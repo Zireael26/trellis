@@ -228,6 +228,55 @@ EOF
 # Rung 3: deterministic fallback. Force-skip the LLM rung with the sentinel
 # (most robust — independent of whether a real `claude` is on PATH).
 # =========================================================================
+@test "143-stop deterministic checks survive early matches in large diffs under pipefail" {
+  local kind file="$BATS_TEST_TMPDIR/large.diff"
+  for kind in aws pem debugger; do
+    case "$kind" in
+      aws) printf '+aws_key = "AKIAIOSFODNN7EXAMPLE"\n' > "$file" ;;
+      pem) printf '+-----BEGIN PRIVATE KEY-----\n' > "$file" ;;
+      debugger) printf '+debugger;\n' > "$file" ;;
+    esac
+    awk 'BEGIN { for (i=0; i<4000; i++) print "+abcdefghijklmnopqrstuvwxyz0123456789" }' >> "$file"
+    run bash -c 'source "$1"; set -o pipefail; deterministic_review < "$2"' _ "$LIB" "$file"
+    [ "$status" -eq 0 ]
+    case "$kind" in
+      aws) [[ "$output" == *'AWS access key'* ]] ;;
+      pem) [[ "$output" == *'Private key (PEM)'* ]] ;;
+      debugger) [[ "$output" == *'Left-in debugger'* ]] ;;
+    esac
+    # Exercise the executed ladder too, where it enables pipefail itself.
+    run env TRELLIS_REVIEW_IN_PROGRESS=1 bash "$LIB" < "$file"
+    [ "$status" -eq 0 ]
+    case "$kind" in
+      aws) [[ "$output" == *'AWS access key'* ]] ;;
+      pem) [[ "$output" == *'Private key (PEM)'* ]] ;;
+      debugger) [[ "$output" == *'Left-in debugger'* ]] ;;
+    esac
+  done
+  awk 'BEGIN { for (i=0; i<4000; i++) print "+ordinary source line" }' > "$file"
+  run bash -c 'source "$1"; set -o pipefail; deterministic_review < "$2"' _ "$LIB" "$file"
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"findings":[]}' ]
+}
+
+@test "143-stop literal filtering is scoped to each secret value, not the whole line" {
+  local line
+  for line in '+password = "hunter2" # TODO rotate' \
+              '+password = "hunter2"; other = process.env.X' \
+              '+password = "REPLACE_ME"; token = "hunter2"' \
+              '+password = "hunter2" # <example>'; do
+    run bash -c 'source "$1"; set -o pipefail; deterministic_review <<< "$2"' _ "$LIB" "$line"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'"severity":"critical"'* ]] || { echo "$line: $output"; false; }
+  done
+  for line in '+password = "REPLACE_ME" # TODO rotate' \
+              '+password = "${SECRET}"' '+api_key = process.env.KEY' '+token = ""'; do
+    run bash -c 'source "$1"; set -o pipefail; deterministic_review <<< "$2"' _ "$LIB" "$line"
+    [ "$status" -eq 0 ]
+    [ "$output" = '{"findings":[]}' ] || { echo "$line: $output"; false; }
+  done
+}
+
 @test "rung3: planted AWS key in diff → critical finding (sentinel-forced)" {
   export TRELLIS_REVIEW_IN_PROGRESS=1
   run bash "$LIB" <<<"$SECRET_DIFF"
@@ -384,4 +433,21 @@ EOF
   run bash -c 'source "$1"; printf "%s" "" | deterministic_review' _ "$LIB"
   [ "$status" -eq 0 ]
   [ "$output" = '{"findings":[]}' ]
+}
+
+# =========================================================================
+# Deciding-artifact readers must not import repo-cwd code. The hook cd's to
+# the repo under review before invoking this ladder, so a stdin python
+# reader without -I would import a repo-root json.py as the user.
+# =========================================================================
+@test "python isolation: repo-root json.py shadow does not run in deciding readers" {
+  local repo="$BATS_TEST_TMPDIR/pyiso-repo" home="$BATS_TEST_TMPDIR/pyiso-home"
+  mkdir -p "$repo" "$home/releases/rel-1/payload/core-rules/skills/herdr-foreman"
+  printf '%s\n' 'raise SystemExit(99)' > "$repo/json.py"
+  printf '{"active_cli_release":"rel-1"}\n' > "$home/config.json"
+  printf '{}\n' > "$home/releases/rel-1/payload/core-rules/skills/herdr-foreman/roles.json"
+  run bash -c 'cd "$0" && unset PYTHONPATH && export TRELLIS_HOME="$1" && source "$2" && reviewer_roles_config' "$repo" "$home" "$LIB"
+  [ "$status" -eq 0 ] || { echo "status=$status output=$output"; false; }
+  [[ "$output" == *"roles.json" ]] || { echo "$output"; false; }
+  [[ "$output" != *"99"* ]] || { echo "$output"; false; }
 }

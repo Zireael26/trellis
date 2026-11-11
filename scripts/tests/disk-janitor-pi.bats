@@ -395,3 +395,31 @@ refused_temp_root() {
   run_dj --report
   [[ "$output" != *"$PI_TMP"* ]] || { echo "$output"; false; }
 }
+
+@test "pi scope: a registered pi-agent worktree with unknown age is held, not planned for delete" {
+  local wt="$PI_ROOT/pi-agent-unknown-0006" shim="$SANDBOX/find-shim" real_find
+  pi_worktree pi-agent-unknown-0006 "$PI_ROOT" >/dev/null
+  rm -f "$wt/work.txt"
+  real_find="$(command -v find)"
+  mkdir -p "$shim"
+  cat > "$shim/find" <<'SH'
+#!/bin/bash
+matched=0
+for arg in "$@"; do [ "$arg" = "$DJ_FRESH_FIXTURE" ] && matched=1; done
+case " $* " in
+  *" -mmin "*)
+    if [ "$matched" -eq 1 ]; then
+      printf '%s\n' "$DJ_FRESH_FIXTURE/work.txt"
+      exit 1
+    fi ;;
+esac
+exec "$DJ_REAL_FIND" "$@"
+SH
+  chmod 755 "$shim/find"
+
+  run env PATH="$shim:$PATH" DJ_FRESH_FIXTURE="$wt" DJ_REAL_FIND="$real_find" \
+    bash "$DJ" --report --scopes pi
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"[skip] $wt "*"age unknown"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete] $wt "* ]] || { echo "$output"; false; }
+}

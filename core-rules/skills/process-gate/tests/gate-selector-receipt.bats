@@ -8,7 +8,7 @@
 # docs-only case (base legacy docs-only path). The full-battery case is expected
 # green on base; it guards against over-narrowing.
 
-EXPECT_NARROWED="--test-file=scripts/tests/check-decisions-log.bats --test-file=scripts/tests/check-process-liveness.bats --test-file=scripts/tests/diff-base-sync.bats --test-file=scripts/tests/gpt6-roster-sweep.bats --test-file=scripts/tests/live-model-roster.bats --test-file=scripts/tests/no-legacy-herdr.bats --test-file=scripts/tests/posix-bootstrap-prologue.bats --test-file=scripts/tests/push-test-map.bats --test-file=scripts/tests/release-payload-commit.bats --test-file=scripts/tests/release-tag-consumers.bats --test-file=scripts/tests/suite-coverage.bats --test-file=scripts/tests/test-fencing.bats"
+EXPECT_NARROWED="--test-file=scripts/tests/check-decisions-log.bats --test-file=scripts/tests/check-process-liveness.bats --test-file=scripts/tests/diff-base-sync.bats --test-file=scripts/tests/gpt6-roster-sweep.bats --test-file=scripts/tests/live-model-roster.bats --test-file=scripts/tests/native-hooks-delivery.bats --test-file=scripts/tests/no-legacy-herdr.bats --test-file=scripts/tests/posix-bootstrap-prologue.bats --test-file=scripts/tests/push-test-map.bats --test-file=scripts/tests/release-payload-commit.bats --test-file=scripts/tests/release-tag-consumers.bats --test-file=scripts/tests/suite-coverage.bats --test-file=scripts/tests/test-fencing.bats"
 
 setup() {
   export HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis"
@@ -50,7 +50,7 @@ setup() {
   cp "$BATS_TEST_DIRNAME/../../../../scripts/lib/push-test-map.py" "$dir/scripts/lib/push-test-map.py"
   local suite
   for suite in check-decisions-log check-process-liveness diff-base-sync gpt6-roster-sweep \
-    live-model-roster no-legacy-herdr posix-bootstrap-prologue push-test-map release-payload-commit \
+    live-model-roster native-hooks-delivery no-legacy-herdr posix-bootstrap-prologue push-test-map release-payload-commit \
     release-tag-consumers suite-coverage test-fencing; do
     printf '# fixture suite\n' > "$dir/scripts/tests/$suite.bats"
   done
@@ -145,7 +145,7 @@ accept_verdict() {
   local row
   row="$(printf '%s\n' "$output" | grep -F 'Tests & coverage:')"
   [[ "$row" == *✅* ]]
-  assert_tests_row "narrowed: 12 selected"
+  assert_tests_row "narrowed: 13 selected"
   accept_verdict
 }
 

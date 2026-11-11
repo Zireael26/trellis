@@ -182,7 +182,9 @@ linked_hooks_fixture() {
 
 # --- R4.4 rollback sequence ---------------------------------------------------
 
-# Render both local templates, then point .trellis/runtime at a payload that
+# T34: the shell registration is the pinned legacy surface (hosts without a
+# native asset); the native hookspath-guard member runs in the companion.
+# Render both legacy local templates, then point .trellis/runtime at a payload that
 # lacks the script: the rendered Bash PostToolUse exits 0 without error and
 # never falls back to a project-controlled hooks/hookspath-guard.sh.
 @test "after a rollback to a payload without the script, the rendered command is inert" {
@@ -201,7 +203,7 @@ linked_hooks_fixture() {
     rendered="$(HOME="$home" bash -c '
       . "$1/scripts/lib/attachment.sh" || exit 90
       context="$(attachment_contextual_render_context "$2")" || exit 91
-      attachment_contextual_template_render "$1/core-rules/templates/$3" "core-rules/templates/$3" "$context"
+      attachment_contextual_template_render "$1/core-rules/legacy-hooks/$3" "core-rules/templates/$3" "$context"
     ' _ "$REPO" "$trellis_home" "$name")"
     # Shell form runs through sh; exec form (Claude) is spawned directly with
     # ${CLAUDE_PROJECT_DIR} substituted in each element, as the client does.

@@ -300,16 +300,23 @@ report_line() {
 
 # Registry: rows under `## Active projects`, Project column is col 1.
 read_registry_names() {
-  [ -f "$REGISTRY" ] || return 0
+  [ -f "$REGISTRY" ] && [ -r "$REGISTRY" ] || return 1
   awk '
-    /^## Active projects/ { in_table=1; next }
-    /^---$/ && in_table { in_table=0 }
-    in_table && /^\| [a-zA-Z0-9._-]+ \|/ {
-      name=$0
-      gsub(/^\| /, "", name); gsub(/ \|.*$/, "", name)
-      if (name == "Project" || name ~ /^-+$/) next
+    /^## Active projects([[:space:]]|$)/ { headings++; in_table=1; next }
+    in_table && (/^##[[:space:]]/ || /^---[[:space:]]*$/) { in_table=0 }
+    in_table && /^\|/ {
+      n=split($0, columns, /\|/)
+      if (n < 3) { invalid=1; next }
+      name=columns[2]
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", name)
+      if (name == "Project") { header=1; next }
+      if (name ~ /^:?-+:?$/) { if (!header) invalid=1; divider=1; next }
+      if (!header || !divider) { invalid=1; next }
+      if (name == "" || name == "—") next
+      if (name !~ /^[a-zA-Z0-9._-]+$/) { invalid=1; next }
       print name
     }
+    END { if (headings != 1 || !header || !divider || invalid) exit 1 }
   ' "$REGISTRY"
 }
 
@@ -320,9 +327,14 @@ resolve_project_path() {
 }
 
 REGISTRY_NAMES=()
-while IFS= read -r line; do
-  [ -n "$line" ] && REGISTRY_NAMES+=("$line")
-done < <(read_registry_names)
+REGISTRY_READ_ERROR=0
+if registry_names_text="$(read_registry_names)"; then
+  while IFS= read -r line; do
+    [ -n "$line" ] && REGISTRY_NAMES+=("$line")
+  done <<< "$registry_names_text"
+else
+  REGISTRY_READ_ERROR=1
+fi
 
 BLACKLIST_NAMES=()
 while IFS= read -r line; do
@@ -545,9 +557,13 @@ echo
 # TIER 1 — per active project.
 # ---------------------------------------------------------------------------
 echo "== Tier 1: per-project inheritance =="
+if [ "$REGISTRY_READ_ERROR" -eq 1 ]; then
+  report_line '  ' "$HC_ERROR" "registry could not be read or its active-project table is malformed: $REGISTRY; no projects checked"
+fi
 
 # Build the target list (registry minus blacklist, or the single --project).
 TARGETS=()
+HELD_COUNT=0
 if [ -n "$ONLY_PROJECT" ]; then
   found=0
   if [ "${#REGISTRY_NAMES[@]}" -gt 0 ]; then
@@ -571,6 +587,7 @@ else
         # (still registered and reportable) rather than
         # silently. An explicit --project still validates (handled above).
         echo "  (held: $n — blacklisted; skipped)"
+        HELD_COUNT=$((HELD_COUNT + 1))
         continue
       fi
       TARGETS+=("$n")
@@ -578,8 +595,12 @@ else
   fi
 fi
 
-if [ "${#TARGETS[@]}" -eq 0 ]; then
-  echo "  (no active projects to check)"
+if [ "${#TARGETS[@]}" -eq 0 ] && [ "$REGISTRY_READ_ERROR" -eq 0 ]; then
+  if [ "${#REGISTRY_NAMES[@]}" -eq 0 ]; then
+    report_line '  ' "$HC_WARN" 'no projects checked — active registry is empty'
+  elif [ "$HELD_COUNT" -gt 0 ]; then
+    report_line '  ' "$HC_WARN" "no projects checked — $HELD_COUNT active row(s) held by blacklist"
+  fi
 fi
 
 # emit <indent> <fn> <args...> — run a check, print its ✓/⚠/✗ row (which also
@@ -1035,6 +1056,9 @@ if [ "$DO_DRY_RUN" -eq 1 ]; then
   printf '%s %d error(s)  %s %d warning(s)  %s %d info — diagnosed, NOT fixed\n' \
     "$GLYPH_ERR" "$N_ERROR" "$GLYPH_WARN" "$N_WARN" "$GLYPH_INFO" "$N_INFO"
   echo "(dry-run: every action above is [manual] — since v1.0.0-rc.25 --fix applies nothing to a legacy layout)"
+  if [ "$REGISTRY_READ_ERROR" -eq 1 ]; then
+    echo "registry unavailable or malformed: no projects checked; a real run would exit 1"
+  fi
   exit 0
 fi
 
@@ -2005,8 +2029,8 @@ apply_safe_repair() {
 
 # A successful repair command is not evidence that the original error is gone.
 # Re-read the authoritative registry and prove the same worktree reaches the
-# strict attachment/layout predicate before clearing this row's pre-repair
-# diagnostics from the aggregate.
+# strict attachment/layout predicate before clearing only those two verified
+# pre-repair diagnostics from the aggregate.
 verify_safe_repair_result() (
   local home="$1" root="$2" fleet="$3" project_id="$4" snapshot rows row
   local checkout_id worktree_id attachment_id release harnesses owner
@@ -2055,6 +2079,10 @@ run_check '  ' hc_portable_source_root "$HOME_PATH" || true
 run_check '  ' hc_portable_release_store "$HOME_PATH" || true
 run_check '  ' hc_portable_active_cli_release "$HOME_PATH" || true
 run_check '  ' hc_release_tmp_scratch "$HOME_PATH" || true
+# A nonce lock may still be live: diagnose, never remove or recover it here.
+if nonce_lock_row="$(hc_nonce_lock_state "$HOME_PATH")"; then :; else
+  report '  ' "$?" "$nonce_lock_row"
+fi
 # Spec 055 R2.7: WARN-only rows; silent when healthy.
 if launcher_row="$(hc_launcher_currency "${HOME:-}" "$HOME_PATH")"; then :; else
   report '  ' "$?" "$launcher_row"
@@ -2263,6 +2291,7 @@ while IFS= read -r row; do
   owner="$HOME_PATH/state/attachments/$checkout_id/$worktree_id.json"; owner_state=missing
   owner_errors_at_start="$N_ERROR"
   if run_check '  ' hc_portable_owner "$HOME_PATH" "$owner" "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$attachment_id" "$release"; then owner_state=attached; else owner_state="${HC_PORTABLE_OWNER_STATE:-conflict}"; fi
+  owner_error_count=$((N_ERROR - owner_errors_at_start))
   if [ "$owner_state" != missing ]; then
     # Spec 055 R4.6: the one repair --fix makes itself, on an owner whose only
     # failure is the hook authority. It runs before the hooks-path check so a
@@ -2282,6 +2311,7 @@ while IFS= read -r row; do
             if [ "$DO_DRY_RUN" -eq 0 ] && [ "$owner_state" != attached ]; then
               N_ERROR="$owner_errors_at_start"
               if run_check '  ' hc_portable_owner "$HOME_PATH" "$owner" "$root" "$fleet" "$project_id" "$checkout_id" "$worktree_id" "$attachment_id" "$release"; then owner_state=attached; else owner_state="${HC_PORTABLE_OWNER_STATE:-conflict}"; fi
+              owner_error_count=$((N_ERROR - owner_errors_at_start))
             fi
             ;;
           1) printf '  [manual] %s\n' "$hooks_fix_output" ;;
@@ -2330,7 +2360,9 @@ while IFS= read -r row; do
   # declared discovery leaf.  Inspect the concrete checkout before computing any
   # safe-repair route; this drift is detection-only and requires detach/attach.
   run_check '  ' health_checks_missing_leaves "$root" "$harnesses" "$HOME_PATH" "$release" || true
+  layout_errors_at_start="$N_ERROR"
   run_check '  ' hc_portable_layout "$root" "$owner_state" "$project_id" || true
+  layout_error_count=$((N_ERROR - layout_errors_at_start))
   layout="$HC_PORTABLE_LAYOUT"
   # Anti-slop presence (spec 037): read-only, OK/INFO only — it reports whether a
   # language profile config and a gate_profiles.anti_slop.posture exist, and never
@@ -2343,7 +2375,14 @@ while IFS= read -r row; do
   test_runner_message="$(hc_test_runner_exposure "$root")" || test_runner_status=$?
   [ "$test_runner_status" -eq 0 ] || report '  ' "$test_runner_status" "$test_runner_message"
   # Rendered bright-line guard registrations: WARN or nothing (re-render only).
-  if guard_row="$(hc_guard_registrations "$root")"; then :; else
+  # Native arming is inspected through the runtime anchor, so without one the
+  # row cannot be judged; the ownership and layout rows already report the
+  # missing anchor, and a verified relink runs this check below.
+  guard_deferred=false
+  if [ "$owner_state" = runtime-missing ]; then
+    guard_deferred=true
+    report '  ' "$HC_INFO" 'guard registration: not checked because this project has no installed runtime anchor'
+  elif guard_row="$(hc_guard_registrations "$root")"; then :; else
     report '  ' "$?" "$guard_row"
   fi
   row_diagnostics_ok=false
@@ -2370,8 +2409,15 @@ while IFS= read -r row; do
         if [ "$DO_DRY_RUN" -eq 1 ]; then
           report '  ' "$HC_ERROR" "safe repair through trellis $SAFE_REPAIR is planned but was not applied; state remains unresolved"
         elif verify_safe_repair_result "$HOME_PATH" "$root" "$fleet" "$project_id"; then
-          N_ERROR="$ROW_ERRORS_AT_START"
+          N_ERROR=$((N_ERROR - owner_error_count - layout_error_count))
           report '  ' "$HC_INFO" "safe repair delegated through trellis $SAFE_REPAIR and passed strict post-repair verification"
+          if [ "$guard_deferred" = true ]; then
+            if guard_row="$(hc_guard_registrations "$root")"; then
+              report '  ' "$HC_INFO" 'guard registration: verified after repair'
+            else
+              report '  ' "$?" "$guard_row (after repair)"
+            fi
+          fi
         else
           report '  ' "$HC_ERROR" "safe repair through trellis $SAFE_REPAIR completed but strict post-repair verification failed; state remains unresolved"
         fi

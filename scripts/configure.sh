@@ -266,10 +266,10 @@ configure_relink_user_surface_if_attached() {
 cmd_configure() {
   local home_opt source_opt default_fleet_opt release_opt remote_opt shared_infra_root
   local launcher_template_opt install_launcher discovery_roots_seen
-  local home cfg source_root default_fleet release release_remote roots_tmp
-  local base_tmp proposed_tmp root launcher_template launcher_bin roots_json jq_filter
+  local home cfg source_root default_fleet release release_remote
+  local root launcher_template launcher_bin roots_json jq_filter
   local existing_roots_count launcher_action relink_rc config_existed attachment owner
-  local launcher_snapshot_tmp launcher_existed launcher_mode launcher_local_dir launcher_dir
+  local launcher_existed launcher_mode launcher_local_dir launcher_dir
   local launcher_local_existed launcher_dir_existed launcher_after_hash launcher_after_mode rollback_rc
   local -a discovery_roots=()
   home_opt=""
@@ -281,6 +281,8 @@ cmd_configure() {
   launcher_template_opt=""
   install_launcher=1
   discovery_roots_seen=0
+  # This CLI dispatches one command per process. Bash 3.2 drops function
+  # locals before EXIT on `exit`/errexit, so keep trap state in process scope.
   base_tmp=""
   proposed_tmp=""
   roots_tmp=""
@@ -422,7 +424,7 @@ cmd_configure() {
       cp -p "$launcher_bin" "$launcher_snapshot_tmp" || exit "$TRELLIS_EX_UNAVAILABLE"
       launcher_mode="$(_attachment_mode "$launcher_bin")" || exit "$TRELLIS_EX_UNAVAILABLE"
     fi
-    if trellis_home_install_launcher "$launcher_template" "$launcher_bin"; then
+    if trellis_home_install_launcher "$launcher_template" "$launcher_bin" "$home" "$release"; then
       launcher_action="$TRELLIS_HOME_LAUNCHER_ACTION"
       if launcher_after_hash="$(_attachment_hash "$launcher_bin")" &&
          launcher_after_mode="$(_attachment_mode "$launcher_bin")"; then
@@ -504,8 +506,9 @@ cmd_configure() {
 
 cmd_fleet_add_or_update() {
   local mode fleet home_opt shared_infra_root make_default home cfg exists
-  local roots_tmp base_tmp proposed_tmp roots_json roots_count jq_filter root
+  local roots_json roots_count jq_filter root
   local -a roots=()
+  # These EXIT-cleanup paths must outlive the function's locals on Bash 3.2.
   mode="$1"
   shift
   [ "$#" -ge 1 ] || usage_error "fleet $mode requires NAME"
@@ -603,7 +606,8 @@ cmd_fleet_add_or_update() {
 }
 
 cmd_fleet_set_default() {
-  local fleet home_opt home cfg proposed_tmp
+  # proposed_tmp is process-scoped so the EXIT cleanup survives Bash 3.2.
+  local fleet home_opt home cfg
   [ "$#" -ge 1 ] || usage_error "fleet set-default requires NAME"
   case "$1" in -h|--help) print_help; return 0 ;; esac
   fleet="$1"

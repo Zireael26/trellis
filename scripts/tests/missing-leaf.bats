@@ -36,6 +36,15 @@ missing_leaf_install_release() {
     "$repo/core-rules/commands/fixture-command.md"
   printf '%s\n' '---' 'description: fixture agent' '---' > \
     "$repo/core-rules/agents/fixture-agent.md"
+  # Every release renders its harness settings, and doctor's guard row judges
+  # native arming from that render and template (spec 074 T62); a release
+  # without one reads as an attached harness of unknown wiring.
+  mkdir -p "$repo/core-rules/templates" "$repo/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/"
+  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
+    "$repo/core-rules/templates/claude-settings.local.json"
+  cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
+    "$repo/core-rules/templates/codex-hooks.local.json"
 
   cat > "$repo/core-rules/inheritance-manifest.json" <<'JSON'
 {
@@ -47,14 +56,18 @@ missing_leaf_install_release() {
         {"source_children":"core-rules/commands","destination_dir":".claude/commands","entry_type":"file","suffix":".md"},
         {"source_children":"core-rules/agents","destination_dir":".claude/agents","entry_type":"file","suffix":".md"}
       ],
-      "render": []
+      "render": [
+        {"template":"core-rules/templates/claude-settings.local.json","destination":".claude/settings.local.json","merge":"explicit-json","mode":"0600","required":true}
+      ]
     },
     "codex": {
       "links": [
         {"source_children":"core-rules/skills","destination_dir":".agents/skills","entry_type":"directory","required_file":"SKILL.md"},
         {"source_children":"core-rules/commands","destination_dir":".agents/commands","entry_type":"file","suffix":".md"}
       ],
-      "render": []
+      "render": [
+        {"template":"core-rules/templates/codex-hooks.local.json","destination":".codex/hooks.json","merge":"explicit-json","mode":"0600","required":true}
+      ]
     }
   }
 }

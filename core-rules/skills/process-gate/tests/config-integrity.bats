@@ -204,6 +204,21 @@ PROCESS_GATE_STACK_VALIDATORS=(
     { cat "$PROBE"; false; }
 }
 
+@test "scalar twin override removes stale elements from an earlier array" {
+  probe_row PROCESS_GATE_ADR_TRIGGERS
+  put .agents/skills/process-gate-local/local.config.sh $'PROCESS_GATE_ADR_TRIGGERS=(one two three)\n'
+  put "$CFG" $'PROCESS_GATE_ADR_TRIGGERS=only\n'
+  commit_all 'twin array and scalar' || return 1
+  run_gate push
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$PROBE")" = $'PROCESS_GATE_ADR_TRIGGERS#=1\nPROCESS_GATE_ADR_TRIGGERS=only' ] || { cat "$PROBE"; false; }
+
+  # The active Codex twin is still allowed to replace the scalar with an array.
+  run bash -c "cd '$PROJECT_DIR' && CODEX_PROJECT_DIR='$PROJECT_DIR' '$STUB/scripts/run-all.sh' --mode=push --range=main..HEAD"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$PROBE")" = $'PROCESS_GATE_ADR_TRIGGERS#=3\nPROCESS_GATE_ADR_TRIGGERS=one\nPROCESS_GATE_ADR_TRIGGERS=two\nPROCESS_GATE_ADR_TRIGGERS=three' ] || { cat "$PROBE"; false; }
+}
+
 @test "twin precedence: the active harness's config wins; deprecated only without twins" {
   probe_row PROCESS_GATE_PR_SIZE_LIMIT
   put .agents/skills/process-gate-local/local.config.sh $'PROCESS_GATE_PR_SIZE_LIMIT=111\n'

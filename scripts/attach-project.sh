@@ -47,6 +47,7 @@ Usage:
   attach-project.sh relink [--home PATH] [--fleet NAME] PATH
   attach-project.sh recover [--home PATH] PATH
   attach-project.sh recover [--home PATH] --discard-orphan-journal UUID SURVIVING_CHECKOUT_PATH
+  attach-project.sh recover [--home PATH] --discard-superseded-journal UUID PATH
 Attach resolves an immutable installed release, creates only local native harness
 leaves, and owns one exact block in the Git common directory's info/exclude.
 Detach removes only exact owned leaves and restores common local state after
@@ -156,6 +157,34 @@ attach_relink_runtime_anchor_plan() {
     '{root_identity:$root_identity,trellis_identity:$trellis_identity,expected_old:$expected_old}'
 }
 
+# Exact owner artifacts, or exact but for an absent runtime anchor: a refused
+# attach withdraws the anchor, and relink or a retried attach publishes it.
+attach_verify_owner_artifacts_except_absent_anchor() {
+  local home="$1" owner="$2" root="$3" status record artifact render
+  attach_verify_owner_artifacts "$home" "$owner"
+  status=$?
+  [ "$status" -ne 0 ] || return 0
+  [ "$status" -eq "$TRELLIS_EX_CONFLICT" ] || return "$status"
+  [ ! -e "$root/.trellis/runtime" ] && [ ! -L "$root/.trellis/runtime" ] || return "$TRELLIS_EX_CONFLICT"
+  record="$(jq -c . "$owner")" || return "$TRELLIS_EX_STATE"
+  _attachment_render_pairings_valid "$record" || return "$TRELLIS_EX_CONFLICT"
+  while IFS= read -r artifact; do
+    [ -n "$artifact" ] || continue
+    _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" || return "$TRELLIS_EX_CONFLICT"
+    _attachment_artifact_exact "$root" "$artifact" || return "$TRELLIS_EX_CONFLICT"
+  done < <(printf '%s\n' "$record" | jq -c '
+    . as $owner
+    | (($owner.renders // []) | map(.path)) as $render_paths
+    | $owner.artifacts[] as $artifact
+    | select($artifact.path != ".trellis/runtime")
+    | select(($render_paths | index($artifact.path)) == null)
+    | $artifact
+  ')
+  while IFS= read -r render; do
+    _attachment_render_owned_keys_exact "$root" "$render" || return "$TRELLIS_EX_CONFLICT"
+  done < <(printf '%s\n' "$record" | jq -c '(.renders // [])[]')
+}
+
 attach_relink_identity_matches_locked() {
   local root="$1" locked_identity="$2" current
   current="$(local_registry_identity_for_root "$root")" || return "$TRELLIS_EX_CONFLICT"
@@ -235,7 +264,7 @@ attach_repair_state_file_matches() {
     attach_expected_directory_identity_valid "$expected_parent_dev_ino" || return "$TRELLIS_EX_STATE"
   fi
   [ -x /usr/bin/python3 ] || return "$TRELLIS_EX_UNAVAILABLE"
-  /usr/bin/python3 - "$path" "$expected_sha256" "$expected_parent_dev_ino" <<'PY'
+  /usr/bin/python3 -I - "$path" "$expected_sha256" "$expected_parent_dev_ino" <<'PY'
 import hashlib
 import os
 import stat
@@ -421,7 +450,7 @@ attach_relink_set_hooks_path_pinned() {
   local root="$1" locked_identity="$2" root_dev_ino="$3" common_dev_ino="$4" managed="$5"
   attach_locked_checkout_namespace_matches "$root" "$locked_identity" "$root_dev_ino" "$common_dev_ino" >/dev/null || return "$?"
   [ -x /usr/bin/python3 ] || return "$TRELLIS_EX_UNAVAILABLE"
-  /usr/bin/python3 - "$root" "$locked_identity" "$root_dev_ino" "$common_dev_ino" "$managed" <<'PY'
+  /usr/bin/python3 -I - "$root" "$locked_identity" "$root_dev_ino" "$common_dev_ino" "$managed" <<'PY'
 import hashlib
 import json
 import os
@@ -592,7 +621,7 @@ attach_exclude_parse() {
   fi
   [ -f "$file" ] && [ ! -L "$file" ] || return "$TRELLIS_EX_CONFLICT"
   command -v python3 >/dev/null 2>&1 || return "$TRELLIS_EX_UNAVAILABLE"
-  python3 - "$file" "$block_file" <<'PY'
+  python3 -I - "$file" "$block_file" <<'PY'
 import sys
 
 source_path, block_path = sys.argv[1:3]
@@ -717,7 +746,7 @@ attach_exclude_remove_block() {
   [ -f "$before" ] && [ ! -L "$before" ] || return "$TRELLIS_EX_STATE"
   case "$before_exists" in true|false) ;; *) return "$TRELLIS_EX_STATE" ;; esac
   command -v python3 >/dev/null 2>&1 || return "$TRELLIS_EX_UNAVAILABLE"
-  python3 - "$source" "$output" "$block_file" "$before" "$before_exists" <<'PY'
+  python3 -I - "$source" "$output" "$block_file" "$before" "$before_exists" <<'PY'
 import sys
 
 source_path, output_path, block_path, before_path, before_exists = sys.argv[1:6]
@@ -969,7 +998,7 @@ attach_exclude_extract_block() {
   [ -f "$source" ] && [ ! -L "$source" ] || return "$TRELLIS_EX_CONFLICT"
   [ -f "$output" ] && [ ! -L "$output" ] || return "$TRELLIS_EX_STATE"
   command -v python3 >/dev/null 2>&1 || return "$TRELLIS_EX_UNAVAILABLE"
-  python3 - "$source" "$output" <<'PY'
+  python3 -I - "$source" "$output" <<'PY'
 import sys
 
 source_path, output_path = sys.argv[1:3]
@@ -1009,7 +1038,7 @@ attach_exclude_reuse_compatible() (
   local expected_block="$1" existing_block="$2" worktree_root="$3"
   [ "$#" -eq 3 ] || return "$TRELLIS_EX_STATE"
   [ -d "$worktree_root" ] && [ ! -L "$worktree_root" ] || return "$TRELLIS_EX_CONFLICT"
-  python3 - "$expected_block" "$existing_block" "$worktree_root" <<'PY'
+  python3 -I - "$expected_block" "$existing_block" "$worktree_root" <<'PY'
 import pathlib, subprocess, sys
 
 expected_path, existing_path, worktree_root = sys.argv[1:4]
@@ -1174,14 +1203,23 @@ attach_exclude_recover() (
   fi
   block_state="$(attach_exclude_parse "$path" "$block_file")"
   rc=$?
-  [ "$rc" -eq 0 ] || return "$rc"
+  if [ "$rc" -ne 0 ]; then
+    [ "$rc" -ne "$TRELLIS_EX_CONFLICT" ] ||
+      attach_err "managed exclude block is tampered or duplicated during recover for $(attach_diagnostic_escape "$path"); restore the single block Trellis wrote (sha256 $block_hash), then rerun trellis recover"
+    return "$rc"
+  fi
   [ "$block_state" = one ] || {
     attach_err "managed exclude block state mismatch during recover for $(attach_diagnostic_escape "$path"): state ${block_state:-unknown} (expected one); expected block sha256 $block_hash"
     return "$TRELLIS_EX_CONFLICT"
   }
   dir="$(dirname "$path")"; base="$(basename "$path")"
   tmp="$(mktemp "$dir/.${base}.trellis-recover.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  attach_exclude_remove_block "$path" "$tmp" "$block_file" "$before_file" "$before_exists" || return "$?"
+  attach_exclude_remove_block "$path" "$tmp" "$block_file" "$before_file" "$before_exists" || {
+    rc=$?
+    [ "$rc" -ne "$TRELLIS_EX_CONFLICT" ] ||
+      attach_err "managed exclude block in $(attach_diagnostic_escape "$path") changed during recover; restore the single block Trellis wrote (sha256 $block_hash), then rerun trellis recover"
+    return "$rc"
+  }
   if [ "$before_exists" = false ] && [ ! -s "$tmp" ]; then
     rm "$path" || return "$TRELLIS_EX_UNAVAILABLE"
     return 0
@@ -1293,7 +1331,7 @@ attach_owner_surface_plan() {
 
 # This runs on sync as well as pre-add; quiet never redirects failure stderr.
 attach_exclude_diagnostic() {
-  python3 - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
+  python3 -I - "$1" "$2" "$3" "$4" "$5" "$6" <<'PY'
 import base64, glob, hashlib, json, pathlib, sys
 home, checkout, common, desired_path, release, root = sys.argv[1:]
 path = pathlib.Path(common) / 'info/exclude'
@@ -1476,7 +1514,7 @@ attach_json_render_plan() (
   before_file="$(mktemp "${TMPDIR:-/tmp}/trellis.render.before.XXXXXX")" || { rm -f "$template_file"; return "$TRELLIS_EX_UNAVAILABLE"; }
   after_file="$(mktemp "${TMPDIR:-/tmp}/trellis.render.after.XXXXXX")" || { rm -f "$template_file" "$before_file"; return "$TRELLIS_EX_UNAVAILABLE"; }
   trap 'rm -f "$template_file" "$before_file" "$after_file"' EXIT
-  attach_contextual_template_render "$source" "$template" "$context" > "$template_file" || return "$?"
+  attach_contextual_template_render "$source" "$template" "$context" "$root" > "$template_file" || return "$?"
   jq -e 'type == "object"' "$template_file" >/dev/null 2>&1 || return "$TRELLIS_EX_STATE"
   if [ -e "$root/$destination" ] || [ -L "$root/$destination" ]; then
     [ -f "$root/$destination" ] && [ ! -L "$root/$destination" ] || return "$TRELLIS_EX_CONFLICT"
@@ -1492,33 +1530,7 @@ attach_json_render_plan() (
   fi
   before_hash="$(if [ "$before_exists" = true ]; then attach_sha_file "$before_file"; else attach_sha_text ''; fi)" || return "$?"
   before64="$(if [ "$before_exists" = true ]; then attach_base64_file "$before_file"; fi)" || return "$?"
-  detail="$(jq -cn --slurpfile base "$before_file" --slurpfile template "$template_file" '
-    def exists_at($value; $path):
-      reduce $path[] as $key ({value:$value,exists:true};
-        if .exists and (.value | type) == "object" and (.value | has($key))
-        then .value = .value[$key] else .exists = false end) | .exists;
-    def object_paths($value; $path):
-      if ($value | type) == "object"
-      then [$path] + [$value | to_entries[] | object_paths(.value; $path + [.key])[]]
-      else [] end;
-    def leaves($value; $path):
-      if ($value | type) == "object"
-      then if ($value | length) == 0 then [{path:$path,value:$value}]
-           else [$value | to_entries[] | leaves(.value; $path + [.key])] | add end
-      else [{path:$path,value:$value}] end;
-    def merge_missing($left; $right):
-      reduce ($right | keys_unsorted[]) as $key ($left;
-        if has($key) then .[$key] = merge_missing(.[$key]; $right[$key])
-        else .[$key] = $right[$key] end);
-    $base[0] as $base | $template[0] as $template
-    | if (($base | type) != "object") or (($template | type) != "object") then error("objects required")
-      elif ([object_paths($template; [])[] | select(length > 0) as $path | select(exists_at($base; $path) and (($base | getpath($path)) | type) != "object")] | length) > 0
-        then error("object type conflict")
-      elif ([leaves($template; [])[] | select(exists_at($base; .path))] | length) > 0
-        then error("project key overlap")
-      else {after:merge_missing($base;$template),owned_keys:leaves($template; []),created_paths:[object_paths($template; [])[] | select(length > 0) as $path | select(exists_at($base; $path) | not)]}
-      end
-  ' 2>/dev/null)" || {
+  detail="$(settings_owned_json merge "$before_file" '[]' "$template_file")" || {
     attach_err "explicit-json template overlaps project-owned keys: $destination"
     return "$TRELLIS_EX_CONFLICT"
   }
@@ -1649,7 +1661,8 @@ attach_user_parent_artifacts() {
 attach_user_json_render_plan() (
   local payload="$1" record="$2" base_entry="${3:-null}" adopt="${4:-false}" allow_owned="${5:-false}" template destination mode source
   local template_file before_file after_file detail before_exists=false before_hash before64 before_mode=null
-  local after_hash after64 after_mode owned created artifact render encoded prior_owned
+  local after_hash after64 after_mode owned created artifact render encoded prior_owned context='' merge_operation=merge
+  local render_before_hash render_before64
   template="$(printf '%s\n' "$record" | jq -r '.template')" || return "$TRELLIS_EX_STATE"
   destination="$(printf '%s\n' "$record" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
   mode="$(printf '%s\n' "$record" | jq -r '.mode')" || return "$TRELLIS_EX_STATE"
@@ -1669,7 +1682,10 @@ attach_user_json_render_plan() (
     return "$TRELLIS_EX_UNAVAILABLE"
   }
   trap 'rm -f "$template_file" "$before_file" "$after_file"' EXIT
-  cp "$source" "$template_file" || return "$TRELLIS_EX_UNAVAILABLE"
+  if jq -e 'any(.. | strings; contains("__TRELLIS_"))' "$source" >/dev/null; then
+    context="$(attachment_contextual_render_context "$TRELLIS_HOME")" || return "$?"
+  fi
+  attach_contextual_template_render "$source" "$template" "$context" "$HOME" > "$template_file" || return "$?"
   if [ "$base_entry" != null ]; then
     before_exists="$(printf '%s\n' "$base_entry" | jq -r '.result_exists')" || return "$TRELLIS_EX_STATE"
     if [ "$before_exists" = true ]; then
@@ -1698,61 +1714,38 @@ attach_user_json_render_plan() (
   before_hash="$(if [ "$before_exists" = true ]; then attach_sha_file "$before_file"; else attach_sha_text ''; fi)" || return "$?"
   before64="$(if [ "$before_exists" = true ]; then attach_base64_file "$before_file"; else printf ''; fi)" || return "$?"
   prior_owned="$(printf '%s\n' "$base_entry" | jq -c '.owned_keys // []')" || return "$TRELLIS_EX_STATE"
-  detail="$(trellis_jq -cn --argjson adopt "$adopt" --argjson allow_owned "$allow_owned" \
-    --argjson prior_owned "$prior_owned" --slurpfile base "$before_file" --slurpfile template "$template_file" '
-    def exists_at($value; $path):
-      reduce $path[] as $key ({value:$value,exists:true};
-        if .exists and (.value | type) == "object" and (.value | has($key))
-        then .value = .value[$key] else .exists = false end) | .exists;
-    def object_paths($value; $path):
-      if ($value | type) == "object"
-      then [$path] + [$value | to_entries[] | object_paths(.value; $path + [.key])[]]
-      else [] end;
-    def leaves($value; $path):
-      if ($value | type) == "object"
-      then if ($value | length) == 0 then [{path:$path,value:$value}]
-           else [$value | to_entries[] | leaves(.value; $path + [.key])] | add end
-      else [{path:$path,value:$value}] end;
-    def merge_missing($left; $right):
-      reduce ($right | keys_unsorted[]) as $key ($left;
-        if has($key)
-        then if ((.[$key] | type) == "object") and (($right[$key] | type) == "object")
-             then .[$key] = merge_missing(.[$key]; $right[$key])
-             else . end
-        else .[$key] = $right[$key] end);
-    def previously_owned($path): any($prior_owned[]; .path == $path);
-    $base[0] as $base | $template[0] as $template
-    | if (($base | type) != "object") or (($template | type) != "object") then error("objects required")
-      elif ([object_paths($template; [])[]
-              | select(length > 0) as $path
-              | select(exists_at($base; $path) and (($base | getpath($path)) | type) != "object")]
-            | length) > 0
-        then error("object type conflict")
-      elif ([leaves($template; [])[]
-              | . as $leaf
-              | select(exists_at($base; $leaf.path))
-              | select((
-                  ($adopt and (($base | getpath($leaf.path)) == $leaf.value))
-                  or ($allow_owned and previously_owned($leaf.path))
-                ) | not)]
-            | length) > 0
-        then error("operator key overlap")
-      else (merge_missing($base;$template)) as $merged
-        | {
-            after:(reduce (leaves($template; [])[]) as $leaf ($merged;
-              if $allow_owned and previously_owned($leaf.path)
-              then setpath($leaf.path;$leaf.value)
-              else . end)),
-            owned_keys:leaves($template; []),
-            created_paths:[object_paths($template; [])[]
-              | select(length > 0) as $path
-              | select(exists_at($base; $path) | not)]
-          }
-      end
-  ' 2>/dev/null)" || {
+  if [ "$allow_owned" = true ]; then
+    merge_operation='merge-base'
+    # Relink receives an already inverse-merged simulated base. Only old owned
+    # positions that existed before the original attach can remain in it.
+    prior_owned="$(jq -c --argjson keys "$prior_owned" '
+      def exists_at($v; $p): reduce $p[] as $k ({v:$v,ok:true};
+        if .ok and (.v | type) == "object" and (.v | has($k))
+        then .v = .v[$k] else .ok = false end) | .ok;
+      . as $base | [$keys[] | select(exists_at($base; .path))]
+    ' "$before_file")" || return "$TRELLIS_EX_STATE"
+  else
+    prior_owned='[]'
+  fi
+  if [ "$allow_owned" = true ] && [ "$(printf '%s\n' "$base_entry" | jq -r '.original_before_exists // false')" = true ]; then
+    attach_decode_base64 "$(printf '%s\n' "$base_entry" | jq -r '.original_before_base64')" > "$after_file" || return "$TRELLIS_EX_STATE"
+  else
+    printf '{}\n' > "$after_file" || return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  detail="$(settings_owned_json "$merge_operation" "$before_file" "$prior_owned" "$template_file" "$after_file" '[]' "$adopt")" || {
     attach_err "explicit-json template overlaps operator-owned keys: $destination"
     return "$TRELLIS_EX_CONFLICT"
   }
+  render_before_hash="$before_hash"
+  render_before64="$before64"
+  if [ "$merge_operation" = merge-base ]; then
+    # Publication still CASes against the unsanitized simulated base above.
+    # Only the future render restoration snapshot drops changed owned values;
+    # otherwise a later relink could resurrect an adopted canonical prefix.
+    printf '%s\n' "$detail" | jq -S '.before' > "$before_file" || return "$TRELLIS_EX_STATE"
+    render_before_hash="$(if [ "$before_exists" = true ]; then attach_sha_file "$before_file"; else attach_sha_text ''; fi)" || return "$?"
+    render_before64="$(if [ "$before_exists" = true ]; then attach_base64_file "$before_file"; else printf ''; fi)" || return "$?"
+  fi
   printf '%s\n' "$detail" | jq -S '.after' > "$after_file" || return "$TRELLIS_EX_STATE"
   after_hash="$(attach_sha_file "$after_file")" || return "$?"
   after64="$(attach_base64_file "$after_file")" || return "$?"
@@ -1767,7 +1760,7 @@ attach_user_json_render_plan() (
          else {} end)
     ')" || return "$TRELLIS_EX_STATE"
   render="$(trellis_jq -cn --arg destination "$destination" --arg mode "$after_mode" \
-    --arg before_hash "$before_hash" --arg before64 "$before64" --arg after_hash "$after_hash" \
+    --arg before_hash "$render_before_hash" --arg before64 "$render_before64" --arg after_hash "$after_hash" \
     --arg after64 "$after64" --argjson before_exists "$before_exists" --arg before_mode "$before_mode" \
     --argjson owned "$owned" --argjson created "$created" '
       {
@@ -2073,11 +2066,17 @@ attach_expected_binding_verify() {
   # exactly as `local_registry_validate_available_identities` would have made
   # them; no other row's state is consulted. Both call sites in relink run under
   # the held checkout lock, so the lock-time re-check is as strict as before.
-  state="$(local_registry_read_diagnostic_state "$home")"
-  rc=$?
-  if [ "$rc" -ne 0 ]; then
-    attach_err 'could not re-read local registry state for the expected repair binding'
-    return "$rc"
+  if [ "$#" -eq 6 ]; then
+    # Only the lock-holding donor transaction passes its freshly captured,
+    # change-checked diagnostic state. Other callers always perform a new read.
+    state="$6"
+  else
+    state="$(local_registry_read_diagnostic_state "$home")"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      attach_err 'could not re-read local registry state for the expected repair binding'
+      return "$rc"
+    fi
   fi
   local_registry_validate_bound_row_identity "$state" \
     "$(printf '%s\n' "$identity" | jq -r '.checkout_id')" \
@@ -2404,8 +2403,14 @@ attach_reconcile_bound_harnesses() (
   [ -n "${_ATTACHMENT_CHECKOUT_LOCK_HOLDER:-}" ] || return "$TRELLIS_EX_CONFLICT"
   record="$(jq -cS . "$owner")" || return "$TRELLIS_EX_STATE"
   trellis_home_registry_lock_acquire "$home" || return "$?"
-  trap '[ -z "$base" ] || rm -f "$base"; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
-  trap '_attachment_signal_exit' HUP INT TERM
+  attach_reconcile_bound_cleanup() {
+    trap '' HUP INT TERM; trap - EXIT
+    [ -z "$base" ] || rm -f "$base"
+    trellis_home_lock_release >/dev/null 2>&1 || true
+  }
+  trap 'attach_reconcile_bound_cleanup' EXIT
+  # Clean while the function's locals still exist on Bash 3.2.
+  trap 'attach_reconcile_bound_cleanup; _attachment_signal_exit' HUP INT TERM
   base="$(mktemp "${TMPDIR:-/tmp}/trellis.reconcile.binding.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   attach_reconcile_load_registry "$home" "$base" || return "$?"
   local_registry_validate_bound_row_identity "$(jq -c . "$base")" \
@@ -2644,8 +2649,14 @@ attach_reconcile_owner_registry() (
   checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
   journal="$home/state/attachment-journals/reconcile-$(printf '%s\n' "$record" | jq -r '.attachment_id').json"
   trellis_home_registry_lock_acquire "$home" || return "$?"
-  trap '[ -z "$base" ] || rm -f "$base"; [ -z "$proposal" ] || rm -f "$proposal"; trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
-  trap '_attachment_signal_exit' HUP INT TERM
+  attach_reconcile_owner_cleanup() {
+    trap '' HUP INT TERM; trap - EXIT
+    [ -z "$base" ] || rm -f "$base"
+    [ -z "$proposal" ] || rm -f "$proposal"
+    trellis_home_lock_release >/dev/null 2>&1 || true
+  }
+  trap 'attach_reconcile_owner_cleanup' EXIT
+  trap 'attach_reconcile_owner_cleanup; _attachment_signal_exit' HUP INT TERM
   base="$(mktemp "${TMPDIR:-/tmp}/trellis.reconcile.base.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   proposal="$(mktemp "${TMPDIR:-/tmp}/trellis.reconcile.proposal.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   attach_reconcile_load_registry "$home" "$base" || return "$?"
@@ -2784,7 +2795,7 @@ attach_detach_owner_path() {
 }
 
 attach_detach_owner_files() {
-  local home="$1" checkout="$2" owner_dir
+  local home="$1" checkout="$2" owner_dir owners owner
   owner_dir="$home/state/attachments/$checkout"
   # A symlinked owner directory is tampered state, not "already detached".
   if [ -L "$owner_dir" ]; then
@@ -2792,24 +2803,64 @@ attach_detach_owner_files() {
     return "$TRELLIS_EX_STATE"
   fi
   [ -d "$owner_dir" ] || return "$TRELLIS_EX_UNAVAILABLE"
-  find "$owner_dir" -maxdepth 1 -type f -name '*.json' -print | LC_ALL=C sort
+  owners="$(find "$owner_dir" -mindepth 1 -maxdepth 1 -name '*.json' -print)" || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner_dir"
+    return "$TRELLIS_EX_STATE"
+  }
+  while IFS= read -r owner; do
+    [ -n "$owner" ] || continue
+    if [ -L "$owner" ] || [ ! -f "$owner" ]; then
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner"
+      return "$TRELLIS_EX_STATE"
+    fi
+  done <<< "$owners"
+  [ -z "$owners" ] || printf '%s\n' "$owners" | LC_ALL=C sort
+}
+
+# A pending render that no longer matches its journal fails validation with 3;
+# name the render rather than call the whole journal invalid.
+attach_detach_journal_render_conflict() {
+  [ "$1" -eq "$TRELLIS_EX_CONFLICT" ] || return 1
+  jq -e '.external.render_pending != null' "$2" >/dev/null 2>&1 || return 1
+  _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" render-conflict "$2"
+  return 0
 }
 
 attach_detach_pending_journals() {
-  local home="$1" identity="$2" root="$3" all="$4" dir checkout worktree candidate rc journal_phase journal_total
+  local home="$1" identity="$2" root="$3" all="$4" dir checkout worktree candidate candidates rc journal_phase journal_total
   dir="$home/state/attachment-journals"
   [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
   checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
   worktree="$(printf '%s\n' "$identity" | jq -r '.worktree_id')" || return "$TRELLIS_EX_STATE"
+  candidates="$(find "$dir" -maxdepth 1 -type f -name 'detach-*.json' -print)" || {
+    _attachment_refuse "${ATTACHMENT_ACTION:-}" journal-invalid "$dir"
+    return "$TRELLIS_EX_STATE"
+  }
+  candidates="$(printf '%s\n' "$candidates" | LC_ALL=C sort)" || return "$TRELLIS_EX_STATE"
   while IFS= read -r candidate; do
-    jq -e --arg checkout "$checkout" --arg worktree "$worktree" --arg root "$root" --argjson all "$all" '
+    [ -n "$candidate" ] || continue
+    if ! jq -e -s 'length == 1 and (.[0] | type == "object")' "$candidate" >/dev/null 2>&1; then
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" journal-invalid "$candidate"
+      return "$TRELLIS_EX_STATE"
+    fi
+    if jq -e --arg checkout "$checkout" --arg worktree "$worktree" --arg root "$root" --argjson all "$all" '
       .status == "detaching"
       and .original_owner.checkout_id == $checkout
       and ($all or (.original_owner.worktree_id == $worktree and .original_owner.worktree_root == $root))
-    ' "$candidate" >/dev/null 2>&1 || continue
+    ' "$candidate" >/dev/null 2>&1; then
+      :
+    else
+      rc=$?
+      [ "$rc" -eq 1 ] && continue
+      _attachment_refuse "${ATTACHMENT_ACTION:-}" journal-invalid "$candidate"
+      return "$TRELLIS_EX_STATE"
+    fi
     _attachment_detach_journal_valid "$candidate"
     rc=$?
     [ "$rc" -eq 0 ] || {
+      if attach_detach_journal_render_conflict "$rc" "$candidate"; then
+        return "$TRELLIS_EX_CONFLICT"
+      fi
       if [ "$rc" -eq 3 ]; then
         journal_phase="$(jq -r '.external.phase // "unknown"' "$candidate" 2>/dev/null)" || journal_phase="unknown"
         journal_total="$(jq -r '(.external.renders | length) // "unknown"' "$candidate" 2>/dev/null)" || journal_total="unknown"
@@ -2820,7 +2871,7 @@ attach_detach_pending_journals() {
       return "$TRELLIS_EX_STATE"
     }
     printf '%s\n' "$candidate"
-  done < <(find "$dir" -maxdepth 1 -type f -name 'detach-*.json' -print | LC_ALL=C sort)
+  done <<< "$candidates"
 }
 
 attach_detach_registry_preflight() {
@@ -3010,16 +3061,7 @@ attach_detach_inverse_render_json() (
   current_hash="$(attach_sha_file "$root/$path")" || return "$?"
   tmp="$(mktemp "$parent/.${base}.trellis-detach-result.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   trap 'rm -f "$tmp"' EXIT
-  trellis_jq -S --argjson keys "$keys" --argjson created "$created" '
-    def exists_at($value; $path):
-      reduce $path[] as $key ({value:$value,exists:true};
-        if .exists and (.value | type) == "object" and (.value | has($key))
-        then .value = .value[$key] else .exists = false end) | .exists;
-    reduce $keys[] as $owned (. ; delpaths([$owned.path]))
-    | reduce ($created | sort_by(length) | reverse[]) as $path
-        (. ; if exists_at(.; $path) and ((getpath($path) | type) == "object") and ((getpath($path) | length) == 0)
-             then delpaths([$path]) else . end)
-  ' "$root/$path" > "$tmp" || return "$TRELLIS_EX_CONFLICT"
+  settings_owned_json inverse "$root/$path" "$keys" '' '' "$created" > "$tmp" || return "$TRELLIS_EX_CONFLICT"
   [ "$(attach_sha_file "$root/$path")" = "$current_hash" ] || return "$TRELLIS_EX_CONFLICT"
   if [ "$before_exists" = false ] && [ "$(jq -r 'type == "object" and length == 0' "$tmp")" = true ]; then
     jq -cn --arg sha "$(attach_sha_text '')" \
@@ -3038,23 +3080,34 @@ attach_detach_render_begin() {
   local owner="$1" journal="$2" root render state path before after result stage
   root="$(printf '%s\n' "$owner" | jq -r '.worktree_root')" || return "$TRELLIS_EX_STATE"
   render="$(jq -c '.external as $external | $external.renders[$external.render_phase]' "$journal")" || return "$TRELLIS_EX_STATE"
-  [ "$render" != null ] || return "$TRELLIS_EX_CONFLICT"
+  [ "$render" != null ] || { _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" journal-phase-conflict "$journal"; return "$?"; }
   path="$(printf '%s\n' "$render" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
   state="$(attach_detach_render_state "$root" "$render")" || return "$?"
   case "$state" in
     after)
-      before="$(attach_detach_render_snapshot "$root/$path")" || return "$?"
-      result="$(attach_detach_render_before_result "$render")" || return "$?"
-      after="$(attach_detach_render_snapshot "$root/$path")" || return "$?"
+      before="$(attach_detach_render_snapshot "$root/$path")" &&
+        result="$(attach_detach_render_before_result "$render")" &&
+        after="$(attach_detach_render_snapshot "$root/$path")" ||
+        { _attachment_detach_step_refuse "$?" render-conflict "$journal"; return "$?"; }
       ;;
     merged)
-      before="$(attach_detach_render_snapshot "$root/$path")" || return "$?"
-      result="$(attach_detach_inverse_render_json "$root" "$render")" || return "$?"
-      after="$(attach_detach_render_snapshot "$root/$path")" || return "$?"
+      before="$(attach_detach_render_snapshot "$root/$path")" &&
+        result="$(attach_detach_inverse_render_json "$root" "$render")" &&
+        after="$(attach_detach_render_snapshot "$root/$path")" ||
+        { _attachment_detach_step_refuse "$?" render-conflict "$journal"; return "$?"; }
       ;;
-    *) return "$TRELLIS_EX_CONFLICT" ;;
+    *)
+      # `before`, as the fresh-detach preflight refuses it: the file is back to
+      # its pre-attach bytes, or gone when it did not exist before attach.
+      if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
+        _attachment_refuse "${ATTACHMENT_ACTION:-}" render-reverted "$root/$path"
+      else
+        _attachment_refuse "${ATTACHMENT_ACTION:-}" render-missing "$root/$path"
+      fi
+      return "$TRELLIS_EX_CONFLICT"
+      ;;
   esac
-  [ "$before" = "$after" ] || return "$TRELLIS_EX_CONFLICT"
+  [ "$before" = "$after" ] || { _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" render-conflict "$journal"; return "$?"; }
   if [ "$(printf '%s\n' "$result" | jq -r '.result_exists')" = true ]; then
     stage="$(_attachment_stage_candidate "$root" "$path" "$(jq -r '.attachment_id' "$journal")")" || return "$TRELLIS_EX_UNAVAILABLE"
     stage="$(jq -cn --arg path "$stage" '$path')" || return "$TRELLIS_EX_STATE"
@@ -3104,9 +3157,10 @@ attach_detach_render_pending_state() {
 attach_detach_render_resume() {
   local owner="$1" journal="$2" pending state destination
   pending="$(jq -c '.external.render_pending' "$journal")" || return "$TRELLIS_EX_STATE"
-  [ "$pending" != null ] || return "$TRELLIS_EX_CONFLICT"
+  [ "$pending" != null ] || { _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" journal-phase-conflict "$journal"; return "$?"; }
   destination="$(printf '%s\n' "$owner" | jq -r '.worktree_root')/$(printf '%s\n' "$pending" | jq -r '.render.path')" || return "$TRELLIS_EX_STATE"
-  state="$(attach_detach_render_pending_state "$owner" "$journal" "$pending")" || return "$?"
+  state="$(attach_detach_render_pending_state "$owner" "$journal" "$pending")" ||
+    { _attachment_detach_step_refuse "$?" render-conflict "$journal"; return "$?"; }
   case "$state" in
     source)
       attachment_detach_render_stage "$journal" || return "$?"
@@ -3115,26 +3169,32 @@ attach_detach_render_resume() {
       ;;
     claimed) ;;
     published)
-      attach_detach_render_pending_result_matches "$destination" "$pending" || return "$TRELLIS_EX_CONFLICT"
+      attach_detach_render_published_matches "$journal" "$destination" || return "$?"
       attachment_detach_render_cleanup "$journal" || return "$?"
-      pending="$(jq -c '.external.render_pending' "$journal")" || return "$TRELLIS_EX_STATE"
-      attach_detach_render_pending_result_matches "$destination" "$pending" || return "$TRELLIS_EX_CONFLICT"
+      attach_detach_render_published_matches "$journal" "$destination" || return "$?"
       attachment_detach_render_finish "$journal"
       return "$?"
       ;;
-    *) return "$TRELLIS_EX_CONFLICT" ;;
+    *) _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" render-conflict "$journal"; return "$?" ;;
   esac
   attachment_detach_render_stage "$journal" || return "$?"
   attachment_detach_render_publish "$journal" || return "$?"
   if [ "${ATTACHMENT_FAULT_PHASE:-}" = detach-render-published ]; then return "$TRELLIS_EX_UNAVAILABLE"; fi
   # Staging pins the result identity into the journal, so the published bytes
   # have to be checked against the journal record rather than the pre-stage copy.
-  pending="$(jq -c '.external.render_pending' "$journal")" || return "$TRELLIS_EX_STATE"
-  attach_detach_render_pending_result_matches "$destination" "$pending" || return "$TRELLIS_EX_CONFLICT"
+  attach_detach_render_published_matches "$journal" "$destination" || return "$?"
   attachment_detach_render_cleanup "$journal" || return "$?"
-  pending="$(jq -c '.external.render_pending' "$journal")" || return "$TRELLIS_EX_STATE"
-  attach_detach_render_pending_result_matches "$destination" "$pending" || return "$TRELLIS_EX_CONFLICT"
+  attach_detach_render_published_matches "$journal" "$destination" || return "$?"
   attachment_detach_render_finish "$journal"
+}
+
+# The published render must still be the journal's result, read afresh because
+# staging pins the result identity into the journal.
+attach_detach_render_published_matches() {
+  local journal="$1" destination="$2" pending
+  pending="$(jq -c '.external.render_pending' "$journal")" || return "$TRELLIS_EX_STATE"
+  attach_detach_render_pending_result_matches "$destination" "$pending" && return 0
+  _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" render-conflict "$journal"
 }
 
 attach_detach_apply_renders() {
@@ -3221,13 +3281,13 @@ attach_hooks_create() {
     rm -rf "$temporary"
     return "$rc"
   }
-  expected_shims=$(_attachment_hooks_expected_passthrough_names "$root" "$previous") || {
+  expected_shims=$(_attachment_hooks_expected_passthrough_names "$root" "$previous" "$payload") || {
     rm -rf "$temporary"
     return "$TRELLIS_EX_UNAVAILABLE"
   }
   while IFS= read -r name; do
     [ -n "$name" ] || continue
-    shim_body=$(_attachment_hooks_passthrough_shim_body "$name") || {
+    shim_body=$(_attachment_hooks_shim_body_for "$name" "$previous") || {
       rc=$?
       rm -rf "$temporary"
       return "$TRELLIS_EX_STATE"
@@ -3249,9 +3309,57 @@ attach_hooks_create() {
     return "$rc"
   fi
 }
+# Replace only a digest-pinned released shim. Swap leaves the old inode in the
+# stage until it has been rechecked, so an unexpected file is never discarded.
+attach_hooks_upgrade_released_shim() (
+  local managed=$1 name=$2 parent_id=$3 entry="$1/$2" stage="" old_id new_id body
+  _attachment_hooks_released_shim_matches "$entry" "$name" || return "$TRELLIS_EX_CONFLICT"
+  old_id=$(_attachment_fs_identity "$entry") || return "$TRELLIS_EX_CONFLICT"
+  body=$(_attachment_hooks_passthrough_shim_body "$name") || return "$TRELLIS_EX_STATE"
+  stage=$(mktemp "$managed/.trellis-shim-upgrade.XXXXXX") || return "$TRELLIS_EX_UNAVAILABLE"
+  new_id=$(_attachment_fs_identity "$stage") || return "$TRELLIS_EX_CONFLICT"
+  trap 'if [ -n "$stage" ] && _attachment_identity_matches "$stage" "$new_id" file; then rm -f "${stage:?}"; fi' EXIT
+  chmod 700 "$stage" && printf '%s\n' "$body" > "$stage" || return "$TRELLIS_EX_UNAVAILABLE"
+  [ "$(release_store_directory_identity "$managed")" = "$parent_id" ] || return "$TRELLIS_EX_CONFLICT"
+  _attachment_identity_matches "$entry" "$old_id" file &&
+    _attachment_hooks_released_shim_matches "$entry" "$name" &&
+    _attachment_identity_matches "$stage" "$new_id" file &&
+    _attachment_hooks_file_matches "$stage" "$body" 700 || return "$TRELLIS_EX_CONFLICT"
+  release_store_rename_swap "$stage" "$entry" || return "$?"
+  if ! { [ "$(release_store_directory_identity "$managed")" = "$parent_id" ] &&
+    _attachment_identity_matches "$stage" "$old_id" file &&
+    _attachment_hooks_released_shim_matches "$stage" "$name" &&
+    _attachment_identity_matches "$entry" "$new_id" file &&
+    _attachment_hooks_file_matches "$entry" "$body" 700; }; then
+    # Put an unexpected swapped inode back when our replacement is still there.
+    if _attachment_identity_matches "$entry" "$new_id" file; then
+      release_store_rename_swap "$stage" "$entry" ||
+        attach_err "could not restore swapped hook; preserve and inspect $(attach_diagnostic_escape "$stage")"
+    fi
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  rm -f "${stage:?}" || return "$TRELLIS_EX_UNAVAILABLE"
+  stage=""
+)
+
+attach_hooks_upgrade_released_shims() {
+  local managed=$1 previous=${2:-} parent_id entry name body
+  # Default hooks dir shims (no recorded predecessor) were never released.
+  [ -n "$previous" ] || return 0
+  parent_id=$(release_store_directory_identity "$managed") || return "$TRELLIS_EX_CONFLICT"
+  for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
+    [ -e "$entry" ] || [ -L "$entry" ] || continue
+    name=${entry##*/}
+    _attachment_hooks_is_passthrough_name "$name" || continue
+    body=$(_attachment_hooks_passthrough_shim_body "$name") || return "$TRELLIS_EX_STATE"
+    _attachment_hooks_file_matches "$entry" "$body" 700 && continue
+    attach_hooks_upgrade_released_shim "$managed" "$name" "$parent_id" || return "$?"
+  done
+}
+
 attach_hooks_recreate_missing_dispatchers() {
   local managed="$1" previous="$2" payload="$3" source="$4" manifest="$5" root="$6"
-  local entry base missing=false dispatcher_missing=false shim_stale=false post_checkout pre_push managed_dev_ino current_dev_ino expected_shims name shim_body
+  local entry base missing=false dispatcher_missing=false shim_stale=false shim_legacy=false post_checkout pre_push managed_dev_ino current_dev_ino expected_shims name shim_body
   [ -n "${root:-}" ] || return "$TRELLIS_EX_CONFLICT"
   [ -d "$managed" ] && [ ! -L "$managed" ] || return "$TRELLIS_EX_CONFLICT"
   _attachment_canonical_dir "$managed" || return "$TRELLIS_EX_CONFLICT"
@@ -3284,14 +3392,19 @@ attach_hooks_recreate_missing_dispatchers() {
   else
     _attachment_hooks_file_matches "$managed/pre-push" "$pre_push" 700 || return "$TRELLIS_EX_CONFLICT"
   fi
-  expected_shims=$(_attachment_hooks_expected_passthrough_names "$root" "$previous") || return "$TRELLIS_EX_CONFLICT"
+  expected_shims=$(_attachment_hooks_expected_passthrough_names "$root" "$previous" "$payload") || return "$TRELLIS_EX_CONFLICT"
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if [ ! -e "$managed/$name" ] && [ ! -L "$managed/$name" ]; then
       missing=true
     else
-      shim_body=$(_attachment_hooks_passthrough_shim_body "$name") || return "$TRELLIS_EX_STATE"
-      _attachment_hooks_file_matches "$managed/$name" "$shim_body" 700 || return "$TRELLIS_EX_CONFLICT"
+      shim_body=$(_attachment_hooks_shim_body_for "$name" "$previous") || return "$TRELLIS_EX_STATE"
+      if ! _attachment_hooks_file_matches "$managed/$name" "$shim_body" 700; then
+        # Only a recorded predecessor's shim was ever released.
+        [ -n "$previous" ] && _attachment_hooks_released_shim_matches "$managed/$name" "$name" ||
+          return "$TRELLIS_EX_CONFLICT"
+        shim_legacy=true
+      fi
     fi
   done <<<"$expected_shims"
   for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
@@ -3304,15 +3417,14 @@ attach_hooks_recreate_missing_dispatchers() {
     if printf '%s\n' "$expected_shims" | grep -Fxq -- "$base"; then
       continue
     fi
-    shim_body=$(_attachment_hooks_passthrough_shim_body "$base") || return "$TRELLIS_EX_STATE"
-    _attachment_hooks_file_matches "$managed/$base" "$shim_body" 700 || return "$TRELLIS_EX_CONFLICT"
+    _attachment_hooks_shim_matches_for "$managed/$base" "$base" "$previous" || return "$TRELLIS_EX_CONFLICT"
     shim_stale=true
   done
-  [ "$missing" = true ] || [ "$shim_stale" = true ] || return "$TRELLIS_EX_CONFLICT"
+  [ "$missing" = true ] || [ "$shim_stale" = true ] || [ "$shim_legacy" = true ] || return "$TRELLIS_EX_CONFLICT"
   managed_dev_ino="$(release_store_directory_identity "$managed")" || return "$TRELLIS_EX_CONFLICT"
   if [ "$dispatcher_missing" = true ]; then
     [ -x /usr/bin/python3 ] || return "$TRELLIS_EX_UNAVAILABLE"
-  /usr/bin/python3 - "$managed" "$managed_dev_ino" "$post_checkout" "$pre_push" <<'PY'
+  /usr/bin/python3 -I - "$managed" "$managed_dev_ino" "$post_checkout" "$pre_push" <<'PY'
 import errno
 import os
 import secrets
@@ -3455,7 +3567,7 @@ PY
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     if [ ! -e "$managed/$name" ] && [ ! -L "$managed/$name" ]; then
-      shim_body=$(_attachment_hooks_passthrough_shim_body "$name") || return "$TRELLIS_EX_STATE"
+      shim_body=$(_attachment_hooks_shim_body_for "$name" "$previous") || return "$TRELLIS_EX_STATE"
       current_dev_ino="$(release_store_directory_identity "$managed")" || return "$TRELLIS_EX_CONFLICT"
       [ "$current_dev_ino" = "$managed_dev_ino" ] || return "$TRELLIS_EX_CONFLICT"
       attach_hooks_write_file "$managed/$name" "$shim_body" 700 || return "$?"
@@ -3471,12 +3583,12 @@ PY
     if printf '%s\n' "$expected_shims" | grep -Fxq -- "$base"; then
       continue
     fi
-    shim_body=$(_attachment_hooks_passthrough_shim_body "$base") || return "$TRELLIS_EX_STATE"
-    _attachment_hooks_file_matches "$managed/$base" "$shim_body" 700 || return "$TRELLIS_EX_CONFLICT"
+    _attachment_hooks_shim_matches_for "$managed/$base" "$base" "$previous" || return "$TRELLIS_EX_CONFLICT"
     current_dev_ino="$(release_store_directory_identity "$managed")" || return "$TRELLIS_EX_CONFLICT"
     [ "$current_dev_ino" = "$managed_dev_ino" ] || return "$TRELLIS_EX_CONFLICT"
     rm -f "$managed/$base" || return "$TRELLIS_EX_UNAVAILABLE"
   done
+  attach_hooks_upgrade_released_shims "$managed" "$previous" || return "$?"
 }
 
 
@@ -3552,6 +3664,8 @@ attach_hooks_install() {
     _attachment_hooks_state_matches "$home" "$owner" || state_status=$?
     if [ "$state_status" -ne 0 ]; then
       attach_hooks_recreate_missing_dispatchers "$managed" "$previous" "$payload" "$source" "$manifest" "$root" || return "$?"
+    else
+      attach_hooks_upgrade_released_shims "$managed" "$previous" || return "$?"
     fi
   fi
   if [ "$current" != "$managed" ]; then
@@ -3565,14 +3679,19 @@ attach_hooks_install() {
 }
 
 attach_hooks_remove() {
-  local home="$1" owner="$2" enabled managed entry base
+  local home="$1" owner="$2" enabled managed entry base rc
   enabled="$(printf '%s\n' "$owner" | jq -r '.git_hooks.enabled // false')" || return "$TRELLIS_EX_STATE"
   [ "$enabled" = true ] || return 0
   managed="$(printf '%s\n' "$owner" | jq -r '.git_hooks.managed_hooks_path // empty')" || return "$TRELLIS_EX_STATE"
   if [ ! -e "$managed" ] && [ ! -L "$managed" ]; then
     return 0
   fi
-  _attachment_hooks_state_owned_matches_data "$home" "$owner" false || return "$?"
+  _attachment_hooks_state_owned_matches_data "$home" "$owner" false || {
+    rc=$?
+    [ "$rc" -ne "$TRELLIS_EX_CONFLICT" ] ||
+      attach_err "refusing to remove managed hooks: $(attach_diagnostic_escape "$managed") no longer matches the recorded dispatcher; run trellis doctor --fix, then rerun"
+    return "$rc"
+  }
   rm -f "$managed/post-checkout" "$managed/pre-push" "$managed/previous-hooks-path" \
     "$managed/release-payload" "$managed/pre-push-source" || return "$TRELLIS_EX_UNAVAILABLE"
   for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
@@ -3581,7 +3700,10 @@ attach_hooks_remove() {
     case "$base" in
       post-checkout|pre-push|previous-hooks-path|release-payload|pre-push-source) continue ;;
     esac
-    _attachment_hooks_is_passthrough_name "$base" || return "$TRELLIS_EX_CONFLICT"
+    _attachment_hooks_is_passthrough_name "$base" || {
+      attach_err "refusing to remove managed hooks: $(attach_diagnostic_escape "$entry") is not a Trellis hook; move it out of $(attach_diagnostic_escape "$managed"), then rerun"
+      return "$TRELLIS_EX_CONFLICT"
+    }
     rm -f "$entry" || return "$TRELLIS_EX_UNAVAILABLE"
   done
   rmdir "$managed" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"
@@ -3593,7 +3715,10 @@ attach_detach_hooks_current() {
   rc=$?
   case "$rc" in
     0)
-      [ "$(printf '%s\n' "$values" | wc -l | tr -d ' ')" -eq 1 ] || return "$TRELLIS_EX_CONFLICT"
+      [ "$(printf '%s\n' "$values" | wc -l | tr -d ' ')" -eq 1 ] || {
+        attach_err "refusing detach: core.hooksPath has more than one value in $(attach_diagnostic_escape "$root"); keep one with git config --local core.hooksPath, then rerun"
+        return "$TRELLIS_EX_CONFLICT"
+      }
       printf '%s\n' "$values"
       ;;
     1) printf '\n' ;;
@@ -3685,11 +3810,16 @@ attach_detach_rebase_shared_restore() {
   local owners='[]' candidate expected after transfer
   original="$(jq -c '.original_owner' "$journal")" || return "$TRELLIS_EX_STATE"
   external="$(jq -c '.external' "$journal")" || return "$TRELLIS_EX_STATE"
-  [ "$(jq -r '.owner_committed' "$journal")" = true ] || return "$TRELLIS_EX_CONFLICT"
+  [ "$(jq -r '.owner_committed' "$journal")" = true ] ||
+    { _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" journal-phase-conflict "$journal"; return "$?"; }
   phase="$(printf '%s\n' "$external" | jq -r '.phase')" || return "$TRELLIS_EX_STATE"
   action="$(printf '%s\n' "$external" | jq -r '.exclude_action')" || return "$TRELLIS_EX_STATE"
   [ "$action" = restore ] || return 0
-  case "$phase" in 0|1|2) ;; 3|4|5) return 0 ;; *) return "$TRELLIS_EX_CONFLICT" ;; esac
+  case "$phase" in
+    0|1|2) ;;
+    3|4|5) return 0 ;;
+    *) _attachment_detach_step_refuse "$TRELLIS_EX_CONFLICT" journal-phase-conflict "$journal"; return "$?" ;;
+  esac
   checkout="$(printf '%s\n' "$original" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
   owner_path="$(attach_detach_owner_files "$home" "$checkout")" || return "$?"
   while IFS= read -r owner; do
@@ -3824,9 +3954,10 @@ _attach_detach_finish_journal_impl() (
   checkout="$(jq -r '.checkout_id' "$journal")" || return "$TRELLIS_EX_STATE"
   worktree="$(jq -r '.worktree_id' "$journal")" || return "$TRELLIS_EX_STATE"
   attachment="$(jq -r '.attachment_id' "$journal")" || return "$TRELLIS_EX_STATE"
-  _attachment_lock_acquire "$home" "$checkout" "$worktree" "$attachment" || return "$?"
+  _attachment_lock_acquire "$home" "$checkout" "$worktree" "$attachment" ||
+    _attachment_lock_refuse "$?" "$home" "$checkout" "$worktree" || return "$?"
   _attachment_install_lock_traps
-  _attachment_detach_journal_valid "$journal" || return "$?"
+  _attachment_detach_journal_revalid "$journal" || return "$?"
   _attach_detach_finish_journal_locked "$home" "$journal"
 )
 
@@ -3870,8 +4001,7 @@ attach_cmd_detach() (
   identity="$(local_registry_identity_for_root "$root")" || return "$?"
   checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
   common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')" || return "$TRELLIS_EX_STATE"
-  attachment_checkout_lock_reclaim "$home" "$checkout" "$common" || return "$?"
-  attachment_checkout_lock_acquire "$home" "$checkout" "$common" || return "$?"
+  attach_checkout_lock_wait "$home" "$checkout" "$common" || return "$?"
   _attachment_install_checkout_lock_traps
   if [ -n "${ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK:-}" ]; then sleep "$ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK"; fi
   pending="$(attach_detach_pending_journals "$home" "$identity" "$root" "$all_worktrees")" || return "$?"
@@ -4225,13 +4355,89 @@ attach_refresh_artifacts() (
   printf 'refreshed artifacts: %s\n' "$root"
 )
 
+# T13: a fixed descriptor holds each acquired lock directory across the donor
+# preflight. Check its named holder and public alias before cleanup: a lost or
+# replaced lock is evidence, never something this invocation may remove.
+attach_t13_pin_matches() {
+  local fd="$1" holder="$2" link="${3:-}" opened named
+  [ -d "$holder" ] && [ ! -L "$holder" ] || return 1
+  _attachment_os_name_cache
+  opened="$(_attachment_fd_fs_identity "/dev/fd/$fd")" || return 1
+  named="$(_attachment_fs_identity "$holder")" || return 1
+  [ "$opened" = "$named" ] || return 1
+  if [ -n "$link" ]; then
+    [ -L "$link" ] && [ "$(readlink "$link")" = "${holder##*/}" ] || return 1
+  fi
+}
+
+attach_t13_close_checkout_pin() {
+  local changed=0
+  if [ "${_T13_OWN_31:-0}" = 1 ]; then
+    if ! attach_t13_pin_matches 31 "${_ATTACHMENT_CHECKOUT_LOCK_HOLDER:-}" "${_ATTACHMENT_CHECKOUT_LOCK_LINK:-}"; then
+      printf 'trellis attach: checkout lock changed; retaining its current holder for inspection\n' >&2
+      _ATTACHMENT_CHECKOUT_LOCK_LINK=""; _ATTACHMENT_CHECKOUT_LOCK_HOLDER=""; changed=1
+    fi
+    exec 31<&-
+    _T13_OWN_31=0
+  fi
+  [ "$changed" -eq 0 ]
+}
+
+# Spec 074 T14, amended 2026-11-10 (owner): attach returns once the worktree
+# is attached and its checks job has started. The job's verdict gates the next
+# Stop and the next push (attach_postjob_gate), so attach no longer waits for
+# it. A job that could not start already refused in the spawn. Release the
+# checkout lock (the job's commit takes it non-blocking).
+attach_await_ready() {
+  attach_t13_close_checkout_pin || return "$TRELLIS_EX_CONFLICT"
+  _attachment_checkout_lock_release >/dev/null 2>&1 || {
+    attach_err "could not release the checkout lock for $(attach_diagnostic_escape "$2"); run trellis doctor"
+    return "$TRELLIS_EX_STATE"
+  }
+  [ "${TRELLIS_ATTACH_POSTJOB:-}" != off ] || return 0
+  [ -n "${_ATTACH_POSTJOB_SPAWNED:-}" ] && [ "$_ATTACH_POSTJOB_SPAWNED" = "$2" ] || {
+    attach_err "no attachment checks were started for $(attach_diagnostic_escape "$2"); remedy: trellis doctor --fix"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+}
+
+attach_t13_close_fast_pins() {
+  local changed=0
+  if [ "${_T13_OWN_32:-0}" = 1 ]; then
+    if ! attach_t13_pin_matches 32 "${_ATTACHMENT_LOCK_HOLDER:-}" "${_ATTACHMENT_LOCK_LINK:-}"; then
+      printf 'trellis attach: attachment lock changed; retaining its current holder for inspection\n' >&2
+      _ATTACHMENT_LOCK_LINK=""; _ATTACHMENT_LOCK_HOLDER=""; changed=1
+    fi
+    exec 32<&-
+    _T13_OWN_32=0
+  fi
+  if [ "${_T13_OWN_33:-0}" = 1 ]; then
+    if ! attach_t13_pin_matches 33 "${_TRELLIS_HOME_LOCK_DIR:-}"; then
+      printf 'trellis attach: registry lock changed; retaining its current holder for inspection\n' >&2
+      _TRELLIS_HOME_LOCK_DIR=""; changed=1
+    fi
+    exec 33<&-
+    _T13_OWN_33=0
+  fi
+  if [ "${_T13_OWN_31:-0}" = 1 ]; then
+    if ! attach_t13_pin_matches 31 "${_ATTACHMENT_CHECKOUT_LOCK_HOLDER:-}" "${_ATTACHMENT_CHECKOUT_LOCK_LINK:-}"; then
+      printf 'trellis attach: checkout lock changed; retaining its current holder for inspection\n' >&2
+      _ATTACHMENT_CHECKOUT_LOCK_LINK=""; _ATTACHMENT_CHECKOUT_LOCK_HOLDER=""; changed=1
+    fi
+    exec 31<&-
+    _T13_OWN_31=0
+  fi
+  [ "$changed" -eq 0 ]
+}
+
 # Internal miss = 10. All misses occur before artifact/state publication and
 # continue through the existing full attach path. A partial batch is an error,
 # never a reason to start another transaction. Reuse both existing lock kinds.
 attach_try_donor_fastpath() (
   local home="$1" root="$2" fleet="$3" project_id="$4" identity="$5" release="$6"
   local harnesses_json="$7" donor="$8" root_pin="$9" common_pin="${10}" expected_binding="${11}"
-  local helper verifier checkout worktree attachment_id fast_tmp bindings
+  local helper verifier checkout worktree attachment_id fast_tmp bindings registry_state registry_token registry_after proposal_digest
+  local donor_proof="" proof_pid="" proof_owner="" proof_digest="" proof_release="" proof_donor_owner=""
   # A4 is required in production. Unit fixtures define only its frozen seam.
   declare -F trellis_attach_postjob_spawn >/dev/null 2>&1 || return 10
   if [ "${TRELLIS_LIBS_PRELOADED:-}" = 1 ]; then
@@ -4251,26 +4457,73 @@ attach_try_donor_fastpath() (
   _ATTACHMENT_LOCK_LINK=""
   _ATTACHMENT_LOCK_HOLDER=""
   _TRELLIS_HOME_LOCK_DIR=""
-  fast_tmp=""
-  trap '_attachment_lock_release >/dev/null 2>&1; trellis_home_lock_release >/dev/null 2>&1; if [ -n "$fast_tmp" ]; then (cd "$fast_tmp" && rm -f plan.json plan.json.harnesses registry.json && cd .. && rmdir "$(basename "$fast_tmp")"); fi' EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  _T13_OWN_32=0; _T13_OWN_33=0; _T13_FAST_TMP=""
+  [ "${_T13_OWN_31:-0}" = 1 ] || return 10
+  attach_fastpath_cleanup() {
+    trap '' HUP INT TERM; trap - EXIT
+    attach_t13_close_fast_pins || :
+    _attachment_lock_release >/dev/null 2>&1
+    trellis_home_lock_release >/dev/null 2>&1
+    if [ -n "${_T13_FAST_TMP:-}" ]; then
+      (cd "$_T13_FAST_TMP" && rm -f plan.json plan.json.harnesses registry.json && cd .. && rmdir "$(basename "$_T13_FAST_TMP")")
+    fi
+  }
+  trap 'attach_fastpath_cleanup' EXIT
+  trap 'attach_fastpath_cleanup; exit 129' HUP
+  trap 'attach_fastpath_cleanup; exit 130' INT
+  trap 'attach_fastpath_cleanup; exit 143' TERM
   _attachment_lock_acquire "$home" "$checkout" "$worktree" "$attachment_id" || return 10
+  _T13_ATTACHMENT_PID="$_ATTACHMENT_PROCESS_PID"
+  if { : <&32; } 2>/dev/null; then return 10; fi
+  { exec 32<"$_ATTACHMENT_LOCK_HOLDER"; } 2>/dev/null || return 10
+  _T13_OWN_32=1
   trellis_home_lock_acquire "$home" registry 0 >/dev/null 2>&1 || return 10
+  if { : <&33; } 2>/dev/null; then return 10; fi
+  { exec 33<"$_TRELLIS_HOME_LOCK_DIR"; } 2>/dev/null || return 10
+  _T13_OWN_33=1
+  # T12's diagnostic snapshot is captured once under all transaction locks.
+  # A coarse/unavailable token or any change is a read-only fast miss; the
+  # canonical path remains responsible for handling those filesystems.
+  registry_token="$(_local_registry_diagnostic_token "$home")" || return 10
+  registry_state="$(local_registry_read_diagnostic_state "$home")" || return 10
+  registry_after="$(_local_registry_diagnostic_token "$home")" || return 10
+  [ "$registry_token" = "$registry_after" ] || return 10
   if [ -n "$expected_binding" ]; then
     attach_expected_binding_matches_selection "$expected_binding" "$fleet" "$project_id" "$root" \
       "$identity" "$attachment_id" "$release" "$harnesses_json" true || return "$?"
-    attach_expected_binding_verify "$home" "$root" "$identity" "$expected_binding" "$donor" || return "$?"
+    attach_expected_binding_verify "$home" "$root" "$identity" "$expected_binding" "$donor" "$registry_state" || return "$?"
+  fi
+  # Spec 074 T2a: hand on the seed's canonical donor verify only for the bound
+  # expected donor, from this process, at this release. attach-fastpath.py
+  # honours it only for identical owner bytes and re-proves every leaf.
+  if [ -n "$donor" ] && [ -n "${_ATTACHMENT_DONOR_PROOF:-}" ]; then
+    IFS=$'\t' read -r proof_pid proof_owner proof_digest proof_release <<< "$_ATTACHMENT_DONOR_PROOF"
+    proof_donor_owner="$home/state/attachments/$checkout/$(printf '%s\n' "$donor" | jq -r '.worktree_id').json" || proof_donor_owner=""
+    if [ "$proof_pid" = "$$" ] && [ "$proof_release" = "$release" ] &&
+       [ -n "$proof_donor_owner" ] && [ "$proof_owner" = "$proof_donor_owner" ] &&
+       trellis_is_sha256_hex "$proof_digest"; then
+      donor_proof="$proof_owner"$'\t'"$proof_digest"$'\t'"$proof_release"
+    fi
   fi
   fast_tmp="$(mktemp -d "${TMPDIR:-/tmp}/trellis.fast-plan.XXXXXX")" || return 10
   fast_tmp="$(CDPATH='' cd "$fast_tmp" && pwd -P)" || return 10
-  /usr/bin/python3 -I -B "$helper" --begin "$fast_tmp" "$home" "$root" "$fleet" "$project_id" "$identity" \
-    "$release" "$harnesses_json" "$donor" "$attachment_id" "$root_pin" "$common_pin" || return "$?"
+  _T13_FAST_TMP="$fast_tmp"
+  # --begin prints only the digest of the proposal it validated through its
+  # held workspace; --finish binds the registry write to it.
+  proposal_digest="$(printf '%s\n' "$registry_state" | TRELLIS_FASTPATH_DONOR_PROOF="$donor_proof" /usr/bin/python3 -I -B "$helper" --begin "$fast_tmp" "$home" "$root" "$fleet" "$project_id" "$identity" \
+    "$release" "$harnesses_json" "$donor" "$attachment_id" "$root_pin" "$common_pin" \
+    "$_T13_CHECKOUT_PID" "$_T13_ATTACHMENT_PID" "$$")" || return "$?"
+  # Python has rechecked all three pins after journaling. This shell keeps
+  # them through the registry write and --finish, which rechecks them around
+  # every publication step and the owner commit; cleanup checks them once
+  # more, so a holder replaced after --begin is retained, never released.
+  # Children get none: the registry write runs with them closed (Bash keeps
+  # its saved copies close-on-exec) and Python closes them in its children.
   # The journal exists now: a failure is recoverable and must not fall back.
   bindings="$(jq -cn --arg checkout "$checkout" --arg worktree "$worktree" '[{checkout_id:$checkout,worktree_id:$worktree}]')" || return "$TRELLIS_EX_STATE"
-  local_registry_write_locked_bound_rows "$home" "$fast_tmp/registry.json" "$bindings" || return "$TRELLIS_EX_STATE"
-  /usr/bin/python3 -I -B "$helper" --finish "$fast_tmp" "$home" "$root_pin" "$common_pin"
+  local_registry_write_locked_bound_rows "$home" "$fast_tmp/registry.json" "$bindings" 31<&- 32<&- 33<&- || return "$TRELLIS_EX_STATE"
+  /usr/bin/python3 -I -B "$helper" --finish "$fast_tmp" "$home" "$root_pin" "$common_pin" "$proposal_digest" \
+    "$_T13_CHECKOUT_PID" "$_T13_ATTACHMENT_PID" "$$"
 )
 
 # A new worktree's attach (post-checkout) lands in the post-attach job's
@@ -4289,7 +4542,7 @@ attach_cmd_attach() (
   local expected_owner_sha256="" expected_owner_parent_dev_ino="" pre_existing="[]"
   local donor_snapshot="" final_donor_snapshot="" fast_owner="" fast_status=10
   local expected_owner_sha_seen=0 expected_owner_parent_seen=0
-  local refresh_toolchain=0 refresh_artifacts=0
+  local refresh_toolchain=0 refresh_artifacts=0 anchor_plan=""
   local expected_donor_root="" expected_donor_checkout_id="" expected_donor_worktree_id="" expected_donor_attachment_id="" expected_donor_release="" expected_donor_harnesses_json=""
   local expected_binding_requested=0 expected_fleet_seen=0 expected_project_seen=0 expected_root_seen=0 expected_checkout_seen=0 expected_worktree_seen=0 expected_attachment_seen=0 expected_release_seen=0 expected_harnesses_seen=0
   local expected_donor_binding_requested=0 expected_donor_root_seen=0 expected_donor_checkout_seen=0 expected_donor_worktree_seen=0 expected_donor_attachment_seen=0 expected_donor_release_seen=0 expected_donor_harnesses_seen=0
@@ -4421,7 +4674,16 @@ attach_cmd_attach() (
   locked_common_dev_ino="$(attach_relink_directory_identity "$common")" || return "$?"
   attach_checkout_lock_wait "$home" "$checkout" "$common" || return "$?"
   _attachment_install_checkout_lock_traps
-  if [ -d "$home/state/release-adoptions/$checkout" ]; then
+  # Globals and literal fd numbers survive Bash 3.2 EXIT/TERM trap unwinding.
+  # An occupied fd is never clobbered: it merely disables this fast path.
+  unset _T13_OWN_31 _T13_CHECKOUT_PID
+  _T13_OWN_31=0; _T13_CHECKOUT_PID="$_ATTACHMENT_PROCESS_PID"
+  trap 'attach_t13_close_checkout_pin || :; _attachment_checkout_lock_release >/dev/null 2>&1' EXIT
+  if ! { : <&31; } 2>/dev/null; then
+    # Prime the kernel name here so the donor subshell's pin checks inherit it.
+    if { exec 31<"$_ATTACHMENT_CHECKOUT_LOCK_HOLDER"; } 2>/dev/null; then _T13_OWN_31=1; _attachment_os_name_cache; fi
+  fi
+  if [ -e "$home/state/release-adoptions/$checkout" ] || [ -L "$home/state/release-adoptions/$checkout" ]; then
     attach_err "pending group adoption for $root ($checkout); remedy: retry release adopt with the same selector to recover"
     return "$TRELLIS_EX_CONFLICT"
   fi
@@ -4442,10 +4704,11 @@ attach_cmd_attach() (
   fi
 
   if owner="$(attach_existing_owner "$home" "$identity")"; then
+    attach_t13_close_checkout_pin || return "$TRELLIS_EX_CONFLICT"
     attach_expected_owner_state_matches "$owner" "$expected_owner_sha256" "$expected_owner_parent_dev_ino" || return "$?"
     owner_harnesses="$(attach_reconcile_bound_harnesses "$home" "$owner" "$identity")" || return "$?"
     attach_expected_binding_owner_matches "$owner" "$expected_binding" "$owner_harnesses" || return "$?"
-    attach_verify_owner_artifacts "$home" "$owner" || {
+    attach_verify_owner_artifacts_except_absent_anchor "$home" "$owner" "$root" || {
       rc=$?
       attach_err "exact-owner reconcile refused: non-exact owner $owner: live artifacts disagree with recorded inventory"
       return "$rc"
@@ -4473,9 +4736,18 @@ attach_cmd_attach() (
       "$expected_owner_sha256" "$expected_owner_parent_dev_ino" || return "$?"
     [ -n "$owner_release" ] || return "$TRELLIS_EX_STATE"
     TRELLIS_HOME="$home" release_store_verify "$owner_release" || return "$?"
+    # A refused attach withdrew its anchor; publish it only now that hooks hold.
+    if [ ! -e "$root/.trellis/runtime" ] && [ ! -L "$root/.trellis/runtime" ]; then
+      attach_locate_release "$home" "$owner_release" || return "$?"
+      anchor_plan="$(attach_relink_runtime_anchor_plan "$root" "$_ATTACH_LOCATED_RELEASE/payload")" || return "$?"
+      TRELLIS_HOME="$home" release_store_adopt_runtime_anchor_pinned "$owner_release" "$root" \
+        "$(printf '%s\n' "$anchor_plan" | jq -r '.root_identity')" \
+        "$(printf '%s\n' "$anchor_plan" | jq -r '.trellis_identity')" "" >/dev/null || return "$?"
+    fi
     attach_reconcile_owner_registry "$home" "$owner" "$identity" || return "$?"
     attach_locked_checkout_namespace_matches "$root" "$locked_identity" "$locked_root_dev_ino" "$locked_common_dev_ino" >/dev/null || return "$?"
-    trellis_attach_postjob_spawn "$home" "$root"
+    trellis_attach_postjob_spawn "$home" "$root" || return "$?"
+    attach_await_ready "$home" "$root" || return "$?"
     printf 'already attached: %s\n' "$root"
     return 0
   fi
@@ -4492,11 +4764,13 @@ attach_cmd_attach() (
   else
     fast_status=$?
   fi
+  attach_t13_close_checkout_pin || return "$TRELLIS_EX_CONFLICT"
   case "$fast_status" in
     0)
       [ -f "$fast_owner" ] && [ ! -L "$fast_owner" ] || return "$TRELLIS_EX_STATE"
       # The published owner is bound to $root; A4's frozen API accepts ROOT.
       trellis_attach_postjob_spawn "$home" "$root" || return "$?"
+      attach_await_ready "$home" "$root" || return "$?"
       printf 'attached (donor fast path): %s\n' "$root"
       return 0
       ;;
@@ -4626,12 +4900,21 @@ attach_cmd_attach() (
   attach_hooks_install "$home" "$owner" "$locked_identity" "$locked_root_dev_ino" "$locked_common_dev_ino"
   rc=$?
   if [ "$rc" -ne 0 ]; then
+    # A refused install keeps the committed owner for relink or detach, but
+    # withdraws the runtime anchor: destination preflight refused any earlier
+    # link, so this one is ours, and the project stays inert until relink.
+    if _attachment_parent_safe "$root" .trellis/runtime && [ -L "$root/.trellis/runtime" ] &&
+       [ "$(readlink "$root/.trellis/runtime")" = "$payload" ]; then
+      rm -f "${root:?}/.trellis/runtime" ||
+        attach_err "could not withdraw the runtime anchor of $(attach_diagnostic_escape "$root"); run trellis relink or detach"
+    fi
     rm -f "$plan" "$exclude_before" "$exclude_after"
     return "$rc"
   fi
   rm -f "$plan" "$exclude_before" "$exclude_after"
   attach_reconcile_owner_registry "$home" "$owner" "$identity" "$harnesses_json" || return "$?"
-  trellis_attach_postjob_spawn "$home" "$root"
+  trellis_attach_postjob_spawn "$home" "$root" || return "$?"
+  attach_await_ready "$home" "$root" || return "$?"
   printf 'attached: %s\n' "$root"
 )
 
@@ -4826,8 +5109,76 @@ attach_discard_orphan_journal() (
   [ "$moved_log" != true ] || printf 'archived progress log: %s\n' "$archived_log"
 )
 
+attach_superseded_journal_refuse() {
+  attach_err "superseded journal discard refused: $2; journal kept at $(attach_diagnostic_escape "$1")"
+  return "$TRELLIS_EX_CONFLICT"
+}
+
+# A committed full detach journal is superseded when its worktree was attached
+# again before the journal finished: a different attachment owns the worktree
+# and its registry row, and the journal's own ID is bound nowhere. Its remaining
+# steps would undo the new attachment, so it is archived, never finished.
+attach_superseded_journal_check() {
+  local home="$1" identity="$2" root="$3" journal="$4" attachment checkout worktree owner current state
+  [ -f "$journal" ] && [ ! -L "$journal" ] || { attach_superseded_journal_refuse "$journal" 'no detach journal uses this attachment ID'; return $?; }
+  _attachment_detach_journal_valid "$journal" || { attach_superseded_journal_refuse "$journal" 'invalid detach journal'; return $?; }
+  attachment="$(jq -r '.attachment_id' "$journal")" || return "$TRELLIS_EX_STATE"
+  checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
+  worktree="$(printf '%s\n' "$identity" | jq -r '.worktree_id')" || return "$TRELLIS_EX_STATE"
+  jq -e --arg c "$checkout" --arg w "$worktree" --arg root "$root" '
+    .original_owner.checkout_id == $c and .original_owner.worktree_id == $w and .original_owner.worktree_root == $root
+  ' "$journal" >/dev/null || { attach_superseded_journal_refuse "$journal" "journal does not bind to $(attach_diagnostic_escape "$root")"; return $?; }
+  [ "$(jq -r '.owner_committed' "$journal")" = true ] ||
+    { attach_superseded_journal_refuse "$journal" 'its owner commit has not happened; use normal trellis recover'; return $?; }
+  [ "$(jq -r '.next_owner == null' "$journal")" = true ] ||
+    { attach_superseded_journal_refuse "$journal" 'a partial-harness journal requires normal recovery'; return $?; }
+  owner="$(_attachment_ownership_path "$home" "$checkout" "$worktree")"
+  _attachment_owner_json_valid "$owner" || { attach_superseded_journal_refuse "$journal" 'the worktree has no valid owner record'; return $?; }
+  jq -e --arg c "$checkout" --arg w "$worktree" --arg root "$root" '
+    .checkout_id == $c and .worktree_id == $w and .worktree_root == $root
+  ' "$owner" >/dev/null || { attach_superseded_journal_refuse "$journal" "the owner record does not bind to $(attach_diagnostic_escape "$root")"; return $?; }
+  current="$(jq -r '.attachment_id' "$owner")" || return "$TRELLIS_EX_STATE"
+  [ "$current" != "$attachment" ] || { attach_superseded_journal_refuse "$journal" 'the owner record is still this attachment; use normal trellis recover'; return $?; }
+  state="$(local_registry_read_diagnostic_state "$home")" || return "$?"
+  printf '%s\n' "$state" | jq -e --arg c "$checkout" --arg w "$worktree" --arg current "$current" '
+    [.projects[].checkouts[$c].worktrees[$w].attachment_id? // empty] == [$current]
+  ' >/dev/null || { attach_superseded_journal_refuse "$journal" "the registry does not bind this worktree to its owner $current"; return $?; }
+  printf '%s\n' "$state" | jq -e --arg a "$attachment" '[.. | objects | .attachment_id? // empty | select(. == $a)] | length == 0' >/dev/null ||
+    { attach_superseded_journal_refuse "$journal" "the registry still binds attachment $attachment"; return $?; }
+  if [ -e "$(_attachment_progress_path "$home" "$attachment")" ] || [ -L "$(_attachment_progress_path "$home" "$attachment")" ]; then
+    attach_superseded_journal_refuse "$journal" 'a progress log exists; use normal trellis recover'; return $?
+  fi
+}
+
+attach_discard_superseded_journal() (
+  local home="$1" identity="$2" root="$3" attachment="$4" journal journal_sha checkout worktree day archive archived
+  journal="$(_attachment_detach_journal_path "$home" "$attachment")"
+  attach_superseded_journal_check "$home" "$identity" "$root" "$journal" || return $?
+  journal_sha="$(attach_sha_file "$journal")" || return $?
+  checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
+  worktree="$(printf '%s\n' "$identity" | jq -r '.worktree_id')" || return "$TRELLIS_EX_STATE"
+  if _attachment_lock_reclaim "$home" "$checkout" "$worktree" "$attachment" &&
+     _attachment_lock_acquire "$home" "$checkout" "$worktree" "$attachment"; then :; else
+    attach_superseded_journal_refuse "$journal" 'a worktree attachment lock is live or unsafe'; return $?
+  fi
+  _attachment_install_lock_traps
+  attach_superseded_journal_check "$home" "$identity" "$root" "$journal" || return $?
+  [ "$(attach_sha_file "$journal")" = "$journal_sha" ] || { attach_superseded_journal_refuse "$journal" 'journal changed'; return $?; }
+  day="$(date -u +%Y-%m-%d)" || return "$TRELLIS_EX_UNAVAILABLE"
+  archive="$home/backups/discarded-journals-$day"
+  if ! _attachment_ensure_private_dir "$home/backups" || ! _attachment_ensure_private_dir "$archive"; then
+    attach_superseded_journal_refuse "$journal" 'unsafe archive directory'; return $?
+  fi
+  archived="$archive/${journal##*/}"
+  [ ! -e "$archived" ] && [ ! -L "$archived" ] ||
+    { attach_superseded_journal_refuse "$journal" "archive destination already exists at $(attach_diagnostic_escape "$archived")"; return $?; }
+  release_store_rename_no_clobber "$journal" "$archived" || return $?
+  [ "$(attach_sha_file "$archived")" = "$journal_sha" ] && [ "$(_attachment_mode "$archived")" = 600 ] || return "$TRELLIS_EX_CONFLICT"
+  printf 'archived superseded journal: %s\n' "$archived"
+)
+
 attach_cmd_recover() (
-  local discard_orphan=""
+  local discard_orphan="" discard_superseded=""
   local home_opt="" root_opt="" home root identity locked_identity locked_root_dev_ino locked_common_dev_ino checkout common journal journal_record status exclude rc registry_rc owner project_id owner_harnesses=null
   local expected_binding="" expected_fleet="" expected_project_id="" expected_root="" expected_checkout_id="" expected_worktree_id="" expected_attachment_id="" expected_release="" expected_harnesses_json=""
   local expected_journal_sha256="" expected_journal_sha_seen=0
@@ -4840,6 +5191,11 @@ attach_cmd_recover() (
         local_registry_require_attachment_id "$2" || return $?
         [ -n "$2" ] || { attach_usage_error '--discard-orphan-journal requires UUID'; return $?; }
         discard_orphan="$2"; shift 2 ;;
+      --discard-superseded-journal)
+        [ "$#" -ge 2 ] && [ -z "$discard_superseded" ] || { attach_usage_error '--discard-superseded-journal requires one UUID'; return $?; }
+        local_registry_require_attachment_id "$2" || return $?
+        [ -n "$2" ] || { attach_usage_error '--discard-superseded-journal requires UUID'; return $?; }
+        discard_superseded="$2"; shift 2 ;;
       --home) [ "$#" -ge 2 ] || { attach_usage_error '--home requires PATH'; return $?; }; home_opt="$2"; shift 2 ;;
       --expected-fleet) [ "$#" -ge 2 ] || { attach_usage_error '--expected-fleet requires NAME'; return $?; }; expected_fleet="$2"; expected_fleet_seen=1; expected_binding_requested=1; shift 2 ;;
       --expected-project-id) [ "$#" -ge 2 ] || { attach_usage_error '--expected-project-id requires ID'; return $?; }; expected_project_id="$2"; expected_project_seen=1; shift 2 ;;
@@ -4864,6 +5220,15 @@ attach_cmd_recover() (
   done
   [ "$#" -eq 0 ] || { attach_usage_error "unexpected argument: $1"; return $?; }
   [ -n "$root_opt" ] || { attach_usage_error 'recover requires PATH'; return $?; }
+  ATTACHMENT_ACTION=recover
+  if [ -n "$discard_orphan" ] && [ -n "$discard_superseded" ]; then
+    attach_usage_error '--discard-orphan-journal and --discard-superseded-journal are exclusive'
+    return "$TRELLIS_EX_USAGE"
+  fi
+  if [ -n "$discard_superseded" ] && { [ "$expected_binding_requested" -eq 1 ] || [ "$expected_project_seen" -eq 1 ] || [ "$expected_journal_sha_seen" -eq 1 ]; }; then
+    attach_usage_error '--discard-superseded-journal cannot be mixed with delegated --expected-* bindings'
+    return "$TRELLIS_EX_USAGE"
+  fi
   if [ -n "$discard_orphan" ] && { [ "$expected_binding_requested" -eq 1 ] || [ "$expected_project_seen" -eq 1 ] || [ "$expected_journal_sha_seen" -eq 1 ]; }; then
     attach_usage_error '--discard-orphan-journal cannot be mixed with delegated --expected-* bindings'
     return "$TRELLIS_EX_USAGE"
@@ -4895,14 +5260,18 @@ attach_cmd_recover() (
   locked_identity="$identity"
   locked_root_dev_ino="$(attach_relink_directory_identity "$root")" || return "$?"
   locked_common_dev_ino="$(attach_relink_directory_identity "$common")" || return "$?"
-  attachment_checkout_lock_reclaim "$home" "$checkout" "$common" || return "$?"
-  attachment_checkout_lock_acquire "$home" "$checkout" "$common" || return "$?"
+  attach_checkout_lock_wait "$home" "$checkout" "$common" || return "$?"
   _attachment_install_checkout_lock_traps
   if [ -n "${ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK:-}" ]; then sleep "$ATTACHMENT_TEST_HOLD_CHECKOUT_LOCK"; fi
   identity="$(attach_locked_checkout_namespace_matches "$root" "$locked_identity" "$locked_root_dev_ino" "$locked_common_dev_ino")" || return "$?"
   checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')" || return "$TRELLIS_EX_STATE"
   common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')" || return "$TRELLIS_EX_STATE"
   attach_expected_binding_verify "$home" "$root" "$identity" "$expected_binding" || return "$?"
+  if [ -n "$discard_superseded" ]; then
+    attach_discard_superseded_journal "$home" "$identity" "$root" "$discard_superseded" || return $?
+    attach_locked_checkout_namespace_matches "$root" "$locked_identity" "$locked_root_dev_ino" "$locked_common_dev_ino" >/dev/null
+    return $?
+  fi
   if [ -n "$discard_orphan" ]; then
     attach_discard_orphan_journal "$home" "$identity" "$discard_orphan" || return $?
     attach_locked_checkout_namespace_matches "$root" "$locked_identity" "$locked_root_dev_ino" "$locked_common_dev_ino" >/dev/null
@@ -4962,6 +5331,8 @@ attach_cmd_recover() (
         ;;
       detaching)
         _attachment_detach_journal_valid "$candidate" || {
+          rc=$?
+          attach_detach_journal_render_conflict "$rc" "$candidate" && return "$TRELLIS_EX_CONFLICT"
           attach_err "attachment journal is invalid: $candidate"
           return "$TRELLIS_EX_STATE"
         }
@@ -5041,7 +5412,7 @@ $candidate"
   return "$registry_rc"
 )
 attach_cmd_relink() (
-  local home_opt="" fleet_opt="" root_opt="" home root identity locked_identity locked_root_dev_ino locked_common_dev_ino checkout common owner release payload expected anchor_plan root_identity trellis_identity expected_old exclude verify_rc project_id owner_harnesses record artifact render
+  local home_opt="" fleet_opt="" root_opt="" home root identity locked_identity locked_root_dev_ino locked_common_dev_ino checkout common owner release payload expected anchor_plan root_identity trellis_identity expected_old exclude verify_rc project_id owner_harnesses
   local expected_binding="" expected_fleet="" expected_project_id="" expected_root="" expected_checkout_id="" expected_worktree_id="" expected_attachment_id="" expected_release="" expected_harnesses_json=""
   local expected_owner_sha256="" expected_owner_parent_dev_ino=""
   local expected_owner_sha_seen=0 expected_owner_parent_seen=0
@@ -5130,44 +5501,11 @@ attach_cmd_relink() (
   root_identity="$(printf '%s\n' "$anchor_plan" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   trellis_identity="$(printf '%s\n' "$anchor_plan" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
   expected_old="$(printf '%s\n' "$anchor_plan" | jq -r '.expected_old')" || return "$TRELLIS_EX_STATE"
-  attach_verify_owner_artifacts "$home" "$owner"
-  verify_rc=$?
-  if [ "$verify_rc" -ne 0 ]; then
-    [ "$verify_rc" -eq "$TRELLIS_EX_CONFLICT" ] || return "$verify_rc"
-    [ ! -e "$root/.trellis/runtime" ] && [ ! -L "$root/.trellis/runtime" ] || {
-      attach_err "owned attachment artifacts are modified"
-      return "$TRELLIS_EX_CONFLICT"
-    }
-    record="$(jq -c . "$owner")" || return "$TRELLIS_EX_STATE"
-    _attachment_render_pairings_valid "$record" || {
-      attach_err "owned attachment artifacts are modified"
-      return "$TRELLIS_EX_CONFLICT"
-    }
-    while IFS= read -r artifact; do
-      [ -n "$artifact" ] || continue
-      _attachment_parent_safe "$root" "$(printf '%s\n' "$artifact" | jq -r '.path')" || {
-        attach_err "owned attachment artifacts are modified"
-        return "$TRELLIS_EX_CONFLICT"
-      }
-      _attachment_artifact_exact "$root" "$artifact" || {
-        attach_err "owned attachment artifacts are modified"
-        return "$TRELLIS_EX_CONFLICT"
-      }
-    done < <(printf '%s\n' "$record" | jq -c '
-      . as $owner
-      | (($owner.renders // []) | map(.path)) as $render_paths
-      | $owner.artifacts[] as $artifact
-      | select($artifact.path != ".trellis/runtime")
-      | select(($render_paths | index($artifact.path)) == null)
-      | $artifact
-    ')
-    while IFS= read -r render; do
-      _attachment_render_owned_keys_exact "$root" "$render" || {
-        attach_err "owned attachment artifacts are modified"
-        return "$TRELLIS_EX_CONFLICT"
-      }
-    done < <(printf '%s\n' "$record" | jq -c '(.renders // [])[]')
-  fi
+  attach_verify_owner_artifacts_except_absent_anchor "$home" "$owner" "$root" || {
+    verify_rc=$?
+    [ "$verify_rc" -ne "$TRELLIS_EX_CONFLICT" ] || attach_err "owned attachment artifacts are modified"
+    return "$verify_rc"
+  }
   [ -z "$fleet_opt" ] || [ "$fleet_opt" = "$(jq -r '.fleet' "$owner")" ] || { attach_err 'requested fleet differs from recorded attachment'; return "$TRELLIS_EX_STATE"; }
   exclude="$(jq -c '.exclude' "$owner")" || return "$TRELLIS_EX_STATE"
   attach_exclude_verify_state "$exclude" || return "$?"
@@ -5335,8 +5673,10 @@ attach_user_relink_simulated_base() {
     bases="$(trellis_jq -cn --argjson bases "$bases" \
       --arg destination "$(printf '%s\n' "$render" | jq -r '.destination')" \
       --argjson owned_keys "$(printf '%s\n' "$render" | jq -c '.owned_keys')" \
+      --arg original_before_base64 "$(printf '%s\n' "$render" | jq -r '.before_base64')" \
+      --argjson original_before_exists "$(printf '%s\n' "$render" | jq -r '.before_exists')" \
       --argjson result "$result" \
-      '$bases + [({destination:$destination,owned_keys:$owned_keys} + $result)]')" ||
+      '$bases + [({destination:$destination,owned_keys:$owned_keys,original_before_base64:$original_before_base64,original_before_exists:$original_before_exists} + $result)]')" ||
       return "$TRELLIS_EX_STATE"
   done < <(printf '%s\n' "$owner" | jq -c '.renders[]')
   printf '%s\n' "$bases"
@@ -5661,10 +6001,17 @@ attach_cmd_user_attach() (
   user_home="$(_attachment_user_runtime_home)" || return "$?"
   attachment="$(attach_uuid)" || return "$?"
   plan_file="$(mktemp "${TMPDIR:-/tmp}/trellis.user.plan.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  trap '_attachment_signal_exit' HUP
-  trap '_attachment_signal_exit' INT
-  trap '_attachment_signal_exit' TERM
-  trap 'attach_user_repair_remedy "$home" "$?" || true; rm -f "${plan_file:-}"; _attachment_user_lock_release >/dev/null 2>&1 || true' EXIT
+  # Trap state lives in this subshell, under names no interrupted helper uses.
+  __aua_home="$home" __aua_plan_file="$plan_file"
+  attach_user_attach_cleanup() {
+    local status="$1"
+    trap '' HUP INT TERM; trap - EXIT
+    attach_user_repair_remedy "$__aua_home" "$status" || true
+    rm -f "${__aua_plan_file:?}"
+    _attachment_user_lock_release >/dev/null 2>&1 || true
+  }
+  trap 'attach_user_attach_cleanup "$?"' EXIT
+  trap 'attach_user_attach_cleanup "${TRELLIS_EX_UNAVAILABLE:-5}"; _attachment_signal_exit' HUP INT TERM
   attachment_user_lock_reclaim "$home" || return "$?"
   attachment_user_lock_acquire "$home" "$attachment" || return "$?"
   attach_user_recover_pending "$home" || return "$?"
@@ -5712,10 +6059,15 @@ attach_cmd_user_detach() (
   home="$(trellis_home_canonical_home "$home")" || return "$?"
   user_home="$(_attachment_user_runtime_home)" || return "$?"
   attachment="$(attach_uuid)" || return "$?"
-  trap 'attach_user_repair_remedy "$home" "$?" || true; _attachment_user_lock_release >/dev/null 2>&1 || true' EXIT
-  trap '_attachment_signal_exit' HUP
-  trap '_attachment_signal_exit' INT
-  trap '_attachment_signal_exit' TERM
+  __aud_home="$home"
+  attach_user_detach_cleanup() {
+    local status="$1"
+    trap '' HUP INT TERM; trap - EXIT
+    attach_user_repair_remedy "$__aud_home" "$status" || true
+    _attachment_user_lock_release >/dev/null 2>&1 || true
+  }
+  trap 'attach_user_detach_cleanup "$?"' EXIT
+  trap 'attach_user_detach_cleanup "${TRELLIS_EX_UNAVAILABLE:-5}"; _attachment_signal_exit' HUP INT TERM
   attachment_user_lock_reclaim "$home" || return "$?"
   attachment_user_lock_acquire "$home" "$attachment" || return "$?"
   attach_user_recover_pending "$home" || return "$?"
@@ -5742,9 +6094,10 @@ attach_cmd_user_detach() (
 )
 
 attach_cmd_user_relink() (
-  local home config release release_dir payload user_home attachment surfaces owner original old_release old_dir plan_file=""
+  local home config release release_dir payload user_home attachment surfaces owner original old_release old_dir
   local bases owned_parents plan attach_journal records remove external detach_journal rc restore_rc detach_rc
-  local expected_target current_owner configure_lock_validated=0
+  local expected_target current_owner
+  __aur_plan_file='' __aur_lock_validated=0
   attach_user_parse_common relink "$@"
   rc=$?
   [ "$rc" -eq 0 ] || { [ "$rc" -eq 10 ] && return 0; return "$rc"; }
@@ -5752,13 +6105,19 @@ attach_cmd_user_relink() (
   home="$(trellis_home_canonical_home "$home")" || return "$?"
   user_home="$(_attachment_user_runtime_home)" || return "$?"
   attachment="$(attach_uuid)" || return "$?"
-  trap 'attach_user_repair_remedy "$home" "$?" "$configure_lock_validated" || true; [ -z "${plan_file:-}" ] || rm -f "$plan_file"; _attachment_user_lock_release >/dev/null 2>&1 || true' EXIT
-  trap '_attachment_signal_exit' HUP
-  trap '_attachment_signal_exit' INT
-  trap '_attachment_signal_exit' TERM
+  __aur_home="$home"
+  attach_user_relink_cleanup() {
+    local status="$1"
+    trap '' HUP INT TERM; trap - EXIT
+    attach_user_repair_remedy "$__aur_home" "$status" "$__aur_lock_validated" || true
+    [ -z "$__aur_plan_file" ] || rm -f "${__aur_plan_file:?}"
+    _attachment_user_lock_release >/dev/null 2>&1 || true
+  }
+  trap 'attach_user_relink_cleanup "$?"' EXIT
+  trap 'attach_user_relink_cleanup "${TRELLIS_EX_UNAVAILABLE:-5}"; _attachment_signal_exit' HUP INT TERM
   if [ "$ATTACH_USER_CONFIGURE_LOCK_HELD" -eq 1 ]; then
     attach_user_configure_lock_valid "$home" || return "$?"
-    configure_lock_validated=1
+    __aur_lock_validated=1
   else
     attachment_user_lock_reclaim "$home" || return "$?"
     attachment_user_lock_acquire "$home" "$attachment" || return "$?"
@@ -5772,7 +6131,7 @@ attach_cmd_user_relink() (
   attach_locate_release "$home" "$release" || return "$?"
   release_dir="$_ATTACH_LOCATED_RELEASE"
   payload="$release_dir/payload"
-  plan_file="$(mktemp "${TMPDIR:-/tmp}/trellis.user-relink.plan.XXXXXX")" ||
+  __aur_plan_file="$(mktemp "${TMPDIR:-/tmp}/trellis.user-relink.plan.XXXXXX")" ||
     return "$TRELLIS_EX_UNAVAILABLE"
   owner="$(_attachment_user_owner_path "$home")"
   attach_user_internal _attachment_user_owner_json_valid "$owner"
@@ -5790,8 +6149,8 @@ attach_cmd_user_relink() (
   old_dir="$_ATTACH_LOCATED_RELEASE"
   original="$(jq -cS . "$owner")" || return "$TRELLIS_EX_STATE"
   attach_user_internal _attachment_user_validate_sources "$original" "$old_dir/payload" || return "$?"
-  attach_user_repair_missing_symlinks "$home" "$owner" "$original" "$plan_file" || return "$?"
-  if [ "$old_release" = "$release" ]; then
+  attach_user_repair_missing_symlinks "$home" "$owner" "$original" "$__aur_plan_file" || return "$?"
+  if [ "$old_release" = "$release" ] && [ ! -f "$payload/core-rules/native/artifacts.json" ]; then
     attachment_user_verify "$home" "$owner" || return "$?"
     printf 'relinked user surface: %s\n' "$user_home"
     return 0
@@ -5803,12 +6162,21 @@ attach_cmd_user_relink() (
   [ "$(printf '%s\n' "$surfaces" | jq -c '.harnesses')" = '["user"]' ] || return "$TRELLIS_EX_STATE"
   plan="$(attach_user_plan_from_surfaces "$user_home" "$release" "$attachment" "$payload" \
     "$surfaces" "$bases" "$owned_parents" false true)" || return "$?"
+  if [ "$old_release" = "$release" ] &&
+    trellis_jq -en --argjson plan "$plan" --argjson original "$original" '
+      ([$plan.renders[] | {destination,owned_keys,after_mode}] | sort_by(.destination)) ==
+      ([$original.renders[] | {destination,owned_keys,after_mode}] | sort_by(.destination))
+    ' >/dev/null; then
+    attachment_user_verify "$home" "$owner" || return "$?"
+    printf 'relinked user surface: %s\n' "$user_home"
+    return 0
+  fi
   plan="$(attach_user_carry_restore "$plan" "$original")" || return "$?"
-  printf '%s\n' "$plan" > "$plan_file" || return "$TRELLIS_EX_UNAVAILABLE"
+  printf '%s\n' "$plan" > "$__aur_plan_file" || return "$TRELLIS_EX_UNAVAILABLE"
   attach_user_internal _attachment_user_validate_sources "$plan" "$payload" || return "$?"
   attach_user_destination_preflight "$plan" "$original" || return "$?"
   attach_journal="$(_attachment_user_journal_path "$home")"
-  attach_user_internal _attachment_user_prepare_relink_impl "$home" "$plan_file" "$original" "$attach_journal" || return "$?"
+  attach_user_internal _attachment_user_prepare_relink_impl "$home" "$__aur_plan_file" "$original" "$attach_journal" || return "$?"
   records="$(attach_user_detach_records "$original")" || return "$TRELLIS_EX_STATE"
   remove="$(printf '%s\n' "$records" | jq -c '.remove')" || return "$TRELLIS_EX_STATE"
   external="$(printf '%s\n' "$records" | jq -c '.external')" || return "$TRELLIS_EX_STATE"
@@ -5871,6 +6239,9 @@ attach_command_has_user_selector() {
 
 main() {
   local command="${1:-}"
+  # A donor proof is a variable of the seed process that verified the donor;
+  # a directly executed attach never inherits one from its environment.
+  unset _ATTACHMENT_DONOR_PROOF
   case "$command" in
     attach)
       shift

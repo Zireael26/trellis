@@ -655,3 +655,55 @@ EOF
   [[ "$output" == *"trellis_root=$SANDBOX/not-the-source"* ]] || { echo "$output"; false; }
   [[ "$output" == *"source=$POLICY_ROOT"* ]] || { echo "$output"; false; }
 }
+
+@test "offline npx probe never resolves an ajv from the caller cwd" {
+  local poison="$SANDBOX/poison-cwd" probe_cwd="$SANDBOX/npx-cwd.log"
+  mkdir -p "$poison/node_modules/.bin"
+  printf '#!/bin/sh\nexit 0\n' > "$poison/node_modules/.bin/ajv"
+  chmod 755 "$poison/node_modules/.bin/ajv"
+  : > "$probe_cwd"
+
+  run env \
+    HOME="$HOME_DIR" \
+    TRELLIS_HOME="$TRELLIS_HOME_DIR" \
+    TRELLIS_CONFIG="$POLICY" \
+    PROBE_CWD="$probe_cwd" \
+    bash -c '
+      ajv() { return 127; }
+      npx() { printf "%s\n" "$PWD" >> "$PROBE_CWD"; return 127; }
+      cd "$1" || exit 1
+      . "$2"
+    ' _ "$poison" "$LOADER"
+
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -s "$probe_cwd" ] || { echo "npx probe did not run"; false; }
+  ! grep -qxF "$poison" "$probe_cwd" || { echo "npx resolved from the caller cwd"; false; }
+  grep -qxF / "$probe_cwd" || { cat "$probe_cwd"; false; }
+}
+
+@test "offline npx validates a relative TRELLIS_CONFIG from the caller cwd" {
+  run env     HOME="$HOME_DIR" \
+    TRELLIS_HOME="$TRELLIS_HOME_DIR" \
+    TRELLIS_CONFIG=trellis.config.json \
+    bash -c '
+      ajv() { return 127; }
+      npx() {
+        case " $* " in
+          *" validate "*)
+            policy=""
+            while [ "$#" -gt 0 ]; do
+              case "$1" in -d) policy="$2"; shift ;; esac
+              shift
+            done
+            [ -f "$policy" ] || return 1
+            return 0
+            ;;
+          *" compile "*) return 0 ;;
+        esac
+        return 1
+      }
+      cd "$1" || exit 1
+      . "$2"
+    ' _ "$POLICY_ROOT" "$LOADER"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}

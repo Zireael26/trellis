@@ -1,0 +1,976 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trellis://qualification/receipt/1",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "trellis-qualification-receipt/1"
+        },
+        "candidate_sha": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "t71_source_commit": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "manifest_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "claims": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "oracles": {
+              "type": "object",
+              "additionalProperties": {
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "BLOCKED",
+                  "UNSUPPORTED"
+                ]
+              }
+            },
+            "verdict": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "BLOCKED",
+                "UNSUPPORTED"
+              ]
+            },
+            "cases": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "n_a_reason": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "n_a_reason"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "n": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "p50": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "p90": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_p50": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_p90": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_runs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1,
+                        "uniqueItems": true
+                      },
+                      "verdict": {
+                        "enum": [
+                          "PASS",
+                          "FAIL",
+                          "BLOCKED",
+                          "UNSUPPORTED"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "n",
+                      "p50",
+                      "p90",
+                      "before_p50",
+                      "before_p90",
+                      "before_runs",
+                      "verdict"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "minItems": 0
+            }
+          },
+          "required": [
+            "commands",
+            "oracles",
+            "verdict",
+            "cases"
+          ],
+          "additionalProperties": false
+        },
+        "cell": {
+          "const": "artifacts"
+        },
+        "task": {
+          "enum": [
+            "T71",
+            "T72"
+          ]
+        },
+        "build_hosts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "host_id": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              },
+              "platform": {
+                "type": "object",
+                "properties": {
+                  "os": {
+                    "enum": [
+                      "Darwin",
+                      "Linux"
+                    ]
+                  },
+                  "arch": {
+                    "enum": [
+                      "aarch64",
+                      "x86_64"
+                    ]
+                  },
+                  "os_version": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "filesystem": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "ctime_capability": {
+                    "enum": [
+                      "fine",
+                      "coarse",
+                      "unknown"
+                    ]
+                  },
+                  "ctime_probe": {
+                    "type": "object",
+                    "properties": {
+                      "capability": {
+                        "enum": [
+                          "fine",
+                          "coarse",
+                          "unknown"
+                        ]
+                      },
+                      "same_device": {
+                        "type": "boolean"
+                      },
+                      "samples_ns": {
+                        "type": "array",
+                        "items": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "minItems": 0
+                      }
+                    },
+                    "required": [
+                      "capability",
+                      "same_device",
+                      "samples_ns"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "emulated": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "os",
+                  "arch",
+                  "os_version",
+                  "filesystem",
+                  "ctime_capability",
+                  "ctime_probe",
+                  "emulated"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "host_id",
+              "platform"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "toolchain": {
+          "type": "object",
+          "properties": {
+            "channel": {
+              "type": "string",
+              "minLength": 1
+            },
+            "rustc": {
+              "type": "string",
+              "minLength": 1
+            },
+            "cargo": {
+              "type": "string",
+              "minLength": 1
+            },
+            "targets": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1,
+              "uniqueItems": true
+            },
+            "codesign": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cargo_lock_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "rust_toolchain_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "channel",
+            "rustc",
+            "cargo",
+            "targets",
+            "codesign",
+            "cargo_lock_sha256",
+            "rust_toolchain_sha256"
+          ],
+          "additionalProperties": false
+        },
+        "outputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "target": {
+                "enum": [
+                  "aarch64-apple-darwin",
+                  "x86_64-apple-darwin",
+                  "x86_64-unknown-linux-musl",
+                  "aarch64-unknown-linux-musl"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "size": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "target",
+              "path",
+              "size",
+              "sha256"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 1
+        },
+        "selection_change": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "old_manifest_commit": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "from_generation": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "to_generation": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "removed_target": {
+              "const": "aarch64-unknown-linux-musl"
+            }
+          },
+          "required": [
+            "commit",
+            "old_manifest_commit",
+            "from_generation",
+            "to_generation",
+            "removed_target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "candidate_sha",
+        "t71_source_commit",
+        "manifest_generation",
+        "runs",
+        "claims",
+        "cell",
+        "task",
+        "build_hosts",
+        "toolchain",
+        "outputs"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "trellis-qualification-receipt/1"
+        },
+        "candidate_sha": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "t71_source_commit": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "manifest_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "claims": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "oracles": {
+              "type": "object",
+              "additionalProperties": {
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "BLOCKED",
+                  "UNSUPPORTED"
+                ]
+              }
+            },
+            "verdict": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "BLOCKED",
+                "UNSUPPORTED"
+              ]
+            },
+            "cases": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "n_a_reason": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "n_a_reason"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "n": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "p50": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "p90": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_p50": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_p90": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_runs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1,
+                        "uniqueItems": true
+                      },
+                      "verdict": {
+                        "enum": [
+                          "PASS",
+                          "FAIL",
+                          "BLOCKED",
+                          "UNSUPPORTED"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "n",
+                      "p50",
+                      "p90",
+                      "before_p50",
+                      "before_p90",
+                      "before_runs",
+                      "verdict"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "minItems": 0
+            }
+          },
+          "required": [
+            "commands",
+            "oracles",
+            "verdict",
+            "cases"
+          ],
+          "additionalProperties": false
+        },
+        "platform": {
+          "type": "object",
+          "properties": {
+            "os": {
+              "enum": [
+                "Darwin",
+                "Linux"
+              ]
+            },
+            "arch": {
+              "enum": [
+                "aarch64",
+                "x86_64"
+              ]
+            },
+            "os_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "filesystem": {
+              "type": "string",
+              "minLength": 1
+            },
+            "ctime_capability": {
+              "enum": [
+                "fine",
+                "coarse",
+                "unknown"
+              ]
+            },
+            "ctime_probe": {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "enum": [
+                    "fine",
+                    "coarse",
+                    "unknown"
+                  ]
+                },
+                "same_device": {
+                  "type": "boolean"
+                },
+                "samples_ns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "capability",
+                "same_device",
+                "samples_ns"
+              ],
+              "additionalProperties": false
+            },
+            "emulated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "os",
+            "arch",
+            "os_version",
+            "filesystem",
+            "ctime_capability",
+            "ctime_probe",
+            "emulated"
+          ],
+          "additionalProperties": false
+        },
+        "route": {
+          "enum": [
+            "native",
+            "legacy"
+          ]
+        },
+        "asset_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cell": {
+          "type": "string",
+          "pattern": "^(?!artifacts$).+"
+        },
+        "task": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selection_change": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "old_manifest_commit": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "from_generation": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "to_generation": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "removed_target": {
+              "const": "aarch64-unknown-linux-musl"
+            }
+          },
+          "required": [
+            "commit",
+            "old_manifest_commit",
+            "from_generation",
+            "to_generation",
+            "removed_target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "candidate_sha",
+        "t71_source_commit",
+        "manifest_generation",
+        "runs",
+        "claims",
+        "platform",
+        "route",
+        "asset_sha256",
+        "cell",
+        "task"
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema": {
+          "const": "trellis-qualification-receipt/1"
+        },
+        "candidate_sha": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "t71_source_commit": {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        "manifest_generation": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "claims": {
+          "type": "object",
+          "properties": {
+            "commands": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "integer"
+              }
+            },
+            "oracles": {
+              "type": "object",
+              "additionalProperties": {
+                "enum": [
+                  "PASS",
+                  "FAIL",
+                  "BLOCKED",
+                  "UNSUPPORTED"
+                ]
+              }
+            },
+            "verdict": {
+              "enum": [
+                "PASS",
+                "FAIL",
+                "BLOCKED",
+                "UNSUPPORTED"
+              ]
+            },
+            "cases": {
+              "type": "array",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "n_a_reason": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "n_a_reason"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "n": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "p50": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "p90": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_p50": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_p90": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "before_runs": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "minItems": 1,
+                        "uniqueItems": true
+                      },
+                      "verdict": {
+                        "enum": [
+                          "PASS",
+                          "FAIL",
+                          "BLOCKED",
+                          "UNSUPPORTED"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "key",
+                      "n",
+                      "p50",
+                      "p90",
+                      "before_p50",
+                      "before_p90",
+                      "before_runs",
+                      "verdict"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "minItems": 0
+            }
+          },
+          "required": [
+            "commands",
+            "oracles",
+            "verdict",
+            "cases"
+          ],
+          "additionalProperties": false
+        },
+        "platform": {
+          "type": "object",
+          "properties": {
+            "os": {
+              "enum": [
+                "Darwin",
+                "Linux"
+              ]
+            },
+            "arch": {
+              "enum": [
+                "aarch64",
+                "x86_64"
+              ]
+            },
+            "os_version": {
+              "type": "string",
+              "minLength": 1
+            },
+            "filesystem": {
+              "type": "string",
+              "minLength": 1
+            },
+            "ctime_capability": {
+              "enum": [
+                "fine",
+                "coarse",
+                "unknown"
+              ]
+            },
+            "ctime_probe": {
+              "type": "object",
+              "properties": {
+                "capability": {
+                  "enum": [
+                    "fine",
+                    "coarse",
+                    "unknown"
+                  ]
+                },
+                "same_device": {
+                  "type": "boolean"
+                },
+                "samples_ns": {
+                  "type": "array",
+                  "items": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "minItems": 0
+                }
+              },
+              "required": [
+                "capability",
+                "same_device",
+                "samples_ns"
+              ],
+              "additionalProperties": false
+            },
+            "emulated": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "os",
+            "arch",
+            "os_version",
+            "filesystem",
+            "ctime_capability",
+            "ctime_probe",
+            "emulated"
+          ],
+          "additionalProperties": false
+        },
+        "route": {
+          "enum": [
+            "native",
+            "legacy"
+          ]
+        },
+        "asset_sha256": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bench": {
+          "type": "string",
+          "minLength": 1
+        },
+        "task": {
+          "type": "string",
+          "minLength": 1
+        },
+        "selection_change": {
+          "type": "object",
+          "properties": {
+            "commit": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "old_manifest_commit": {
+              "type": "string",
+              "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+            },
+            "from_generation": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "to_generation": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "removed_target": {
+              "const": "aarch64-unknown-linux-musl"
+            }
+          },
+          "required": [
+            "commit",
+            "old_manifest_commit",
+            "from_generation",
+            "to_generation",
+            "removed_target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "schema",
+        "candidate_sha",
+        "t71_source_commit",
+        "manifest_generation",
+        "runs",
+        "claims",
+        "platform",
+        "route",
+        "asset_sha256",
+        "bench",
+        "task"
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

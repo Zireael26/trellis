@@ -352,3 +352,26 @@ checkout_validator_case() {
   [[ "$output" == *"outside.sh is outside the trusted validator tree"* ]] || { echo "$output"; false; }
   [[ "$output" != *"OUTSIDE-SOURCED"* ]] || { echo "$output"; false; }
 }
+
+# Bash 3.2 reads BASH_ENV with $0 set to the shell, and a shell named by its
+# absolute path (or reading -c/stdin code) has no script in $0 at all; the
+# guard must still police it, on every bash.
+@test "project code a validator runs through an absolute bash path or -c may not source an outside file" {
+  local outside="$BATS_TEST_TMPDIR/outside.sh" form
+  printf 'echo OUTSIDE-SOURCED\n' > "$outside"
+  put scripts/run.sh ". '$outside'"$'\necho RAN-ON\n'
+  for form in script inline; do
+    stack_config validators/check.sh
+    if [ "$form" = script ]; then
+      put .claude/skills/process-gate-local/validators/check.sh $'"$BASH" "$PROCESS_GATE_PROJECT_DIR/scripts/run.sh"\n'
+    else
+      put .claude/skills/process-gate-local/validators/check.sh "\"\$BASH\" -c \". '$outside'\""$'\n'
+    fi
+    commit_all "validator running project code through an absolute bash ($form)" || return 1
+
+    run_gate push
+    [ "$status" -eq 1 ] || { echo "$form: $output"; false; }
+    [[ "$output" == *"outside.sh is outside the trusted validator tree"* ]] || { echo "$form: $output"; false; }
+    [[ "$output" != *"OUTSIDE-SOURCED"* ]] || { echo "$form: $output"; false; }
+  done
+}

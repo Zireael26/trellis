@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# Bright-line PreToolUse guards are stall-safe and fail closed.
+# Bright-line guards are stall-safe and fail closed: the PreToolUse guards and
+# Claude's UserPromptExpansion skill-slash-guard (claude-expansion mode).
 #
 # Claude Code cancels a PreToolUse command hook that reaches its registered
 # timeout and lets the tool call continue; it also treats an exit other than 2
@@ -20,8 +21,11 @@ load helpers
 REPO="$(cd "$HOOKS_DIR/../.." && pwd)"
 CLIENT_TIMEOUT=30
 SUP=core-rules/hooks/lib/guard-supervise.pl
-CLAUDE_TEMPLATE=core-rules/templates/claude-settings.local.json
-CODEX_TEMPLATE=core-rules/templates/codex-hooks.local.json
+# T34: the project templates register the native entry (tested at the end of
+# this file); guard-supervise.pl still serves the pinned legacy surface that
+# hosts without a native asset render, so its properties are tested there.
+CLAUDE_TEMPLATE=core-rules/legacy-hooks/claude-settings.local.json
+CODEX_TEMPLATE=core-rules/legacy-hooks/codex-hooks.local.json
 TIMED_OUT='guard timed out after 3s; refusing'
 SANITIZE='env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl "$@"'
 
@@ -101,7 +105,7 @@ finish_run() {
 run_registered() {
   local hook part
   local -a argv=()
-  hook="$(jq -c --arg g "/$2.sh" '[.hooks.PreToolUse[].hooks[]
+  hook="$(jq -c --arg g "/$2.sh" '[.hooks[][].hooks[]
     | select([.command] + (.args // []) | join(" ") | contains($g))][0]' "$REPO/$1")"
   if printf '%s' "$hook" | jq -e 'has("args")' >/dev/null; then
     # Exec form: the client spawns the program directly and substitutes
@@ -122,12 +126,14 @@ run_registered() {
   finish_run
 }
 
-# entry_script <claude|codex>: the shipped sh entry, taken from the template:
-# the argument after `-c` in exec form, the single-quoted script in shell form.
+# entry_script <claude|claude-expansion|codex>: the shipped sh entry, taken
+# from the template: the argument after `-c` in exec form, the single-quoted
+# script in shell form.
 entry_script() {
-  local template="$CLAUDE_TEMPLATE"
+  local template="$CLAUDE_TEMPLATE" event=PreToolUse
   [ "$1" = codex ] && template="$CODEX_TEMPLATE"
-  jq -r '.hooks.PreToolUse[0].hooks[0]
+  [ "$1" = claude-expansion ] && event=UserPromptExpansion
+  jq -r --arg e "$event" '.hooks[$e][0].hooks[0]
     | if has("args") then .args[(.args | index("-c")) + 1] else .command end' "$REPO/$template" |
     if [ "$1" = codex ]; then
       sed -n "s/^.*\/bin\/sh -c '\(.*\)' guard-supervise .*$/\1/p"
@@ -184,6 +190,22 @@ edit_event() {
     '{hook_event_name:"PreToolUse",tool_name:"Edit",session_id:"s1",tool_input:{file_path:$f}}'
 }
 
+SKILL_EVENT='{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"commit"}}'
+SLASH_EVENT='{"hook_event_name":"UserPromptExpansion","expansion_type":"slash_command","command_name":"commit","prompt":"/commit"}'
+RM_EVENT='{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"rm -rf /"}}'
+
+# no_jq_path: a PATH holding perl and the tools the guards use, but no jq.
+no_jq_path() {
+  local dir="$BATS_TEST_TMPDIR/no-jq-bin" cmd src
+  mkdir -p "$dir"
+  for cmd in bash sh env perl cat dirname basename git awk sed grep tr cut head mkdir mktemp rm mv chmod \
+    shasum sha256sum od date stat readlink wc sort uniq; do
+    src="$(command -v "$cmd" 2>/dev/null)" || continue
+    case "$src" in /*) ln -sf "$src" "$dir/$cmd" ;; esac
+  done
+  printf '%s' "$dir"
+}
+
 # --- the deadline covers bootstrap, through the rendered registration ---------
 
 @test "claude block-destructive: a slow sourced dependency is denied at the deadline" {
@@ -220,6 +242,42 @@ edit_event() {
   run_registered "$CODEX_TEMPLATE" reread-guard "$(edit_event)"
   assert_codex_block "$TIMED_OUT"
   assert_quick
+}
+
+# Claude lets a UserPromptExpansion hook that times out expand the command; the
+# supervisor's deadline refuses first.
+@test "claude skill-slash-guard: a slow sourced dependency is blocked at the deadline" {
+  slow_lib core-rules/hooks/lib/skill-size.sh
+  run_registered "$CLAUDE_TEMPLATE" skill-slash-guard "$SLASH_EVENT"
+  assert_codex_block "$TIMED_OUT"
+  assert_quick
+}
+
+# --- jq is required; TRELLIS_NO_JQ_DEGRADE never makes a guard a no-op -------
+
+@test "no jq on PATH: every registered guard denies, TRELLIS_NO_JQ_DEGRADE=1 or not" {
+  extend_test_deadline
+  local path degrade guard event
+  path="$(no_jq_path)"
+  for degrade in 0 1; do
+    for guard in block-destructive reread-guard skill-preload-guard; do
+      case "$guard" in
+        block-destructive) event="$RM_EVENT" ;;
+        reread-guard) event="$(edit_event)" ;;
+        *) event="$SKILL_EVENT" ;;
+      esac
+      EXTRA_ENV="PATH=$path TRELLIS_NO_JQ_DEGRADE=$degrade" run_registered "$CLAUDE_TEMPLATE" "$guard" "$event"
+      assert_claude_deny "$guard: jq required but not found; refusing" || { echo "claude $guard degrade=$degrade"; return 1; }
+    done
+    for guard in block-destructive reread-guard; do
+      event="$RM_EVENT"
+      [ "$guard" = reread-guard ] && event="$(edit_event)"
+      EXTRA_ENV="PATH=$path TRELLIS_NO_JQ_DEGRADE=$degrade" run_registered "$CODEX_TEMPLATE" "$guard" "$event"
+      assert_codex_block "$guard: jq required but not found; refusing" || { echo "codex $guard degrade=$degrade"; return 1; }
+    done
+    EXTRA_ENV="PATH=$path TRELLIS_NO_JQ_DEGRADE=$degrade" run_registered "$CLAUDE_TEMPLATE" skill-slash-guard "$SLASH_EVENT"
+    assert_codex_block 'skill-slash-guard: jq required but not found; refusing' || { echo "slash degrade=$degrade"; return 1; }
+  done
 }
 
 @test "PERL5LIB/PERL5OPT in the client environment cannot stop the clock" {
@@ -262,6 +320,8 @@ edit_event() {
     EXTRA_ENV="PATH=$BATS_TEST_TMPDIR/empty-bin" run_registered "$CODEX_TEMPLATE" "$guard" "$BASH_EVENT"
     assert_codex_block 'guard supervisor failed \(status 127\); refusing$' || { echo "$guard"; return 1; }
   done
+  EXTRA_ENV="PATH=$BATS_TEST_TMPDIR/empty-bin" run_registered "$CLAUDE_TEMPLATE" skill-slash-guard "$SLASH_EVENT"
+  assert_codex_block 'guard supervisor failed \(status 127\); refusing$'
 }
 
 @test "a missing supervisor file denies instead of erroring" {
@@ -485,10 +545,76 @@ kill -SEGV \$\$"
   done
 }
 
+# run_supervisor_masked <harness> <stub>: run the test-copy supervisor directly
+# with SIGCHLD blocked from the start, so no wakeup for the guard's exit ever
+# arrives (the worst case of a SIGCHLD landing just before select()). Sets
+# status and wall (seconds, fractional).
+run_supervisor_masked() {
+  local line
+  printf '{}' > "$BATS_TEST_TMPDIR/event.json"
+  line="$(perl -MPOSIX -MTime::HiRes=time -e '
+    POSIX::sigprocmask(POSIX::SIG_BLOCK(), POSIX::SigSet->new(POSIX::SIGCHLD())) or die "mask\n";
+    my ($in, @cmd) = @ARGV;
+    my $t0 = time;
+    my $pid = fork() // die "fork\n";
+    if (!$pid) { open(STDIN, "<", $in) or POSIX::_exit(126); open(STDOUT, ">", "/dev/null"); exec @cmd; POSIX::_exit(127) }
+    waitpid($pid, 0);
+    printf "%d %.3f\n", $? >> 8, time - $t0;
+  ' "$BATS_TEST_TMPDIR/event.json" perl "$RT/$SUP" "$1" test-guard "$STUBS/$2")"
+  status="${line%% *}"
+  wall="${line#* }"
+}
+
+# A lost SIGCHLD wakeup must cost at most one short poll: the supervisor reaps
+# on every pass and never sleeps in select() for longer than that. Before the
+# poll cap, this waited out the whole deadline (3 s in the test copy).
+@test "a guard exit that wakes nothing is reaped within a poll, not at the deadline" {
+  local harness
+  stub late.sh 'exec >&- 2>&-; sleep 0.3; exit 0'
+  for harness in claude codex; do
+    run_supervisor_masked "$harness" late.sh
+    [ "$status" -eq 10 ] || { echo "$harness: status=$status wall=$wall"; return 1; }
+    perl -e 'exit !($ARGV[0] < 1.5)' "$wall" || { echo "$harness: wall=${wall}s"; return 1; }
+  done
+}
+
+@test "fifty immediate guard exits each finish far below the deadline" {
+  local i max=0
+  stub quick.sh 'exit 0'
+  for i in $(seq 1 50); do
+    run_supervisor_masked codex quick.sh
+    [ "$status" -eq 10 ] || { echo "run $i: status=$status wall=$wall"; return 1; }
+    max="$(perl -e 'print $ARGV[0] > $ARGV[1] ? $ARGV[0] : $ARGV[1]' "$wall" "$max")"
+  done
+  perl -e 'exit !($ARGV[0] < 1.5)' "$max" || { echo "max wall ${max}s"; return 1; }
+}
+
 @test "a Claude guard's own exit 2 becomes an explicit deny document" {
   stub refuse.sh 'echo "test-guard: jq required but not found; refusing" >&2; exit 2'
   supervise claude refuse.sh
   assert_claude_deny 'guard refused \(test-guard: jq required but not found; refusing\) with exit 2; refusing$'
+}
+
+# UserPromptExpansion: the guard's own block keeps its exit-0 envelope; every
+# other result, a PreToolUse document included, is a block with exit 2.
+@test "claude-expansion passes one block document through and refuses everything else" {
+  extend_test_deadline
+  local target
+  stub block.sh "printf '%s\\n' '{\"decision\":\"block\",\"reason\":\"too big\"}'"
+  stub allow.sh 'exit 0'
+  stub refuse.sh 'echo "test-guard: jq required but not found; refusing" >&2; exit 2'
+  stub one.sh 'exit 1'
+  stub claude-shape.sh "printf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"allow\"}}'"
+  supervise claude-expansion block.sh
+  [ "$status" -eq 0 ] && [ "$output" = '{"decision":"block","reason":"too big"}' ] || { echo "$status $output"; false; }
+  supervise claude-expansion allow.sh
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$status $output"; false; }
+  supervise claude-expansion refuse.sh
+  assert_codex_block 'guard refused \(test-guard: jq required but not found; refusing\) with exit 2; refusing$'
+  for target in one.sh claude-shape.sh "$STUBS/does-not-exist.sh"; do
+    supervise claude-expansion "$target"
+    assert_codex_block 'refusing$' || { echo "$target"; return 1; }
+  done
 }
 
 @test "oversized output is refused before any passthrough, pi included" {
@@ -556,14 +682,22 @@ kill -SEGV \$\$"
   assert_codex_block '^Blocked force push'
   run_registered "$CODEX_TEMPLATE" block-destructive "$BASH_EVENT"
   [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$status $output"; false; }
+  mkdir -p "$PROJECT_DIR/.claude/skills/commit"
+  head -c 65537 /dev/zero | tr '\0' a > "$PROJECT_DIR/.claude/skills/commit/SKILL.md"
+  run_registered "$CLAUDE_TEMPLATE" skill-slash-guard "$SLASH_EVENT"
+  [ "$status" -eq 0 ] || { echo "$status $output $stderr"; false; }
+  printf '%s' "$output" | jq -e '(keys == ["decision", "reason"]) and .decision == "block"
+    and (.reason | contains("Skill root exceeds 65536-byte inline budget"))' >/dev/null || { echo "$output"; false; }
+  run_registered "$CLAUDE_TEMPLATE" skill-slash-guard '{"hook_event_name":"UserPromptExpansion","expansion_type":"mcp_prompt"}'
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$status $output"; false; }
 }
 
 # --- registrations ------------------------------------------------------------
 
-@test "every template starts each bright-line guard through the sanitizing sh entry at 30s" {
+@test "every legacy-surface template starts each bright-line guard through the sanitizing sh entry at 30s" {
   local template harness guard tail got
   while IFS='|' read -r template harness guard tail; do
-    got="$(jq -r --arg g "/$guard.sh" '[.hooks.PreToolUse[].hooks[] | select(.command | contains($g))]
+    got="$(jq -r --arg g "/$guard.sh" '[.hooks[][].hooks[] | select(.command | contains($g))]
       | if length == 1 then "\(.[0].timeout)|\(.[0].command)" else "count \(length)" end' "$REPO/$template")"
     [ "${got%%|*}" = "$CLIENT_TIMEOUT" ] || { echo "$template $guard: ${got%%|*}"; return 1; }
     case "${got#*|}" in
@@ -571,11 +705,12 @@ kill -SEGV \$\$"
       *) echo "$template $guard: ${got#*|}"; return 1 ;;
     esac
   done <<'EOF'
-core-rules/templates/codex-hooks.local.json|codex|block-destructive|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" codex block-destructive "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/block-destructive.sh"
-core-rules/templates/codex-hooks.local.json|codex|reread-guard|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" codex reread-guard "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/reread-guard.sh"
+core-rules/legacy-hooks/codex-hooks.local.json|codex|block-destructive|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" codex block-destructive "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/block-destructive.sh"
+core-rules/legacy-hooks/codex-hooks.local.json|codex|reread-guard|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl" codex reread-guard "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.trellis/runtime/core-rules/codex/hooks/reread-guard.sh"
 core-rules/templates/claude-settings.json|claude|block-destructive|"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude block-destructive "$CLAUDE_PROJECT_DIR/.claude/hooks/block-destructive.sh"
 core-rules/templates/claude-settings.json|claude|reread-guard|"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude reread-guard "$CLAUDE_PROJECT_DIR/.claude/hooks/reread-guard.sh"
 core-rules/templates/claude-settings.json|claude|skill-preload-guard|"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude skill-preload-guard "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-preload-guard.sh"
+core-rules/templates/claude-settings.json|claude-expansion|skill-slash-guard|"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude-expansion skill-slash-guard "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-slash-guard.sh"
 core-rules/codex/hooks.json|codex|block-destructive|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/lib/guard-supervise.pl" codex block-destructive /bin/bash "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/block-destructive.sh"
 core-rules/codex/hooks.json|codex|reread-guard|"${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/lib/guard-supervise.pl" codex reread-guard /bin/bash "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}/.codex/hooks/reread-guard.sh"
 EOF
@@ -584,11 +719,13 @@ EOF
 # Claude 2.1.295+: the attach-rendered template starts each guard in exec form
 # (no user shell) through the same sanitizing sh entry, and adds onFailure
 # block so a guard that cannot start, times out or exits oddly still blocks.
-@test "the Claude local template starts each bright-line guard in exec form with onFailure block at 30s" {
-  local guard rt='${CLAUDE_PROJECT_DIR}/.trellis/runtime'
-  for guard in block-destructive reread-guard skill-preload-guard; do
-    jq -e --arg g "$guard" --arg rt "$rt" --arg sanitize "$SANITIZE" --argjson timeout "$CLIENT_TIMEOUT" '
-      [.hooks.PreToolUse[].hooks[] | select((.args // []) | index($rt + "/core-rules/hooks/" + $g + ".sh"))]
+@test "the legacy Claude local template starts each bright-line guard in exec form with onFailure block at 30s" {
+  local guard harness rt='${CLAUDE_PROJECT_DIR}/.trellis/runtime'
+  for guard in block-destructive reread-guard skill-preload-guard skill-slash-guard; do
+    harness=claude
+    [ "$guard" = skill-slash-guard ] && harness=claude-expansion
+    jq -e --arg g "$guard" --arg h "$harness" --arg rt "$rt" --arg sanitize "$SANITIZE" --argjson timeout "$CLIENT_TIMEOUT" '
+      [.hooks[][].hooks[] | select((.args // []) | index($rt + "/core-rules/hooks/" + $g + ".sh"))]
       | length == 1
       and (.[0] | .command == "/usr/bin/env"
         and .timeout == $timeout
@@ -598,7 +735,7 @@ EOF
         and .args[0] == "TRELLIS_ROOT=" + $rt
         and .args[1:3] == ["/bin/sh", "-c"]
         and (.args[3] | contains($sanitize))
-        and .args[4:] == ["guard-supervise", $rt + "/core-rules/hooks/lib/guard-supervise.pl", "claude", $g,
+        and .args[4:] == ["guard-supervise", $rt + "/core-rules/hooks/lib/guard-supervise.pl", $h, $g,
                           $rt + "/core-rules/hooks/" + $g + ".sh"])
     ' "$REPO/$CLAUDE_TEMPLATE" >/dev/null || { echo "$guard"; return 1; }
   done
@@ -630,7 +767,7 @@ EOF
   [ "$output" = 0 ] || { echo "the supervisor reads the environment"; false; }
 }
 
-@test "advisory pr-gate-shiftleft keeps its own 120s timeout on Codex" {
+@test "advisory pr-gate-shiftleft keeps its own 120s timeout on the legacy Codex surface" {
   jq -e '[.hooks.PreToolUse[].hooks[] | select(.command | contains("/pr-gate-shiftleft.sh")) | .timeout] == [120]' \
     "$REPO/$CODEX_TEMPLATE" >/dev/null
 }
@@ -679,4 +816,135 @@ EOF
     n=$((n + 1))
   done < <(jq -r '.permissions.deny[]' "$REPO/$CLAUDE_TEMPLATE")
   [ "$n" -gt 0 ]
+}
+
+# --- T34: the native registrations --------------------------------------------
+# The production project templates route every bright-line guard through the
+# native entry; the shipped companion is the supervisor there. Its in-process
+# deadline, signal and capture rules are covered by the Rust supervisor fault
+# tests; these check the shipped artifacts and registrations end to end.
+NATIVE_CLAUDE=core-rules/templates/claude-settings.local.json
+NATIVE_CODEX=core-rules/templates/codex-hooks.local.json
+
+native_companion() {
+  local target
+  case "$(uname -sm)" in
+    'Darwin arm64') target=aarch64-apple-darwin ;;
+    'Linux x86_64') target=x86_64-unknown-linux-musl ;;
+    *) skip "no shipped native asset for $(uname -sm) (legacy surface only, D3)" ;;
+  esac
+  NATIVE_BIN="$REPO/core-rules/native/$target/trellis-hooks"
+  [ -x "$NATIVE_BIN" ] || { echo "missing $NATIVE_BIN"; return 1; }
+  NATIVE_HOME="$BATS_TEST_TMPDIR/trellis-home"
+  mkdir -p "$NATIVE_HOME"
+  chmod 700 "$NATIVE_HOME"
+}
+
+# native_event <claude|codex> <event> <input> [companion]: the registration's
+# own shape: Claude exec form (event-client), Codex the sealed sh adapter.
+native_event() {
+  local bin="${4:-$NATIVE_BIN}"
+  start=$SECONDS
+  set +e
+  if [ "$1" = claude ]; then
+    output="$(printf '%s' "$3" | /usr/bin/env -i HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$NATIVE_HOME" \
+      PATH=/usr/bin:/bin:/usr/sbin:/sbin "$bin" event-client claude "$2" "$PROJECT_DIR" 2>"$BATS_TEST_TMPDIR/stderr")"
+  else
+    output="$(printf '%s' "$3" | HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$NATIVE_HOME" \
+      /bin/sh -c "$(cat "$REPO/core-rules/native/hook-adapter.sh")" trellis-hooks "$bin" codex "$2" "$PROJECT_DIR" \
+      2>"$BATS_TEST_TMPDIR/stderr")"
+  fi
+  finish_run
+}
+
+@test "T34 native templates register every bright-line guard once through the native entry at 30s" {
+  local template
+  jq -e '
+    [.hooks.PreToolUse[] | select(any(.hooks[]; .args == ["hook","event","claude","PreToolUse"]))] as $pre
+    | [.hooks.UserPromptExpansion[] | select(any(.hooks[]; .args == ["hook","event","claude","UserPromptExpansion"]))] as $exp
+    | ($pre | length) == 1 and ($exp | length) == 1
+    and (($pre[0].matcher | split("|")) as $m | all("Bash","Skill","Edit","MultiEdit","Write"; . as $t | $m | index($t)))
+    and all(($pre + $exp)[].hooks[]; .command == "__TRELLIS_LAUNCHER__" and .timeout == 30 and .onFailure == "block")' \
+    "$REPO/$NATIVE_CLAUDE" >/dev/null || { echo "claude native guard registrations"; return 1; }
+  jq -e '
+    [.hooks.PreToolUse[] | select(any(.hooks[]; .args == ["hook","event","codex","PreToolUse"]))] as $pre
+    | ($pre | length) == 1
+    and (($pre[0].matcher | split("|")) as $m | all("Bash","Edit","MultiEdit","Write"; . as $t | $m | index($t)))
+    and all($pre[].hooks[]; .command == "__TRELLIS_LAUNCHER__" and .timeout == 30 and (has("onFailure") | not))' \
+    "$REPO/$NATIVE_CODEX" >/dev/null || { echo "codex native guard registrations"; return 1; }
+  for template in "$NATIVE_CLAUDE" "$NATIVE_CODEX"; do
+    ! grep -Eq 'guard-supervise|block-destructive\.sh|reread-guard\.sh|skill-preload-guard\.sh|skill-slash-guard\.sh' \
+      "$REPO/$template" || { echo "$template still registers a legacy guard beside the native entry"; return 1; }
+  done
+}
+
+@test "T34 every legacy bright-line guard is a member of the native event that replaces it" {
+  native_companion
+  local row harness event tool guard
+  for row in claude:PreToolUse:Bash:block-destructive claude:PreToolUse:Edit:reread-guard \
+    claude:PreToolUse:MultiEdit:reread-guard claude:PreToolUse:Write:reread-guard \
+    claude:PreToolUse:Skill:skill-preload-guard claude:UserPromptExpansion::skill-slash-guard \
+    codex:PreToolUse:Bash:block-destructive codex:PreToolUse:Edit:reread-guard codex:PreToolUse:apply_patch:reread-guard; do
+    IFS=: read -r harness event tool guard <<<"$row"
+    run "$NATIVE_BIN" event-members "$harness" "$event" ${tool:+"$tool"}
+    [ "$status" -eq 0 ] || { echo "$row: $output"; return 1; }
+    printf '%s' "$output" | jq -e --arg g "$guard" 'any(.members[]; .name == $g)' >/dev/null || { echo "$row: $output"; return 1; }
+  done
+}
+
+@test "T34 the shipped companion denies every guard event it cannot prove, for both harnesses" {
+  native_companion
+  local input
+  for input in "$BASH_EVENT" "$RM_EVENT" "$SKILL_EVENT" "$(edit_event)" \
+    '{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"/tmp/x","content":"y"}}' \
+    '{"hook_event_name":"PreToolUse","tool_name":"MultiEdit","tool_input":{"file_path":"/tmp/x","edits":[]}}'; do
+    native_event claude PreToolUse "$input"
+    assert_claude_deny '.' || { echo "claude: $input"; return 1; }
+    assert_quick
+  done
+  native_event claude UserPromptExpansion "$SLASH_EVENT"
+  [ "$status" -eq 0 ] && printf '%s' "$output" | jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null ||
+    { echo "expansion: status=$status $output"; return 1; }
+  for input in "$BASH_EVENT" "$RM_EVENT" "$(edit_event)"; do
+    native_event codex PreToolUse "$input"
+    assert_codex_block '.' || { echo "codex: $input"; return 1; }
+    assert_quick
+  done
+}
+
+@test "T34 garbage, an oversized event and a missing companion are refused, never allowed" {
+  native_companion
+  native_event claude PreToolUse 'not json'
+  assert_claude_deny '.'
+  native_event codex PreToolUse 'not json'
+  assert_codex_block '.'
+  native_event claude PreToolUse "$(head -c 70000000 /dev/zero | tr '\0' x)"
+  assert_claude_deny '.'
+  native_event codex PreToolUse "$BASH_EVENT" "$BATS_TEST_TMPDIR/no-such-companion"
+  assert_codex_block 'native entry failed'
+}
+
+@test "T34 the shipped companion deadline is 20s, below the 30s client timeout" {
+  native_companion
+  run "$NATIVE_BIN" contract
+  [ "$status" -eq 0 ]
+  [ "$(printf '%s' "$output" | jq -r '.deadline_secs')" = 20 ]
+  [ $((20 + 10)) -le "$CLIENT_TIMEOUT" ]
+}
+
+@test "T34 a hanging guard under the shipped companion is killed at its 20s deadline, for both harnesses" {
+  native_companion
+  local harness
+  printf '#!/bin/sh\nsleep 120\n' > "$STUBS/hang"
+  chmod 755 "$STUBS/hang"
+  for harness in claude codex; do
+    start=$SECONDS
+    set +e
+    output="$(printf '%s' "$BASH_EVENT" | "$NATIVE_BIN" supervise "$harness" test-guard "$STUBS/hang" 2>"$BATS_TEST_TMPDIR/stderr")"
+    status=$?
+    set -e
+    elapsed=$((SECONDS - start))
+    [ "$elapsed" -ge 19 ] && [ "$elapsed" -le 25 ] || { echo "$harness elapsed=${elapsed}s"; return 1; }
+    printf '%s' "$output" | grep -q 'guard timed out after 20s' || { echo "$harness: $output"; return 1; }
+  done
 }

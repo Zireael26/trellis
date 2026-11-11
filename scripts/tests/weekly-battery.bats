@@ -19,6 +19,7 @@ check_weekly_integration() {
 }
 
 @test "weekly battery always invokes the uncached full runner and scrubs overrides" { check_weekly test_full_uncached_command_scrubs_selection_and_runner_overrides; }
+@test "weekly battery runs the slow tier (TRELLIS_SLOW_TESTS=1) whatever the caller set" { check_weekly test_runs_the_slow_tier_whatever_the_caller_set; }
 @test "weekly scheduler environment drift still raises P1 from real tree verdicts" { check_weekly_integration test_scheduler_environment_drift_still_disables_tree_reuse; }
 @test "weekly occupied holder still snapshots green verdicts and raises P1 (P7)" { check_weekly_integration test_occupied_holder_snapshot_still_raises_p1; }
 @test "weekly dead run record still snapshots green verdicts and raises P1 (P8)" { check_weekly_integration test_dead_record_snapshot_still_raises_p1; }

@@ -462,18 +462,30 @@ if [ ! -f "$CHANGELOG_FILE" ]; then
   findings+=("$CHANGELOG_FILE: missing — seed via Keep a Changelog 1.1.0 format")
   worst="fail"
 else
-  # Did any code-trigger path change?
+  # Include deleted paths and use Git's NUL framing so quoting, whitespace
+  # and newlines cannot hide a code path or a changed changelog.
   code_changed=false
-  for f in $changed_files; do
+  changelog_changed=false
+  changelog_diff_rc=""
+  while IFS= read -r -d '' f; do
+    if [ -z "$f" ]; then
+      IFS= read -r -d '' changelog_diff_rc || changelog_diff_rc=1
+      break
+    fi
+    if [ "$f" = "$CHANGELOG_FILE" ]; then changelog_changed=true; fi
     for prefix in "${CHANGELOG_PATHS[@]}"; do
       case "$f" in
-        "$prefix"*) code_changed=true; break 2 ;;
+        "$prefix"*) code_changed=true; break ;;
       esac
     done
-  done
+  done < <(rc=0; git diff --name-only --no-renames --diff-filter=ACMRDT -z "$RANGE" 2>/dev/null || rc=$?; printf '\0%s\0' "$rc")
+  if [ "$changelog_diff_rc" != 0 ]; then
+    findings+=("CHANGELOG: unable to enumerate changed paths for range '$RANGE'")
+    worst="fail"
+  fi
 
   if $code_changed; then
-    if ! grep -Fxq -- "$CHANGELOG_FILE" <<<"$changed_files"; then
+    if ! $changelog_changed; then
       findings+=("$CHANGELOG_FILE: not updated despite code changes under: ${CHANGELOG_PATHS[*]}")
       worst="fail"
     else
@@ -509,10 +521,60 @@ while IFS= read -r f; do
   done
 done <<< "$adr_changed_files"
 
+# A literal tracked path is an unambiguous reference, including date-named ADRs.
+adr_path_referenced() {
+  local needle="$1" text="$2" prefix suffix before after
+  while [[ "$text" == *"$needle"* ]]; do
+    prefix="${text%%"$needle"*}"
+    suffix="${text#*"$needle"}"
+    before="${prefix: -1}"; after="${suffix:0:1}"
+    case "$before" in
+      ''|[[:space:]]|'('|'['|'<'|'{'|'"'|"'"|'`'|':'|'=') ;;
+      *) text="$suffix"; continue ;;
+    esac
+    case "$after" in
+      ''|[[:space:]]|')'|']'|'>'|'}'|'"'|"'"|'`'|'.'|','|';'|':'|'!'|'?') return 0 ;;
+    esac
+    text="$suffix"
+  done
+  return 1
+}
+
 if $adr_trigger_changed; then
   # Either a new/modified file in $ADR_DIR, OR a commit body referencing an existing ADR
   adr_diff="$(printf "%s\n" "$changed_files" | grep -E "^${ADR_DIR}/" || true)"
-  body_ref="$(git log --format='%B' "$RANGE" 2>/dev/null | grep -oE 'ADR-[0-9]+' | head -1 || true)"
+  body_ref=""
+  if [ -z "$adr_diff" ]; then
+    messages="$(git log --format='%B' "$RANGE" 2>/dev/null || true)"
+    refs="$(printf '%s\n' "$messages" | grep -oE 'ADR-[0-9]+' || true)"
+    head="$(pg_range_head "$PROJECT_DIR" "$RANGE")" || head=""
+    while IFS= read -r -d '' entry; do
+      case "$entry" in "100644 blob "*|"100755 blob "*) ;; *) continue ;; esac
+      path="${entry#*$'\t'}"
+      case "$path" in "$ADR_DIR/"*.md) ;; *) continue ;; esac
+      name="${path##*/}"
+      # Dates require a literal citation; several decisions can share a day.
+      case "$name" in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*.md)
+          if adr_path_referenced "$path" "$messages"; then body_ref="$path"; break; fi
+          continue ;;
+      esac
+      case "$name" in ADR-*|adr-*) name="${name#*-}" ;; esac
+      number="${name%%-*}"; number="${number%.md}"
+      case "$number" in ''|*[!0-9]*) continue ;; esac
+      case "$name" in "$number.md"|"$number-"*.md) ;; *) continue ;; esac
+      if adr_path_referenced "$path" "$messages"; then body_ref="$path"; break; fi
+      while [ "${number#0}" != "$number" ]; do number="${number#0}"; done
+      [ -n "$number" ] || number=0
+      for ref in $refs; do
+        ref_number="${ref#ADR-}"
+        while [ "${ref_number#0}" != "$ref_number" ]; do ref_number="${ref_number#0}"; done
+        [ -n "$ref_number" ] || ref_number=0
+        if [ "$number" = "$ref_number" ]; then body_ref="$ref"; break; fi
+      done
+      [ -z "$body_ref" ] || break
+    done < <(git --literal-pathspecs ls-tree -r -z "$head" -- "$ADR_DIR" 2>/dev/null)
+  fi
   if [ -z "$adr_diff" ] && [ -z "$body_ref" ]; then
     findings+=("ADR: trigger paths changed without new/updated ADR or commit-body reference")
     worst="fail"

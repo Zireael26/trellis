@@ -14,7 +14,7 @@ setup() {
   export SCANNER_FIXTURES="$TEST_ROOT"
 
   # Only infrastructure commands are inherited; never a real scanner.
-  for cmd in bash git basename dirname mktemp mkdir readlink ls sort tail rm head awk cat sed; do
+  for cmd in bash git basename dirname mktemp mkdir readlink ls sort tail rm head awk cat sed grep cut tr; do
     ln -s "$(command -v "$cmd")" "$BIN/$cmd"
   done
   ln -s "$(python3 -c 'import sys; print(sys.executable)')" "$BIN/python3"
@@ -34,6 +34,8 @@ setup() {
   cat > "$BIN/scanner" <<'SH'
 #!/usr/bin/env bash
 engine="$(basename "$0")"
+# The baseline OSV helper checks osv-scanner's major version first.
+[ "$engine:${1:-}" != osv-scanner:--version ] || { echo "osv-scanner version: 2.6.0"; exit 0; }
 case "$engine" in
   semgrep) mode="$SEMGREP_MODE" ;;
   gitleaks) mode="$GITLEAKS_MODE" ;;
@@ -190,6 +192,26 @@ PY
   done
 }
 
+@test "semgrep shell parse errors block when ShellCheck is disabled" {
+  commit_change shell
+  stub_semgrep_error changed.sh 'Syntax error'
+  # Both an explicit opt-out and a profile whose default is off are covered.
+  local mode failures=0
+  for mode in explicit default; do
+    if [ "$mode" = explicit ]; then
+      run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling SECURITY_GATE_SHELLCHECK=0
+    else
+      run_diff SECURITY_GATE_STACK_PROFILE=web-next
+    fi
+    [ "$status" -eq 1 ] && [[ "$output" == *"Overall: BLOCKED"* ]] \
+      && [[ "$output" == *"SAST:"*"❌ fail"* ]] \
+      && [[ "$output" == *"JSON errors non-empty (Syntax error)"* ]] \
+      && [[ "$output" != *"shell parse errors not counted"* ]] \
+      || { echo "$mode: rc=$status; $output"; failures=1; }
+  done
+  [ "$failures" -eq 0 ]
+}
+
 @test "semgrep .bash and extensionless shell parse errors use exact shell scope" {
   for path in changed.bash pre-push; do
     printf '#!/usr/bin/env -S bash\ntrue\n' > "$PROJECT/$path"
@@ -254,6 +276,36 @@ PY
   run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS='*.sh'
   assert_blocked semgrep SAST
   [[ "$output" != *"shell parse errors not counted"* ]]
+}
+
+@test "a shell shebang on a file with another extension earns no parse exemption" {
+  # Inversion (security review): a shebang alone classified evil.cgi as shell,
+  # so a crafted file's parse errors were exempt and the scan passed complete.
+  for path in evil.cgi evil.ts; do
+    printf '#!/bin/sh\nexport const x = 1;\n' > "$PROJECT/$path"
+    git -C "$PROJECT" add -A
+    git -C "$PROJECT" commit -qm "shebang $path"
+    stub_semgrep_error "$path" PartialParsing
+    run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
+    assert_blocked semgrep SAST
+    [[ "$output" != *"shell parse errors not counted"* ]] || { echo "$path: $output"; false; }
+  done
+}
+
+@test "a dotted or dotfile name with a shell shebang earns no parse exemption" {
+  # Inversion (security review): the exemption scope and the baseline
+  # classifier disagreed on names like .foo and ..ts; any '.' in the basename
+  # now means not shell, unless it ends in .sh or .bash.
+  for path in .x.ts ..ts a.b .foo; do
+    printf '#!/bin/sh\ntrue\n' > "$PROJECT/$path"
+    git -C "$PROJECT" add -A
+    git -C "$PROJECT" commit -qm "shebang $path"
+    stub_semgrep_error "$path" PartialParsing
+    run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
+    assert_blocked semgrep SAST
+    [[ "$output" == *"JSON errors non-empty (PartialParsing)"* ]] || { echo "$path: $output"; false; }
+    [[ "$output" != *"shell parse errors not counted"* ]] || { echo "$path: $output"; false; }
+  done
 }
 
 @test "semgrep zsh parse errors receive no ShellCheck exemption" {
@@ -901,8 +953,15 @@ assert_member_covered() {
   assert_nonmember_blocked uv
 }
 
-@test "Cargo ancestor lock cannot cover a registry package named like a non-member" {
-  assert_nonmember_blocked cargo
+@test "Cargo ancestor lock cannot cover a registry-only package with a matching member glob" {
+  seed_workspace_lock cargo member
+  printf 'version = 3\n[[package]]\nname = "component"\nversion = "1.0.0"\nsource = "registry+https://example.invalid/index"\n' > "$PROJECT/Cargo.lock"
+  git -C "$PROJECT" add Cargo.lock
+  git -C "$PROJECT" commit -qm "registry-only lock"
+  commit_workspace_manifest
+  run_diff
+  assert_blocked osv-scanner Deps
+  [[ "$output" == *"ancestor lockfile does not name member: members/component/Cargo.toml"* ]]
 }
 
 @test "CONTROL npm packages entry proves ancestor workspace membership" {
@@ -1118,10 +1177,10 @@ assert_cargo_membership_blocked() {
   [[ "$output" == *"ancestor lockfile does not name member: $1"* ]]
 }
 
-@test "Cargo same-name excluded non-member with its own workspace blocks" {
-  seed_cargo_membership_workspace '["core"]' '["fuzz"]'
-  commit_same_name_cargo_manifest fuzz/Cargo.toml own-workspace
-  assert_cargo_membership_blocked fuzz/Cargo.toml
+@test "Cargo literal exclude overrides a matching member glob" {
+  seed_cargo_membership_workspace '["members/*/*"]' '["members/old"]'
+  commit_same_name_cargo_manifest members/old/fuzz/Cargo.toml
+  assert_cargo_membership_blocked members/old/fuzz/Cargo.toml
 }
 
 @test "Cargo same-name non-member cannot borrow an ancestor lock without an exclude" {
@@ -1258,6 +1317,7 @@ seed_go_module() {
     SEMGREP_MODE=crash PG_MODE=push \
     bash "$SCRIPT_ROOT/../process-gate/scripts/check-security-diff.sh" --range=HEAD~1..HEAD
   assert_blocked semgrep SAST
+  [[ "$output" == *"semgrep did not complete: scanner exit 2"* ]] || { echo "$output"; false; }
 }
 
 record_semgrep_args() {

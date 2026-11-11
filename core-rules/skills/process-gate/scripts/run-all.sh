@@ -965,14 +965,24 @@ printf "## process-gate verdict (mode=%s)\n\n" "$PG_MODE"
 printf "%s\n\n" "$DIFF_BASE_RECEIPT"
 # Only the checker's own two-space finding counts, never captured command
 # output (four spaces). The checker's final receipt wins over earlier findings.
-tests_scope="$(printf '%s\n' "${FINDINGS[3]}" | sed -nE 's/^  Tests: (full|not run|unknown|narrowed: [1-9][0-9]* selected|no-tests: docs-only|narrowed \((docs-only|release-metadata): [0-9]+ files\))$/\1/p' | tail -n 1)"
+tests_scope="$(printf '%s\n' "${FINDINGS[3]}" | sed -nE 's/^  Tests: (full|partial|not run|unknown|narrowed: [1-9][0-9]* selected|no-tests: docs-only|narrowed \((docs-only|release-metadata): [0-9]+ files\))$/\1/p' | tail -n 1)"
 tests_scope="${tests_scope:-unknown}"
 for i in 0 1 2 3 4 5 6 7 8; do
   printf "%-18s %s" "${LABELS[$i]}:" "$(glyph "${RESULTS[$i]}")"
   [ "$i" != 3 ] || printf ' — %s' "$tests_scope"
+  if [ "$i" -eq 8 ] && [ "${RESULTS[$i]}" = n/a ] &&
+     [[ "${FINDINGS[$i]}" == *'jq unavailable; advisory check did not run'* ]]; then
+    printf ' — jq unavailable; advisory check did not run'
+  fi
   printf '\n'
 done
 printf "\nOverall: %s\n\nTests: %s\n\n" "$overall" "$tests_scope"
+# Pass rows normally hide checker output. Preserve the bypass check's coverage
+# limitation there; non-pass rows already show it in the Findings section.
+if [ "${RESULTS[2]}" = pass ]; then
+  bypass_coverage="$(printf '%s\n' "${FINDINGS[2]}" | grep -E '^  (Bypass|Husky) coverage:' || true)"
+  [ -z "$bypass_coverage" ] || printf '%s\n\n' "$bypass_coverage"
+fi
 # Cache identity and the tag rerun supplement the canonical scope; neither is
 # parsed as a second Tests scope or allowed to override its result.
 tests_receipt="$(printf '%s\n' "${FINDINGS[3]}" | sed -En 's/^  (tests: reused verdict [0-9a-f]+ \(tree [0-9a-f]+, ran [^)]*\))$/\1/p' | head -n 1)"

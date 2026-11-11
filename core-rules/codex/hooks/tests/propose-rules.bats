@@ -380,6 +380,34 @@ EOF
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
 }
 
+@test "codex L5 unverifiable preset ceilings cannot authorize proposal writes" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  setup_safe_candidate
+  mkdir -p "$PROJECT_DIR/.claude" "$BATS_TEST_TMPDIR/empty-runtime/core-rules/presets"
+  printf '5\n' > "$PROJECT_DIR/.claude/session-autonomy"
+  COUNT="$BATS_TEST_TMPDIR/unknown-ceiling.count"; : > "$COUNT"
+  PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
+  local scenario
+  for scenario in malformed missing-runtime missing-preset; do
+    unset TRELLIS_ROOT
+    case "$scenario" in
+      malformed) printf '%s\n' '{"presets":' > "$PROJECT_DIR/.trellis.json" ;;
+      missing-runtime) printf '%s\n' '{"presets":["ceiling"]}' > "$PROJECT_DIR/.trellis.json" ;;
+      missing-preset) printf '%s\n' '{"presets":["ceiling"]}' > "$PROJECT_DIR/.trellis.json"; export TRELLIS_ROOT="$BATS_TEST_TMPDIR/empty-runtime" ;;
+    esac
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"cannot verify"* ]] || { echo "$scenario: $output"; false; }
+    [ ! -e "$PROJECT_DIR/gotchas.md" ]
+    [ ! -e "$PROJECT_DIR/decisions-log.md" ]
+  done
+  printf '%s\n' '---' 'autonomy_ceiling: 5' '---' > "$TRELLIS_ROOT/core-rules/presets/ceiling.md"
+  run_hook
+  [[ "$output" == *"auto-appended the candidate"* ]]
+  [ -f "$PROJECT_DIR/gotchas.md" ]
+}
+
 @test "codex L5 secret-like candidate is neither emitted nor persisted" {
   setup_editheavy_repo
   setup_transcript_with_signal
@@ -398,6 +426,58 @@ EOF
   [[ "$output" != *"not-a-real-secret"* ]]
   [ "$(cat "$PROJECT_DIR/gotchas.md")" = "$gotchas_before" ]
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
+}
+
+@test "codex L5 JSON, secret-key, Stripe and PGP credentials are not emitted or persisted" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  setup_safe_candidate
+  printf '%s\n' '{"autonomy":5}' > "$PROJECT_DIR/.trellis.json"
+  COUNT="$BATS_TEST_TMPDIR/credential-shapes.count"; : > "$COUNT"
+  PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
+  local specimen
+  for specimen in '{"api_key": "local-sentinel-123"}' 'SECRET_KEY=local-sentinel-123' \
+    'DB_SECRET_KEY=local-sentinel-123' 'sk_live_12345678901234567890' \
+    '-----BEGIN PGP PRIVATE KEY BLOCK-----'; do
+    printf '## 2026-08-23 — Credential guard\n**Pattern:** %s\n**Why it matters:** Keep credentials private.\n**Rule:** Never emit credentials.\n' "$specimen" > "$CANDIDATE"
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"secret-like material"* ]]
+    [[ "$output" != *"$specimen"* ]]
+    [ ! -e "$PROJECT_DIR/gotchas.md" ]
+    [ ! -e "$PROJECT_DIR/decisions-log.md" ]
+  done
+  printf '## 2026-08-23 — Empty example\n**Pattern:** {"api_key": ""}\n**Why it matters:** Empty examples contain no credential.\n**Rule:** Leave empty examples safe.\n' > "$CANDIDATE"
+  run_hook
+  [[ "$output" == *"auto-appended the candidate"* ]]
+  grep -Fq '"api_key": ""' "$PROJECT_DIR/gotchas.md"
+}
+
+@test "codex credential screen preserves camelCase and joined-key coverage at L3 and L5" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  setup_safe_candidate
+  COUNT="$BATS_TEST_TMPDIR/camel-secrets.count"; : > "$COUNT"
+  PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
+  local level specimen
+  for level in 3 5; do
+    printf '{"autonomy":%s}\n' "$level" > "$PROJECT_DIR/.trellis.json"
+    for specimen in 'accessToken: local-sentinel-123' 'dbPassword=local-sentinel-123' \
+      'clientSecret = "local-sentinel-123"' 'authToken=local-sentinel-123' \
+      'DBPASSWORD=local-sentinel-123' 'mypassword: local-sentinel-123'; do
+      printf '## 2026-08-23 — Credential guard\n**Pattern:** %s\n**Why it matters:** Keep credentials private.\n**Rule:** Never emit credentials.\n' "$specimen" > "$CANDIDATE"
+      run_hook
+      [ "$status" -eq 0 ]
+      [[ "$output" == *"secret-like material"* ]] || { echo "level $level: $specimen was not screened"; false; }
+      [[ "$output" != *"$specimen"* ]]
+      [ ! -e "$PROJECT_DIR/gotchas.md" ]
+      [ ! -e "$PROJECT_DIR/decisions-log.md" ]
+    done
+  done
+  setup_safe_candidate
+  run_hook
+  [[ "$output" == *"auto-appended the candidate"* ]]
+  [ -f "$PROJECT_DIR/gotchas.md" ]
 }
 
 @test "codex L5 unquoted secret-key candidates are neither emitted nor persisted" {
@@ -481,4 +561,36 @@ EOF
   [ "$(cat "$backup")" = "$gotchas_before" ]
   [[ "$(cat "$PROJECT_DIR/gotchas.md")" == *"## 2026-08-23 — Canonical gotcha writes"* ]]
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
+}
+
+@test "sweep-fx1: codex URL with embedded credentials is screened" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  setup_safe_candidate
+  printf '%s\n' '{"autonomy":5}' > "$PROJECT_DIR/.trellis.json"
+  printf '## 2026-08-23 — Credential guard\n**Pattern:** postgres://user:hunter2@db.internal:5432/app\n**Why it matters:** Keep credentials private.\n**Rule:** Never emit credentials.\n' > "$CANDIDATE"
+  COUNT="$BATS_TEST_TMPDIR/codex-url-cred.count"; : > "$COUNT"
+  PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"secret-like material"* ]]
+  [[ "$output" != *"hunter2"* ]]
+  [ ! -e "$PROJECT_DIR/gotchas.md" ]
+  [ ! -e "$PROJECT_DIR/decisions-log.md" ]
+}
+
+@test "sweep-fx1-L5: codex vite and npm URLs with ports are not screened" {
+  setup_editheavy_repo
+  setup_transcript_with_signal
+  setup_safe_candidate
+  printf '%s\n' '{"autonomy":5}' > "$PROJECT_DIR/.trellis.json"
+  local specimen
+  for specimen in 'http://localhost:5173/@vite/client' 'https://registry.npmjs.org:443/@scope/pkg'; do
+    printf '## 2026-08-23 — Safe reference\n**Pattern:** See %s for assets.\n**Why it matters:** Local dev references are safe.\n**Rule:** Keep local references.\n' "$specimen" > "$CANDIDATE"
+    COUNT="$BATS_TEST_TMPDIR/codex-l5-safe-$RANDOM.count"; : > "$COUNT"
+    PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"secret-like material"* ]] || { echo "level 5: $specimen wrongly screened"; false; }
+  done
 }

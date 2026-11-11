@@ -3,9 +3,11 @@
 # Source: Trellis / core-rules / hooks (lib).
 #
 # Sourced (not executed) by both:
-#   - core-rules/hooks/ui-verify.sh        (Phase-2a Stop hook)
+#   - core-rules/hooks/ui-verify.sh and the Codex twin (Stop hooks)
 #   - the Phase-4 execute body
 #   - the Phase-2b/test layer (bats) which unit-tests the functions below.
+# The Stop wrappers source it in an isolated capture subshell with executable-
+# mode flags; the function's verdict and screenshot side effects stay the same.
 #
 # This is a PURE DECISION FUNCTION. It does not emit Claude-Code control blocks
 # and it does not own the exit code: it prints ONE JSON line describing a
@@ -59,49 +61,119 @@
 
 # run_with_timeout <secs> <cmd...>
 #   Bounded execution via a perl alarm shim (GNU timeout is absent on macOS).
-#   Returns the command's exit status; a fired alarm surfaces as 142. If Perl
-#   is absent, returns 125 without starting the external command.
+#   Runs the command in its OWN process group (setsid) and, on timeout, kills
+#   the WHOLE group — a bare SIGALRM reaches only the direct child, so a
+#   grandchild (Playwright node driver + headless Chromium) would otherwise
+#   survive a timed-out UI turn. Returns the command's exit status; a fired
+#   alarm surfaces as 142. If Perl is absent, returns 125 without starting
+#   the external command. A non-numeric or non-positive ceiling falls back to
+#   the 20 s default so the probe always runs bounded.
 run_with_timeout() {
   local secs="$1"; shift
+  case "$secs" in ''|*[!0-9]*) secs=20 ;; esac
+  [ "$secs" -gt 0 ] 2>/dev/null || secs=20
   command -v perl >/dev/null 2>&1 || return 125
-  # SAFETY: $secs is the configured external-probe ceiling (20 s default, core-rules/hooks.md § ui-verify decision core); status 142 emits an advisory.
-  perl -e 'alarm shift; exec @ARGV' "$secs" "$@"
+  perl -e '
+    use POSIX ();
+    my $secs = shift @ARGV;
+    my $pid = fork();
+    if (!defined $pid) { print STDERR "ui-verify: timeout fork failed\n"; exit(125); }
+    if ($pid == 0) { POSIX::setsid(); exec @ARGV or POSIX::_exit(127); }
+    $SIG{ALRM} = sub {
+      kill("TERM", -$pid);
+      select(undef, undef, undef, 0.3);
+      kill("KILL", -$pid); waitpid($pid, 0); exit(142);
+    };
+    # SAFETY: $secs is the configured external-probe ceiling (20 s default, core-rules/hooks.md § ui-verify decision core); status 142 emits an advisory.
+    alarm $secs;
+    waitpid($pid, 0);
+    my $st = $?;
+    exit($st & 127 ? 128 + ($st & 127) : $st >> 8);
+  ' "$secs" "$@"
+}
+
+# Stream changed names as NUL records. A failing Git command must fail the
+# pipeline even if an earlier command already produced useful-looking names.
+_uvc_git_changed_paths() {
+  local base
+  git diff HEAD --name-only -z || return 1
+  git ls-files --others --exclude-standard -z || return 1
+  if [ "${UI_TURN_STATUS:-unarmed}" = known ]; then
+    # The wrapper has validated these space/newline-separated object IDs.
+    # shellcheck disable=SC2086
+    for base in ${UI_TURN_HEADS:-}; do
+      if [ "$base" = unborn ]; then
+        base=$(git hash-object -t tree /dev/null) || return 1
+      else
+        case "$base" in (''|*[!0-9a-f]*) return 1 ;; esac
+        [ "${#base}" -eq 40 ] || [ "${#base}" -eq 64 ] || return 1
+      fi
+      git diff --no-renames --name-only -z "$base" HEAD -- || return 1
+    done
+  fi
+}
+
+# Encode control bytes before line-oriented matching; do not fork per path.
+# The shell fallback keeps the existing missing-Perl advisory reachable.
+_uvc_paths_as_lines() {
+  local path=""
+  if command -v perl >/dev/null 2>&1; then
+    /usr/bin/env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB perl -0e '
+      use strict;
+      binmode STDIN; binmode STDOUT;
+      while (defined(my $path = <STDIN>)) {
+        substr($path, -1) eq "\0" or exit 2;
+        chomp $path;
+        length($path) or exit 2;
+        $path =~ s/\n/\\n/g;
+        $path =~ s/\r/\\r/g;
+        $path =~ s/\t/\\t/g;
+        print $path, "\n" or exit 2;
+      }
+      close STDOUT or exit 2;
+    '
+    return $?
+  fi
+  while IFS= read -r -d '' path; do
+    [ -n "$path" ] || return 2
+    path=${path//$'\n'/\\n}
+    path=${path//$'\r'/\\r}
+    path=${path//$'\t'/\\t}
+    printf '%s\n' "$path" || return 2
+  done
+  [ -z "$path" ]
 }
 
 # ui_changed_files
-#   Echo the UI files (one per line) changed this turn, capped. Unions tracked
-#   changes (`git diff HEAD`) with brand-new untracked files
-#   (`git ls-files --others --exclude-standard`) — a UI gate that watched only
-#   the diff would miss freshly-created .tsx components. Returns 0 with no
-#   output for a valid no-match, 3 for an invalid regex, and 2 for git or output
-#   processing failures.
+#   Echo UI files (one per line) from tracked and untracked Git changes. Match
+#   all encoded Git names in one grep, preserving ERE semantics and detecting
+#   failures in every stage. Returns 0 for a valid no-match, 3 for invalid
+#   regex, and 2 for other failures.
 ui_changed_files() {
-  local tracked untracked matches sorted grep_status
+  local matches="" sorted grep_status
   command -v git >/dev/null 2>&1 || return 2
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 2
-  if ! tracked="$(git diff HEAD --name-only)"; then
-    return 2
-  fi
-  if ! untracked="$(git ls-files --others --exclude-standard)"; then
-    return 2
-  fi
-
-  if matches="$({
-    [ -z "$tracked" ] || printf '%s\n' "$tracked"
-    [ -z "$untracked" ] || printf '%s\n' "$untracked"
-  } | grep -Ei "$UI_REGEX")"; then
-    if ! sorted="$(printf '%s\n' "$matches" | sort -u)"; then
-      return 2
-    fi
-    if printf '%s\n' "$sorted" | awk 'NR <= 50'; then
-      return 0
-    fi
-    return 2
+  if printf '\n' | grep -Ei "$UI_REGEX" >/dev/null 2>&1; then
+    :
   else
     grep_status=$?
-    [ "$grep_status" -eq 1 ] && return 0
-    return 3
+    [ "$grep_status" -eq 1 ] || return 3
   fi
+  if matches=$(
+    set +e
+    set -o pipefail
+    _uvc_git_changed_paths | _uvc_paths_as_lines | grep -aEi "$UI_REGEX"
+    statuses=("${PIPESTATUS[@]}")
+    [ "${statuses[0]}" -eq 0 ] && [ "${statuses[1]}" -eq 0 ] || exit 2
+    [ "${statuses[2]}" -le 1 ] || exit 3
+  ); then
+    :
+  else
+    return $?
+  fi
+  [ -n "$matches" ] || return 0
+  sorted=$(printf '%s\n' "$matches" | sort -u) || return 2
+  printf '%s\n' "$sorted" | awk 'NR <= 50' || return 2
 }
 
 # detect_visual_tool
@@ -193,7 +265,11 @@ ui_verify_decision() (
     return 0
   fi
   if [ -z "$touched" ]; then
-    _uvc_emit skip "ui-verify: no UI files changed this turn." ""
+    if [ "${UI_TURN_STATUS:-unarmed}" = unknown ]; then
+      _uvc_emit advisory "ui-verify: turn baseline unavailable; committed UI changes cannot be determined, so visual verification may be required." ""
+    else
+      _uvc_emit skip "ui-verify: no UI files changed this turn." ""
+    fi
     return 0
   fi
   # Compact the touched list to a single comma-joined line for reason strings.
@@ -280,6 +356,7 @@ ui_verify_decision() (
 # directly (or from a test that runs it as a script), enable strict flags and
 # print a verdict. The core itself always exits 0; the verdict is in the JSON.
 if [ "${BASH_SOURCE[0]:-}" = "${0:-}" ]; then
+  export GIT_OPTIONAL_LOCKS=0
   set -euo pipefail
   ui_verify_decision "$@"
   exit 0

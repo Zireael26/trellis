@@ -14,7 +14,11 @@ setup() {
   chmod 700 "$TRELLIS_HOME" "$TRELLIS_HOME/releases"
 }
 
+# shellcheck source=scripts/tests/helpers/hfs-volume.bash
+. "$BATS_TEST_DIRNAME/helpers/hfs-volume.bash"
+
 teardown() {
+  hfs_volume_detach
   if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
     find "$SANDBOX" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
     rm -rf "$SANDBOX"
@@ -167,7 +171,7 @@ restamped_by_full_verify() {
   writable "$rel/payload/core-rules"
   printf 'rules\n' > "$rel/payload/core-rules/.next"
   sealed "$rel/payload/core-rules/.next"
-  mv "$rel/payload/core-rules/.next" "$rel/payload/core-rules/CLAUDE.md"
+  mv -f "$rel/payload/core-rules/.next" "$rel/payload/core-rules/CLAUDE.md"
   sealed "$rel/payload/core-rules"
   run stamped_verify "$rel"
   restamped_by_full_verify "$rel"
@@ -195,9 +199,14 @@ restamped_by_full_verify() {
 tamper_keeping_size_and_mtime() {
   local file="$1"
   python3 -I -c '
-import os, sys
+import os, sys, time
 path = sys.argv[1]
 before = os.stat(path)
+# T39: on a coarse-ctime volume (HFS+) a tamper in the same second as the
+# last seal keeps ctime, so wait for the next whole second first.
+if before.st_ctime_ns % 1_000_000_000 == 0:
+    while time.time_ns() // 1_000_000_000 <= before.st_ctime_ns // 1_000_000_000:
+        time.sleep(0.02)
 os.chmod(path, 0o644)
 with open(path, "r+b") as handle:
     handle.write(b"RULES\n")
@@ -257,6 +266,30 @@ assert after.st_ctime_ns != before.st_ctime_ns
   done
   tamper_keeping_size_and_mtime "$rel/payload/core-rules/CLAUDE.md"
   STAMP_LIB="$coarse" run stamped_verify "$rel"
+  refused_by_full_verify
+}
+
+# T39: the same verdict on a real non-APFS filesystem. The release home lives
+# on an HFS+ volume whose ctimes are whole seconds (proven, not assumed): the
+# unmodified stamp library never stamps or hits, and the full verify decides.
+@test "on a real HFS+ volume with whole-second ctime nothing is stamped or hit, and the full verify decides" {
+  hfs_volume_attach
+  hfs_volume_coarse_ctime
+  TRELLIS_HOME="$HFS_MNT/trellis-home"
+  STAMPS="$TRELLIS_HOME/state/release-stamps"
+  mkdir -p "$TRELLIS_HOME/releases"
+  chmod 700 "$TRELLIS_HOME" "$TRELLIS_HOME/releases"
+  rel="$(install_release)"
+  for attempt in 1 2; do
+    run stamped_verify "$rel"
+    [ "$status" -ne 0 ] && [ "$output" = full-verify ] || { echo "attempt=$attempt status=$status output=$output"; false; }
+  done
+  [ -z "$(ls -A "$STAMPS" 2>/dev/null)" ]
+  # Whole-second ctime: cross a second so the tamper helper's own ctime check
+  # holds; the verdict under test is the full verify's.
+  sleep 1.1
+  tamper_keeping_size_and_mtime "$rel/payload/core-rules/CLAUDE.md"
+  run stamped_verify "$rel"
   refused_by_full_verify
 }
 
@@ -446,12 +479,640 @@ ONE_ENTRY='info.st_mode \& 0o100 and stat.S_ISREG(info.st_mode)'
     release_stamp_check "$2" "$3" || exit 90
     release_stamp_check "$2" "$3" || exit 91
     first="$(wc -l < "$4/runs")"
-    export _TRELLIS_RELEASE_STAMP_MEMO
+    export _TRELLIS_RELEASE_STAMP_KEY
     bash -c ". \"$1/release-stamp.sh\"; release_stamp_check \"$2\" \"$3\"" || exit 92
     printf "first=%s total=%s\n" "$first" "$(wc -l < "$4/runs")"
   ' memo "$LIB" "$TRELLIS_HOME" "$rel" "$SANDBOX"
   [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
   [ "$(printf '%s' "$output" | tr -d ' ')" = "first=1total=2" ] || { echo "$output"; false; }
+}
+
+@test "system bash reuses a qualified stamp with one Python start" {
+  rel="$(stamped_release)"
+  shim="$SANDBOX/system-bash-shim"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\necho run >> "%s/system-bash-runs"\nexec "%s" "$@"\n' "$SANDBOX" "$(command -v python3)" > "$shim/python3"
+  chmod 755 "$shim/python3"
+  run env -u TRELLIS_PYTHON HOME="$SANDBOX/user" PATH="$shim:$PATH" /bin/bash -c '
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 90
+    [ -n "$_TRELLIS_RELEASE_STAMP_KEY" ] || exit 91
+    release_stamp_check "$2" "$3" || exit 92
+    printf "runs=%s\\n" "$(wc -l < "$4/system-bash-runs" | tr -d " ")"
+  ' system-bash "$LIB" "$TRELLIS_HOME" "$rel" "$SANDBOX"
+  [ "$status" -eq 0 ] && [ "$output" = runs=1 ] || { echo "status=$status $output"; false; }
+}
+
+@test "stable launcher system bash takes the invocation-local full-proof memo" {
+  rel="$(install_release)"
+  reseal_release "$rel" sh -c 'mkdir -p scripts; printf "#!/bin/sh\necho stable-exec\n" > scripts/trellis; chmod 755 scripts/trellis'
+  mkdir -p "$SANDBOX/source"
+  jq -n --arg source "$SANDBOX/source" --arg root "$SANDBOX" '{
+    schema_version:1, source_root:$source, release_remote:"fixture://launcher",
+    active_cli_release:"1.0.0", default_fleet:"personal", fleets:{personal:{discovery_roots:[$root]}}
+  }' > "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
+  launcher="$SANDBOX/stable-launcher"
+  cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$launcher"
+  chmod 755 "$launcher"
+  # Instrument only the private launcher fixture. The first and second calls
+  # are the real verifier; the log records actual full-body invocations.
+  python3 -I - "$launcher" "$SANDBOX" <<'PY'
+import pathlib, shlex, sys
+path, scratch = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
+text = path.read_text()
+head = 'launcher_snapshot_verified_release() (\n'
+body = '    launcher_verify_release "$source" "$version" >/dev/null || return $?\n'
+assert text.count(head) == 1 and text.count(body) == 1
+log = shlex.quote(str(scratch / 'launcher-full-runs'))
+marker = shlex.quote(str(scratch / 'launcher-memo-key'))
+wrap = '''eval "$(declare -f launcher_verify_release_body | sed '1s/launcher_verify_release_body/_fixture_real_verify_body/')"
+launcher_verify_release_body() {
+  printf '%s\\n' "$1" >> %s
+  _fixture_real_verify_body "$@"
+}
+''' % ('%s', log)
+probe = body + '''    [ -n "$_TRELLIS_LAUNCHER_VERIFY_MEMO" ] || return 91
+    printf 'key-set\\n' > %s
+    launcher_verify_release "$source" "$version" >/dev/null || return $?
+''' % marker
+path.write_text(text.replace(head, wrap + head, 1).replace(body, probe, 1))
+PY
+  run env HOME="$SANDBOX/user" TRELLIS_HOME="$TRELLIS_HOME" "$launcher" memo-probe
+  [ "$status" -eq 0 ] && [[ "$output" == *stable-exec* ]] || { echo "status=$status $output"; false; }
+  [ "$(< "$SANDBOX/launcher-memo-key")" = key-set ] || { echo 'no launcher memo key'; false; }
+  [ "$(grep -Fxc "$rel" "$SANDBOX/launcher-full-runs")" -eq 1 ] || { echo 'source full verification was not reused'; false; }
+}
+
+@test "resourcing the stamp library preserves a hit in the trusted shell" {
+  rel="$(stamped_release)"
+  shim="$SANDBOX/re-source-shim"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\necho run >> "%s/re-source-runs"\nexec "%s" "$@"\n' "$SANDBOX" "$(command -v python3)" > "$shim/python3"
+  chmod 755 "$shim/python3"
+  run env -u TRELLIS_PYTHON HOME="$SANDBOX/user" PATH="$shim:$PATH" bash -c '
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 90
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 91
+    printf "runs=%s\n" "$(wc -l < "$4/re-source-runs" | tr -d " ")"
+  ' re-source "$LIB" "$TRELLIS_HOME" "$rel" "$SANDBOX"
+  [ "$status" -eq 0 ] && [ "$output" = runs=1 ] || { echo "status=$status $output"; false; }
+}
+
+@test "resourcing between pre-verify check and write preserves the pending token" {
+  rel="$(install_release)"
+  run env HOME="$SANDBOX/user" TMPDIR="$SANDBOX/tmp" TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    . "$1/release-store.sh"
+    release_stamp_check "$2" "$3" && exit 90
+    . "$1/release-store.sh"
+    release_store_verify_path "$3" "${3##*/}" || exit 91
+    release_stamp_write "$2" "$3" || exit 92
+  ' re-source-pending "$LIB" "$TRELLIS_HOME" "$rel"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+  [ -f "$(stamp_file "$rel")" ]
+}
+
+@test "a pending token is consumed on changed arguments or toolchain" {
+  rel="$(install_release)"
+  run env HOME="$SANDBOX/user" bash -c '
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" && exit 90
+    release_stamp_write "$2" "$3-other" && exit 91
+    release_stamp_write "$2" "$3" && exit 92
+    release_stamp_check "$2" "$3" && exit 93
+    TRELLIS_PYTHON=/bin/true release_stamp_write "$2" "$3" && exit 94
+    release_stamp_write "$2" "$3" && exit 95
+    exit 0
+  ' pending-boundary "$LIB" "$TRELLIS_HOME" "$rel"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+  [ ! -e "$(stamp_file "$rel")" ]
+}
+
+@test "an exec with a forged exported memo cannot seed a new shell even with the same pid" {
+  rel="$(stamped_release)"
+  run env HOME="$SANDBOX/user" bash -c '
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 90
+    export _TRELLIS_RELEASE_STAMP_KEY _TRELLIS_RELEASE_STAMP_PATHS
+    export _TRELLIS_RELEASE_STAMP_KINDS _TRELLIS_RELEASE_STAMP_ROWS
+    export _TRELLIS_RELEASE_STAMP_CONTEXT="$$"
+    chmod u+w "$3/payload/core-rules/CLAUDE.md"
+    printf "RULES\n" > "$3/payload/core-rules/CLAUDE.md"
+    chmod a-w "$3/payload/core-rules/CLAUDE.md"
+    exec bash -c '\''
+      . "$1/release-stamp.sh"
+      if release_stamp_check "$2" "$3"; then exit 91; fi
+    '\'' child "$1" "$2" "$3"
+  ' same-pid "$LIB" "$TRELLIS_HOME" "$rel"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+}
+
+@test "forged environment cannot authorize a tampered release using an unrelated anchor" {
+  rel="$(stamped_release)"
+  tamper_keeping_size_and_mtime "$rel/payload/core-rules/CLAUDE.md"
+  anchor="$(python3 -I -c 'import os; s=os.lstat("/"); print(s.st_dev, s.st_ino, s.st_mode)')"
+  run env HOME="$SANDBOX/user" bash -c '
+    export _TRELLIS_RELEASE_STAMP_CONTEXT="$$"
+    export _TRELLIS_RELEASE_STAMP_KEY="$2"$'\''\t'\''"$3"$'\''\t'\''"$1/release_stamp.py"$'\''\t'\''"${TRELLIS_PYTHON:-}"$'\''\t'\''"$PATH"
+    export _TRELLIS_RELEASE_STAMP_PATHS=/
+    export _TRELLIS_RELEASE_STAMP_KINDS=A
+    export _TRELLIS_RELEASE_STAMP_ROWS="$4"
+    exec /bin/bash -c '\''
+      . "$1/release-stamp.sh"
+      if release_stamp_check "$2" "$3"; then exit 91; fi
+      printf "MISS\n"
+    '\'' forged-child "$1" "$2" "$3"
+  ' forged-parent "$LIB" "$TRELLIS_HOME" "$rel" "$anchor"
+  [ "$status" -eq 0 ] && [ "$output" = MISS ] || { echo "status=$status $output"; false; }
+}
+
+@test "a changed release is not accepted from the same-shell memo" {
+  rel="$(stamped_release)"
+  shim="$SANDBOX/changed-shim"
+  mkdir -p "$shim"
+  real_python="$(command -v python3)"
+  printf '#!/bin/sh\necho run >> "%s/changed-runs"\nexec "%s" "$@"\n' "$SANDBOX" "$real_python" > "$shim/python3"
+  chmod 755 "$shim/python3"
+  run env -u TRELLIS_PYTHON HOME="$SANDBOX/user" PATH="$shim:$PATH" bash -c '
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 90
+    "$5" -I -c '\''
+import os, sys, time
+path = sys.argv[1]
+before = os.stat(path)
+# T39: on a coarse-ctime volume (HFS+) a tamper in the same second as the
+# last seal keeps ctime, so wait for the next whole second first.
+if before.st_ctime_ns % 1_000_000_000 == 0:
+    while time.time_ns() // 1_000_000_000 <= before.st_ctime_ns // 1_000_000_000:
+        time.sleep(0.02)
+os.chmod(path, 0o644)
+with open(path, "r+b") as f:
+    f.write(b"RULES\n")
+os.chmod(path, before.st_mode & 0o7777)
+os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+after = os.stat(path)
+assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+assert after.st_ctime_ns != before.st_ctime_ns
+'\'' "$3/payload/core-rules/CLAUDE.md" || exit 91
+    if release_stamp_check "$2" "$3"; then exit 92; fi
+    printf "runs=%s\n" "$(wc -l < "$4/changed-runs" | tr -d " ")"
+  ' changed-input "$LIB" "$TRELLIS_HOME" "$rel" "$SANDBOX" "$real_python"
+  [ "$status" -eq 0 ] && [ "$output" = runs=2 ] || { echo "status=$status $output"; false; }
+}
+
+@test "a changed directory membership invalidates the same-shell stamp proof" {
+  rel="$(stamped_release)"
+  run env HOME="$SANDBOX/user" bash -c '
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 90
+    chmod u+w "$3/payload/core-rules"
+    printf "extra\n" > "$3/payload/core-rules/extra"
+    chmod a-w "$3/payload/core-rules/extra" "$3/payload/core-rules"
+    if release_stamp_check "$2" "$3"; then exit 91; fi
+  ' changed-membership "$LIB" "$TRELLIS_HOME" "$rel"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+}
+
+@test "a tampered in-memory fingerprint forces a new sweep before a hit" {
+  rel="$(stamped_release)"
+  shim="$SANDBOX/token-shim"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\necho run >> "%s/token-runs"\nexec "%s" "$@"\n' "$SANDBOX" "$(command -v python3)" > "$shim/python3"
+  chmod 755 "$shim/python3"
+  run env -u TRELLIS_PYTHON HOME="$SANDBOX/user" PATH="$shim:$PATH" bash -c '
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 90
+    [ -n "$_TRELLIS_RELEASE_STAMP_KEY" ] || exit 91
+    _TRELLIS_RELEASE_STAMP_ROWS[0]="forged"
+    release_stamp_check "$2" "$3" || exit 92
+    printf "runs=%s\n" "$(wc -l < "$4/token-runs" | tr -d " ")"
+  ' tampered-token "$LIB" "$TRELLIS_HOME" "$rel" "$SANDBOX"
+  [ "$status" -eq 0 ] && [ "$output" = runs=2 ] || { echo "status=$status $output"; false; }
+}
+
+# The stat route's sweep cache must only shorten a comparison that already
+# passed on identical input. Each change runs after two passing rechecks, so
+# the cached sweep is warm, under the system Bash and the PATH Bash.
+# clone: an APFS clone (cp -c) with the same bytes, mode and mtime; elsewhere a copy.
+@test "a warm sweep cache still sees a changed mtime, ctime, size, inode, mode or clone" {
+  for shell in /bin/bash "$(command -v bash)"; do
+    for change in mtime ctime size inode mode clone; do
+      n=$((${n:-0} + 1))
+      rel="$(stamped_release "1.0.$n")"
+      run env HOME="$SANDBOX/user" "$shell" -c '
+        . "$1/release-stamp.sh"
+        # The sweep cache belongs to the stat route: take it.
+        _release_stamp_lstat_rows() { return 1; }
+        release_stamp_check "$2" "$3" || exit 90
+        _release_stamp_matches || exit 91
+        [ "${#_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[@]}" -gt 0 ] || exit 92
+        _release_stamp_matches || exit 93
+        python3 -I -c '\''
+import os, shutil, subprocess, sys
+change, path = sys.argv[1], sys.argv[2]
+before = os.lstat(path)
+mode = before.st_mode & 0o7777
+if change == "mtime":
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000))
+elif change == "ctime":
+    os.chmod(path, 0o644)
+    os.chmod(path, mode)
+elif change == "size":
+    os.chmod(path, 0o644)
+    with open(path, "ab") as handle:
+        handle.write(b"x")
+    os.chmod(path, mode)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+elif change == "inode":
+    parent = os.path.dirname(path)
+    parent_mode = os.lstat(parent).st_mode & 0o7777
+    os.chmod(parent, 0o755)
+    shutil.copyfile(path, path + ".new")
+    os.chmod(path + ".new", mode)
+    os.utime(path + ".new", ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.rename(path + ".new", path)
+    os.chmod(parent, parent_mode)
+elif change == "clone":
+    parent = os.path.dirname(path)
+    parent_mode = os.lstat(parent).st_mode & 0o7777
+    os.chmod(parent, 0o755)
+    if sys.platform == "darwin":
+        subprocess.run(["/bin/cp", "-c", path, path + ".new"], check=True)
+    else:
+        shutil.copyfile(path, path + ".new")
+    os.chmod(path + ".new", mode)
+    os.utime(path + ".new", ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.rename(path + ".new", path)
+    os.chmod(parent, parent_mode)
+else:
+    os.chmod(path, mode ^ 0o004)
+after = os.lstat(path)
+field = {"mtime": "st_mtime_ns", "ctime": "st_ctime_ns", "size": "st_size",
+         "inode": "st_ino", "clone": "st_ino", "mode": "st_mode"}[change]
+assert getattr(after, field) != getattr(before, field)
+if change == "clone":
+    assert (after.st_size, after.st_mtime_ns, after.st_mode) == (before.st_size, before.st_mtime_ns, before.st_mode)
+'\'' "$4" "$3/payload/core-rules/CLAUDE.md" || exit 94
+        if _release_stamp_matches; then exit 95; fi
+        exit 0
+      ' warm-sweep "$LIB" "$TRELLIS_HOME" "$rel" "$change"
+      [ "$status" -eq 0 ] || { echo "shell=$shell change=$change status=$status $output"; false; }
+    done
+  done
+}
+
+# The library's check returns Python's hit with its lists unbound. Nothing may
+# act on that key before a stat sweep binds it: not a later check, not a write.
+@test "an unbound memo key authorizes neither a changed release nor a write" {
+  for shell in /bin/bash "$(command -v bash)"; do
+    n=$((${n:-0} + 1))
+    rel="$(stamped_release "2.0.$n")"
+    stamp="$(stamp_file "$rel")"
+    before="$(sha256_of "$stamp")"
+    run env HOME="$SANDBOX/user" "$shell" -c '
+      lib="$1" home="$2" rel="$3"
+      . "$lib/release-stamp.sh"
+      release_stamp_check "$home" "$rel" || exit 90
+      [ -n "$_TRELLIS_RELEASE_STAMP_KEY" ] || exit 91
+      [ "${#_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[@]}" -eq 0 ] || exit 92
+      chmod u+w "$rel/payload/core-rules/CLAUDE.md"
+      printf "RULES\n" > "$rel/payload/core-rules/CLAUDE.md"
+      chmod a-w "$rel/payload/core-rules/CLAUDE.md"
+      if release_stamp_write "$home" "$rel"; then exit 93; fi
+      if _release_stamp_matches; then exit 94; fi
+      if release_stamp_check "$home" "$rel"; then exit 95; fi
+      exit 0
+    ' unbound-key "$LIB" "$TRELLIS_HOME" "$rel"
+    [ "$status" -eq 0 ] || { echo "shell=$shell status=$status $output"; false; }
+    [ "$(sha256_of "$stamp")" = "$before" ] || { echo "shell=$shell stamp rewritten"; false; }
+  done
+}
+
+@test "the sweep cache is never exported and an inherited one never seeds a shell" {
+  rel="$(stamped_release)"
+  for shell in /bin/bash "$(command -v bash)"; do
+    run env HOME="$SANDBOX/user" "$shell" -c '
+      set -a
+      . "$1/release-stamp.sh"
+      _release_stamp_lstat_rows() { return 1; }
+      release_stamp_check "$2" "$3" || exit 90
+      _release_stamp_matches || exit 91
+      [ "${#_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[@]}" -gt 0 ] || exit 92
+      env | grep "^_TRELLIS_RELEASE_STAMP_" && exit 93
+      export _TRELLIS_RELEASE_STAMP_CONTEXT="$$" _TRELLIS_RELEASE_STAMP_SWEEP_KEYS=forged _TRELLIS_RELEASE_STAMP_SWEEPS=forged
+      exec "$4" -c '\''
+        . "$1/release-stamp.sh"
+        [ "${#_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[@]}" -eq 0 ] && [ "${#_TRELLIS_RELEASE_STAMP_SWEEPS[@]}" -eq 0 ] || exit 94
+      '\'' child "$1"
+    ' no-export "$LIB" "$TRELLIS_HOME" "$rel" "$shell"
+    [ "$status" -eq 0 ] || { echo "shell=$shell status=$status $output"; false; }
+  done
+}
+
+# GPT review M1 without mounting volumes: a raw APFS clone keeps every inode
+# and time but not the device. Simulate it mounted for the first observation
+# a recheck makes and gone for any later one, by adding 1 to every device the
+# first lstat pass or stat process prints. Each row's device must come from
+# its own observation, so the recheck refuses on the Python path and on the
+# stat fallback, cold or warm, whatever a later observation would show.
+@test "a mount switch between observations of one recheck is refused" {
+  rel="$(stamped_release)"
+  for shell in /bin/bash "$(command -v bash)"; do
+    for route in python stat; do
+      for cache in cold warm; do
+        run env HOME="$SANDBOX/user" "$shell" -c '
+          lib="$1" home="$2" rel="$3" route="$4" cache="$5" marker="$6"
+          . "$lib/release-stamp.sh"
+          release_stamp_check "$home" "$rel" || exit 90
+          _release_stamp_matches || exit 91
+          [ "$cache" = warm ] || { _TRELLIS_RELEASE_STAMP_SWEEP_KEYS=(); _TRELLIS_RELEASE_STAMP_SWEEPS=(); }
+          tab="$(printf "\t")"
+          # Print the first observation with every device plus 1 (a line
+          # whose first word is not a number passes through unchanged).
+          switched() {
+            local sep="$1" out="$2" line first rest
+            while IFS= read -r line; do
+              first="${line%%"$sep"*}" rest="${line#*"$sep"}"
+              case "$first" in ""|*[!0-9]*) printf "%s\n" "$line" ;; *) printf "%s%s%s\n" "$((first + 1))" "$sep" "$rest" ;; esac
+            done <<EOF
+$out
+EOF
+          }
+          rm -f "$marker"
+          if [ "$route" = python ]; then
+            eval "$(declare -f _release_stamp_lstat_rows | sed "1s/_release_stamp_lstat_rows/real_lstat_rows/")"
+            _release_stamp_lstat_rows() {
+              local out
+              out="$(real_lstat_rows)" || return 1
+              if [ -e "$marker" ]; then printf "%s\n" "$out"; return 0; fi
+              : > "$marker"
+              switched " " "$out"
+            }
+          else
+            _release_stamp_lstat_rows() { return 1; }
+            eval "$(declare -f _release_stamp_stat | sed "1s/_release_stamp_stat/real_release_stamp_stat/")"
+            _release_stamp_stat() {
+              local out
+              out="$(real_release_stamp_stat "$@")" || return 1
+              if [ -e "$marker" ]; then printf "%s\n" "$out"; return 0; fi
+              : > "$marker"
+              switched "$tab" "$out"
+            }
+          fi
+          if _release_stamp_matches; then echo "accepted a switched device ($route, $cache)"; exit 92; fi
+          [ -e "$marker" ] || exit 93
+          exit 0
+        ' mount-switch "$LIB" "$TRELLIS_HOME" "$rel" "$route" "$cache" "$SANDBOX/switched"
+        [ "$status" -eq 0 ] || { echo "shell=$shell route=$route cache=$cache status=$status $output"; false; }
+      done
+    done
+  done
+}
+
+# A filesystem with coarse ctime cannot be made here, so run the library's
+# own lstat program with os.lstat reporting whole-millisecond ctimes: a
+# release entry must never print a row that could match, an anchor keeps
+# its "dev ino mode" row.
+@test "the lstat recheck never matches a coarse ctime" {
+  rel="$(stamped_release)"
+  for shell in /bin/bash "$(command -v bash)"; do
+    run env HOME="$SANDBOX/user" "$shell" -c '
+      . "$1/release-stamp.sh"
+      release_stamp_check "$2" "$3" || exit 90
+      printf "%s\0" E A "$3/payload/core-rules/CLAUDE.md" "${3%/*}" |
+        "$4" -I -S -c "
+import os
+real = os.lstat
+def coarse(path):
+    s = real(path)
+    return os.stat_result(tuple(s)[:10] + (s.st_atime, s.st_mtime, s.st_ctime, s.st_atime_ns, s.st_mtime_ns, s.st_ctime_ns // 1000000 * 1000000))
+os.lstat = coarse
+exec(compile(r\"\"\"$_RELEASE_STAMP_LSTAT_PROGRAM\"\"\", \"lstat\", \"exec\"))
+" 2
+    ' coarse "$LIB" "$TRELLIS_HOME" "$rel" "$(command -v python3)"
+    [ "$status" -eq 0 ] || { echo "shell=$shell status=$status $output"; false; }
+    [ "${lines[0]}" = "ok 2" ] && [ "${lines[1]}" = coarse ] && [[ "${lines[2]}" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]] ||
+      { echo "shell=$shell $output"; false; }
+  done
+}
+
+# The lstat pass and the stat sweep must give the same verdict on every
+# stamp fixture: unchanged, every recorded field of a file, directory and
+# anchor row forged, all release devices moved, and each real change.
+@test "the Python lstat recheck and the stat sweep agree on every stamp fixture" {
+  plain="$(stamped_release 3.0.1)"
+  launcher="$(install_release 3.0.2)"
+  reseal_release "$launcher" sh -c 'mkdir -p scripts; printf "#!/bin/sh\nexit 0\n" > scripts/trellis; chmod 755 scripts/trellis'
+  run stamped_verify "$launcher"
+  [ "$status" -eq 0 ] || { echo "stamp launcher fixture: $output"; false; }
+  for shell in /bin/bash "$(command -v bash)"; do
+    for change in none mtime ctime size inode mode clone added; do
+      if [ "$change" = none ]; then rels="$plain $launcher"; else n=$((${n:-0} + 1)); rels="$(stamped_release "3.1.$n")"; fi
+      for rel in $rels; do
+        run env HOME="$SANDBOX/user" "$shell" -c '
+          lib="$1" home="$2" rel="$3" change="$4" counter="$5"
+          . "$lib/release-stamp.sh"
+          release_stamp_check "$home" "$rel" || exit 90
+          eval "$(declare -f _release_stamp_lstat_rows | sed "1s/_release_stamp_lstat_rows/real_lstat_rows/")"
+          force_stat=0
+          _release_stamp_lstat_rows() {
+            local out
+            [ "$force_stat" = 0 ] || return 1
+            out="$(real_lstat_rows)" || { echo failed >> "$counter"; return 1; }
+            echo ran >> "$counter"
+            printf "%s\n" "$out"
+          }
+          both() {
+            local py st runs
+            : > "$counter"
+            force_stat=0; if _release_stamp_matches; then py=0; else py=1; fi
+            runs="$(tr "\n" " " < "$counter")"
+            force_stat=1; _TRELLIS_RELEASE_STAMP_SWEEP_KEYS=(); _TRELLIS_RELEASE_STAMP_SWEEPS=()
+            if _release_stamp_matches; then st=0; else st=1; fi
+            [ "$runs" = "ran " ] || { echo "python lstat pass did not decide $1: $runs"; exit 94; }
+            [ "$py" = "$st" ] && [ "$py" = "$2" ] || { echo "disagree $1: python=$py stat=$st expected=$2"; exit 95; }
+          }
+          if [ "$change" != none ]; then
+            both unchanged 0
+            "$6" -I -c '\''
+import os, shutil, subprocess, sys
+change, path = sys.argv[1], sys.argv[2]
+before = os.lstat(path)
+mode = before.st_mode & 0o7777
+parent = os.path.dirname(path)
+parent_mode = os.lstat(parent).st_mode & 0o7777
+if change == "mtime":
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 1000))
+elif change == "ctime":
+    os.chmod(path, 0o644)
+    os.chmod(path, mode)
+elif change == "size":
+    os.chmod(path, 0o644)
+    with open(path, "ab") as handle:
+        handle.write(b"x")
+    os.chmod(path, mode)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+elif change in ("inode", "clone"):
+    os.chmod(parent, 0o755)
+    if change == "clone" and sys.platform == "darwin":
+        subprocess.run(["/bin/cp", "-c", path, path + ".new"], check=True)
+    else:
+        shutil.copyfile(path, path + ".new")
+    os.chmod(path + ".new", mode)
+    os.utime(path + ".new", ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.rename(path + ".new", path)
+    os.chmod(parent, parent_mode)
+elif change == "added":
+    os.chmod(parent, 0o755)
+    open(os.path.join(parent, "extra"), "wb").close()
+    os.chmod(parent, parent_mode)
+else:
+    os.chmod(path, mode ^ 0o004)
+'\'' "$change" "$rel/payload/core-rules/CLAUDE.md" || exit 96
+            both "$change" 1
+            exit 0
+          fi
+          both unchanged 0
+          file="" dir="" anchor="" i=0
+          while [ "$i" -lt "${#_TRELLIS_RELEASE_STAMP_PATHS[@]}" ]; do
+            case "${_TRELLIS_RELEASE_STAMP_PATHS[$i]}" in
+              "$rel/payload/core-rules/CLAUDE.md") file="$i" ;;
+              "$rel/payload/core-rules") dir="$i" ;;
+              "${rel%/*}") anchor="$i" ;;
+            esac
+            i=$((i + 1))
+          done
+          [ -n "$file" ] && [ -n "$dir" ] && [ -n "$anchor" ] || exit 92
+          for row in "$file" "$dir" "$anchor"; do
+            original="${_TRELLIS_RELEASE_STAMP_ROWS[$row]}"
+            set -- $original
+            field=1
+            while [ "$field" -le "$#" ]; do
+              forged="" k=1
+              for value in "$@"; do
+                [ "$k" -ne "$field" ] || value=$((value + 1))
+                forged="${forged:+$forged }$value"
+                k=$((k + 1))
+              done
+              _TRELLIS_RELEASE_STAMP_ROWS[$row]="$forged"
+              both "row $row field $field" 1
+              _TRELLIS_RELEASE_STAMP_ROWS[$row]="$original"
+              field=$((field + 1))
+            done
+          done
+          saved=("${_TRELLIS_RELEASE_STAMP_ROWS[@]}")
+          i=0
+          while [ "$i" -lt "${#_TRELLIS_RELEASE_STAMP_ROWS[@]}" ]; do
+            if [ "${_TRELLIS_RELEASE_STAMP_KINDS[$i]}" = E ]; then
+              row="${_TRELLIS_RELEASE_STAMP_ROWS[$i]}"
+              _TRELLIS_RELEASE_STAMP_ROWS[$i]="$((${row%% *} + 1)) ${row#* }"
+            fi
+            i=$((i + 1))
+          done
+          both "all devices moved" 1
+          _TRELLIS_RELEASE_STAMP_ROWS=("${saved[@]}")
+          both restored 0
+        ' parity "$LIB" "$TRELLIS_HOME" "$rel" "$change" "$SANDBOX/lstat-runs" "$(command -v python3)"
+        [ "$status" -eq 0 ] || { echo "shell=$shell change=$change rel=$rel status=$status $output"; false; }
+      done
+    done
+  done
+}
+
+@test "a warm sweep cache still compares every recorded field of files, directories and anchors" {
+  rel="$(stamped_release)"
+  for shell in /bin/bash "$(command -v bash)"; do
+    run env HOME="$SANDBOX/user" "$shell" -c '
+      lib="$1" home="$2" rel="$3"
+      . "$lib/release-stamp.sh"
+      release_stamp_check "$home" "$rel" || exit 90
+      _release_stamp_matches || exit 91
+      file="" dir="" anchor="" i=0
+      while [ "$i" -lt "${#_TRELLIS_RELEASE_STAMP_PATHS[@]}" ]; do
+        case "${_TRELLIS_RELEASE_STAMP_PATHS[$i]}" in
+          "$rel/payload/core-rules/CLAUDE.md") file="$i" ;;
+          "$rel/payload/core-rules") dir="$i" ;;
+          "${rel%/*}") anchor="$i" ;;
+        esac
+        i=$((i + 1))
+      done
+      [ -n "$file" ] && [ -n "$dir" ] && [ -n "$anchor" ] || exit 92
+      [ "${_TRELLIS_RELEASE_STAMP_KINDS[$anchor]}" = A ] || exit 93
+      # One field of one row at a time, each restored and re-accepted.
+      for row in "$file" "$dir" "$anchor"; do
+        original="${_TRELLIS_RELEASE_STAMP_ROWS[$row]}"
+        set -- $original
+        field=1
+        while [ "$field" -le "$#" ]; do
+          forged="" k=1
+          for value in "$@"; do
+            [ "$k" -ne "$field" ] || value=$((value + 1))
+            forged="${forged:+$forged }$value"
+            k=$((k + 1))
+          done
+          _TRELLIS_RELEASE_STAMP_ROWS[$row]="$forged"
+          if _release_stamp_matches; then echo "accepted row=$row field=$field"; exit 94; fi
+          _TRELLIS_RELEASE_STAMP_ROWS[$row]="$original"
+          _release_stamp_matches || exit 95
+          field=$((field + 1))
+        done
+      done
+      # Every release entry claimed on one other device: the directories must
+      # still be compared even though the record stays on one device.
+      saved=("${_TRELLIS_RELEASE_STAMP_ROWS[@]}")
+      i=0
+      while [ "$i" -lt "${#_TRELLIS_RELEASE_STAMP_ROWS[@]}" ]; do
+        if [ "${_TRELLIS_RELEASE_STAMP_KINDS[$i]}" = E ]; then
+          row="${_TRELLIS_RELEASE_STAMP_ROWS[$i]}"
+          _TRELLIS_RELEASE_STAMP_ROWS[$i]="$((${row%% *} + 1)) ${row#* }"
+        fi
+        i=$((i + 1))
+      done
+      if _release_stamp_matches; then echo "accepted a moved device"; exit 96; fi
+      _TRELLIS_RELEASE_STAMP_ROWS=("${saved[@]}")
+      _release_stamp_matches || exit 97
+      exit 0
+    ' warm-fields "$LIB" "$TRELLIS_HOME" "$rel"
+    [ "$status" -eq 0 ] || { echo "shell=$shell status=$status $output"; false; }
+  done
+}
+
+@test "launcher reuses its full proof only while every release input is unchanged" {
+  rel="$(install_release)"
+  reseal_release "$rel" sh -c 'mkdir -p scripts; printf "#!/bin/sh\nexit 0\n" > scripts/trellis; chmod 755 scripts/trellis'
+  run env HOME="$SANDBOX/user" TMPDIR="$SANDBOX/tmp" bash -c '
+    old_path="$PATH"
+    body="$(awk '\''/^# -- trellis launcher body --$/ { on=1; next } /^launcher_main "\$@"$/ { exit } on { print }'\'' "$4")"
+    eval "$body"
+    PATH="$old_path"
+    log_dir="$5"
+    eval "$(declare -f launcher_verify_release_body | sed "1s/launcher_verify_release_body/real_launcher_verify_release_body/")"
+    launcher_verify_release_body() { echo verify >> "$log_dir/launcher-runs"; real_launcher_verify_release_body "$@"; }
+    launcher_verify_release "$3" 1.0.0 >/dev/null || exit 90
+    launcher_verify_release "$3" 1.0.0 >/dev/null || exit 91
+    [ "$(wc -l < "$5/launcher-runs" | tr -d " ")" = 1 ] || exit 92
+    chmod u+w "$3/payload/core-rules/CLAUDE.md"
+    printf "RULES\n" > "$3/payload/core-rules/CLAUDE.md"
+    chmod a-w "$3/payload/core-rules/CLAUDE.md"
+    if launcher_verify_release "$3" 1.0.0 >/dev/null; then exit 93; fi
+    [ "$(wc -l < "$5/launcher-runs" | tr -d " ")" = 2 ] || exit 94
+  ' launcher-memo "$LIB" "$TRELLIS_HOME" "$rel" "$REPO_ROOT/scripts/trellis-launcher.sh" "$SANDBOX"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+}
+
+@test "allexport cannot leak a stamp proof or its pending token to a child" {
+  rel="$(stamped_release)"
+  run env HOME="$SANDBOX/user" bash -c '
+    set -a
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 90
+    . "$1/release-stamp.sh"
+    release_stamp_check "$2" "$3" || exit 91
+    env | grep "^_TRELLIS_RELEASE_STAMP_" && exit 92
+    exit 0
+  ' allexport "$LIB" "$TRELLIS_HOME" "$rel"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
 }
 
 # A stamp check would miss forever on a stamp past STAMP_LIMIT, so write must
@@ -507,6 +1168,12 @@ ONE_ENTRY='info.st_mode \& 0o100 and stat.S_ISREG(info.st_mode)'
   done
 }
 
+@test "launcher carries the same stat-token core as the stamp library" {
+  library="$(awk '/^# BEGIN T11 STAMP-STAT CORE/ { on=1 } on { print } /^# END T11 STAMP-STAT CORE/ { exit }' "$LIB/release-stamp.sh")"
+  launcher="$(awk '/^# BEGIN T11 STAMP-STAT CORE/ { on=1 } on { print } /^# END T11 STAMP-STAT CORE/ { exit }' "$REPO_ROOT/scripts/trellis-launcher.sh")"
+  [ -n "$library" ] && [ "$library" = "$launcher" ]
+}
+
 @test "the stamp program is quote-free so the dispatcher can carry it" {
   [ "$(grep -c "'" "$LIB/release_stamp.py")" -eq 0 ]
   python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$LIB/release_stamp.py"
@@ -525,6 +1192,10 @@ install_executed_release() {
     mkdir -p "$rel/payload/${path%/*}"
     cp "$REPO_ROOT/$path" "$rel/payload/$path"
   done < <(sed -n '/^  local -a paths=($/,/^  )$/p' "$LIB/attachment.sh" | sed '1d;$d;s/^ *//')
+  # Include the helper independently of the verifier's list: a missing list
+  # entry must not silently make the tamper test's fixture omit the file.
+  mkdir -p "$rel/payload/scripts/lib"
+  cp "$REPO_ROOT/scripts/lib/trellis-python.sh" "$rel/payload/scripts/lib/trellis-python.sh"
   seal_release 2.0.0
   printf '%s\n' "$rel"
 }
@@ -562,6 +1233,15 @@ dispatcher_check() {
   [ "$status" -ne 0 ]
   run dispatcher_check trellis_verify_release_executed "$rel"
   [ "$status" -ne 0 ]
+}
+
+@test "dispatcher: the executed check refuses a changed trusted python helper" {
+  rel="$(install_executed_release)"
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  tamper_keeping_size_and_mtime "$rel/payload/scripts/lib/trellis-python.sh"
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -ne 0 ] || { echo 'changed trusted python helper was accepted'; false; }
 }
 
 @test "dispatcher: a python3 that exits 0 without the hit line is a miss, and the full verify refuses" {
@@ -602,7 +1282,15 @@ dispatcher_check() {
       ;;
   esac
   run dispatcher_check trellis_verify_release "$rel"
-  [ "$status" -eq 0 ] || skip 'the full verify already refuses this ACL, so no stamp can cover it'
+  if [ "$status" -ne 0 ]; then
+    # This host's full verify already sees the ACL, so it writes no stamp; the
+    # property still holds only if the executed check refuses it too. Asserted,
+    # never skipped: a skip fails the recorded oracle (T73b rule 3).
+    [ ! -e "$(stamp_file "$rel")" ] || { echo 'a refusing full verify wrote a stamp'; false; }
+    run dispatcher_check trellis_verify_release_executed "$rel"
+    [ "$status" -ne 0 ] || { echo 'the executed check accepted an ACL the full verify refused'; false; }
+    return 0
+  fi
   [ -f "$(stamp_file "$rel")" ]
   run dispatcher_check trellis_verify_release_executed "$rel"
   [ "$status" -ne 0 ] || { echo 'the stamp hit skipped the ACL refusal'; false; }
@@ -645,6 +1333,22 @@ reseal_release() {
     run dispatcher_check trellis_verify_release_executed "$rel"
     [ "$status" -ne 0 ] || { echo "$layout: the stamp hit skipped the no-link rule"; false; }
   done
+}
+
+# release_verify.py runs inside the full verify only when the release has it,
+# so the executed check covers it when present and does not demand it of a
+# release from before it (install_executed_release copies the fixed list only).
+@test "dispatcher: the executed check covers release_verify.py only when the release has it" {
+  rel="$(install_executed_release)"
+  [ ! -e "$rel/payload/scripts/lib/release_verify.py" ]
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -eq 0 ] || { echo "without: $output"; false; }
+  reseal_release "$rel" cp "$LIB/release_verify.py" scripts/lib/release_verify.py
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -eq 0 ] || { echo "with: $output"; false; }
+  tamper_keeping_size_and_mtime "$rel/payload/scripts/lib/release_verify.py"
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -ne 0 ] || { echo 'a changed release_verify.py passed the executed check'; false; }
 }
 
 # The executed check writes no stamp (it is not a full verify). A stamp that
@@ -711,14 +1415,15 @@ postjob_release_leg() {
 # release_store_locate reads the stamp (show-config, doctor, attach, configure)
 # ---------------------------------------------------------------------------
 
+# The shell pass of the full verify allocates its scratch in the release
+# store, so with the store read-only it fails, and a locate that passes there
+# took no full verify. The batch pass (release_verify.py) needs no scratch, so
+# these cases unset it to keep that witness.
 locate() {
   env HOME="$SANDBOX/user" TMPDIR="$SANDBOX/tmp" TRELLIS_HOME="$TRELLIS_HOME" bash -c \
-    '. "$1/release-store.sh"; release_store_locate "$2"' locate "$LIB" "$1"
+    '. "$1/release-store.sh"; _RELEASE_STORE_VERIFY_PROGRAM=""; release_store_locate "$2"' locate "$LIB" "$1"
 }
 
-# A full verify allocates its scratch in the release store, so with the store
-# read-only any full verify fails, and a locate that passes there took no full
-# verify.
 @test "locate: a stamp hit skips the full verify, a miss takes it, and locate writes no stamp" {
   rel="$(install_release)"
   run locate 1.0.0
@@ -753,6 +1458,7 @@ locate() {
   chmod 500 "$TRELLIS_HOME/releases"
   run env HOME="$SANDBOX/user" TMPDIR="$SANDBOX/tmp" TRELLIS_HOME="$TRELLIS_HOME" bash -c '
     . "$1/release-store.sh"
+    _RELEASE_STORE_VERIFY_PROGRAM=""
     release_store_locate 1.0.0 >/dev/null || exit 71
     release_store_verify 1.0.0 || exit 72
   ' memo "$LIB"

@@ -44,3 +44,39 @@ setup() {
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *'edited: a heredoc brace is part of the body'* ]]
 }
+
+@test "release-store split check admits a new case only inside a lane block" {
+  # Bats rewrites literal @test headers even in a printf, so build them by name.
+  local header='@''test'
+  printf '%s\n' '# BEGIN LANE Z9' "$header \"a lane case\" {" '  [ 3 -eq 3 ]' '}' '# END LANE Z9' >> "$PART"
+  run bash "$CHECK" "$TREE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'(1 lane additions)'* ]]
+
+  cp "$ORIGINAL" "$PART"
+  printf '%s\n' "$header \"a stray case\" {" '  [ 3 -eq 3 ]' '}' >> "$PART"
+  run bash "$CHECK" "$TREE"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'added or renamed: a stray case'* ]]
+
+  # A lane block excuses only its own part's case of that name.
+  printf '%s\n' '# BEGIN LANE Z9' "$header \"a stray case\" {" '  [ 3 -eq 3 ]' '}' '# END LANE Z9' \
+    > "$TREE/scripts/tests/release-store-part2.bats"
+  run bash "$CHECK" "$TREE"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'added or renamed: a stray case'* ]]
+  rm "${TREE:?}/scripts/tests/release-store-part2.bats"
+
+  # A lane block cannot re-home or rewrite an original case.
+  head -n 6 "$ORIGINAL" > "$PART"
+  printf '%s\n' '# BEGIN LANE Z9' "$header \"a second case\" {" '  [ 2 -eq 2 ]' '}' '# END LANE Z9' >> "$PART"
+  run bash "$CHECK" "$TREE"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'lane case reuses an original name: a second case'* ]]
+
+  cp "$ORIGINAL" "$PART"
+  printf '%s\n' '# BEGIN LANE Z9' "$header \"an open lane\" {" '  [ 3 -eq 3 ]' '}' >> "$PART"
+  run bash "$CHECK" "$TREE"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *'unbalanced lane markers'* ]]
+}

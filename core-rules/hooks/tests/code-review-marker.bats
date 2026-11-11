@@ -1,15 +1,9 @@
 #!/usr/bin/env bats
-# Tests for the S4 review-coverage rule (spec 050, SC6/SC7): the idempotency
-# marker must be keyed on the FULL diff, never on the 200000-byte reviewer
-# payload prefix. Two diffs sharing a 200 KB prefix must hash differently; an
-# over-cap diff reports incomplete and writes NO marker, so the next Stop
-# re-reviews instead of short-circuiting on a prefix review.
-#
-# Covers tasks T8 (this file) against core-rules/hooks/code-review-subagent.sh:
-#   1. shared-200KB-prefix diffs hash differently (no shared-marker skip)
-#   2. over-cap diff reports incomplete + writes NO marker
-#   3. same over-cap diff invoked twice runs the review both times
-#   4. under-cap completed review still writes its marker (regression guard)
+# S4 safety retained under spec 074 D2: a prefix never earns completed coverage.
+# D2 supersedes repeated prefix-review: over-cap changes invoke NO reviewer,
+# retain unmet state and emit an actionable notice once per capture identity.
+# Tests retain shared-prefix/tail changes, over-cap/no marker, repeated Stop,
+# and under-cap successful completion as separate acceptance assertions.
 #
 # PORTABLE / MIRROR-CLEAN: no absolute machine paths. The hook is located from
 # $HOOKS_DIR (helpers.bash, resolved from $BATS_TEST_DIRNAME). Fixtures live in
@@ -111,10 +105,9 @@ run_hook() {
 # =========================================================================
 # SAFETY: two diffs sharing the first 200000 bytes must not share one marker.
 # Run 1 reviews filler + tail=A; run 2 rewrites only the tail (bytes past the
-# cap) to B. The capped reviewer payload is byte-identical across runs, so a
-# prefix-keyed marker would short-circuit run 2. Both runs must review.
+# cap) to B. Neither oversized change set may be prefix-reviewed or completed.
 # =========================================================================
-@test "marker: two diffs sharing the 200 KB prefix hash differently (both runs review)" {
+@test "marker: two oversized diffs sharing a prefix never call review or share completion" {
   setup_overcap_repo 'TAIL = "alpha"'
   COUNT="$BATS_TEST_TMPDIR/prefix.count"; : > "$COUNT"
   stub="$(make_reviewer_stub 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
@@ -128,14 +121,14 @@ run_hook() {
   run_hook
   [ "$status" -eq 0 ]
 
-  [ "$(reviewer_call_count "$COUNT")" -eq 2 ]
+  [ "$(reviewer_call_count "$COUNT")" -eq 0 ]
+  [ "$(marker_count)" -eq 0 ]
 }
 
 # =========================================================================
-# SAFETY: a diff larger than the reviewer payload cap was only prefix-reviewed,
-# so the hook must report incomplete and mint NO completed marker.
+# SAFETY: an oversized diff is UNREVIEWED, with no reviewer call or marker.
 # =========================================================================
-@test "marker: an over-cap diff reports incomplete and writes NO marker" {
+@test "marker: an over-cap diff reports unmet and writes NO marker" {
   setup_overcap_repo 'TAIL = "alpha"'
   COUNT="$BATS_TEST_TMPDIR/overcap.count"; : > "$COUNT"
   stub="$(make_reviewer_stub 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
@@ -143,15 +136,15 @@ run_hook() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$stderr" == *'incomplete'* ]] || { echo "$stderr"; false; }
+  [[ "$stderr" == *'UNREVIEWED'* ]] || { echo "$stderr"; false; }
+  [ "$(reviewer_call_count "$COUNT")" -eq 0 ]
   [ "$(marker_count)" -eq 0 ]
 }
 
 # =========================================================================
-# SAFETY: with no completed marker written for a prefix review, the next Stop
-# over the same over-cap diff must run the review again, not skip it.
+# SAFETY: repeated oversized Stops stay unmet without repeating paid review.
 # =========================================================================
-@test "marker: a second invocation over the same over-cap diff re-runs the review" {
+@test "marker: consecutive over-cap Stops make zero reviewer calls" {
   setup_overcap_repo 'TAIL = "alpha"'
   COUNT="$BATS_TEST_TMPDIR/rerun.count"; : > "$COUNT"
   stub="$(make_reviewer_stub 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
@@ -162,7 +155,7 @@ run_hook() {
   run_hook
   [ "$status" -eq 0 ]
 
-  [ "$(reviewer_call_count "$COUNT")" -eq 2 ]
+  [ "$(reviewer_call_count "$COUNT")" -eq 0 ]
   [ "$(marker_count)" -eq 0 ]
 }
 

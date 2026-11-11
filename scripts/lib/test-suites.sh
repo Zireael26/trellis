@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Single source of truth for which bats suites under `scripts/tests/` run, where
-# they run, and which are deliberately skipped and why.
+# they run, and which are deliberately skipped and why. It also enumerates the
+# non-bats groups the canonical runner stages: the native Rust integration
+# targets and the local Pi Node suites (T41). Those two were outside every stage
+# while only `scripts/tests/*.bats` was globbed.
 #
 # Nothing is hand-listed as INCLUDED. The runner globs the directory, so a suite
 # is covered the moment it lands. The one hand-maintained list is
@@ -106,6 +109,105 @@ test_suites_core() {
     [ -f "$suite" ] || continue
     printf '%s\n' "${suite#"$root/"}"
   done | LC_ALL=C sort
+}
+
+# Native Rust integration targets, as repository-relative files. Cargo names an
+# integration target after its file stem, so the runner runs one `--test` per
+# file: a failure names the target that caused it and LPT can shard them. The
+# glob is the registration. Before T41 these files were outside every runner
+# stage, so deleting one needed no other edit to stay green.
+test_suites_native() {
+  local root suite
+  root="$(test_suites_root)/.."
+  for suite in "$root"/native/trellis-hooks/tests/*.rs; do
+    [ -f "$suite" ] || continue
+    printf '%s\n' "${suite#"$root"/}"
+  done | LC_ALL=C sort
+}
+
+# Local Pi Node suites, as repository-relative files. Only `*.test.mjs` is a
+# suite; the neighbouring helpers (`delivered-fixture.mjs`, `bench-dispatch.mjs`,
+# `conformance-observations.mjs`) are imported by them and are not run directly.
+# Like test_suites_native, this glob is the registration.
+test_suites_pi() {
+  local root suite
+  root="$(test_suites_root)/.."
+  for suite in "$root"/core-rules/pi/tests/*.test.mjs; do
+    [ -f "$suite" ] || continue
+    printf '%s\n' "${suite#"$root"/}"
+  done | LC_ALL=C sort
+}
+
+# Whether the cargo (native) stages run for this change (owner 2026-11-10, T41).
+# Usage: test_suites_native_decision SCOPE [BASE]
+# Prints one line, `run<TAB>reason` or `skip<TAB>reason`, and returns 0.
+#
+# The stages run when the diff from the base to the working tree (tracked
+# changes plus untracked, unignored files) touches a native build input: any
+# path under native/trellis-hooks/ except target/, or any key of the "inputs"
+# map in core-rules/native/artifacts.json. That map is the build's own input
+# set (scripts/build-native-hooks.sh writes it and `verify --source` checks
+# it), so this list cannot drift from what the binary is built from; a new
+# include_bytes! target is itself a native/trellis-hooks/ change.
+#
+# The base comes from the shared resolver (process-gate lib/diff-base.sh):
+# `db_resolve --base BASE` when the caller names the range base (CI passes the
+# PR base or the pushed-from commit), else its push-mode default for the local
+# scope. CI scope without a base, an unresolvable base, a failed diff, an
+# unreadable input map or a path Git had to quote all answer `run` (fail closed).
+test_suites_native_decision() {
+  local scope="$1" base="${2:-}" root resolved base_sha why inputs changed untracked path nl
+  nl='
+'
+  root="$(test_suites_root)/.."
+  root="$(CDPATH='' cd "$root" && pwd -P)" || { printf 'run\trepository root unresolvable; fail closed\n'; return 0; }
+  if [ -z "$base" ] && [ "$scope" != local ]; then
+    printf 'run\tno range base given for scope %s; fail closed\n' "$scope"
+    return 0
+  fi
+  # A subshell keeps the resolver's db_* functions and globals out of the caller.
+  resolved="$(
+    CDPATH='' cd "$root" || exit 1
+    # shellcheck source=core-rules/skills/process-gate/scripts/lib/diff-base.sh
+    . "$root/core-rules/skills/process-gate/scripts/lib/diff-base.sh" || exit 1
+    if [ -n "$base" ]; then db_resolve --base "$base"; else db_resolve; fi
+    printf '%s\t%s (%s)' "$DB_BASE_SHA" "$DB_SOURCE" "$DB_REASON"
+  )" || resolved=""
+  base_sha="${resolved%%$'\t'*}"
+  why="${resolved#*$'\t'}"
+  if [ -z "$base_sha" ]; then
+    [ -n "$resolved" ] || why='resolver unavailable'
+    printf 'run\tdiff base unknown: %s; fail closed\n' "$why"
+    return 0
+  fi
+  if ! inputs="$(jq -r '.inputs | keys[]' "$root/core-rules/native/artifacts.json" 2>/dev/null)" ||
+     [ -z "$inputs" ]; then
+    printf 'run\tnative input set unreadable (core-rules/native/artifacts.json); fail closed\n'
+    return 0
+  fi
+  if ! changed="$(git -C "$root" --no-optional-locks -c core.quotePath=false \
+        diff --no-renames --name-only "$base_sha" -- 2>/dev/null)" ||
+     ! untracked="$(git -C "$root" --no-optional-locks -c core.quotePath=false \
+        ls-files --others --exclude-standard 2>/dev/null)"; then
+    printf 'run\tdiff from %s failed; fail closed\n' "$(printf '%s' "$base_sha" | cut -c1-12)"
+    return 0
+  fi
+  changed="$changed$nl$untracked"
+  while IFS= read -r path; do
+    case "$path" in
+      '') continue ;;
+      '"'*) printf 'run\tunclassifiable changed path %s; fail closed\n' "$path"; return 0 ;;
+      native/trellis-hooks/target/*) continue ;;
+      native/trellis-hooks/*) printf 'run\tnative build input changed: %s\n' "$path"; return 0 ;;
+    esac
+    case "$nl$inputs$nl" in
+      *"$nl$path$nl"*) printf 'run\tnative build input changed: %s\n' "$path"; return 0 ;;
+    esac
+  done <<EOF
+$changed
+EOF
+  printf 'skip\tno native build input changed since %s, base %s\n' \
+    "$(printf '%s' "$base_sha" | cut -c1-12)" "$why"
 }
 
 # Exclusion scope for one suite, or the empty string when it is not excluded.

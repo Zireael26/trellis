@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # pr-gate-shiftleft.sh — Claude PreToolUse(Bash) recorder for `gh pr create`.
 # Source: Trellis / core-rules / hooks (Spec 005 C3 / T-P4d).
 #
@@ -321,6 +322,9 @@ _pg_has_gh_pr_create() {
           _pg_finish_word
           ;;
         ';'|'&'|'|'|'('|')'|'{'|'}')
+          # A parenthesis in the PR flag span may start command, arithmetic,
+          # or process substitution. Later flags cannot be resolved safely.
+          if [ "$stage" -eq 3 ] && [ "$ch" = '(' ]; then PG_UNCERTAIN=1; fi
           _pg_boundary "$ch"
           if [ "$ch" = '(' ] && [ "$quoted_subshell_depth" -gt 0 ]; then
             quoted_subshell_parens[$quoted_subshell_depth]=$((quoted_subshell_parens[$quoted_subshell_depth] + 1))

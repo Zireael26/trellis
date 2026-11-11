@@ -12,7 +12,10 @@ MAPPER = ROOT / "scripts/lib/push-test-map.py"
 CORE = {"scripts/tests/" + name + ".bats" for name in (
     "posix-bootstrap-prologue", "suite-coverage", "push-test-map", "release-tag-consumers",
     "check-process-liveness", "test-fencing", "release-payload-commit", "live-model-roster",
-    "gpt6-roster-sweep", "diff-base-sync", "no-legacy-herdr")}
+    "gpt6-roster-sweep", "diff-base-sync", "no-legacy-herdr",
+    # T39: its Bash 3.2 compatibility scan reads every shipped shell source,
+    # including the narrowing leaf entrypoints, so no narrowed push may skip it.
+    "native-hooks-delivery")}
 TARGET = "scripts/tests/check-decisions-log.bats"
 SOURCE = "scripts/check-decisions-log.sh"
 DOCS = {"scripts/tests/gpt6-roster-sweep.bats"}
@@ -118,6 +121,8 @@ class PushTestMapTests(unittest.TestCase):
             "recover-orphan-journal": "find reads a fixture backup directory",
             "run-tests-local": "suite glob is in a generated fixture runner",
             "pi-guide-parity": "recursive greps cover docs, core-rules/pi and foreman; those paths force full tests",
+            "attachment": "grep -R reads ROOT, a per-test mktemp scratch directory",
+            "trellis-latency-bench-repeat": "find reads ROOT/tmp, the per-test BATS_TEST_TMPDIR scratch",
         }
         scanners = set()
         for suite in (ROOT / "scripts/tests").glob("*.bats"):

@@ -15,8 +15,15 @@ setup() {
   HOME="$SANDBOX/operator-home"
   TRELLIS_HOME="$SANDBOX/trellis-home"
   LAUNCHCTL_LOG="$SANDBOX/launchctl.log"
-  mkdir -p "$HOME/.local/bin" "$TRELLIS_HOME/releases/1.2.3/payload/scripts"
-  chmod 700 "$TRELLIS_HOME"
+  FIXTURE_SCRIPTS="$SANDBOX/fixture-scripts"
+  FIXTURE_STUB_BIN="$SANDBOX/stub-bin"
+  mkdir -p "$HOME/.local/bin" "$TRELLIS_HOME/releases/1.2.3/payload/scripts" "$FIXTURE_SCRIPTS" "$FIXTURE_STUB_BIN"
+  chmod 700 "$HOME" "$TRELLIS_HOME"
+  printf '#!/bin/sh\nexit 0\n' > "$FIXTURE_SCRIPTS/disk-janitor.sh"
+  printf '#!/bin/bash\nexec %q "$@"\n' "$(command -v git)" > "$FIXTURE_STUB_BIN/git"
+  printf '#!/bin/sh\nexit 99\n' > "$FIXTURE_STUB_BIN/gh"
+  printf '#!/bin/sh\nexit 99\n' > "$FIXTURE_STUB_BIN/launchctl"
+  chmod 700 "$FIXTURE_SCRIPTS/disk-janitor.sh" "$FIXTURE_STUB_BIN/git" "$FIXTURE_STUB_BIN/gh" "$FIXTURE_STUB_BIN/launchctl"
   cat > "$TRELLIS_HOME/config.json" <<'EOF'
 {"schema_version":1,"active_cli_release":"1.2.3"}
 EOF
@@ -85,11 +92,13 @@ run_installer() {
     TRELLIS_TEST_ACL_PATH="${TRELLIS_TEST_ACL_PATH:-}" \
     TRELLIS_TEST_ACL_PREFIX="${TRELLIS_TEST_ACL_PREFIX:-}" \
     TRELLIS_TEST_VAR_FOLDERS_PREFIX="${TRELLIS_TEST_VAR_FOLDERS_PREFIX:-}" \
-    TRELLIS_TEST_SKIP_JANITOR_DRY_RUN="${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN:-}" \
+    FIXTURE_JANITOR_OK="${FIXTURE_JANITOR_OK:-}" FIXTURE_SCRIPTS="$FIXTURE_SCRIPTS" FIXTURE_STUB_BIN="$FIXTURE_STUB_BIN" \
     /bin/bash -c '
       installer="$1"
       shift
       . "$installer"
+      PATH="$FIXTURE_STUB_BIN:$PATH"; export PATH
+      if [ "${FIXTURE_JANITOR_OK:-}" = 1 ]; then SCRIPT_DIR="$FIXTURE_SCRIPTS"; fi
       launchctl_run() {
         printf "%s\t%s\n" "$1" "$2" >> "$LAUNCHCTL_LOG"
       }
@@ -267,6 +276,21 @@ SH
   [ ! -s "$LAUNCHCTL_LOG" ]
 }
 
+# macOS ls prints "@" for an extended attribute in place of the "+" of an ACL.
+@test "path_has_extended_acl sees an ACL that an xattr marker hides" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: ls -e ACL listing and chmod +a fixture'
+  local file="$SANDBOX/acl-probe"
+  : > "$file"
+  chmod 600 "$file"
+  xattr -w com.example.x 1 "$file"
+  run /bin/bash -c '. "$1"; path_has_extended_acl "$2"' _ "$INSTALLER" "$file"
+  [ "$status" -eq 1 ] || { echo "xattr alone: status=$status $output"; false; }
+  chmod +a "user:$(id -un) allow read" "$file"
+  [[ "$(LC_ALL=C /bin/ls -ld "$file")" == '-rw-------@ '* ]] || { ls -lde "$file"; false; }
+  run /bin/bash -c '. "$1"; path_has_extended_acl "$2"' _ "$INSTALLER" "$file"
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+}
+
 @test "rejects an ACL-bearing agent destination before writes" {
   local destination="$HOME/Library/LaunchAgents/$REPORT_LABEL.plist"
   make_owned_report
@@ -304,7 +328,7 @@ SH
   make_owned_apply
 
   # Re-running with dry-run succeeding replaces the degraded agent without requiring manual remedy
-  TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_installer --with-apply
+  FIXTURE_JANITOR_OK=1 run_installer --with-apply
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -f "$apply" ]
   grep -Fq "load	$apply" "$LAUNCHCTL_LOG"
@@ -314,7 +338,7 @@ SH
   local report="$HOME/Library/LaunchAgents/$REPORT_LABEL.plist"
   local apply="$HOME/Library/LaunchAgents/org.trellis.disk-janitor-apply.plist" expected_log
 
-  TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_installer --with-apply
+  FIXTURE_JANITOR_OK=1 run_installer --with-apply
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -f "$report" ]

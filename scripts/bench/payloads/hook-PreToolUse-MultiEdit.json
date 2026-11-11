@@ -1,0 +1,5 @@
+{
+  "session_id": "bench-session-0001", "transcript_path": "@TRANSCRIPT@", "cwd": "@PROJECT@",
+  "hook_event_name": "PreToolUse", "tool_name": "MultiEdit",
+  "tool_input": {"file_path": "@PROJECT@/src/a.ts", "edits": [{"old_string": "return a + b;", "new_string": "return a + b; // checked"}]}
+}

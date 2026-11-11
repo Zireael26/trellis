@@ -477,6 +477,7 @@ relink_one() {
           "TEMP=$SYNC_TMPDIR" \
           "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
           "LC_ALL=C" \
+          "TRELLIS_VERIFIED_PAYLOAD=$ACTIVE_REPAIR_SNAPSHOT/payload" \
           "TRELLIS_LIBS_PRELOADED=1" \
           /bin/bash --noprofile --norc -s -- relink --home "$HOME_PATH" --fleet "$fleet" \
             "${binding_args[@]}" "$root"

@@ -28,7 +28,7 @@ The `check-secrets.sh` script greps the diff for these patterns. False positives
 | OpenAI key | `sk-[A-Za-z0-9]{48}` |
 | Connection string with password | `(postgres\|postgresql\|mysql\|mongodb\|redis)://[^:@/]+:[^@/]+@` |
 
-A match: **fail** with the file:line and the pattern name. The contributor is expected to remove the file from the diff and rotate the secret immediately.
+A match: **fail** with the file:line and the pattern name. The contributor is expected to remove the file from the diff and rotate the secret immediately. Added, modified or type-changed paths that Git classifies as binary have no text hunks: the gate scans the complete new Git blob as bytes with the same patterns, reports matching files as `file:binary`, and fails as incomplete if it cannot read or scan the blob. A clean binary passes. This byte scan detects contiguous pattern bytes, not compressed, encrypted or UTF-16-encoded secrets; it may report a pre-existing match in a modified binary because it scans the whole new blob.
 
 ## False-positive handling
 
@@ -43,7 +43,7 @@ docs/examples/api.md:sk_live_FAKE_PLACEHOLDER_DOCS_ONLY
 fixtures/test-keys.txt:.*
 ```
 
-Allowlisting is auditable in git history. Reviewers should challenge new entries.
+Allowlisting is auditable in git history. Reviewers should challenge new entries. An entry with no colon, an empty path, or an empty pattern never matches; use an explicit `.*` only when the whole file has been reviewed.
 
 ## Environment variable names
 

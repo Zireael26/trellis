@@ -246,16 +246,25 @@ run_codex_with_cmd() {
   [[ "$stderr" == *"install jq"* ]]
 }
 
-@test "P1.5: jq missing + TRELLIS_NO_JQ_DEGRADE=1 → exit 0 + breadcrumb" {
+# A bright-line guard must never become a no-op (spec 074 E5): the degrade
+# hatch the advisory hooks honour does not apply here, on either harness.
+@test "P1.5: jq missing + TRELLIS_NO_JQ_DEGRADE=1 still blocks a destructive command on both harnesses" {
+  local event='{"tool_input":{"command":"rm -rf /"}}' claude_status claude_err
   jq_free_path="$(make_jq_free_path)"
   PATH_BACKUP="$PATH"; export PATH="$jq_free_path"
   export TRELLIS_NO_JQ_DEGRADE=1
-  run_with_stderr "$HOOK" '{}'
+  run_with_stderr "$HOOK" "$event"
+  claude_status=$status claude_err=$stderr
+  run_with_stderr "$CODEX_HOOK" "$event"
   unset TRELLIS_NO_JQ_DEGRADE
   PATH="$PATH_BACKUP"
   rm -rf "$jq_free_path"
-  [ "$status" -eq 0 ]
-  [[ "$stderr" == *"TRELLIS_NO_JQ_DEGRADE=1"* ]]
+  [ "$claude_status" -eq 2 ] || { echo "claude rc=$claude_status $claude_err"; false; }
+  [[ "$claude_err" == *"jq required but not found; refusing"* ]]
+  [[ "$claude_err" != *"degrading"* ]]
+  [ "$status" -eq 2 ] || { echo "codex rc=$status $output $stderr"; false; }
+  [ "$output" = '{"decision":"block","reason":"block-destructive: jq required but not found; refusing"}' ]
+  [[ "$stderr" != *"degrading"* ]]
 }
 
 # --- **/secrets/** reads: GCP/k8s resource identifiers are not file reads -----

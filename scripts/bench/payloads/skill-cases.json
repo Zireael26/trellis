@@ -1,0 +1,12 @@
+{
+  "schema": "trellis-skill-cases/1",
+  "cases": [
+    {"id":"known","name":"bench-known","fixture":"skill-known","bytes":128,"encoding":"utf8","decision":"allow","expected_exit_codes":[0]},
+    {"id":"unknown","name":"bench-never-installed","fixture":"skill-unknown","bytes":null,"encoding":"utf8","decision":"allow","expected_exit_codes":[0]},
+    {"id":"qualified","name":"fixture:bench-known","fixture":"skill-known","bytes":128,"encoding":"utf8","decision":"allow","expected_exit_codes":[0]},
+    {"id":"ambiguous","name":"bench-ambiguous","fixture":"skill-ambiguous","bytes":128,"encoding":"utf8","decision":"deny","expected_exit_codes":[0,2]},
+    {"id":"exact-budget","name":"bench-exact","fixture":"skill-exact","bytes":65536,"encoding":"utf8","decision":"allow","expected_exit_codes":[0]},
+    {"id":"over-budget","name":"bench-over","fixture":"skill-over","bytes":65537,"encoding":"utf8","decision":"deny","expected_exit_codes":[0,2]},
+    {"id":"invalid-utf8","name":"bench-invalid","fixture":"skill-invalid","bytes":128,"encoding":"invalid-utf8","decision":"deny","expected_exit_codes":[0,2]}
+  ]
+}

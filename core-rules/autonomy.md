@@ -96,6 +96,8 @@ Clamp phase:
 
 If multiple presets declare conflicting ceilings, the **lowest ceiling wins** (most restrictive).
 
+A present but unreadable project policy cannot establish its active presets or ceiling. Resolution reports an error and exposes conservative L1 only as a fallback for non-gating callers; decision-receipt, the spec interview gate and stale-file re-read protection refuse to proceed until the policy is readable. Session context reports the unavailable policy rather than claiming a resolved level. A genuinely absent policy still follows the normal fallback sequence.
+
 ## Decision log
 
 When active level ≥ 4, agent appends one line per decision to `<canonical-root>/decisions-log.md` as decisions happen. Format:
@@ -110,7 +112,7 @@ Kinds: `interpretation`, `pattern`, `scope`, `architectural`.
 
 End-of-turn assistant message renders a `## Decisions made (L<n>)` block pulling this turn's entries. When `gh pr create` runs, the PR description body includes the same block. `session-context.sh` injects the last 10 entries from `decisions-log.md` at session start when active level ≥ 4.
 
-At `Stop`, `decision-receipt.sh` enforces this contract only for substantive L4/L5 turns: a dirty worktree or a filled current-turn DoD marker requires exactly one block for the effective post-ceiling level. Each rendered entry must use the current UTC date and exist byte-for-byte in the canonical-root log; architectural entries require `SURFACED INLINE`. The gate is forward-only and never edits or retroactively validates historical entries. L1-L3 and clean read-only turns remain unchanged.
+At `Stop`, `decision-receipt.sh` enforces this contract only for substantive L4/L5 turns: commits since the turn baseline, a dirty worktree, or a filled current-turn DoD marker requires exactly one block for the effective post-ceiling level. Where the running harness registers turn-baseline, a missing baseline also requires a block (fail closed). Each rendered entry must use the current UTC date and exist byte-for-byte in the canonical-root log; architectural entries require `SURFACED INLINE`. The gate is forward-only and never edits or retroactively validates historical entries. L1-L3 and clean read-only turns with no commits since baseline remain unchanged.
 
 ### Storage policy
 

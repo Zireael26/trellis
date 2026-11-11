@@ -352,8 +352,9 @@ install_preset_symlink() (
       fi
       atomic_retarget_preset_symlink "$link" "$current" "$target" "$label" "$name"
       return "$?"
+    else
+      rc="$?"
     fi
-    rc="$?"
     if [ "$rc" -ne 1 ]; then
       echo "  ERROR: cannot verify prior release target for $label" >&2
       return "$rc"

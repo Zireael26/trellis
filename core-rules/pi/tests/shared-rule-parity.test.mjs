@@ -41,7 +41,8 @@ test('shared rule parity: destructive', async t => {
 
 test('shared rule parity: ASCII fold and exact line anchors', () => {
   for (const [command, expected] of [
-    ['drop database prod', 'deny:sql-drop-truncate'],
+    ['drop database prod', 'deny:sql-drop'],
+    ['psql -c "truncate table users"', 'deny:sql-truncate'],
     ['DROP DATABAſE prod', 'allow'],
     ['DROP\u00a0TABLE users', 'allow'],
     ['git push -f\u2028', 'allow'],

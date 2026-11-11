@@ -32,6 +32,17 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export const GUARD_MARKER = "# trellis-bash-guard v1";
 const SEPARATOR = "# trellis-bash-guard: command follows";
 
+// What this pi process has wrapped, newest last. A command is left alone only
+// when it is one of these exact strings, never because of what its text says:
+// the model writes the command, and it can write GUARD_MARKER too (audit
+// 2026-11-02, P03). A global, so a second copy of this extension in the same
+// process sees it; nothing a command does can add to it. Wrapper text from an
+// earlier process is wrapped again, which nests the cap and changes nothing.
+declare global {
+  var __trellisBashGuardWrapped: string[] | undefined;
+}
+const REMEMBERED = 64;
+
 // perl -e CAPPER <cap> <argv...>: run argv as a child, forward at most <cap>
 // bytes of its output and the marker, then exit as the child did. The child's
 // exit is polled, not caught: a SIGCHLD handler would interrupt a blocked
@@ -57,10 +68,11 @@ const CAPPER = [
   "exit($st >> 8);",
 ].join("\n");
 
-/** The wrapped command, or `command` itself when the cap is 0 or it is already wrapped. */
+/** The wrapped command, or `command` itself when the cap is 0 or this process wrapped it. */
 export function guardCommand(command: string, capBytes: number): string {
-  if (capBytes === 0 || command.startsWith(GUARD_MARKER + "\n")) return command;
-  return [
+  const wrapped = (globalThis.__trellisBashGuardWrapped ??= []);
+  if (capBytes === 0 || wrapped.includes(command)) return command;
+  const guarded = [
     GUARD_MARKER,
     `__trellis_guard_cmd=\${BASH_EXECUTION_STRING#*$'\\n${SEPARATOR}\\n'}`,
     `[ "$__trellis_guard_cmd" != "\${BASH_EXECUTION_STRING-}" ] || { echo 'trellis-bash-guard: the command was not found in BASH_EXECUTION_STRING; not run' >&2; exit 125; }`,
@@ -70,6 +82,9 @@ export function guardCommand(command: string, capBytes: number): string {
     SEPARATOR,
     command,
   ].join("\n");
+  wrapped.push(guarded);
+  if (wrapped.length > REMEMBERED) wrapped.shift();
+  return guarded;
 }
 
 export const DEFAULT_TIMEOUT_S = 1800;

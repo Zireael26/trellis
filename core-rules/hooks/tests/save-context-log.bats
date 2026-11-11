@@ -281,3 +281,97 @@ EOF
   [[ "$stderr" == *"failed to create temp directory"* ]]
   chmod 700 "$PROJECT_DIR"
 }
+
+@test "sweep-fx1: write-failure flag prevents truncated replace" {
+  # Behavioural: ENOSPC-class write failure must not replace the good log.
+  # Uses trap XFSZ ignore + ulimit -f 1 so builtin writes fail with EFBIG
+  # instead of killing the shell, matching the reported truncated-replace.
+  local proj="$BATS_TEST_TMPDIR/save-enospc"
+  mkdir -p "$proj"
+  git -C "$proj" init -q
+  git -C "$proj" config user.email test@test.invalid
+  git -C "$proj" config user.name test
+  printf '# Context log\n\n_GOOD_SENTINEL_\n' > "$proj/context-log.md"
+  jq -nc --arg x "$(printf 'x%.0s' {1..5000})" '{type:"user",message:{role:"user",content:$x}}' > "$proj/transcript.jsonl"
+  local hook
+  for hook in "$HOOK" "$CODEX_HOOK"; do
+    ( trap '' XFSZ; ulimit -f 1; printf '{"transcript_path":"%s"}' "$proj/transcript.jsonl" | CLAUDE_PROJECT_DIR="$proj" CODEX_PROJECT_DIR="$proj" bash "$hook" >/dev/null 2>&1 )
+    grep -q '_GOOD_SENTINEL_' "$proj/context-log.md" || { echo "good log lost for $hook"; cat "$proj/context-log.md"; false; }
+  done
+}
+
+# ------------------------------------------------------------------ T61
+# Process-count proxy: one jq parse per input (event, todos, transcript), no
+# per-entry cut, no tr, and one work-tree probe shared by both Git sections.
+t61_spies() {
+  local tool real
+  T61_SPY="$PROJECT_DIR/.t61-spy"
+  mkdir -p "$T61_SPY"
+  for tool in jq git cut tr; do
+    real="$(command -v "$tool")"
+    printf '#!/bin/bash\nprintf "%%s\\n" "%s $*" >> %q\nexec %q "$@"\n' "$tool" "$T61_SPY/calls" "$real" > "$T61_SPY/$tool"
+    chmod 755 "$T61_SPY/$tool"
+  done
+}
+
+t61_fixture() {
+  seed_transcript "$PROJECT_DIR/t.jsonl"
+  printf 'a' > "$PROJECT_DIR/a file.txt"
+  printf 'b' > "$PROJECT_DIR/b.txt"
+  printf 'c' > "$PROJECT_DIR/c.txt"
+  mkdir -p "$PROJECT_DIR/.claude"
+  printf '[{"status":"pending","content":"open item"}]' > "$PROJECT_DIR/.claude/todos.json"
+  printf '/.t61-spy/\n/.trellis-t61/\n' > "$PROJECT_DIR/.gitignore"
+}
+
+@test "T61: one parse per input and one shared work-tree probe (both twins)" {
+  local hook
+  t61_fixture
+  t61_spies
+  for hook in "$HOOK" "$CODEX_HOOK"; do
+    rm -f "$T61_SPY/calls" "$PROJECT_DIR/context-log.md"
+    printf '{"transcript_path":"%s"}' "$PROJECT_DIR/t.jsonl" |
+      TRELLIS_HOME="$PROJECT_DIR/.trellis-t61" PATH="$T61_SPY:$PATH" bash "$hook"
+    grep -q 'second real user prompt' "$PROJECT_DIR/context-log.md"
+    grep -q 'second assistant decision' "$PROJECT_DIR/context-log.md"
+    grep -q 'a file.txt' "$PROJECT_DIR/context-log.md"
+    grep -q 'open item' "$PROJECT_DIR/context-log.md"
+    [ "$(grep -c '^jq ' "$T61_SPY/calls")" -eq 3 ] || { echo "$hook"; cat "$T61_SPY/calls"; false; }
+    [ "$(grep -c '^git .*rev-parse --is-inside-work-tree' "$T61_SPY/calls")" -eq 1 ] || { cat "$T61_SPY/calls"; false; }
+    ! grep -q '^cut \|^tr ' "$T61_SPY/calls" || { cat "$T61_SPY/calls"; false; }
+  done
+}
+
+@test "T61: Codex Stop skips an unchanged transcript and rewrites after it grows; Claude PreCompact always writes" {
+  local first second
+  export TRELLIS_HOME="$PROJECT_DIR/.trellis-t61"
+  t61_fixture
+  printf '{"transcript_path":"%s"}' "$PROJECT_DIR/t.jsonl" | bash "$CODEX_HOOK"
+  first="$(ls -i "$PROJECT_DIR/context-log.md")"
+  sleep 1.1
+  printf '{"transcript_path":"%s"}' "$PROJECT_DIR/t.jsonl" | bash "$CODEX_HOOK"
+  [ "$(ls -i "$PROJECT_DIR/context-log.md")" = "$first" ] || { echo "unchanged transcript rewrote the log"; false; }
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":"third prompt"}}' >> "$PROJECT_DIR/t.jsonl"
+  printf '{"transcript_path":"%s"}' "$PROJECT_DIR/t.jsonl" | bash "$CODEX_HOOK"
+  grep -q 'third prompt' "$PROJECT_DIR/context-log.md"
+  second="$(ls -i "$PROJECT_DIR/context-log.md")"
+  printf '{"transcript_path":"%s"}' "$PROJECT_DIR/t.jsonl" | bash "$HOOK"
+  [ "$(ls -i "$PROJECT_DIR/context-log.md")" != "$second" ] || { echo "PreCompact skipped its write"; false; }
+}
+
+@test "T61: a linked worktree writes the log atomically at the canonical root (both twins)" {
+  local hook wt
+  export TRELLIS_HOME="$PROJECT_DIR/.trellis-t61"
+  t61_fixture
+  wt="$(mktemp -d)/linked wt"
+  git -C "$PROJECT_DIR" worktree add -q -b t61-linked "$wt"
+  for hook in "$HOOK" "$CODEX_HOOK"; do
+    rm -f "$PROJECT_DIR/context-log.md"
+    printf '{"transcript_path":"%s"}' "$PROJECT_DIR/t.jsonl" |
+      CLAUDE_PROJECT_DIR="$wt" CODEX_PROJECT_DIR="$wt" bash "$hook"
+    grep -q 't61-linked' "$PROJECT_DIR/context-log.md" || { cat "$PROJECT_DIR/context-log.md"; false; }
+    [ ! -e "$wt/context-log.md" ]
+    [ -z "$(find "$PROJECT_DIR" -maxdepth 1 -name 'context-log.md.tmp.*')" ]
+  done
+  git -C "$PROJECT_DIR" worktree remove --force "$wt"
+}

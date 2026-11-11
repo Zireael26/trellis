@@ -321,6 +321,58 @@ make_toolbox() {
   done
 }
 
+seed_autodetect_javascript() {
+  mkdir -p "$BATS_TEST_TMPDIR/poly-bin"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$POLY_TEST_LOG"\n' > "$BATS_TEST_TMPDIR/poly-bin/pnpm"
+  chmod +x "$BATS_TEST_TMPDIR/poly-bin/pnpm"
+  export POLY_TEST_LOG="$BATS_TEST_TMPDIR/poly-tests.log"
+  printf '%s\n' '{"scripts":{"typecheck":"true","lint":"true","test":"true"}}' > "$PROJECT_DIR/package.json"
+  printf 'lock\n' > "$PROJECT_DIR/pnpm-lock.yaml"
+}
+
+@test "mixed autodetection reports skipped Python and Go suites as partial" {
+  seed_autodetect_javascript
+  printf '[tool.pytest.ini_options]\n' > "$PROJECT_DIR/pyproject.toml"
+  printf 'module example.invalid/fixture\n' > "$PROJECT_DIR/go.mod"
+  PATH="$BATS_TEST_TMPDIR/poly-bin:$PATH" run_gate
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *'Python (pytest)'* && "$output" == *'Go (go test)'* && "$output" == *'PROCESS_GATE_TEST_CMD'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'Tests: partial'* && "$output" != *'Tests: full'* ]] || { echo "$output"; false; }
+  grep -qx 'run test' "$POLY_TEST_LOG"
+}
+
+@test "mixed autodetection names JavaScript when Python is selected" {
+  mkdir -p "$BATS_TEST_TMPDIR/poly-bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$BATS_TEST_TMPDIR/poly-bin/python"
+  chmod +x "$BATS_TEST_TMPDIR/poly-bin/python"
+  printf '%s\n' '{"scripts":{"test":"true"}}' > "$PROJECT_DIR/package.json"
+  printf '[tool.pytest.ini_options]\n' > "$PROJECT_DIR/pyproject.toml"
+  PATH="$BATS_TEST_TMPDIR/poly-bin:$PATH" run_gate
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *'JavaScript (package.json test)'* && "$output" == *'Tests: partial'* ]] || { echo "$output"; false; }
+}
+
+@test "single-language autodetection remains full" {
+  seed_autodetect_javascript
+  PATH="$BATS_TEST_TMPDIR/poly-bin:$PATH" run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'Tests: full'* && "$output" != *'Tests: partial'* ]] || { echo "$output"; false; }
+}
+
+@test "a declared project-wide test command remains authoritative for mixed projects" {
+  seed_autodetect_javascript
+  printf '[tool.pytest.ini_options]\n' > "$PROJECT_DIR/pyproject.toml"
+  printf 'module example.invalid/fixture\n' > "$PROJECT_DIR/go.mod"
+  mkdir -p "$PROJECT_DIR/.claude/skills/process-gate-local"
+  printf 'PROCESS_GATE_TYPECHECK_CMD=true\nPROCESS_GATE_LINT_CMD=true\nPROCESS_GATE_TEST_CMD=true\n' > "$PROJECT_DIR/.claude/skills/process-gate-local/local.config.sh"
+  git -C "$PROJECT_DIR" add .claude/skills/process-gate-local/local.config.sh
+  git -C "$PROJECT_DIR" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm config
+  git -C "$PROJECT_DIR" -c user.name=fixture -c user.email=fixture@example.invalid commit --allow-empty -qm head
+  PATH="$BATS_TEST_TMPDIR/poly-bin:$PATH" run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'Tests: full'* && "$output" != *'Tests: partial'* ]] || { echo "$output"; false; }
+}
+
 # --- Case 1: package.json with scripts {build} but NO typecheck/lint/test ---
 # A package-lock.json is dropped so pg_resolve_pm resolves PM=npm and the JS
 # branch fires — this is what actually exercises EDIT A (the has-script guard).

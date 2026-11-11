@@ -1,8 +1,11 @@
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { basename, dirname, relative, resolve } from "node:path";
+import { randomBytes } from "node:crypto";
+import { basename, delimiter, dirname, extname, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type {
+  AgentBeforeSettleEvent,
+  BoundaryResult,
   ExtensionAPI,
   ExtensionContext,
   ToolCallEvent,
@@ -338,6 +341,21 @@ function isSubagentControl(pi: ExtensionAPI, name: string): boolean {
   } catch { return false; }
 }
 
+// Mirrors read_state.rs is_override_record_path and _gr_reread_override_path,
+// case-folded (macOS volumes usually are) and also through the real path of the
+// deepest existing ancestor, so a symlinked spelling cannot reach the records.
+function isOverrideRecordPath(path: string): boolean {
+  const named = (spelling: string) => {
+    const folded = spelling.toLowerCase();
+    return folded.endsWith("/state/reread-overrides") || folded.includes("/state/reread-overrides/");
+  };
+  if (named(path)) return true;
+  for (let ancestor = path, rest = ""; ; rest = rest ? `${basename(ancestor)}/${rest}` : basename(ancestor), ancestor = dirname(ancestor)) {
+    try { return named(rest ? `${realpathSync.native(ancestor)}/${rest}` : realpathSync.native(ancestor)); }
+    catch { if (dirname(ancestor) === ancestor) return false; }
+  }
+}
+
 function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cwd: string, root: string, state: ReadState, rules: GuardRules): Decision {
   if (action.tool_name === "powershell") return deny("Trellis PowerShell destructive protection is unavailable; refusing pre-action execution");
   if (action.tool_name === "bash") {
@@ -363,6 +381,14 @@ function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cw
   }
   if (!target || action.target_coverage !== "complete" || /[\0\t\r\n]/.test(target.path)) return deny("reread-guard: mutation target is unavailable or unsafe; Read it first");
   const path = resolve(cwd, target.path);
+  // Override records authorize stale edits for Claude/Codex/native guards, so
+  // they are refused before the create and already-read exemptions.
+  for (const named of action.targets.flatMap(t => [t.path, t.destination])) {
+    if (named !== undefined && isOverrideRecordPath(resolve(cwd, named))) {
+      return { schema_version: 1, capability_status: "enforced", decision: "deny",
+        reason: `reread-guard: BLOCKED edit of ${resolve(cwd, named)} — reread override records are written only by trellis reread override --session <id> --reason <why>.` };
+    }
+  }
   try {
     // Only genuine absence is a create exemption; dangling links/state errors deny.
     if (!lstatSync(path, { throwIfNoEntry: false })) return { schema_version: 1, capability_status: "enforced", decision: "allow" };
@@ -372,6 +398,26 @@ function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cw
     return rereadDecision(rules, path, state, rereadBudget(root, rules));
   } catch {
     return deny("reread-guard: target or autonomy state is unreadable; refusing mutation");
+  }
+}
+
+// HEAD is metadata, not an authorization token. Include the worktree-local
+// branch spelling in read identity without launching Git on ordinary tools.
+// Detached HEAD deliberately binds the commit: rebase/bisect can rewrite file
+// contents, so a changed commit requires a fresh read rather than stale credit.
+function readBinding(cwd: string): string {
+  const root = attachedRoot(cwd);
+  let candidate = resolve(cwd);
+  for (;;) {
+    const marker = resolve(candidate, ".git");
+    if (lstatSync(marker, { throwIfNoEntry: false })) {
+      const directory = statSync(marker).isDirectory() ? marker
+        : resolve(candidate, readFileSync(marker, "utf8").split(/\r?\n/)[0].match(/^gitdir: (.+)$/)?.[1] ?? "invalid-gitdir");
+      return JSON.stringify([root, realpathSync.native(directory), readFileSync(resolve(directory, "HEAD"), "utf8").trim()]);
+    }
+    const parent = resolve(candidate, "..");
+    if (parent === candidate) return JSON.stringify([root, "no-git"]);
+    candidate = parent;
   }
 }
 
@@ -460,6 +506,7 @@ function actionFor(pi: ExtensionAPI, cwd: string, id: string, name: string, inpu
 type HandlerContext = {
   cwd: string; signal: ExtensionContext["signal"]; session_id: string; session_file?: string;
   notify: ExtensionContext["ui"]["notify"];
+  postDeadline?: number;
 };
 
 function snapshot(ctx: ExtensionContext): HandlerContext {
@@ -497,6 +544,7 @@ async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<strin
     return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: `Trellis Pi event exceeds the ${MAX_DISPATCH_EVENT_BYTES}-byte dispatcher transport limit; refusing event` };
   }
 
+  const nonce = randomBytes(32).toString("hex");
   let eventDirectory: string | undefined;
   let eventFile: string | undefined;
   let result: Awaited<ReturnType<ExtensionAPI["exec"]>> | undefined;
@@ -508,7 +556,10 @@ async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<strin
     eventFile = resolve(eventDirectory, "event.json");
     writeFileSync(eventFile, payload, { flag: "wx", mode: 0o600 });
     chmodSync(eventFile, 0o600);
-    result = await pi.exec(script, ["--event-file", eventFile], { cwd: root, timeout: 300_000, signal: ctx.signal });
+    // Pi exec has no env option. env sets this invocation's nonce without
+    // mutating process.env (dispatches can overlap). An explicit executable
+    // keeps env from interpreting a script path containing '=' as an assignment.
+    result = await pi.exec("/usr/bin/env", [`TRELLIS_PI_DISPATCH_NONCE=${nonce}`, "/bin/bash", script, "--event-file", eventFile], { cwd: root, timeout: 300_000, signal: ctx.signal });
   } catch (error) {
     dispatchError = `Trellis Pi dispatcher could not run: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
@@ -532,9 +583,24 @@ async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<strin
   if (!result) {
     return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: "Trellis Pi dispatcher returned no result" };
   }
-  const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
+  // A killed/abnormal dispatcher cannot authorize an action with partial output.
+  if (result.killed || result.truncated || !Number.isInteger(result.code) || result.code < 0 || result.code > 127) {
+    return deny(`Trellis Pi dispatcher ${result.killed ? "was killed" : result.truncated ? "was truncated" : "returned an invalid or signal status"} (status ${String(result.code)}); refusing partial output`);
+  }
+  // Pi 1.5.0 maps an external signal death to code 0/killed false. Require
+  // positive completion: exactly one decision then the call-bound final record.
+  const records = /^([^\r\n]+)\n([^\r\n]+)\n$/.exec(result.stdout);
   try {
-    const parsed: unknown = JSON.parse(lines.at(-1) ?? "");
+    const terminal: unknown = JSON.parse(records?.[2] ?? "");
+    if (!terminal || typeof terminal !== "object" || Array.isArray(terminal)
+        || Object.keys(terminal).length !== 4
+        || !("schema_version" in terminal) || terminal.schema_version !== 1
+        || !("type" in terminal) || terminal.type !== "trellis_dispatch_complete"
+        || !("complete" in terminal) || terminal.complete !== true
+        || !("nonce" in terminal) || terminal.nonce !== nonce) {
+      throw new Error("missing or invalid completion record");
+    }
+    const parsed: unknown = JSON.parse(records?.[1] ?? "");
     if (isDecision(parsed)) {
       if (result.code !== 0 && parsed.decision === "allow") throw new Error("nonzero dispatcher returned allow");
       const stderr = result.stderr.trim();
@@ -545,7 +611,7 @@ async function dispatch(pi: ExtensionAPI, event: NormalizedAction | Record<strin
       } : parsed;
     }
   } catch { /* converted to a visible fail-closed decision below */ }
-  return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: result.stderr.trim() || `Trellis Pi dispatcher failed with exit ${result.code}` };
+  return { schema_version: 1, capability_status: "unknown", decision: "deny", reason: result.stderr.trim() || `Trellis Pi dispatcher failed completion or decision validation (status ${String(result.code)})` };
 }
 
 function isDecision(value: unknown): value is Decision {
@@ -598,24 +664,267 @@ function show(ctx: HandlerContext, decision: Decision) {
   }
 }
 
+type SlopRow = { id: string; match: string; suppress: string };
+
+// Consume literal data from the shared advisory policy, never execute it or
+// maintain a second copy of its patterns. Refuse an unfamiliar shell encoding.
+export function slopPolicy(source: string, language: string): { rows: SlopRow[]; globs: string[]; doctrine: string } {
+  const literalWords = (body: string): string[] => {
+    const words: string[] = [];
+    for (const line of body.split("\n")) {
+      if (/^\s*(#|$)/.test(line)) continue;
+      let rest = line.trim().replace(/^printf\s+'%s(?:\\t%s\\t%s)?\\n'\s*/, "");
+      while (rest && rest !== "\\") {
+        const token = rest.match(/^'([^']*)'|^"((?:\\.|[^"\\])*)"/);
+        if (!token) throw new Error("unsupported shared slop policy literal");
+        if (token[2] !== undefined && /(?<!\\)[`$]/.test(token[2])) throw new Error("nonliteral shared slop policy");
+        words.push(token[1] ?? token[2].replace(/\\([\\"$`])/g, "$1"));
+        rest = rest.slice(token[0].length).trim();
+      }
+    }
+    return words;
+  };
+  const body = source.match(/slop_patterns_for_lang\(\) \{([\s\S]*?)\n\}/)?.[1];
+  const section = body?.match(new RegExp(`^    ${language}\\)\\n([\\s\\S]*?)^      ;;`, "m"))?.[1];
+  const carve = source.match(/slop_carve_out_globs\(\) \{([\s\S]*?)\n\}/)?.[1];
+  const doctrine = source.match(/^SLOP_DOCTRINE_REF="([^"$`]+)"$/m)?.[1];
+  if (!section || !carve || !doctrine) throw new Error("shared slop policy is unavailable");
+  const words = literalWords(section);
+  if (!words.length || words.length % 3) throw new Error("invalid shared slop rows");
+  const rows: SlopRow[] = [];
+  for (let i = 0; i < words.length; i += 3) rows.push({ id: words[i], match: words[i + 1], suppress: words[i + 2] });
+  return { rows, globs: literalWords(carve), doctrine };
+}
+
+export function scanSlop(rows: SlopRow[], lines: { number: number; text: string }[]) {
+  const ere = (pattern: string) => new RegExp(pattern.replaceAll("[[:space:]]", "[ \\t\\r\\n\\v\\f]"));
+  const rules = rows.map(row => ({ ...row, pattern: ere(row.match), escape: row.suppress === "-" ? undefined : ere(row.suppress) }));
+  const findings: { id: string; line: number }[] = [];
+  let previous = "", comments = "";
+  for (const line of lines) {
+    for (const rule of rules) if (rule.pattern.test(line.text) && ![line.text, previous, comments].some(text => rule.escape?.test(text))) findings.push({ id: rule.id, line: line.number });
+    previous = line.text;
+    comments = /^[ \t\r\v\f]*(#|\/\/|\/\*|\*)/.test(line.text) ? `${comments} ${line.text}` : "";
+  }
+  return findings;
+}
+
+function executable(command: string, cwd: string): string | undefined {
+  const paths = command.includes("/") ? [resolve(cwd, command)] : (process.env.PATH ?? "").split(delimiter).map(dir => resolve(dir || cwd, command));
+  return paths.find(path => {
+    try { accessSync(path, constants.X_OK); return statSync(path).isFile(); } catch { return false; }
+  });
+}
+
+// Match the previous dispatcher's whole-event 300 s envelope, not a new
+// per-linter 20 s cutoff. Each awaited subprocess gets the remaining budget.
+function postTimeout(ctx: HandlerContext): number {
+  const remaining = (ctx.postDeadline ?? Date.now() + 300_000) - Date.now();
+  if (remaining <= 0) throw new Error("post-action batch deadline exceeded (300000 ms)");
+  return remaining;
+}
+
+async function gitRead(pi: ExtensionAPI, cwd: string, args: string[], ctx: HandlerContext) {
+  const unset = new Set(["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_PREFIX", ...Object.keys(process.env).filter(key => key.startsWith("GIT_CONFIG_"))]);
+  const result = await pi.exec("env", [...[...unset].flatMap(key => ["-u", key]), "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", ...args], { cwd, timeout: postTimeout(ctx), signal: ctx.signal });
+  if (result.killed) throw new Error("Git snapshot did not complete");
+  return result;
+}
+
+async function lintPostTargets(pi: ExtensionAPI, paths: string[], ctx: HandlerContext, onError: (error: unknown) => void, onWarning: (warning: string) => void): Promise<string | undefined> {
+  const errors: string[] = [];
+  let rustChecked = false;
+  const run = async (command: string, args: string[], cwd: string, label: string, localEslint = false) => {
+    const result = await pi.exec(command, args, { cwd, timeout: postTimeout(ctx), signal: ctx.signal });
+    if (result.killed) throw new Error(`${label}: linter did not complete`);
+    if (result.code !== 0) {
+      if (localEslint && (await pi.exec(command, ["--version"], { cwd, timeout: postTimeout(ctx), signal: ctx.signal })).code !== 0) return;
+      errors.push(`${label}\n${[result.stdout, result.stderr].filter(Boolean).join("\n").trimEnd()}\n`);
+    }
+  };
+  for (const path of paths) {
+    try {
+    const extension = extname(path);
+    if ([".ts", ".tsx", ".js", ".jsx"].includes(extension)) {
+      if (![".eslintrc", ".eslintrc.js", ".eslintrc.cjs", ".eslintrc.json", ".eslintrc.yml", ".eslintrc.yaml", "eslint.config.js", "eslint.config.mjs", "eslint.config.ts"].some(file => existsSync(resolve(ctx.cwd, file)))) continue;
+      const npx = executable("npx", ctx.cwd);
+      const local = npx && executable("./node_modules/.bin/eslint", ctx.cwd);
+      if (local) await run(local, ["--quiet", path], ctx.cwd, `eslint: ${path}`, true);
+      else if (npx) {
+        // Existing canonical linter resolution only, never install a package.
+        const probe = await pi.exec(npx, ["--no-install", "eslint", "--version"], { cwd: ctx.cwd, timeout: postTimeout(ctx), signal: ctx.signal });
+        if (probe.killed) throw new Error("eslint discovery did not complete");
+        if (probe.code === 0) await run(npx, ["--no-install", "eslint", "--quiet", path], ctx.cwd, `eslint: ${path}`);
+      }
+    } else if (extension === ".py") {
+      const ruff = executable("ruff", ctx.cwd);
+      if (ruff) await run(ruff, ["check", path], ctx.cwd, `ruff: ${path}`);
+    } else if (extension === ".rs" && !rustChecked && existsSync(resolve(ctx.cwd, "Cargo.toml"))) {
+      const cargo = executable("cargo", ctx.cwd);
+      if (cargo) { rustChecked = true; await run(cargo, ["clippy", "--quiet", "--message-format=short", "--", "-D", "warnings"], ctx.cwd, "clippy: (project-wide)"); }
+    } else if (extension === ".go") {
+      let root = dirname(path);
+      while (!existsSync(resolve(root, "go.mod")) && dirname(root) !== root) root = dirname(root);
+      if (!existsSync(resolve(root, "go.mod"))) {
+        onWarning(`post-edit-verify: skipping Go lint for ${path}: no owning go.mod found`);
+        continue;
+      }
+      const golangci = executable("golangci-lint", ctx.cwd), go = executable("go", ctx.cwd);
+      if (golangci) await run(golangci, ["run", `./${relative(root, path)}`], root, `golangci-lint: ${path}`);
+      else if (go) await run(go, ["vet", `./${relative(root, dirname(path))}${root === dirname(path) ? "" : "/"}...`], root, `go vet: ${dirname(path)}`);
+    }
+    } catch (error) { onError(error); }
+  }
+  return errors.length ? `Lint failed — fix before continuing:\n${errors.join("\n").trimEnd().split("\n").slice(0, 50).join("\n")}` : undefined;
+}
+
+async function slopPostTargets(pi: ExtensionAPI, paths: string[], root: string, ctx: HandlerContext, onError: (error: unknown) => void): Promise<string | undefined> {
+  if (process.env.SLOP_TRIPWIRE === "off") return;
+  const messages: string[] = [];
+  let total = 0, doctrine = "", source: string | undefined;
+  const policies = new Map<string, ReturnType<typeof slopPolicy>>();
+  for (const path of paths) {
+    const language = ({ ".ts": "ts", ".tsx": "ts", ".js": "ts", ".jsx": "ts", ".py": "py", ".go": "go", ".rs": "rs", ".java": "java" } as Record<string, string>)[extname(path)];
+    if (!language) continue;
+    try {
+    source ??= readFileSync(resolve(root, ".trellis/runtime/core-rules/hooks/lib/slop-patterns.sh"), "utf8");
+    let policy = policies.get(language);
+    if (!policy) { policy = slopPolicy(source, language); policies.set(language, policy); }
+    doctrine = policy.doctrine;
+    const directory = dirname(path), leaf = `./${basename(path)}`;
+    const prefix = await gitRead(pi, directory, ["rev-parse", "--show-prefix"], ctx);
+    const probe = prefix.code === 0 ? `/${prefix.stdout.trimEnd()}${basename(path)}` : path;
+    if (policy.globs.some(glob => new RegExp(`^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*+/g, ".*")}$`).test(probe))) continue;
+    let lines: { number: number; text: string }[];
+    const head = await gitRead(pi, directory, ["rev-parse", "--verify", "HEAD"], ctx);
+    const tracked = head.code === 0 && (await gitRead(pi, directory, ["ls-files", "--error-unmatch", "--", leaf], ctx)).code === 0;
+    if (tracked) {
+      const diff = await gitRead(pi, directory, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "-U0", "HEAD", "--", leaf], ctx);
+      if (diff.code !== 0 || diff.killed) throw new Error("Git added-line snapshot failed");
+      lines = [];
+      let number = 0, hunk = false;
+      for (const line of diff.stdout.split("\n")) {
+        const match = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (match) { number = Number(match[1]); hunk = true; }
+        else if (hunk && line.startsWith("+")) lines.push({ number: number++, text: line.slice(1) });
+      }
+    } else {
+      const content = readFileSync(path, "utf8").replace(/\n$/, "");
+      lines = content ? content.split("\n").map((text, index) => ({ number: index + 1, text })) : [];
+    }
+    for (const finding of scanSlop(policy.rows, lines)) {
+      total++;
+      if (messages.length < 5) messages.push(`slop-tripwire: ${finding.id} at ${path}:${finding.line}`);
+    }
+    } catch (error) { onError(error); }
+  }
+  if (messages.length) return `${messages.join("\n")}${total > messages.length ? ` (+${total - messages.length} more)` : ""} — evidence doctrine: ${doctrine}`;
+}
+
+// One captured ordered batch; each stage is awaited even after another fails.
+// The tracking callback is omitted when the native caller already gave credit.
+export async function localPostAction(pi: ExtensionAPI, event: NormalizedAction & { in_process_read_tracking?: boolean }, ctx: HandlerContext, trackRead?: () => void | Promise<void>,
+  onVerify?: (paths: string[], failure: string | undefined, unknown: boolean) => void): Promise<Decision> {
+  ctx = { ...ctx, postDeadline: Date.now() + 300_000 };
+  const root = attachedRoot(ctx.cwd);
+  if (!root) return deny(runtimeUnavailable);
+  if (event.result?.status === "failed") return { schema_version: 1, capability_status: "unsupported", decision: "allow", reason: "post_action/file_mutation: unsupported — checks skipped due to failed result" };
+  const captureErrors: string[] = [];
+  const paths = [...new Set(event.action.targets.flatMap(target => {
+    const path = target.operation === "rename" ? target.destination : ["create", "update"].includes(target.operation) ? target.path : undefined;
+    if (!path || /[\0\t\r\n]/.test(path)) return [];
+    const absolute = resolve(ctx.cwd, path);
+    try { return existsSync(absolute) && statSync(absolute).isFile() ? [absolute] : []; }
+    catch (error) { captureErrors.push(`post-action target: unknown — ${error instanceof Error ? error.message : String(error)}`); return []; }
+  }))];
+  const reasons: string[] = captureErrors, contexts: string[] = [];
+  let capability: Decision["capability_status"] = captureErrors.length ? "unknown" : "advisory";
+  // Mandatory post-edit-verify outcome (T33): a lint finding or an unknown
+  // verifier failure latches completion; display stays advisory below.
+  const verifyFailures: string[] = [];
+  let verifyUnknown = false;
+  const failure = (name: string, error: unknown) => {
+    capability = "unknown";
+    const text = `${name}: unknown — ${error instanceof Error ? error.message : String(error)}`;
+    reasons.push(text);
+    if (name === "post-edit-verify.sh") { verifyFailures.push(text); verifyUnknown = true; }
+  };
+  const stage = async (name: string, work: () => Promise<void> | void) => {
+    try { await work(); } catch (error) { failure(name, error); }
+  };
+  await stage("post-edit-verify.sh", async () => { const reason = await lintPostTargets(pi, paths, ctx, error => failure("post-edit-verify.sh", error), warning => reasons.push(`post-edit-verify.sh stderr: ${warning}`)); if (reason) { reasons.push(`post-edit-verify.sh: ${reason}`); verifyFailures.push(`post-edit-verify.sh: ${reason}`); } });
+  onVerify?.(paths, verifyFailures.length ? verifyFailures.join("\n") : undefined, verifyUnknown);
+  await stage("slop-tripwire.sh", async () => { const context = await slopPostTargets(pi, paths, root, ctx, error => failure("slop-tripwire.sh", error)); if (context) contexts.push(context); });
+  if (!event.in_process_read_tracking) await stage("track-read.sh", async () => {
+    if (!trackRead) throw new Error("tracking callback unavailable");
+    await trackRead();
+  });
+  await stage("wiki-skill-suggest.sh", async () => {
+    if (!executable("git", ctx.cwd)) {
+      reasons.push("wiki-skill-suggest.sh stderr: wiki-skill-suggest: git not found; degrading to no-op");
+      return;
+    }
+    // Compatibility normalization carries the original input spelling and no
+    // native cwd into this advisory. Keep its bare-basename exclusion.
+    const spelling = event.action.input.path ?? event.action.input.file_path ?? event.action.input.filePath;
+    if (typeof spelling !== "string" || !spelling.includes("/")) return;
+    const canonical = autonomyRoot(ctx.cwd), gotchas = resolve(canonical, "gotchas.md");
+    if (!existsSync(gotchas)) return;
+    const identity = statSync(gotchas);
+    if (!paths.some(path => { const stat = statSync(path); return stat.dev === identity.dev && stat.ino === identity.ino; })) return;
+    if ((await gitRead(pi, ctx.cwd, ["rev-parse", "--is-inside-work-tree"], ctx)).code === 0) contexts.push("wiki-skill-suggest: project-root gotchas.md changed; consider running wiki-maintain explicitly for any qualifying procedure.");
+  });
+  return { schema_version: 1, capability_status: capability, decision: reasons.length ? "warn" : "allow", ...(reasons.length ? { reason: reasons.join("\n") } : {}), ...(contexts.length ? { context: contexts.join("\n\n") } : {}) };
+}
+
+export function decisionContext(decision: Decision, deliveredReasons: Set<string>): string {
+  let reason = decision.reason;
+  if (reason && decision.decision === "allow" && (decision.capability_status === "unsupported" || decision.capability_status === "advisory")) {
+    const key = JSON.stringify([decision.capability_status, reason]);
+    if (deliveredReasons.has(key)) reason = undefined;
+    else deliveredReasons.add(key);
+  }
+  return [decision.context, reason].filter(Boolean).join("\n\n");
+}
+
+// Keep result delivery independent from the evaluator (local or compatibility).
+// Pi partial patches preserve native details/isError/usage and binary blocks.
+export function deliverPostResult(pi: ExtensionAPI, ctx: HandlerContext, event: ToolResultEvent,
+  pre: { context: string; capabilityOnly: boolean } | undefined, decision: Decision, deliveredReasons: Set<string>) {
+  show(ctx, { ...decision, decision: decision.decision === "deny" ? "warn" : decision.decision });
+  const postContext = decisionContext(decision, deliveredReasons);
+  const postAdvisory = postContext ? `[Trellis post-action advisory; capability: ${decision.capability_status}]\n${postContext}` : "";
+  const successfulRead = event.toolName === "read" && !event.isError;
+  const separatePre = successfulRead && pre?.capabilityOnly;
+  const separatePost = successfulRead && isCapabilityOnly(decision);
+  const capabilityContext = [separatePre ? pre?.context : undefined, separatePost ? postAdvisory : undefined].filter(Boolean).join("\n\n");
+  if (capabilityContext) pi.sendMessage({ customType: "trellis-context", content: capabilityContext, display: false }, { triggerTurn: false });
+  const context = [separatePre ? undefined : pre?.context, separatePost ? undefined : postAdvisory].filter(Boolean).join("\n\n");
+  if (context) return { content: [...event.content, { type: "text" as const, text: context }] };
+}
+
 export default function trellisPiExtension(pi: ExtensionAPI) {
   // Keep initialization failures in the execution gate, not the factory. Pi
   // >=1.4 blocks thrown handlers; explicit block returns also protect older hosts.
-  let rules: GuardRules;
+  let rules: GuardRules | undefined;
   let ruleError: unknown;
-  try { rules = loadGuardRules(); } catch (error) { ruleError = error; }
+  let rulesInitialized = false;
   function guardRules(): GuardRules {
-    if (ruleError) throw new Error("Trellis guard rules are unavailable; refusing execution", { cause: ruleError });
+    if (!rulesInitialized) {
+      rulesInitialized = true;
+      try { rules = loadGuardRules(); } catch (error) { ruleError = error; }
+    }
+    if (!rules) throw new Error("Trellis guard rules are unavailable; refusing execution", { cause: ruleError });
     return rules;
   }
-  const pending = new Map<string, { action: NormalizedAction["action"]; input: object; cwd: string; context: string; capabilityOnly: boolean; state: ReadState }>();
+  const pending = new Map<string, { action: NormalizedAction["action"]; input: object; cwd: string; binding: string; context: string; capabilityOnly: boolean; state: ReadState }>();
   const callGenerations = new WeakMap<object, number>();
   const readStates = new Map<string, ReadState>();
   let generation = 0;
   let userBashSequence = 0;
 
   function readState(ctx: HandlerContext): ReadState {
-    const key = JSON.stringify([attachedRoot(ctx.cwd), ctx.session_id]);
+    const key = JSON.stringify([readBinding(ctx.cwd), ctx.session_id]);
     let state = readStates.get(key);
     if (!state) { state = { known: new Set(), warns: new Map() }; readStates.set(key, state); }
     return state;
@@ -628,26 +937,184 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   }
 
   const pendingKey = (epoch: number, ctx: HandlerContext, id: string) => JSON.stringify([epoch, ctx.session_id, ctx.cwd, id]);
-  let pendingContext: string | undefined;
+  let pendingContext: { identity: string; text: string } | undefined;
+  let lifecycleEpoch = 0;
+  let shutdownTask: { identity: string; task: Promise<void> } | undefined;
   const deliveredReasons = new Set<string>();
 
+  function lifecycleIdentity(ctx: HandlerContext): string | undefined {
+    try {
+      const root = attachedRoot(ctx.cwd);
+      return root ? JSON.stringify([ctx.session_id, readBinding(ctx.cwd), realpathSync.native(resolve(root, ".trellis/runtime"))]) : undefined;
+    } catch { return undefined; }
+  }
+
+  function currentLifecycle(ctx: HandlerContext, identity: string | undefined, epoch: number): boolean {
+    // Lifecycle output is intended for the next prompt too. Read-generation
+    // changes do not invalidate checks that ran in the same bound session.
+    return epoch === lifecycleEpoch && identity === lifecycleIdentity(ctx);
+  }
+
+  function queueContext(identity: string | undefined, decision: Decision) {
+    if (!identity) return;
+    const text = advisoryContext(decision);
+    pendingContext = { identity, text: [pendingContext?.identity === identity ? pendingContext.text : undefined, text].filter(Boolean).join("\n\n") };
+  }
+
   function advisoryContext(decision: Decision): string {
-    let reason = decision.reason;
-    if (reason && decision.decision === "allow" && (decision.capability_status === "unsupported" || decision.capability_status === "advisory")) {
-      const key = JSON.stringify([decision.capability_status, reason]);
-      if (deliveredReasons.has(key)) reason = undefined;
-      else deliveredReasons.add(key);
-    }
-    return [decision.context, reason].filter(Boolean).join("\n\n");
+    return decisionContext(decision, deliveredReasons);
   }
 
   function resetSession() {
+    lifecycleEpoch++;
+    shutdownTask = undefined;
     pending.clear();
     resetReads();
     pendingContext = undefined;
     deliveredReasons.clear();
     userBashSequence = 0;
   }
+
+  // T33 completion state: needs_check | blocked | accepted, kept apart from
+  // read maps so no read/session reset can clear it. Persisted as a custom
+  // session entry; a missing or malformed entry on reload is needs_check.
+  type CompletionState = { status: "needs_check" | "blocked" | "accepted"; unknown: boolean; reason: string;
+    postFailures: Record<string, string>; continuations: number; noProgress: number; binding: string; turn: number };
+  const COMPLETION_ENTRY = "trellis-completion", MAX_CONTINUATIONS = 3, MAX_NO_PROGRESS = 2;
+  const freshCompletion = (binding = ""): CompletionState =>
+    ({ status: "needs_check", unknown: false, reason: "", postFailures: {}, continuations: 0, noProgress: 0, binding, turn: 0 });
+  let completion = freshCompletion();
+
+  function validCompletion(data: unknown): data is CompletionState {
+    if (!data || typeof data !== "object") return false;
+    const d = data as Record<string, unknown>;
+    return (d.status === "needs_check" || d.status === "blocked" || d.status === "accepted")
+      && typeof d.unknown === "boolean" && typeof d.reason === "string" && typeof d.binding === "string"
+      && Number.isInteger(d.continuations) && Number.isInteger(d.noProgress) && Number.isInteger(d.turn)
+      && !!d.postFailures && typeof d.postFailures === "object" && !Array.isArray(d.postFailures)
+      && Object.values(d.postFailures as object).every(v => typeof v === "string");
+  }
+
+  function persistCompletion() {
+    // Persistence failure keeps the in-memory latch; it never accepts a turn.
+    try { pi.appendEntry(COMPLETION_ENTRY, { ...completion, postFailures: { ...completion.postFailures } }); } catch { /* latch stays in memory */ }
+  }
+
+  function restoreCompletion(context: ExtensionContext, cwd: string) {
+    const binding = readBinding(cwd);
+    let restored: CompletionState | undefined;
+    try {
+      const manager = context.sessionManager as Partial<Pick<ExtensionContext["sessionManager"], "getBranch" | "getEntries">>;
+      const entries = manager.getBranch?.() ?? manager.getEntries?.() ?? [];
+      for (let i = entries.length - 1; i >= 0 && !restored; i--) {
+        const entry = entries[i] as { type?: string; customType?: string; data?: unknown };
+        if (entry?.type !== "custom" || entry.customType !== COMPLETION_ENTRY) continue;
+        restored = validCompletion(entry.data) && entry.data.binding === binding ? { ...entry.data, postFailures: { ...entry.data.postFailures } } : freshCompletion(binding);
+      }
+    } catch { restored = undefined; }
+    completion = restored ?? freshCompletion(binding);
+  }
+
+  // A verifier that could not run is unknown enforcement, not a lint finding;
+  // it stays unknown until a fresh completion check passes.
+  function latchPost(ctx: HandlerContext, paths: string[], failure: string | undefined, unknown = false) {
+    if (!paths.length) return;
+    const before = JSON.stringify(completion.postFailures);
+    for (const path of paths) {
+      if (failure) completion.postFailures[path] = failure;
+      else delete completion.postFailures[path];
+    }
+    if (failure) completion = { ...completion, status: "blocked", unknown: unknown || (completion.status === "blocked" && completion.unknown), reason: failure, binding: readBinding(ctx.cwd) };
+    if (JSON.stringify(completion.postFailures) !== before || failure) persistCompletion();
+  }
+
+  async function recheckPost(ctx: HandlerContext) {
+    const paths = Object.keys(completion.postFailures);
+    const errors: string[] = [];
+    const present = paths.filter(path => { try { return statSync(path).isFile(); } catch { return false; } });
+    const reason = await lintPostTargets(pi, present, { ...ctx, postDeadline: Date.now() + 300_000 },
+      error => errors.push(`post-edit-verify.sh: unknown — ${error instanceof Error ? error.message : String(error)}`), () => {});
+    const failure = errors.length ? errors.join("\n") : reason ? `post-edit-verify.sh: ${reason}` : undefined;
+    // Removed targets have nothing left to verify. The rerun decides: a
+    // verifier that ran turns the latch into a known, repairable finding.
+    for (const path of paths) if (!present.includes(path)) delete completion.postFailures[path];
+    completion = { ...completion, unknown: false };
+    if (present.length) latchPost(ctx, present, failure, errors.length > 0);
+    else persistCompletion();
+  }
+
+  // Unknown enforcement denies covered actions; a known project-check failure
+  // permits ordinary guarded repairs (per-call guards still run).
+  function completionGate(covered: boolean): string | undefined {
+    if (!covered || completion.status !== "blocked" || !completion.unknown) return;
+    return `Trellis completion enforcement is unavailable; covered actions are blocked until a completion check succeeds: ${completion.reason}`;
+  }
+
+  function lastAssistantText(event: AgentBeforeSettleEvent): string {
+    const messages = (event.context?.contextMessages ?? []) as Array<{ role?: string; content?: unknown }>;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message?.role !== "assistant") continue;
+      if (typeof message.content === "string") return message.content;
+      if (Array.isArray(message.content)) return message.content.filter(b => b && b.type === "text").map(b => String(b.text)).join("\n");
+      return "";
+    }
+    return "";
+  }
+
+  function blockSettle(event: AgentBeforeSettleEvent, ctx: HandlerContext | undefined, reason: string, unknown: boolean): BoundaryResult {
+    const same = completion.status === "blocked" && completion.reason === reason;
+    completion = { ...completion, status: "blocked", unknown, reason, noProgress: same ? completion.noProgress + 1 : 0 };
+    const canContinue = event.context?.canContinue === true && completion.continuations < MAX_CONTINUATIONS && completion.noProgress < MAX_NO_PROGRESS;
+    if (canContinue) completion.continuations++;
+    const text = `[Trellis completion blocked; enforcement: ${unknown ? "unknown" : "known project-check failure"}]\n${reason}\n`
+      + (canContinue ? "Resolve the failure; completion is checked again before the run settles."
+        : "No further automatic continuation; completion stays blocked until a fresh check passes.");
+    try { ctx?.notify(text, "error"); } catch { /* the published entries still carry it */ }
+    // Publish the blocked state with (and before) any continuation request.
+    const entries = [...(event.entries ?? []),
+      { type: "custom" as const, customType: COMPLETION_ENTRY, data: { ...completion, postFailures: { ...completion.postFailures } } },
+      { type: "custom_message" as const, customType: COMPLETION_ENTRY, content: text, display: true }];
+    return canContinue ? { entries, continue: true } : { entries };
+  }
+
+  async function beforeSettle(event: AgentBeforeSettleEvent, nativeContext: ExtensionContext): Promise<BoundaryResult | undefined> {
+    const ctx = snapshot(nativeContext);
+    completion = { ...completion, status: completion.status === "blocked" ? "blocked" : "needs_check", binding: readBinding(ctx.cwd) };
+    persistCompletion(); // needs_check (or the standing block) before fallible work
+    // The unknown fence also blocks repair edits, so settling re-runs the
+    // verifier on the latched targets; only a clean rerun clears them.
+    if (completion.unknown && Object.keys(completion.postFailures).length) await recheckPost(ctx);
+    const failures = Object.entries(completion.postFailures);
+    if (failures.length) {
+      return blockSettle(event, ctx, `Unresolved mandatory post-edit failures:\n${failures.map(([path, why]) => `${path}: ${why}`).join("\n")}`, completion.unknown);
+    }
+    const decision = await dispatch(pi, { schema_version: 1, harness: "pi", phase: "agent_before_settle", ...session(ctx),
+      turn_id: `${ctx.session_id}:${completion.turn}`, generation: completion.turn,
+      can_continue: event.context?.canContinue === true, last_assistant_message: lastAssistantText(event),
+      // Pi has no host-reentrant Stop: a continuation this gate requested is a
+      // fresh attempt, and reentry would short-circuit the mandatory checks.
+      stop_hook_active: false }, ctx);
+    if (decision.decision === "deny") {
+      return blockSettle(event, ctx, decision.reason ?? "Trellis completion denied", decision.capability_status === "unknown");
+    }
+    // Accepted: finalized once here; the native batch already ran stamp-turn
+    // only because it accepted. Settled notifications never change this.
+    completion = { ...freshCompletion(readBinding(ctx.cwd)), status: "accepted", turn: completion.turn };
+    persistCompletion();
+    if (decision.decision === "warn") show(ctx, decision);
+    return undefined;
+  }
+
+  pi.on("agent_before_settle", async (event, nativeContext) => {
+    // A throw here is not a host gate: convert it to an explicit block.
+    try { return await beforeSettle(event, nativeContext); }
+    catch (error) {
+      let ctx: HandlerContext | undefined;
+      try { ctx = snapshot(nativeContext); } catch { ctx = undefined; }
+      return blockSettle(event, ctx, `Trellis completion check failed; enforcement is unknown: ${error instanceof Error ? error.message : String(error)}`, true);
+    }
+  });
 
   pi.on("resources_discover", (event) => {
     const root = attachedRoot(event.cwd);
@@ -657,6 +1124,16 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   async function toolCall(event: ToolCallEvent, context: ExtensionContext) {
     const ctx = snapshot(context), epoch = generation, policy = guardRules();
     const action = actionFor(pi, ctx.cwd, event.toolCallId, event.toolName, event.input as Record<string, unknown>);
+    const blockedCompletion = completionGate(action.family === "file_mutation" || action.family === "shell" || ["Agent", "SubagentWorkflow", "steer_subagent"].includes(event.toolName));
+    if (blockedCompletion) return { block: true, reason: blockedCompletion };
+    // Pi permits extensions to replace built-ins by name. Their behavior is
+    // not covered by the native file/shell guards, even with familiar inputs.
+    if (["read", "edit", "write", "bash"].includes(event.toolName)) {
+      const tools = pi.getAllTools().filter(tool => tool.name === event.toolName);
+      if (tools.length !== 1 || tools[0].sourceInfo?.source !== "builtin") {
+        return { block: true, reason: `Trellis refuses unmediated tool '${event.toolName}': builtin provenance is unavailable` };
+      }
+    }
     const root = attachedRoot(ctx.cwd);
     if ((action.family === "file_mutation" || action.family === "shell" || ["Agent", "SubagentWorkflow", "steer_subagent"].includes(event.toolName)) && (!root || !readPolicy(root))) {
       return { block: true, reason: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md" };
@@ -679,7 +1156,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     if (epoch !== generation) return { block: true, reason: "Trellis turn changed during pre-action; retry the tool" };
     const advisory = advisoryContext(decision);
     callGenerations.set(event.input, epoch);
-    pending.set(pendingKey(epoch, ctx, event.toolCallId), { action, input: event.input, cwd: ctx.cwd, state, capabilityOnly: isCapabilityOnly(decision), context: advisory ? `[Trellis pre-action advisory; capability: ${decision.capability_status}]\n${advisory}` : "" });
+    pending.set(pendingKey(epoch, ctx, event.toolCallId), { action, input: event.input, cwd: ctx.cwd, binding: readBinding(ctx.cwd), state, capabilityOnly: isCapabilityOnly(decision), context: advisory ? `[Trellis pre-action advisory; capability: ${decision.capability_status}]\n${advisory}` : "" });
   }
 
   pi.on("tool_call", async (event, ctx) => {
@@ -688,12 +1165,15 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   });
 
   pi.on("tool_result", async (event: ToolResultEvent, nativeContext) => {
-    const ctx = snapshot(nativeContext), epoch = callGenerations.get(event.input) ?? generation;
+    const epoch = callGenerations.get(event.input) ?? generation;
     if (epoch !== generation) return;
+    let ctx: HandlerContext | undefined, pre: ReturnType<typeof pending.get>;
+    try {
+    ctx = snapshot(nativeContext);
     const key = pendingKey(epoch, ctx, event.toolCallId), candidate = pending.get(key);
     // Pi carries the same parsed args object through pre/post; a late nested
     // result with a reused id must not consume a newer call's state.
-    const pre = candidate?.input === event.input ? candidate : undefined;
+    pre = candidate?.input === event.input ? candidate : undefined;
     if (pre) pending.delete(key);
     const action = pre?.action ?? actionFor(pi, ctx.cwd, event.toolCallId, event.toolName, event.input as Record<string, unknown>);
     const failed = resultFailed(event, action.family, guardRules());
@@ -701,31 +1181,36 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
       schema_version: 1, harness: "pi", phase: "post_action", native_event: "tool_result", ...session(ctx), action,
       result: { status: failed ? "failed" : "succeeded", is_error: failed, output: event.content },
     };
-    if (pre && (action.family === "file_read" || action.family === "file_mutation")) {
+    if (pre && pre.binding === readBinding(ctx.cwd) && (action.family === "file_read" || action.family === "file_mutation")) {
       recordReadTargets(pre.state, action.targets, pre.cwd, failed);
     }
-    const handled = action.family === "file_read" || action.family === "shell" || (action.family === "file_mutation" && !failed);
-    const decision = handled ? await dispatch(pi, { ...envelope, in_process_read_tracking: true }, ctx)
+    // Native Pi output is a content-block array. The legacy truncation checker
+    // deliberately ignores arrays, so Read/shell have no post work beyond the
+    // captured in-process read update. Never fork just to return that no-op.
+    const root = attachedRoot(ctx.cwd);
+    const decision: Decision = !root ? deny(runtimeUnavailable)
+      : action.family === "file_read" || action.family === "shell" ? { schema_version: 1, capability_status: "advisory", decision: "allow" }
+      : action.family === "file_mutation" && !failed ? await localPostAction(pi, { ...envelope, in_process_read_tracking: true }, ctx, undefined, (paths, failure, unknown) => latchPost(ctx!, paths, failure, unknown))
       : action.family === "file_mutation" ? { schema_version: 1 as const, capability_status: "unsupported" as const, decision: "allow" as const, reason: "post_action/file_mutation: unsupported — checks skipped due to failed result" }
       : unhandledDecision("post_action", action.family);
     if (epoch !== generation) return;
-    show(ctx, { ...decision, decision: decision.decision === "deny" ? "warn" : decision.decision });
-    const postContext = advisoryContext(decision);
-    const postAdvisory = postContext ? `[Trellis post-action advisory; capability: ${decision.capability_status}]\n${postContext}` : "";
-    const successfulRead = action.family === "file_read" && !failed;
-    const separatePre = successfulRead && pre?.capabilityOnly;
-    const separatePost = successfulRead && isCapabilityOnly(decision);
-    const capabilityContext = [separatePre ? pre?.context : undefined, separatePost ? postAdvisory : undefined].filter(Boolean).join("\n\n");
-    if (capabilityContext) {
-      // Pi flushes context-only messages at turn_end after tool results, without steering or another turn.
-      pi.sendMessage({ customType: "trellis-context", content: capabilityContext, display: false }, { triggerTurn: false });
+    return deliverPostResult(pi, ctx, { ...event, isError: failed }, pre, decision, deliveredReasons);
+    } catch (error) {
+      if (epoch !== generation) return;
+      const reason = `Trellis post-action evaluation failed; capability is unknown: ${error instanceof Error ? error.message : String(error)}`;
+      try {
+        if (ctx) return deliverPostResult(pi, ctx, { ...event, isError: true }, pre, deny(reason), deliveredReasons);
+        nativeContext.ui.notify(reason, "warning");
+      } catch { /* A broken notification API must not erase model-visible diagnostics. */ }
+      const text = [pre?.context, `[Trellis post-action advisory; capability: unknown]\n${reason}`].filter(Boolean).join("\n\n");
+      return { content: [...event.content, { type: "text" as const, text }] };
     }
-    const context = [separatePre ? undefined : pre?.context, separatePost ? undefined : postAdvisory].filter(Boolean).join("\n\n");
-    if (context) return { content: [...event.content, { type: "text" as const, text: context }] };
   });
 
   async function userBash(event: UserBashEvent, context: ExtensionContext) {
     const ctx = snapshot(context), policy = guardRules();
+    const blockedCompletion = completionGate(true);
+    if (blockedCompletion) return { result: { output: blockedCompletion, exitCode: 1, cancelled: false, truncated: false } };
     const root = attachedRoot(event.cwd);
     if (!root || !readPolicy(root)) {
       return { result: { output: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md", exitCode: 1, cancelled: false, truncated: false } };
@@ -779,6 +1264,10 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event, ctx) => {
     if (event.messageType !== "user") return;
     const cwd = ctx.cwd;
+    // A new prompt needs a fresh completion check; a standing block survives.
+    completion = { ...completion, status: completion.status === "blocked" ? "blocked" : "needs_check",
+      continuations: 0, noProgress: 0, turn: completion.turn + 1 };
+    persistCompletion();
     resetReads();
     const root = attachedRoot(cwd);
     const policy = root ? readPolicy(root) : undefined;
@@ -786,49 +1275,68 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     const systemPrompt = policyBlock && !event.systemPrompt.includes(policyBlock)
       ? `${event.systemPrompt}\n\n${policyBlock}`
       : event.systemPrompt;
-    const context = pendingContext;
+    let identity: string | undefined, identityError: string | undefined;
+    try { identity = lifecycleIdentity(snapshot(ctx)); }
+    catch { identityError = "Trellis session identity unavailable; queued lifecycle context withheld."; }
+    const context = pendingContext?.identity === identity ? pendingContext?.text : undefined;
     pendingContext = undefined;
     const policyContext = !root ? runtimeUnavailable : policy
       ? undefined
       : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md; shell, file mutation, Agent, SubagentWorkflow, and steer_subagent tools are blocked.";
     return {
       systemPrompt,
-      ...((context || policyContext) ? { message: { customType: "trellis-context", content: [policyContext, context].filter(Boolean).join("\n\n"), display: false } } : {}),
+      ...((context || policyContext || identityError) ? { message: { customType: "trellis-context", content: [policyContext, identityError, context].filter(Boolean).join("\n\n"), display: false } } : {}),
     };
   });
 
   pi.on("session_start", async (event, context) => {
     const ctx = snapshot(context);
     resetSession();
+    restoreCompletion(context, ctx.cwd);
+    const epoch = lifecycleEpoch, identity = lifecycleIdentity(ctx);
     const decision = await lifecycle("session_start", ctx, { reason: event.reason });
-    pendingContext = [pendingContext, advisoryContext(decision)].filter(Boolean).join("\n\n");
+    if (!currentLifecycle(ctx, identity, epoch)) return;
+    queueContext(identity, decision);
     show(ctx, decision);
   });
   pi.on("session_before_compact", async (event, nativeContext) => {
     const ctx = snapshot(nativeContext);
+    const epoch = lifecycleEpoch, identity = lifecycleIdentity(ctx);
     const decision = await lifecycle("session_before_compact", ctx, { reason: event.reason, will_retry: event.willRetry });
+    if (!currentLifecycle(ctx, identity, epoch)) return;
     show(ctx, { ...decision, decision: decision.decision === "deny" ? "warn" : decision.decision });
     const context = advisoryContext(decision);
     if (context) pi.sendMessage({ customType: "trellis-context", content: context, display: false }, { deliverAs: "nextTurn" });
   });
   pi.on("session_compact", async (event, context) => {
     const ctx = snapshot(context);
+    const epoch = lifecycleEpoch, identity = lifecycleIdentity(ctx);
     const decision = await lifecycle("session_compact", ctx, { reason: event.reason, will_retry: event.willRetry });
-    pendingContext = [pendingContext, advisoryContext(decision)].filter(Boolean).join("\n\n");
+    if (!currentLifecycle(ctx, identity, epoch)) return;
+    queueContext(identity, decision);
     show(ctx, decision);
   });
   pi.on("agent_settled", async (_event, nativeContext) => {
     const ctx = snapshot(nativeContext);
     resetReads();
+    const epoch = lifecycleEpoch, identity = lifecycleIdentity(ctx);
     const decision = await lifecycle("agent_settled", ctx);
+    if (!currentLifecycle(ctx, identity, epoch)) return;
     show(ctx, decision);
     const context = advisoryContext(decision);
     if (context) pi.sendMessage({ customType: "trellis-context", content: context, display: false }, { deliverAs: "nextTurn" });
   });
-  pi.on("session_shutdown", async (event, context) => {
+  pi.on("session_shutdown", (event, context) => {
     const ctx = snapshot(context);
+    const identity = lifecycleIdentity(ctx), key = identity ?? JSON.stringify([ctx.session_id, ctx.cwd]);
+    if (shutdownTask?.identity === key) return shutdownTask.task;
     resetSession();
-    const decision = await lifecycle("session_shutdown", ctx, { reason: event.reason });
-    show(ctx, decision);
+    const epoch = lifecycleEpoch;
+    const task = (async () => {
+      const decision = await lifecycle("session_shutdown", ctx, { reason: event.reason });
+      if (currentLifecycle(ctx, identity, epoch)) show(ctx, decision);
+    })();
+    shutdownTask = { identity: key, task };
+    return task;
   });
 }

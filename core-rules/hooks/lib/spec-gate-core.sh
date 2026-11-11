@@ -14,9 +14,10 @@
 # what makes enforcement equal across harnesses (spec §0.2, §0.6).
 #
 # Side effects: only `sg_valid_marker` appends to the audit log. Everything else
-# is read-only. Fail-open on a broken environment (git error) so a hiccup never
-# bricks a push; fail-closed only on a PRESENT-but-malformed config (an opted-in
-# project must not be silently disabled by a typo — spec §0.6 C-6a).
+# is read-only. Mandatory-pipeline environment failures block (SC11): a missing
+# tool or uncertain diff cannot substitute a warning for a mandatory decision.
+# Valid disabled/protected/sub-floor precedence is retained; malformed policy
+# never silently disables an opted-in project (spec §0.6 C-6a).
 
 # Resolve the deps lib relative to THIS file (works from any consumer location).
 _sg_lib_dir=$(unset CDPATH; cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)
@@ -140,25 +141,24 @@ EOF
   printf '%s\tok\t%s\n' "$enabled" "$file"
 }
 
-# Echoes: "<enabled> <floor> <ceiling> <status>"
-#   status: ok | disabled | malformed | nojq
-# Resolves each mandatory-pipeline field independently from canonical project,
-# legacy project, immutable runtime, then its built-in default.
-sg_resolve_cfg() {
-  local root="$1" out enabled status file floor="" ceiling=""
-  local validation='
-        def optional_boolean($key):
-            if (has($key) | not) then true
-            else (.[$key] | type == "boolean" or type == "null")
-            end;
-        def positive_integer($key):
-            if (has($key) | not) then true
-            else (.[$key] | if type == "number" then (. > 0 and floor == .) else false end)
-            end;
-          optional_boolean("enabled")
-          and positive_integer("spec_required_diff_lines")
-          and positive_integer("surgical_max_diff_lines")'
-
+# Rare multi-document inputs retain the original jq-stream semantics. The
+# values below are invocation-local snapshots, not environment-supplied cache
+# entries: this subshell never reopens a policy file or a committed blob.
+_sg_resolve_cfg_legacy_cached() (
+  local root="$1" validation="$2" out enabled status file floor="" ceiling=""
+  sg_policy_json() {
+    local i=0
+    while [ "$i" -lt "$_sg_cfg_count" ]; do
+      if [ "${_sg_cfg_paths[$i]}" = "$1" ]; then
+        printf '%s' "${_sg_cfg_errors[$i]}" >&2
+        [ "${_sg_cfg_present[$i]}" = 1 ] || return 1
+        printf '%s\n' "${_sg_cfg_values[$i]}"
+        return 0
+      fi
+      i=$((i + 1))
+    done
+    return 1
+  }
   out=$(sg_resolve_block "$root" mandatory_pipeline "$validation")
   IFS=$'\t' read -r enabled status file <<EOF
 $out
@@ -166,7 +166,6 @@ EOF
   if [ "$status" != ok ]; then
     echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING $status"; return
   fi
-
   out=$(_sg_resolve_block_field "$root" mandatory_pipeline spec_required_diff_lines "$validation")
   IFS=$'\t' read -r floor status file <<EOF
 $out
@@ -181,7 +180,107 @@ EOF
   if [ "$status" != ok ]; then
     echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING $status"; return
   fi
+  case "$floor" in null|'') floor=$SG_DEFAULT_FLOOR ;; esac
+  case "$ceiling" in null|'') ceiling=$SG_DEFAULT_CEILING ;; esac
+  echo "$enabled $floor $ceiling ok"
+)
 
+# Echoes: "<enabled> <floor> <ceiling> <status>"
+#   status: ok | disabled | malformed | nojq
+# Resolve each field independently in precedence order. A lower source is
+# inspected only while a field is unresolved, exactly as in the old per-field
+# searches; a malformed source cannot be skipped merely because enabled won.
+sg_resolve_cfg() {
+  local root="$1" f json out e n c enabled="" floor="" ceiling=""
+  local found_block=0 fallback=0 _sg_cfg_count=0 i snapshot trailer length errlen read_rc
+  local -a _sg_cfg_paths _sg_cfg_present _sg_cfg_values _sg_cfg_errors
+  local validation='
+        def optional_boolean($key):
+            if (has($key) | not) then true
+            else (.[$key] | type == "boolean" or type == "null")
+            end;
+        def positive_integer($key):
+            if (has($key) | not) then true
+            else (.[$key] | if type == "number" then (. > 0 and floor == .) else false end)
+            end;
+          optional_boolean("enabled")
+          and positive_integer("spec_required_diff_lines")
+          and positive_integer("surgical_max_diff_lines")'
+  if ! command -v jq >/dev/null 2>&1; then
+    echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING nojq"; return
+  fi
+
+  while IFS= read -r f; do
+    i=$_sg_cfg_count; _sg_cfg_count=$((_sg_cfg_count + 1))
+    _sg_cfg_paths[$i]=$f; _sg_cfg_present[$i]=0; _sg_cfg_values[$i]=""
+    # Preserve diagnostics without printing errors from a lower source that
+    # a per-field search would never reach. The suffix encodes the captured
+    # value length and status, so even control characters in JSON cannot be
+    # confused with the separator. A diagnostic takes the legacy replay path.
+    snapshot=$(
+      {
+        if json=$(sg_policy_json "$f"); then read_rc=0; else read_rc=$?; fi
+        printf '%s\037%s:%s' "$json" "${#json}" "$read_rc"
+      } 3>&1 2>&3
+    )
+    trailer=${snapshot##*$'\037'}; snapshot=${snapshot%$'\037'*}
+    length=${trailer%:*}; read_rc=${trailer##*:}; errlen=$((${#snapshot} - length))
+    _sg_cfg_errors[$i]=${snapshot:0:errlen}; json=${snapshot:errlen}
+    [ -z "${_sg_cfg_errors[$i]}" ] || fallback=1
+    if [ "$read_rc" -eq 0 ]; then
+      _sg_cfg_present[$i]=1; _sg_cfg_values[$i]=$json
+    else
+      continue
+    fi
+    [ "$fallback" -eq 0 ] || continue
+    if ! out=$(jq -r -s '
+      def optional_boolean($key):
+        if (has($key) | not) then true
+        else (.[$key] | type == "boolean" or type == "null") end;
+      def positive_integer($key):
+        if (has($key) | not) then true
+        else (.[$key] | if type == "number" then (. > 0 and floor == .) else false end) end;
+      if length == 0 then "malformed"
+      elif length != 1 then "legacy"
+      elif (.[0] | type != "object") then "malformed"
+      elif (.[0] | has("mandatory_pipeline") | not) then "absent"
+      elif (.[0].mandatory_pipeline | type != "object") then "malformed"
+      elif (.[0].mandatory_pipeline |
+        (optional_boolean("enabled") and positive_integer("spec_required_diff_lines")
+         and positive_integer("surgical_max_diff_lines")) | not) then "malformed"
+      else .[0].mandatory_pipeline |
+        ["block",
+         (if has("enabled") then "P" + (.enabled | tostring) else "A" end),
+         (if has("spec_required_diff_lines") then "P" + (.spec_required_diff_lines | tostring) else "A" end),
+         (if has("surgical_max_diff_lines") then "P" + (.surgical_max_diff_lines | tostring) else "A" end)] | join("\t")
+      end' <<<"$json" 2>/dev/null); then
+      echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING malformed"; return
+    fi
+    case "$out" in
+      absent) continue ;;
+      malformed) echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING malformed"; return ;;
+      legacy) fallback=1; continue ;;
+      $'block\t'*) ;;
+      *) fallback=1; continue ;;
+    esac
+    out=${out#*$'\t'}
+    IFS=$'\t' read -r e n c <<EOF
+$out
+EOF
+    found_block=1
+    [ -n "$enabled" ] || case "$e" in P*) enabled=${e#P} ;; esac
+    [ -n "$floor" ] || case "$n" in P*) floor=${n#P} ;; esac
+    [ -n "$ceiling" ] || case "$c" in P*) ceiling=${c#P} ;; esac
+    [ -z "$enabled" ] || [ -z "$floor" ] || [ -z "$ceiling" ] || break
+  done < <(_sg_policy_files "$root")
+
+  if [ "$fallback" -eq 1 ]; then
+    _sg_resolve_cfg_legacy_cached "$root" "$validation"; return
+  fi
+  if [ "$found_block" -eq 0 ]; then
+    echo "false $SG_DEFAULT_FLOOR $SG_DEFAULT_CEILING disabled"; return
+  fi
+  case "$enabled" in null|'') enabled=false ;; esac
   case "$floor" in null|'') floor=$SG_DEFAULT_FLOOR ;; esac
   case "$ceiling" in null|'') ceiling=$SG_DEFAULT_CEILING ;; esac
   echo "$enabled $floor $ceiling ok"
@@ -209,28 +308,46 @@ EOF
 # Resolver candidates match the process-gate runner layouts, including the
 # common checkout for linked worktrees. The core's sibling skill covers payload
 # execution and deployed .claude/hooks/lib -> .claude/skills installations.
+# A gate deployed at <root>/.codex/hooks also tries <root>/.agents/skills,
+# where Codex installs process-gate: still the running gate's own tree.
 sg_find_resolver() {
-  local dir="$1" root="$2" candidate
+  local dir="$1" root="$2" candidate codex_skill=""
+  case "$_sg_lib_dir" in
+    */.codex/hooks/lib) codex_skill="${_sg_lib_dir%/.codex/hooks/lib}/.agents/skills/process-gate/scripts/lib/diff-base.sh" ;;
+  esac
   for candidate in \
     "${TRELLIS_ROOT:+$TRELLIS_ROOT/core-rules/skills/process-gate/scripts/lib/diff-base.sh}" \
     "$_sg_lib_dir/../../skills/process-gate/scripts/lib/diff-base.sh" \
-    "$dir/.claude/skills/process-gate/scripts/lib/diff-base.sh" \
-    "$dir/.agents/skills/process-gate/scripts/lib/diff-base.sh" \
-    "$dir/core-rules/skills/process-gate/scripts/lib/diff-base.sh" \
-    "$root/.claude/skills/process-gate/scripts/lib/diff-base.sh" \
-    "$root/.agents/skills/process-gate/scripts/lib/diff-base.sh"; do
+    "$codex_skill"; do
+    [ -n "$candidate" ] || continue
     [ -f "$candidate" ] || continue
     printf '%s' "$candidate"; return 0
   done
-  return 1
+  return 4
 }
 
-# Echoes TAB-separated base / exact range / receipt. No network in a hook.
-# Resolve in the target checkout, without changing a sourced caller's cwd.
-sg_resolve_diff() (
-  local dir="$1" range="${2:-}" ref="${3:-}" head="${4:-}" root resolver rc
-  root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
-  resolver=$(sg_find_resolver "$dir" "$root") || return 2
+# The protected-branch exemption must use the same trusted default-branch
+# authority as the diff resolver, not policy from the branch being judged.
+sg_trusted_protected_branch() (
+  local dir="$1" root="$2" resolver name _dd_ref=""
+  resolver=$(sg_find_resolver "$dir" "$root") || return 1
+  # shellcheck source=/dev/null
+  . "$resolver"
+  cd -- "$dir" || return 1
+  db_defbranch || return 1
+  case "$_dd_ref" in
+    refs/remotes/*) name=${_dd_ref#refs/remotes/}; name=${name#*/} ;;
+    refs/heads/*) name=${_dd_ref#refs/heads/} ;;
+    *) name=$_dd_ref ;;
+  esac
+  [ -n "$name" ] || return 1
+  printf '%s' "$name"
+)
+
+# The caller supplies a root it has already resolved in this operation.
+_sg_resolve_diff_with_root() (
+  local dir="$1" range="${2:-}" ref="${3:-}" head="${4:-}" root="$5" resolver rc
+  resolver=$(sg_find_resolver "$dir" "$root") || return 4
   # shellcheck source=/dev/null
   . "$resolver"
   cd -- "$dir" || return 1
@@ -239,6 +356,15 @@ sg_resolve_diff() (
   if db_resolve --range="$range" --ref="$ref" --head="$head"; then rc=0; else rc=$?; fi
   printf '%s\t%s\t%s' "${DB_BASE_SHA:--}" "${DB_RANGE:--}" "$(db_receipt)"
   return "$rc"
+)
+
+# Echoes TAB-separated base / exact range / receipt. No network in a hook.
+# Resolve in the target checkout, without changing a sourced caller's cwd.
+# Keep the public function's original behavior of ignoring extra arguments.
+sg_resolve_diff() (
+  local dir="$1" root
+  root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
+  _sg_resolve_diff_with_root "$dir" "${2:-}" "${3:-}" "${4:-}" "$root"
 )
 
 # Compatibility API for /surgical: new markers bind the resolver base. The
@@ -284,8 +410,8 @@ sg_gate_args() {
   local root
   root=$(_se_repo_root "$PWD" 2>/dev/null || printf '%s' "$PWD")
   sg_find_resolver "$PWD" "$root" >/dev/null || {
-    printf '[spec-gate] BLOCKED: diff-base resolver missing; restore the process-gate skill\n' >&2
-    return 1
+    printf '[spec-gate] BLOCKED: diff-base resolver missing from trusted runtime; restore the process-gate skill\n' >&2
+    return 4
   }
 }
 
@@ -340,19 +466,29 @@ sg_is_excluded_path() {
 # Echoes the net gated diff size (added+deleted, excluded paths removed) for the
 # exact resolved range. Echoes "-1" if the diff cannot be computed (fail-open).
 sg_compute_gated_diff() {
-  local dir="$1" range="$2" total=0 adds dels relp numstat
+  local dir="$1" range="$2" total=0 adds dels relp row old numstat valid=1
   [ -n "$range" ] || { printf '%s' "-1"; return; }
-  if ! numstat=$(git -C "$dir" diff --numstat "$range" 2>/dev/null); then
+  numstat=$(mktemp "${TMPDIR:-/tmp}/trellis-spec-numstat.XXXXXX") || { printf '%s' "-1"; return; }
+  if ! git -C "$dir" diff --numstat -z "$range" > "$numstat" 2>/dev/null; then
+    rm -f -- "${numstat:?}"
     printf '%s' "-1"; return
   fi
-  while IFS=$'\t' read -r adds dels relp; do
-    [ -z "$relp" ] && continue
-    [ "$adds" = "-" ] && continue          # binary; excluded from a line count
+  # With -z, a rename is 'adds<TAB>dels<TAB>NUL old<NUL>new<NUL>'.
+  # Classify its destination, while counting only the actual changed lines.
+  while IFS= read -r -d '' row; do
+    case "$row" in *$'\t'*$'\t'*) ;; *) valid=0; break ;; esac
+    adds=${row%%$'\t'*}; row=${row#*$'\t'}
+    dels=${row%%$'\t'*}; relp=${row#*$'\t'}
+    if [ -z "$relp" ]; then
+      IFS= read -r -d '' old && [ -n "$old" ] && IFS= read -r -d '' relp && [ -n "$relp" ] || { valid=0; break; }
+    fi
+    if [ "$adds" = '-' ] && [ "$dels" = '-' ]; then continue; fi
+    case "$adds:$dels" in *[!0-9:]*|:*|*:) valid=0; break ;; esac
     sg_is_excluded_path "$relp" && continue
     total=$(( total + adds + dels ))
-  done <<EOF
-$numstat
-EOF
+  done < "$numstat"
+  rm -f -- "${numstat:?}"
+  [ "$valid" -eq 1 ] || { printf '%s' "-1"; return; }
   printf '%s' "$total"
 }
 
@@ -422,23 +558,46 @@ sg_autonomy_level() {
   # cross-harness authority for precedence, session overrides, and ceilings.
   type _se_resolve_autonomy >/dev/null 2>&1 || { printf '3'; return; }
   if [ -n "${SG_OBJECT_HEAD:-}" ]; then
-    _se_resolve_autonomy "$root" sg_policy_json
+    _se_resolve_autonomy "$root" sg_policy_json || return 1
   else
-    _se_resolve_autonomy "$root"
+    _se_resolve_autonomy "$root" || return 1
   fi
   printf '%s' "${AUTONOMY_LEVEL:-3}"
+}
+
+# Match a literal whole branch token, not a prefix or substring of another ref.
+# Whitespace/colon are ref-invalid delimiters; common paired Markdown wrappers
+# permit a branch to be recorded in prose without interpreting it as a regex.
+sg_branch_token_in_log() {
+  [ -n "$1" ] || return 1
+  LC_ALL=C awk -v branch="$1" '
+    function boundary(c) { return c == "" || c ~ /[[:space:]:]/ }
+    {
+      text = $0
+      while ((pos = index(text, branch)) != 0) {
+        left = pos > 1 ? substr(text, pos - 1, 1) : ""
+        right = substr(text, pos + length(branch), 1)
+        if ((boundary(left) && boundary(right)) ||
+            (left == "`" && right == "`") ||
+            (left == "(" && right == ")") ||
+            (left == "[" && right == "]")) { found = 1; exit }
+        text = substr(text, pos + 1)
+      }
+    }
+    END { exit !found }
+  '
 }
 
 # L1-3: real interview => clarify.md in the triad OR an explicit spec-waiver.
 # L4-5: agent self-answers => a decisions-log entry for this branch.
 sg_interview_artifact_ok() {
   local dir="$1" root="$2" tdir="$3" branch="$4" head="${5:-}" lvl
-  lvl=$(sg_autonomy_level "$root")
+  lvl=$(sg_autonomy_level "$root") || return 1
   if [ "$lvl" -ge 4 ]; then
     if [ -n "$head" ]; then
-      sg_ref_file "$dir" "$head" decisions-log.md | grep -qF "$branch"; return
+      sg_ref_file "$dir" "$head" decisions-log.md | sg_branch_token_in_log "$branch"; return
     fi
-    [ -f "$root/decisions-log.md" ] && grep -qF "$branch" "$root/decisions-log.md" && return 0
+    [ -f "$root/decisions-log.md" ] && sg_branch_token_in_log "$branch" < "$root/decisions-log.md" && return 0
     return 1
   fi
   if [ -n "$head" ]; then
@@ -510,11 +669,15 @@ sg_write_marker() {
 # sg_verdict dir [range [ref [head]]]; explicit identity pins object content.
 # Pure function of state. Callers map verdict to their output shape.
 sg_verdict() {
-  local dir; dir=$(git -C "${1:-$PWD}" rev-parse --show-toplevel 2>/dev/null) || { printf 'advisory\tnot-a-git-worktree'; return; }
+  local dir requested="${1:-$PWD}" is_git=1
+  if ! dir=$(git -C "$requested" rev-parse --show-toplevel 2>/dev/null); then
+    dir="$requested"; is_git=0
+  fi
   local root; root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
-  local branch protected base diff range resolved rc SG_RECEIPT=""
+  local branch="" protected base diff range resolved="" rc=1 SG_RECEIPT=""
   local ref="${3:-${SG_REQUEST_REF:-}}" head="${4:-${SG_REQUEST_HEAD:-}}"
   local SG_OBJECT_DIR="$dir" SG_OBJECT_HEAD=""
+  if [ "$is_git" -eq 1 ]; then
   if [ -n "$ref" ]; then
     branch=${ref#refs/heads/}
     git check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || { sg_result block invalid-ref; return; }
@@ -526,7 +689,7 @@ sg_verdict() {
     SG_OBJECT_HEAD=$(git -C "$dir" rev-parse --verify "$head^{commit}" 2>/dev/null) || { sg_result block invalid-head; return; }
     head="$SG_OBJECT_HEAD"
   fi
-  if resolved=$(sg_resolve_diff "$dir" "${2:-${SG_REQUEST_RANGE:-}}" "$ref" "$head"); then
+  if resolved=$(_sg_resolve_diff_with_root "$dir" "${2:-${SG_REQUEST_RANGE:-}}" "$ref" "$head" "$root"); then
     rc=0
   else
     rc=$?
@@ -536,6 +699,7 @@ sg_verdict() {
 $resolved
 EOF
   fi
+  fi
 
   local cfg enabled floor ceiling cfgst
   cfg=$(sg_resolve_cfg "$root"); read -r enabled floor ceiling cfgst <<EOF
@@ -543,29 +707,30 @@ $cfg
 EOF
   case "$cfgst" in
     disabled) sg_result pass disabled; return ;;
-    nojq)     sg_result advisory jq-absent-cannot-evaluate; return ;;
+    nojq)     sg_result block 'jq required but not found — cannot read mandatory_pipeline policy'; return ;;
     malformed) sg_result block 'mandatory_pipeline config present but malformed — fix trellis.config.json'; return ;;
   esac
   [ "$enabled" = "true" ] || { sg_result pass disabled; return; }
+  [ "$is_git" -eq 1 ] || { sg_result block not-a-git-worktree; return; }
 
-  [ -n "$branch" ] && [ "$branch" != "HEAD" ] || { sg_result advisory detached-or-unknown-branch; return; }
-  protected=$(sg_protected_branch "$root")
-  [ "$branch" = "$protected" ] && { sg_result pass on-protected-branch; return; }
-  if [ "$rc" -eq 2 ]; then
-    sg_result advisory 'diff-base resolver missing'; return
+  [ -n "$branch" ] && [ "$branch" != "HEAD" ] || { sg_result block detached-or-unknown-branch; return; }
+  protected=$(sg_trusted_protected_branch "$dir" "$root") || protected=""
+  [ -n "$protected" ] && [ "$branch" = "$protected" ] && { sg_result pass on-protected-branch; return; }
+  if [ "$rc" -eq 4 ]; then
+    sg_result block 'diff-base resolver missing from trusted runtime; restore the process-gate skill'; return
   fi
   if [ "$rc" -ne 0 ]; then
     sg_result block 'cannot-resolve-diff-base'; return
   fi
   diff=$(sg_compute_gated_diff "$dir" "$range")
-  [ "$diff" = "-1" ] && { sg_result advisory 'cannot-compute-diff-baseline'; return; }
+  [ "$diff" = "-1" ] && { sg_result block 'cannot-compute-diff-baseline'; return; }
   [ "$diff" -le "$floor" ] && { sg_result pass "sub-floor($diff<=$floor)"; return; }
 
   # Option 1 (spec 067): only B's range qualifies. An inherited parent triad
   # or a tasks-only tick never substitutes for B's own triad (+interview).
   local tdir
   if ! tdir=$(sg_triad_in_range "$dir" "$range" "$SG_OBJECT_HEAD"); then
-    sg_result advisory 'cannot-discover-spec-triad'; return
+    sg_result block 'cannot-discover-spec-triad'; return
   fi
   if [ -n "$tdir" ]; then
     if sg_interview_artifact_ok "$dir" "$root" "$tdir" "$branch" "$SG_OBJECT_HEAD"; then
@@ -601,7 +766,7 @@ sg_stop_cache_file() {
 # sg_stop_cache_key <dir> — print the sha256 key; fails when any input cannot
 # be read.
 sg_stop_cache_key() {
-  local dir root common branch head refs stats resolver f sum list=()
+  local dir root common branch head refs stats resolver f sum key_input list=()
   dir=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
   root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
   common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
@@ -620,9 +785,11 @@ sg_stop_cache_key() {
     list[${#list[@]}]="s:$f"
   done
   stats=$(_se_stat_lines "${list[@]}") || return 1
-  sum=$(printf '%s\n' 'trellis-spec-gate-key v1' "dir $dir" "root $root" "branch $branch" "head $head" \
+  # Preserve the final newline: command substitution would change the key.
+  printf -v key_input '%s\n' 'trellis-spec-gate-key v1' "dir $dir" "root $root" "branch $branch" "head $head" \
     "env ${TRELLIS_ROOT:-}|${SG_REQUEST_RANGE:-}|${SG_REQUEST_REF:-}|${SG_REQUEST_HEAD:-}" \
-    "$refs" "$stats" | shasum -a 256) || return 1
+    "$refs" "$stats"
+  sum=$(_se_stop_sha256_text "$key_input") || return 1
   sum=${sum%% *}
   [ "${#sum}" -eq 64 ] || return 1
   printf '%s' "$sum"

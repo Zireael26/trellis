@@ -37,7 +37,10 @@ wm_secret_files() {
   fi
   scan_rc=0
   while IFS= read -r -d '' file; do
-    if ! wm_git -C "$wt" diff --cached --no-color --unified=0 -- "$file" > "$tmp/diff"; then
+    # Pin the diff prefixes: a user diff.noprefix or diff.mnemonicPrefix setting
+    # must not change the header filter below into scanning the file path.
+    if ! wm_git -C "$wt" diff --cached --no-color --unified=0 \
+      --src-prefix=a/ --dst-prefix=b/ -- "$file" > "$tmp/diff"; then
       scan_rc=1
       break
     fi
@@ -50,7 +53,7 @@ wm_secret_files() {
         esac ;;
     esac
     if [ "$found" -eq 0 ]; then
-      if ! added="$(sed -n '/^+++ /d; s/^+//p' "$tmp/diff")"; then
+      if ! added="$(sed -n '/^+++ b\//d; s/^+//p' "$tmp/diff")"; then
         scan_rc=1
         break
       fi
@@ -91,7 +94,7 @@ wm_apply_preserve() {
   }
   path="$(printf '%s' "$row" | jq -r '.path')"
   if ! fresh="$(wm_revalidate "$work" "$row")"; then
-    wm_journal "$journal" preserve "$path" "" failed "$fresh"
+    wm_journal "$journal" preserve "$path" "" failed "$fresh" || return 5
     return 1
   fi
   branch="$(printf '%s' "$fresh" | jq -r '.branch // ""')"
@@ -113,11 +116,11 @@ wm_apply_preserve() {
 $kept
 EOF
     if [ "$ok" -ne 1 ]; then
-      wm_journal "$journal" preserve "$path" "" failed "archive copy of ignored files failed"
+      wm_journal "$journal" preserve "$path" "" failed "archive copy of ignored files failed" || return 5
       return 1
     fi
     wm_journal "$journal" preserve "$path" "" archived "" \
-      "$(printf '%s' "$fresh" | jq -c --arg a "$archive" '{archive:$a, files:.ignored_kept}')"
+      "$(printf '%s' "$fresh" | jq -c --arg a "$archive" '{archive:$a, files:.ignored_kept}')" || return 5
   fi
 
   if [ "$work_count" -gt 0 ]; then
@@ -125,14 +128,14 @@ EOF
     [ ! -f "$git_dir/index" ] || cp -p "$git_dir/index" "$work/index.backup"
     if [ "$pb" != "$branch" ]; then
       if ! wm_git -C "$path" checkout -q -b "$pb" >> "$WM_LOG" 2>&1; then
-        wm_journal "$journal" preserve "$path" "" failed "could not create $pb: $(wm_log_tail)"
+        wm_journal "$journal" preserve "$path" "" failed "could not create $pb: $(wm_log_tail)" || return 5
         return 1
       fi
       created=1
     fi
     if ! wm_git -C "$path" add -A >> "$WM_LOG" 2>&1 || ! secrets="$(wm_secret_files "$path")"; then
       _wm_preserve_undo
-      wm_journal "$journal" preserve "$path" "" failed "staging or the secrets scan failed: $(wm_log_tail)"
+      wm_journal "$journal" preserve "$path" "" failed "staging or the secrets scan failed: $(wm_log_tail)" || return 5
       return 1
     fi
     # A staged file the process gate's secrets scan flags is copied to the
@@ -148,21 +151,21 @@ $secrets
 EOF
       if [ "$ok" -ne 1 ]; then
         _wm_preserve_undo
-        wm_journal "$journal" preserve "$path" "" failed "could not withhold flagged files"
+        wm_journal "$journal" preserve "$path" "" failed "could not withhold flagged files" || return 5
         return 1
       fi
       wm_journal "$journal" preserve "$path" "" secrets-withheld "" \
-        "$(jq -nc --arg a "$archive" --arg f "$secrets" '{archive:$a, files:($f | split("\n") | map(select(. != "")))}')"
+        "$(jq -nc --arg a "$archive" --arg f "$secrets" '{archive:$a, files:($f | split("\n") | map(select(. != "")))}')" || return 5
     fi
     # The commit-msg hook fleet-wide takes Conventional Commit types only, so
     # the owner's "wip: preserve ..." subject rides behind `chore:`.
     if wm_git -C "$path" diff --cached --quiet; then
       _wm_preserve_undo
-      wm_journal "$journal" preserve "$path" "" nothing-to-commit
+      wm_journal "$journal" preserve "$path" "" nothing-to-commit || return 5
     elif wm_git -C "$path" commit -q -m "chore: wip: preserve $path before worktree migration" >> "$WM_LOG" 2>&1; then
       sha="$(wm_git -C "$path" rev-parse HEAD)"
       wm_journal "$journal" preserve "$path" "" committed "" \
-        "$(jq -nc --arg b "$pb" --arg s "$sha" --arg base "$head" '{branch:$b, sha:$s, base:$base}')"
+        "$(jq -nc --arg b "$pb" --arg s "$sha" --arg base "$head" '{branch:$b, sha:$s, base:$base}')" || return 5
       # A new preserve/<dir> branch moves to that branch's convention path.
       if [ "$created" -eq 1 ] &&
          target="$(hy_convention_path "$(printf '%s' "$fresh" | jq -r '.repo')" "$pb")" && [ ! -e "$target" ]; then
@@ -170,7 +173,7 @@ EOF
       fi
     else
       _wm_preserve_undo
-      wm_journal "$journal" preserve "$path" "" failed "preserve commit refused: $(wm_log_tail)"
+      wm_journal "$journal" preserve "$path" "" failed "preserve commit refused: $(wm_log_tail)" || return 5
       return 1
     fi
   fi
@@ -183,14 +186,14 @@ EOF
     fi
     if [ "$remote" = "$sha" ]; then
       wm_journal "$journal" preserve "$path" "" pushed "" \
-        "$(jq -nc --arg r "origin/$push_ref" --arg s "$sha" '{pushed_ref:$r, sha:$s}')"
+        "$(jq -nc --arg r "origin/$push_ref" --arg s "$sha" '{pushed_ref:$r, sha:$s}')" || return 5
     else
-      wm_journal "$journal" preserve "$path" "" push-failed "push of $pb to $push_ref not verified on origin: $(wm_log_tail)"
+      wm_journal "$journal" preserve "$path" "" push-failed "push of $pb to $push_ref not verified on origin: $(wm_log_tail)" || return 5
     fi
   elif [ "$push" = true ]; then
-    wm_journal "$journal" preserve "$path" "" local-only "nothing was committed on $pb"
+    wm_journal "$journal" preserve "$path" "" local-only "nothing was committed on $pb" || return 5
   else
-    wm_journal "$journal" preserve "$path" "" local-only "origin owner not in worktrees.push_owners"
+    wm_journal "$journal" preserve "$path" "" local-only "origin owner not in worktrees.push_owners" || return 5
   fi
 
   wm_move_steps "$work" "$journal" preserve "$fresh" start

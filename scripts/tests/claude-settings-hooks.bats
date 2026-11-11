@@ -1,13 +1,17 @@
 #!/usr/bin/env bats
 # Spec 072 T12: how the attach-rendered Claude settings start Trellis hooks.
 # Exec form (no user shell) for every hook outside the contextual SessionStart
-# entries; onFailure block on the bright-line PreToolUse guards and nowhere
-# else; explicit timeouts; advisories filtered with `if` and kept synchronous.
+# entries; onFailure block on the bright-line guards (the PreToolUse guards
+# and the UserPromptExpansion skill-slash-guard) and nowhere else; explicit timeouts; advisories filtered with `if` and kept synchronous.
 # Below Claude Code 2.1.295, or on an unreadable version, the render is the
 # pre-exec shell-form wiring, byte for byte. claude is a stub.
 REPO="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
-TEMPLATE="$REPO/core-rules/templates/claude-settings.local.json"
-GUARDS='["block-destructive","reread-guard","skill-preload-guard"]'
+# T34: the production template registers the native entry (asserted at the
+# end); the spec 072 exec/shell-form wiring below is the pinned legacy
+# surface that the native-miss fallback renders.
+TEMPLATE="$REPO/core-rules/legacy-hooks/claude-settings.local.json"
+NATIVE_TEMPLATE="$REPO/core-rules/templates/claude-settings.local.json"
+GUARDS='["block-destructive","reread-guard","skill-preload-guard","skill-slash-guard"]'
 
 setup() {
   SANDBOX="$(cd "$(mktemp -d "$BATS_TEST_TMPDIR/claude-settings.XXXXXX")" && pwd -P)"
@@ -31,7 +35,7 @@ render() {
     HOME="$SANDBOX/home" PATH="$SANDBOX/claude-bin:/usr/bin:/bin" bash -c '
     . "$1/scripts/lib/attachment.sh" || exit 90
     context="$(attachment_contextual_render_context "$2")" || exit 91
-    attachment_contextual_template_render "$1/core-rules/templates/claude-settings.local.json" \
+    attachment_contextual_template_render "$1/core-rules/legacy-hooks/claude-settings.local.json" \
       core-rules/templates/claude-settings.local.json "$context"
   ' _ "$REPO" "$SANDBOX/trellis-home"
 }
@@ -39,9 +43,9 @@ render() {
 # guard_of: the bright-line guard a hook starts through the supervisor, or null.
 GUARD_OF='def guard_of: ((.args // []) | index("guard-supervise")) as $i | if $i == null then null else .args[$i + 3] end;'
 
-@test "onFailure block is on every bright-line PreToolUse guard and on no other hook" {
+@test "onFailure block is on every bright-line guard and on no other hook" {
   jq -e --argjson guards "$GUARDS" "$GUARD_OF"'
-    ([.hooks.PreToolUse[].hooks[] | select(.onFailure == "block") | guard_of] | sort) == $guards
+    ([.hooks[][].hooks[] | select(.onFailure == "block") | guard_of] | sort) == $guards
     and ([.hooks[][].hooks[] | select(has("onFailure"))] | length) == ($guards | length)
   ' "$TEMPLATE" >/dev/null
 }
@@ -69,7 +73,7 @@ GUARD_OF='def guard_of: ((.args // []) | index("guard-supervise")) as $i | if $i
     {"post-edit-verify":120,"slop-tripwire":5,"track-read":5,"wiki-skill-suggest":5,
      "hookspath-guard":10,"spec-gate":15,"decision-receipt":15,"stop-verify":300,
      "code-review-subagent":120,"ui-verify":120,"stamp-turn":5,"turn-baseline":10,
-     "skill-slash-guard":5,"save-context-log":10} as $ceiling
+     "save-context-log":10} as $ceiling
     | [.hooks | to_entries[] | select(.key != "SessionStart") | .key as $event | .value[].hooks[]
        | {event:$event, guard:guard_of, name:name, timeout}]
     | length == 18
@@ -116,15 +120,16 @@ GUARD_OF='def guard_of: ((.args // []) | index("guard-supervise")) as $i | if $i
     out="$(render)" || { echo "render failed: $version"; false; }
     # The exec-form template as is, SessionStart aside.
     printf '%s\n' "$out" | jq -e --argjson guards "$GUARDS" --slurpfile t "$TEMPLATE" "$GUARD_OF"'
-      ([.hooks.PreToolUse[].hooks[] | select(.onFailure == "block") | guard_of] | sort == $guards)
+      ([.hooks[][].hooks[] | select(.onFailure == "block") | guard_of] | sort == $guards)
       and del(.hooks.SessionStart) == ($t[0] | del(.hooks.SessionStart))
     ' >/dev/null || { echo "$version: $out"; false; }
   done
 }
 
 # sha256 of `jq -cS '.hooks | del(.SessionStart)'` over the template as it was
-# before exec form (641b7873e): the shell-form wiring a legacy client gets.
-LEGACY_HOOKS_SHA256=b0ef593136abb7607fe68405cdcd6479b27a0ae1406a190db493af9cb15c167f
+# before exec form (641b7873e): the shell-form wiring a legacy client gets,
+# with skill-slash-guard started through the supervisor (spec 074 T67).
+LEGACY_HOOKS_SHA256=1ddefe65d7a1731818017280fe0d3f19ce50fe015cb304b1581dc43f39bd8b23
 
 # legacy_case <case>: a claude below the floor, unreadable, or missing.
 legacy_case() {
@@ -162,9 +167,9 @@ run_hook() {
     ' >/dev/null || { echo "$case: render differs outside the hook wiring"; false; }
     # Each guard keeps the sanitizing supervisor entry and the 30 s budget.
     printf '%s\n' "$out" | jq -e --argjson guards "$GUARDS" '
-      [.hooks.PreToolUse[].hooks[] | select(.command | contains("guard-supervise"))
+      [.hooks[][].hooks[] | select(.command | contains("guard-supervise"))
        | select(.timeout == 30 and (.command | contains("env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl")))
-       | .command | capture("claude (?<g>[a-z-]+) \"").g] | sort == $guards
+       | .command | capture("claude(-expansion)? (?<g>[a-z-]+) \"").g] | sort == $guards
     ' >/dev/null || { echo "$case: guard entries lost the supervisor or budget"; false; }
   done
 }
@@ -240,7 +245,7 @@ run_hook() {
   printf '#!/bin/sh\necho "2.1.300 (Claude Code)"\n' > "$SANDBOX/caller-bin/claude"
   chmod 755 "$SANDBOX/caller-bin/claude"
   out="$(render "$SANDBOX/caller-bin:/usr/bin")"
-  printf '%s\n' "$out" | jq -e '[.. | objects | select(.onFailure == "block")] | length == 3' >/dev/null
+  printf '%s\n' "$out" | jq -e '[.. | objects | select(.onFailure == "block")] | length == 4' >/dev/null
 }
 
 # An npm-style `#!/usr/bin/env node` claude needs its runtime from the caller
@@ -252,7 +257,7 @@ run_hook() {
   printf '#!/bin/sh\necho "2.1.300 (Claude Code)"\n' > "$SANDBOX/caller-bin/claude-stub-runtime"
   chmod 755 "$SANDBOX/caller-bin/claude" "$SANDBOX/caller-bin/claude-stub-runtime"
   out="$(render "$SANDBOX/caller-bin:/usr/bin:/bin")"
-  printf '%s\n' "$out" | jq -e '[.. | objects | select(.onFailure == "block")] | length == 3' >/dev/null
+  printf '%s\n' "$out" | jq -e '[.. | objects | select(.onFailure == "block")] | length == 4' >/dev/null
 }
 
 @test "the bench spawns exec-form hooks directly and honours a Bash if filter" {
@@ -275,4 +280,15 @@ assert argv[0][-1] == "/p/.trellis/runtime/core-rules/hooks/block-destructive.sh
 assert gh == ["block-destructive", "pr-gate-shiftleft"], gh
 PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T34: the production template registers only native entries, onFailure block, with the event budgets" {
+  jq -e '
+    [.hooks | to_entries[] | select(.key != "SessionStart") | .key as $e | .value[] | .hooks[] | {e:$e, h:.}] as $rows
+    | ($rows | length) == 6
+    and all($rows[]; .h.command == "__TRELLIS_LAUNCHER__" and .h.args == ["hook","event","claude",.e] and .h.onFailure == "block"
+        and .h.timeout == ({"Stop":310,"PostToolUse":130}[.e] // 30))
+    and ([.hooks.PreToolUse[].matcher] == ["Bash|Skill|Edit|MultiEdit|Write"])
+    and ([.hooks.PostToolUse[].matcher] == ["Read|Write|Edit|MultiEdit|Bash"])
+  ' "$NATIVE_TEMPLATE" >/dev/null
 }

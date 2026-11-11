@@ -184,6 +184,43 @@ run_hook() {
   [ "$(reviewer_call_count "$COUNT")" -eq 0 ]
 }
 
+@test "143-stop critical severity variants block and invalid severities are never recorded as reviewed" {
+  setup_triggering_repo
+  export CODEX_PROJECT_DIR="$PROJECT_DIR" TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)"
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/review-home"
+  stub="$(make_reviewer_stub 'jq -nc --arg severity "$TEST_SEVERITY" "{status:\"completed\",findings:[{severity:\$severity,file:\"x\",line:1,msg:\"finding\"}]}"')"
+  export CODE_REVIEWER_CMD="$stub"
+  local hook severity
+  for hook in "$HOOK" "$CODEX_HOOKS_DIR/code-review-subagent.sh"; do
+    for severity in Critical CRITICAL blocker BLOCKER; do
+      export TEST_SEVERITY="$severity"
+      run_with_stderr "$hook" '{}'
+      if [ "$hook" = "$HOOK" ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+      printf '%s\n' "$output" | jq -e '.decision == "block" and (.reason | contains("finding"))' >/dev/null
+    done
+    export TEST_SEVERITY='not-a-severity'
+    run_with_stderr "$hook" '{}'
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *'malformed'* ]]
+    run_with_stderr "$hook" '{}'
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *'malformed'* ]]
+    export TEST_SEVERITY=Important
+    run_with_stderr "$hook" '{}'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'[important]'* ]]
+    [[ "$output" != *'"decision":"block"'* ]]
+  done
+  printf '# another change\n' >> "$PROJECT_DIR/alpha.py"
+  stub="$(make_reviewer_stub 'printf "%s\n" '\''{"status":"completed","findings":[{"severity":"unknown","file":"x","msg":"unknown"},{"severity":"Critical","file":"x","msg":"must block"}]}'\''')"
+  export CODE_REVIEWER_CMD="$stub"
+  for hook in "$HOOK" "$CODEX_HOOKS_DIR/code-review-subagent.sh"; do
+    run_with_stderr "$hook" '{}'
+    if [ "$hook" = "$HOOK" ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+    printf '%s\n' "$output" | jq -e '.decision == "block" and (.reason | contains("must block"))' >/dev/null
+  done
+}
+
 # =========================================================================
 # Block on critical: a rung-1 stub emitting a critical finding → the hook exits
 # 2 and stdout is a {"decision":"block",...} object carrying the finding text.
@@ -554,4 +591,101 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(jq -r '.autonomy_level' "$CAPTURE_FILE")" -eq 2 ]
   [ -z "$(jq -r '.decisions_log' "$CAPTURE_FILE")" ]
+}
+
+@test "sweep-fx1: mixed valid critical plus null-file finding still blocks" {
+  setup_triggering_repo
+  stub="$(make_reviewer_stub \
+    'printf "%s\n" "{\"findings\":[{\"severity\":\"critical\",\"file\":\"src/a.ts\",\"line\":3,\"msg\":\"auth bypass\"},{\"severity\":\"minor\",\"file\":null,\"msg\":\"nit\"}]}"')"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'auth bypass'* ]] || { echo "$output"; false; }
+}
+
+@test "H1: completed empty findings is a clean review, not malformed" {
+  setup_triggering_repo
+  stub="$(make_reviewer_stub \
+    'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"')"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$stderr" != *"malformed"* ]] || { echo "$stderr"; false; }
+  # Clean review writes a marker so the same diff is not re-reviewed.
+  [ "$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
+@test "H2: dropped critical with bad file still blocks with file ?" {
+  setup_triggering_repo
+  stub="$(make_reviewer_stub \
+    'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"critical\",\"file\":null,\"msg\":\"auth bypass across modules\"},{\"severity\":\"minor\",\"file\":\"a.ts\",\"line\":1,\"msg\":\"nit\"}]}"')"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'auth bypass across modules'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'"?"'* || "$output" == *'?:'* || "$output" == *'? :' ]] || { echo "$output"; false; }
+}
+
+@test "H2b: dropped non-critical does not write a marker" {
+  setup_triggering_repo
+  stub="$(make_reviewer_stub \
+    'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"minor\",\"file\":\"a.ts\",\"line\":1,\"msg\":\"nit\"},{\"severity\":\"minor\",\"file\":null,\"msg\":\"bad\"}]}"')"
+  export CODE_REVIEWER_CMD="$stub"
+
+  run_hook
+  [ "$status" -eq 0 ]
+  # Valid minor shown, but no marker because an entry was dropped.
+  [[ "$output" == *'nit'* ]] || { echo "$output"; false; }
+  [ -z "$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
+}
+
+@test "sweep-fx1-R2-M2: a dropped non-critical finding counts toward the attempt cap" {
+  setup_triggering_repo
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home-m2"
+  COUNT="$BATS_TEST_TMPDIR/dropped-cap.count"; : > "$COUNT"
+  stub="$(make_reviewer_stub \
+    'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"minor\",\"file\":null,\"msg\":\"bad\"}]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD="$stub"
+
+  for n in 1 2 3; do
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"malformed finding(s) dropped"*"(attempt $n of 3 on this diff)"* ]] || { echo "$stderr"; false; }
+  done
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'UNREVIEWED'* ]] || { echo "$stderr"; false; }
+  [ "$(reviewer_call_count "$COUNT")" -eq 3 ]
+  [ -z "$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' -print -quit 2>/dev/null)" ]
+}
+
+@test "sweep-fx1-R2-L2: a parseable critical blocks in any envelope status or shape" {
+  setup_triggering_repo
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home-l2"
+  local env_file="$BATS_TEST_TMPDIR/l2-envelope.json" crit='{"severity":"critical","file":"a.py","line":1,"msg":"L2CRIT"}'
+  stub="$(make_reviewer_stub "cat $(_shq "$env_file")")"
+  export CODE_REVIEWER_CMD="$stub"
+  for envelope in \
+    "{\"status\":\"incomplete\",\"findings\":[$crit]}" \
+    "{\"status\":\"bogus\",\"findings\":[$crit]}" \
+    "{\"status\":\"completed\",\"findings\":$crit}" \
+    "{\"status\":\"completed\",\"findings\":{\"first\":$crit}}" \
+    "{\"status\":\"completed\",\"findings\":[]}
+{\"status\":\"completed\",\"findings\":[$crit]}"; do
+    printf '%s\n' "$envelope" > "$env_file"
+    run_hook
+    [ "$status" -eq 2 ] || { echo "$envelope -> $status $output $stderr"; false; }
+    [[ "$output" == *'"decision":"block"'* && "$output" == *'L2CRIT'* ]] || { echo "$envelope -> $output"; false; }
+  done
+  # Shape-malformed without a critical still degrades and retries.
+  printf '%s\n' '{"status":"bogus","findings":[{"severity":"minor","file":"a.py","msg":"nit"}]}' > "$env_file"
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'malformed findings envelope'* ]] || { echo "$stderr"; false; }
 }

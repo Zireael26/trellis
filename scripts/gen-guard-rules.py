@@ -196,17 +196,27 @@ def check_text(value, where):
     return value
 
 
+def check_strings(value, where, nonempty=False):
+    if not isinstance(value, list) or (nonempty and not value) or any(not isinstance(v, str) for v in value):
+        raise RuleError(f"{where}: expected {'nonempty ' if nonempty else ''}string array")
+    return value
+
+
 def load_destructive(doc):
     check_keys(doc, "destructive.json", ("schema_version", "guard", "description", "semantics", "rules"))
-    if doc["schema_version"] != 1 or doc["guard"] != "block-destructive":
+    if type(doc["schema_version"]) is not int or doc["schema_version"] != 1 or doc["guard"] != "block-destructive":
         raise RuleError("destructive.json: schema_version 1, guard block-destructive expected")
+    check_text(doc["description"], "destructive.json description")
+    check_strings(doc["semantics"], "destructive.json semantics")
+    if not isinstance(doc["rules"], list) or not doc["rules"]:
+        raise RuleError("destructive.json: expected nonempty rules array")
     rules, seen = [], set()
     for n, rule in enumerate(doc["rules"]):
         where = f"destructive.json rules[{n}]"
         check_keys(rule, where, ("id", "effect", "match"),
                    ("reason", "message", "message_by_engine", "ignore_case", "unless", "exempt"))
         rid = rule["id"]
-        if not re.fullmatch(r"[a-z0-9-]+", rid) or rid in seen:
+        if not isinstance(rid, str) or not re.fullmatch(r"[a-z0-9-]+", rid) or rid in seen:
             raise RuleError(f"{where}: id must be unique lowercase-hyphenated: {rid!r}")
         seen.add(rid)
         where = f"destructive.json {rid}"
@@ -221,14 +231,15 @@ def load_destructive(doc):
             if "reason" in rule:
                 raise RuleError(f"{where}: a warn rule has a message, not a reason")
             check_text(rule.get("message"), f"{where} message")
+            check_keys(rule.get("message_by_engine", {}), f"{where} message_by_engine", (), ENGINES)
             for engine, message in rule.get("message_by_engine", {}).items():
                 if engine not in ENGINES:
                     raise RuleError(f"{where}: unknown engine {engine!r}")
                 check_text(message, f"{where} message_by_engine.{engine}")
         else:
             raise RuleError(f"{where}: effect must be deny or warn")
-        if not rule["match"]:
-            raise RuleError(f"{where}: match must list at least one pattern")
+        check_strings(rule["match"], f"{where} match", nonempty=True)
+        check_strings(rule.get("unless", []), f"{where} unless")
         compiled = dict(rule)
         compiled["match"] = [(p, check_pattern(p, f"{where} match", icase)) for p in rule["match"]]
         compiled["unless"] = [(p, check_pattern(p, f"{where} unless", icase)) for p in rule.get("unless", [])]
@@ -237,6 +248,10 @@ def load_destructive(doc):
             check_keys(ex, f"{where} exempt", ("engines", "allowed_commands", "command_prefixes",
                                                "refuse_if_line_matches", "refuse_short_flags", "boundaries",
                                                "identifier", "identifier_boundary", "replacement"), ("why",))
+            for field in ("engines", "allowed_commands", "command_prefixes", "refuse_if_line_matches", "refuse_short_flags"):
+                check_strings(ex[field], f"{where} exempt {field}")
+            if "why" in ex:
+                check_text(ex["why"], f"{where} exempt why")
             if not ex["engines"] or any(e not in ENGINES for e in ex["engines"]):
                 raise RuleError(f"{where} exempt: engines must name {ENGINES}")
             if not ex["allowed_commands"] or \
@@ -246,7 +261,7 @@ def load_destructive(doc):
                 raise RuleError(f"{where} exempt: allowed_commands are plain words separated by one space, "
                                 "command_prefixes plain words")
             marks = ex["boundaries"]
-            if not re.fullmatch(r"[!-~]+", marks) or len(set(marks)) != len(marks):
+            if not isinstance(marks, str) or not re.fullmatch(r"[!-~]+", marks) or len(set(marks)) != len(marks):
                 raise RuleError(f"{where} exempt: boundaries are distinct printable characters")
             check_text(ex["replacement"], f"{where} exempt replacement")
             if not re.fullmatch(r"[!-~]+", ex["replacement"]) or "/" in ex["replacement"]:

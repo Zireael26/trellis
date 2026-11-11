@@ -50,8 +50,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-slash-guard.sh",
-            "timeout": 5,
+            "command": "/bin/sh -c 'r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"decision\\\":\\\"block\\\",\\\"reason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}\"; echo \"$3: guard supervisor failed (status $r); refusing\" >&2; exit 2' guard-supervise \"$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl\" claude-expansion skill-slash-guard \"$CLAUDE_PROJECT_DIR/.claude/hooks/skill-slash-guard.sh\"",
+            "timeout": 30,
             "statusMessage": "Checking slash-command Skill size..."
           }
         ]

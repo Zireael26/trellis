@@ -68,21 +68,38 @@ function is_js_runtime(name) {
   return name == "node" || name == "MainThread" || name == "node-MainThread" || name == "nodejs" || name == "bun" || name == "deno"
 }
 function is_bundler(name) {
-  return name ~ /^(next|vite|turbo|webpack|webpack-cli|tsc)([.](js|mjs|cjs|cmd))?$/
+  return name ~ /^(next|vite|turbo|webpack|webpack-cli|tsc|astro|esbuild|rollup|tsup|parcel|rspack|nuxt)([.](js|mjs|cjs|cmd))?$/
 }
-function primary_index(kind, start,    i, token) {
+function primary_index(kind, start,    i, j, token, uncertain) {
   for (i = start; i <= NF; i++) {
     token = $i
-    if (token == "--") return i < NF ? i + 1 : 0
+    if (token == "--") {
+      if (kind == "runtime" && uncertain)
+        for (j = i + 1; j <= NF; j++) if (is_bundler(base_name($j))) return j
+      return i < NF ? i + 1 : 0
+    }
     if (kind == "shell" && token ~ /^-[^-]*c/) return -1
     if (kind == "python" && (token == "-c" || token == "-m" || token == "-")) return -1
     if (kind == "runtime" && (token == "-e" || token == "--eval" || token == "-p" || token == "--print")) return -1
     if (token == "-O" || token == "--rcfile" || token == "--init-file" ||
-        token == "-W" || token == "-X" || token == "--require") {
+        token == "-W" || token == "-X" || token == "--require" ||
+        (kind == "runtime" && (token == "-r" || token == "--import" ||
+         token == "--loader" || token == "--experimental-loader" ||
+         token == "--title" || token == "--watch-path" || token == "--inspect-port" ||
+         token == "--conditions" || token == "--disable-warning" ||
+         token == "--unhandled-rejections" || token == "--dns-result-order" ||
+         token == "-C" || token == "--env-file"))) {
       i++
       continue
     }
-    if (token ~ /^-/) continue
+    if (token ~ /^-/) {
+      # Unknown options may take a separate value. An equals-form is already
+      # self-contained; otherwise do not let a possible value hide a bundler.
+      if (kind == "runtime" && token !~ /=/) uncertain = 1
+      continue
+    }
+    if (kind == "runtime" && uncertain)
+      for (j = i; j <= NF; j++) if (is_bundler(base_name($j))) return j
     return i
   }
   return 0
@@ -99,10 +116,16 @@ function gate_script(kind, path, start,    program) {
   if ((program == "bats" || program ~ /^bats-/) && has_bats_path(start)) return "bats"
   return ""
 }
-function has_build_action(start,    i, token) {
+# Explicit non-build table. Unknown commands, defaults, serve and watch are
+# busy: a mistaken busy result skips this janitor scan, not a live build guard.
+function non_build_action(program, start,    i, token) {
+  sub(/[.](js|mjs|cjs|cmd)$/, "", program)
   for (i = start; i <= NF; i++) {
     token = $i
-    if (token == "dev" || token == "build" || token == "--build" || token == "-b") return 1
+    if (token == "--help" || token == "-h" || token == "--version") return 1
+    if (token == "-v" && program ~ /^(next|vite|webpack|webpack-cli|tsc)$/) return 1
+    if (program == "tsc" && (token == "--noEmit=true" ||
+        (token == "--noEmit" && $(i + 1) != "false"))) return 1
   }
   return 0
 }
@@ -143,7 +166,7 @@ $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && NF >= 5 {
         }
       }
     }
-  } else if (mode == "build" && index(args, project) > 0) {
+  } else if (mode == "build") {
     pos = 0
     program = ""
     if (is_bundler(comm)) {
@@ -159,7 +182,13 @@ $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && NF >= 5 {
         }
       }
     }
-    if (pos > 0 && is_bundler(program) && has_build_action(pos + 1)) target = program
+    if (pos > 0 && is_bundler(program) && !non_build_action(program, pos + 1)) {
+      if (index(args, project) > 0) target = program
+      else {
+        printf "CWD\tpid=%s\tppid=%s\tpgid=%s\tcomm=%s\ttarget=%s\n", $1, $2, $3, comm, program
+        needs_cwd = 1
+      }
+    }
   }
 
   if (target != "" && !seen[$3]++) {
@@ -170,6 +199,7 @@ $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && NF >= 5 {
 END {
   if (valid == 0) exit 3
   if (ambiguous) exit 4
+  if (needs_cwd) exit 5
   if (found) exit 1
   exit 0
 }
@@ -198,7 +228,58 @@ primary_is_file() {
   esac
 }
 
-if [ "$awk_status" -eq 4 ]; then
+# A bundler invocation without the project path in argv may use a global,
+# cached, symlinked or relative program. Resolve its live cwd; an unreadable
+# cwd is uncertain, never evidence of idleness.
+process_cwd() {
+  local pid="$1" field cwd
+  case "$(uname -s)" in
+    Linux) (CDPATH='' cd -P "/proc/$pid/cwd" && pwd -P) ;;
+    Darwin)
+      cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null)" || return 1
+      while IFS= read -r field; do
+        case "$field" in
+          n*) (CDPATH='' cd -P "${field#n}" && pwd -P); return ;;
+        esac
+      done <<< "$cwd"
+      return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+if [ "$awk_status" -eq 5 ]; then
+  project_cwd="$(CDPATH='' cd -P "$project" 2>/dev/null && pwd -P)" || project_cwd=""
+  evidence=""
+  awk_status=0
+  while IFS=$'\t' read -r record pid ppid pgid comm target; do
+    case "$record" in
+      BUSY)
+        [ "$awk_status" -eq 4 ] || awk_status=1
+        evidence+="${record}"$'\t'"${pid}"$'\t'"${ppid}"$'\t'"${pgid}"$'\t'"${comm}"$'\t'"${target}"$'\n'
+        ;;
+      CWD)
+        cwd=""
+        if [ -z "$project_cwd" ]; then
+          awk_status=4
+          evidence+="ERROR"$'\t'"${pid}"$'\t'"${pgid}"$'\t'"${comm}"$'\t'"${target}"$'\t'"cwd=<not-probed>"$'\t'"project=${project}"$'\t'"project cwd unavailable"$'\n'
+        elif ! cwd="$(process_cwd "${pid#pid=}")"; then
+          awk_status=4
+          evidence+="ERROR"$'\t'"${pid}"$'\t'"${pgid}"$'\t'"${comm}"$'\t'"${target}"$'\t'"cwd=<unavailable>"$'\t'"project=${project}"$'\t'"build process cwd unavailable"$'\n'
+        else
+          case "$cwd" in
+            "$project_cwd"|"$project_cwd"/*)
+              [ "$awk_status" -eq 4 ] || awk_status=1
+              evidence+="BUSY"$'\t'"${pid}"$'\t'"${ppid}"$'\t'"${pgid}"$'\t'"${comm}"$'\t'"${target}"$'\n'
+              ;;
+          esac
+        fi
+        ;;
+    esac
+  done <<< "$result"
+  result="${evidence%$'\n'}"
+fi
+
+if [ "$awk_status" -eq 4 ] && [ "$mode" = gate ]; then
   evidence=""
   awk_status=0
   while IFS=$'\t' read -r record pid pgid comm detail primary; do

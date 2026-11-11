@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # session-start.sh — Claude SessionStart dispatcher (spec 072 U4).
 # Source: Trellis / core-rules / hooks.md
 #

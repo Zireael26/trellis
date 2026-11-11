@@ -49,12 +49,26 @@ _se_autonomy_frontmatter_value() {
 # Optional reader lets an object-aware caller supply committed project policy;
 # fleet/preset definitions and session state still belong to the runtime/checkout.
 _se_autonomy_policy_json() {
-  [ -f "$1" ] || return 1
-  printf '%s\n' "$(< "$1")"
+  local parent
+  parent=$(dirname -- "$1") || return 2
+  [ -d "$parent" ] && [ -x "$parent" ] || return 2
+  [ -e "$1" ] || [ -L "$1" ] || return 1
+  [ -f "$1" ] && [ -r "$1" ] || return 2
+  cat "$1" 2>/dev/null || return 2
+}
+
+# With an unreadable policy no active ceiling can be established. Keep a
+# conservative level for non-gating callers and return failure for the gates.
+_se_autonomy_unavailable() {
+  AUTONOMY_ERROR="unreadable project autonomy policy: $1"
+  AUTONOMY_LEVEL=1 AUTONOMY_NAME="Pedagogical" AUTONOMY_REQUESTED_LEVEL=1
+  AUTONOMY_CEILING=1 AUTONOMY_CLAMPED=0 AUTONOMY_LIMITING_PRESET=""
+  printf 'autonomy: %s\n' "$AUTONOMY_ERROR" >&2
+  return 2
 }
 
 _se_resolve_autonomy() {
-  local repo_root="$1" reader="${2:-_se_autonomy_policy_json}" json
+  local repo_root="$1" reader="${2:-_se_autonomy_policy_json}" json reader_rc
   local canonical_cfg="$repo_root/.trellis.json"
   # DEPRECATED read-only fallback. Retained past v1.0.0-rc.25 only for checkouts
   # still held on the legacy layout; `trellis migrate --prepare` replaces it.
@@ -69,6 +83,7 @@ _se_resolve_autonomy() {
   AUTONOMY_CEILING=5
   AUTONOMY_CLAMPED=0
   AUTONOMY_LIMITING_PRESET=""
+  AUTONOMY_ERROR=""
 
   # The installed payload is the only fleet policy source. Do not resolve a
   # source checkout or consult machine-local configuration here.
@@ -87,14 +102,31 @@ _se_resolve_autonomy() {
   # compatibility file fills only an absent canonical value. A present but
   # malformed higher-precedence value suppresses lower-precedence overrides.
   for project_cfg_candidate in "$canonical_cfg" "$legacy_cfg"; do
-    json=$("$reader" "$project_cfg_candidate") || continue
+    if json=$("$reader" "$project_cfg_candidate"); then
+      :
+    else
+      reader_rc=$?
+      if [ "$reader" = _se_autonomy_policy_json ] && [ "$reader_rc" -ne 1 ]; then
+        _se_autonomy_unavailable "$project_cfg_candidate"
+        return 2
+      fi
+      continue
+    fi
     if ! jq -e 'type == "object"' <<<"$json" >/dev/null 2>&1; then
       project_override_present=1
       break
     fi
     if jq -e 'has("autonomy")' <<<"$json" >/dev/null 2>&1; then
       project_override_present=1
-      value=$(jq -r '.autonomy' <<<"$json" 2>/dev/null || true)
+      if [ "$project_cfg_candidate" = "$canonical_cfg" ]; then
+        # JSON Schema integers are numerical, not jq's rendered spelling:
+        # canonical autonomy 4.0 is L4. Legacy/runtime string rules stay intact.
+        value=$(jq -r '.autonomy | if type == "number" then
+          if . >= 1 and . <= 5 and floor == . then floor else . end
+          else . end' <<<"$json" 2>/dev/null || true)
+      else
+        value=$(jq -r '.autonomy' <<<"$json" 2>/dev/null || true)
+      fi
       if _se_valid_autonomy_level "$value"; then
         project_level="$value"
       fi
@@ -105,7 +137,16 @@ _se_resolve_autonomy() {
   # Active preset names use the same canonical-then-legacy field precedence,
   # while every preset definition is loaded solely from the immutable runtime.
   for project_cfg_candidate in "$canonical_cfg" "$legacy_cfg"; do
-    json=$("$reader" "$project_cfg_candidate") || continue
+    if json=$("$reader" "$project_cfg_candidate"); then
+      :
+    else
+      reader_rc=$?
+      if [ "$reader" = _se_autonomy_policy_json ] && [ "$reader_rc" -ne 1 ]; then
+        _se_autonomy_unavailable "$project_cfg_candidate"
+        return 2
+      fi
+      continue
+    fi
     if ! jq -e 'type == "object"' <<<"$json" >/dev/null 2>&1; then
       break
     fi

@@ -22,7 +22,7 @@ These RELAX parent discipline. Each carve-out names the parent rule by section a
 - **Direct commits to `main` are allowed.** Parent rule `engineering-process.md §6` requires every change to land via PR. *Carve-out:* solo author, no reviewers, no external consumers — PR ceremony adds friction without catching anything. *Constraint:* the moment a second author touches the repo, this carve-out is void and the project switches to a real branch-and-PR flow.
 - **No `tasks.md` discipline.** Parent rule `engineering-process.md §14.7` recommends the spec-kit pipeline for multi-step features. *Carve-out:* experimental work explores; specs lock in assumptions too early. Use `TodoWrite` only; skip the committed pipeline artifacts.
 - **CHANGELOG entries optional.** Parent rule asks every PR to update `CHANGELOG.md`. *Carve-out:* prototype iteration is the changelog. Re-enable for the rewrite when the prototype proves out.
-- **`process-gate`'s PR-size ceiling is informational only.** Parent rule treats PR size >800 as a hard fail. *Carve-out:* exploratory commits are larger by nature. The gate still reports size; the fail tier becomes warn.
+- **`process-gate`'s PR-size ceiling is informational only.** Parent rule treats PR size >1200 countable lines as a hard fail unless a new size ADR qualifies. *Carve-out:* exploratory commits are larger by nature. The gate still reports size; the fail tier becomes warn.
 - **Test coverage is not required to ship.** Parent rule requires receipts on every "done" claim. *Carve-out:* the test we'd write is "does this experiment teach us what we wanted to know"; that test is the operator's eyes on a running prototype, not a CI job. Add real tests when the experiment outgrows that.
 
 ## Notes

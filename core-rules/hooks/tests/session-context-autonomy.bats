@@ -2,6 +2,7 @@
 # Tests for session-context.sh autonomy + decisions injection.
 
 load helpers
+bats_require_minimum_version 1.5.0
 
 HOOK="$HOOKS_DIR/session-context.sh"
 AUTONOMY_HELPER="$HOOKS_DIR/lib/autonomy.sh"
@@ -64,6 +65,147 @@ resolver_globals() {
       "$AUTONOMY_LEVEL" "$AUTONOMY_NAME" "$AUTONOMY_REQUESTED_LEVEL" \
       "$AUTONOMY_CEILING" "$AUTONOMY_CLAMPED" "$AUTONOMY_LIMITING_PRESET"
   ' bash "$helper" "$PROJECT_DIR"
+}
+
+@test "143-stop unreadable policy cannot silently remove an autonomy ceiling" {
+  write_runtime_config 5
+  printf '%s\n' '---' 'autonomy_ceiling: 2' '---' > "$TRELLIS_FIXTURE/core-rules/presets/strict.md"
+  write_canonical_project_config null '["strict"]'
+  chmod 000 "$PROJECT_DIR/.trellis.json"
+  local helper
+  for helper in "$AUTONOMY_HELPER" "$CODEX_AUTONOMY_HELPER"; do
+    run --separate-stderr bash -c 'source "$1"; _se_autonomy_policy_json "$2"' _ "$helper" "$PROJECT_DIR/.trellis.json"
+    [ "$status" -eq 2 ]
+    run --separate-stderr bash -c 'source "$1"; _se_resolve_autonomy "$2"; s=$?; printf "%s %s %s\n" "$AUTONOMY_LEVEL" "$AUTONOMY_CEILING" "$AUTONOMY_ERROR"; exit "$s"' _ "$helper" "$PROJECT_DIR"
+    [ "$status" -eq 2 ]
+    [[ "$output" == '1 1 '* ]]
+  done
+  chmod 600 "$PROJECT_DIR/.trellis.json"
+  for helper in "$AUTONOMY_HELPER" "$CODEX_AUTONOMY_HELPER"; do
+    run resolver_globals "$helper"
+    [ "$status" -eq 0 ]
+    [[ "$output" == $'2\tCautious\t5\t2\t1\tstrict' ]]
+  done
+  mv "$PROJECT_DIR/.trellis.json" "$PROJECT_DIR/.trellis.config.json"
+  chmod 000 "$PROJECT_DIR/.trellis.config.json"
+  for helper in "$AUTONOMY_HELPER" "$CODEX_AUTONOMY_HELPER"; do
+    run --separate-stderr bash -c 'source "$1"; _se_autonomy_policy_json "$2"' _ "$helper" "$PROJECT_DIR/.trellis.json"
+    [ "$status" -eq 1 ]
+    run --separate-stderr bash -c 'source "$1"; _se_resolve_autonomy "$2"' _ "$helper" "$PROJECT_DIR"
+    [ "$status" -eq 2 ]
+  done
+  chmod 600 "$PROJECT_DIR/.trellis.config.json"
+}
+
+@test "143-stop decision receipt blocks unresolved autonomy on both transports" {
+  write_runtime_config 5
+  write_canonical_project_config 4 '[]'
+  printf 'changed\n' > "$PROJECT_DIR/app.js"
+  chmod 000 "$PROJECT_DIR/.trellis.json"
+  local harness dir hook
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+  for harness in claude codex; do
+    dir="$BATS_TEST_TMPDIR/deploy-$harness/hooks"
+    mkdir -p "$dir/lib"
+    cp "$HOOKS_DIR/lib/decision-receipt-core.sh" "$dir/lib/"
+    if [ "$harness" = claude ]; then
+      cp "$HOOKS_DIR/decision-receipt.sh" "$dir/decision-receipt.sh"
+      cp "$HOOKS_DIR/lib/deps.sh" "$HOOKS_DIR/lib/autonomy.sh" "$dir/lib/"
+    else
+      cp "$CODEX_HOOKS_DIR/decision-receipt.sh" "$dir/decision-receipt.sh"
+      cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$dir/lib/"
+    fi
+    hook="$dir/decision-receipt.sh"
+    run --separate-stderr bash "$hook" <<<'{"last_assistant_message":"Done."}'
+    if [ "$harness" = claude ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+    printf '%s' "$output" | jq -e '.decision == "block" and (.reason | contains("autonomy"))' >/dev/null
+  done
+  chmod 600 "$PROJECT_DIR/.trellis.json"
+}
+
+@test "143-stop reread guard refuses unknown autonomy but keeps new files exempt" {
+  write_canonical_project_config 4 '[]'
+  printf 'old\n' > "$PROJECT_DIR/existing.js"
+  chmod 000 "$PROJECT_DIR/.trellis.json"
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+  export TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)"
+  local harness hook event
+  for harness in claude codex; do
+    if [ "$harness" = claude ]; then hook="$HOOKS_DIR/reread-guard.sh"; else hook="$CODEX_HOOKS_DIR/reread-guard.sh"; fi
+    event="$(jq -nc --arg p "$PROJECT_DIR/new.js" '{session_id:"unknown-policy",tool_name:"Edit",tool_input:{file_path:$p}}')"
+    run --separate-stderr bash "$hook" <<<"$event"
+    [ "$status" -eq 0 ]; [ -z "$output" ]
+    event="$(jq -nc --arg p "$PROJECT_DIR/existing.js" '{session_id:"unknown-policy",tool_name:"Edit",tool_input:{file_path:$p}}')"
+    run --separate-stderr bash "$hook" <<<"$event"
+    if [ "$harness" = claude ]; then
+      [ "$status" -eq 0 ]
+      printf '%s' "$output" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null
+    else
+      [ "$status" -eq 2 ]
+      printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
+    fi
+  done
+  chmod 600 "$PROJECT_DIR/.trellis.json"
+  for harness in claude codex; do
+    if [ "$harness" = claude ]; then hook="$HOOKS_DIR/reread-guard.sh"; else hook="$CODEX_HOOKS_DIR/reread-guard.sh"; fi
+    run --separate-stderr bash "$hook" <<<"$event"
+    [ "$status" -eq 0 ]; [ -z "$output" ]; [[ "$stderr" == *'warn 1/'* ]]
+  done
+}
+
+@test "143-stop session context reports unavailable autonomy instead of claiming L5" {
+  write_runtime_config 5
+  write_canonical_project_config 4 '[]'
+  chmod 000 "$PROJECT_DIR/.trellis.json"
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+  local hook
+  for hook in "$HOOKS_DIR/session-context.sh" "$CODEX_HOOKS_DIR/session-context.sh"; do
+    run --separate-stderr bash "$hook" <<<'{"source":"startup"}'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'Policy unavailable'* ]]
+    [[ "$output" != *'Level: L5'* ]]
+  done
+  chmod 600 "$PROJECT_DIR/.trellis.json"
+}
+
+@test "143-stop spec interview gate cannot choose a policy from unreadable autonomy" {
+  write_canonical_project_config 4 '[]'
+  chmod 000 "$PROJECT_DIR/.trellis.json"
+  run --separate-stderr bash -c 'source "$1"; sg_autonomy_level "$2"' _ "$HOOKS_DIR/lib/spec-gate-core.sh" "$PROJECT_DIR"
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+  chmod 600 "$PROJECT_DIR/.trellis.json"
+  run --separate-stderr bash -c 'source "$1"; sg_autonomy_level "$2"' _ "$HOOKS_DIR/lib/spec-gate-core.sh" "$PROJECT_DIR"
+  [ "$status" -eq 0 ]; [ "$output" = 4 ]
+}
+
+@test "143-stop reviewer never records coverage under unreadable autonomy" {
+  write_canonical_project_config 4 '[]'
+  local name hook harness n=0
+  for name in one two three; do printf '%s\n' "$name" > "$PROJECT_DIR/$name.py"; done
+  cat > "$BATS_TEST_TMPDIR/reviewer" <<'EOF'
+#!/bin/bash
+printf x >> "$REVIEW_CALLS"
+printf '%s\n' '{"status":"completed","findings":[]}'
+EOF
+  chmod +x "$BATS_TEST_TMPDIR/reviewer"
+  export CODE_REVIEWER_CMD="$BATS_TEST_TMPDIR/reviewer" REVIEW_CALLS="$BATS_TEST_TMPDIR/review-calls"
+  export CODEX_PROJECT_DIR="$PROJECT_DIR" TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)"
+  chmod 000 "$PROJECT_DIR/.trellis.json"
+  for harness in claude codex; do
+    if [ "$harness" = claude ]; then hook="$HOOKS_DIR/code-review-subagent.sh"; else hook="$CODEX_HOOKS_DIR/code-review-subagent.sh"; fi
+    run --separate-stderr bash "$hook" <<<'{}'
+    [ "$status" -eq 0 ]; [[ "$stderr" == *'autonomy policy unavailable'* ]]
+    [ ! -e "$REVIEW_CALLS" ]
+  done
+  chmod 600 "$PROJECT_DIR/.trellis.json"
+  for harness in claude codex; do
+    if [ "$harness" = claude ]; then hook="$HOOKS_DIR/code-review-subagent.sh"; else hook="$CODEX_HOOKS_DIR/code-review-subagent.sh"; fi
+    run --separate-stderr bash "$hook" <<<'{}'
+    [ "$status" -eq 0 ]
+    n=$((n + 1))
+    [ "$(wc -c < "$REVIEW_CALLS" | tr -d ' ')" -eq "$n" ]
+  done
 }
 
 @test "autonomy: no policy defaults to L3 (Standard)" {

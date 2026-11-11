@@ -107,11 +107,13 @@ def invoke(root, evaluation, selected=plugin, digest=None):
     return result
 
 
-def reject(name, change, selected=plugin, digest=None):
+def reject(name, change, selected=plugin, digest=None, reason=None):
     root, e = fixture(name)
     change(root, e)
     result = invoke(root, e, selected, digest)
     assert result.returncode != 0, 'invalid evidence accepted: ' + name
+    if reason is not None:
+        assert reason in result.stderr, f'rejection reason for {name} was not {reason!r}: {result.stderr}'
     assert not (root / 'evidence/evaluation.json').exists(), 'finalized success artifact leaked'
     if name != 'preexisting':
         assert not (root / 'evidence/benchmark.json').exists(), 'provisional benchmark leaked'
@@ -187,7 +189,12 @@ elif case == 'inventory':
     reject('missing-run', lambda root, e: shutil.rmtree(root / 'evidence/eval-1/with_skill/run-3'))
     reject('unexpected-config', lambda root, e: (root / 'evidence/eval-1/old_skill').mkdir())
     reject('metadata', lambda root, e: dump(root / 'evidence/eval-1/eval_metadata.json', {'eval_id': True}))
-    reject('unsafe-path', lambda root, e: e.update(candidate_snapshot='../escape'))
+    def plant_escape(root, e):
+        # A real copy at the escape target with the candidate digest, so a
+        # missing-path rejection cannot stand in for the traversal guard.
+        shutil.copytree(root / 'evidence/candidate', root.parent / 'escape')
+        e.update(candidate_snapshot='../escape')
+    reject('unsafe-path', plant_escape, reason='normalized repository-relative POSIX path')
     reject('symlink', lambda root, e: (root / 'evidence/link').symlink_to(root / 'evidence/candidate'))
     reject('candidate-hash', lambda root, e: (root / 'evidence/candidate/SKILL.md').write_text('drift'))
 elif case == 'metrics':

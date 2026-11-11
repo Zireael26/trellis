@@ -28,17 +28,21 @@ make_release() {
   for path in attach-project.sh registry.sh release.sh trellis trellis-launcher.sh; do
     cp "$REPO_ROOT/scripts/$path" "$source/scripts/$path"
   done
-  # Match the attachment planner's real payload dependency closure, less
-  # attach-postjob.sh: the launcher runs attach under env -i, so
-  # TRELLIS_ATTACH_POSTJOB=off cannot reach it, and the detached job it would
-  # spawn holds the checkout lock while a later rollout in the same case runs.
+  # Match the attachment planner's real payload dependency closure. Since spec
+  # 074 T14 attach succeeds only after the deferred job's ok, so the job and
+  # its health checks are part of attach itself, and attach has returned only
+  # once the job recorded its verdict.
   for path in \
+    attach-postjob.sh \
     attachment.sh \
+    health-checks.sh \
     local-registry.sh \
     release-stamp.sh \
     release-store.sh \
     release_stamp.py \
+    release_verify.py \
     semver.sh \
+    settings-hooks-merge.sh \
     skill-roots.sh \
     surface-plan.sh \
     trellis-home.sh \
@@ -58,6 +62,7 @@ make_release() {
   printf '# fixture experimental preset\n' > "$source/core-rules/presets/experimental-loose.md"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$source/core-rules/templates/claude-settings.local.json"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks" "$source/core-rules/legacy-hooks"
   cat > "$source/core-rules/githooks/pre-push" <<'SH'
 #!/usr/bin/env bash
 exit 0

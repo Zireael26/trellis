@@ -18,6 +18,7 @@
 # excluded there.
 #
 # Usage: scripts/run-tests.sh [--quick] [--scope=local|ci] [--shard=I/N] [--list] [--plan]
+#                              [--base=REV] [--native-stages=auto|always]
 #   --quick        run only the fast deterministic slice (shellcheck, AEO static
 #                  + python, conformance, bootstrap prologues). Intended for a
 #                  tight local loop, never for a gate run.
@@ -35,6 +36,22 @@
 #   --plan         print the complete N-shard plan without executing it. Rows use
 #                  shard<TAB>stage<TAB>weight, followed by
 #                  total<TAB>SHARD<TAB>WEIGHT rows.
+#   --base=REV     the range base for the native-stage decision below. CI passes
+#                  the PR base (or the pushed-from commit); locally the shared
+#                  diff-base resolver picks it.
+#   --native-stages=auto|always
+#                  auto (default): the cargo stages are registered only when the
+#                  change touches a native build input (test_suites_native_decision
+#                  in scripts/lib/test-suites.sh; owner 2026-11-10). An unknown base
+#                  runs them. A skip prints one labelled line per stage, never a
+#                  silent pass. always: register them regardless.
+#
+# Environment:
+#   TRELLIS_SLOW_TESTS=1  also run the slow tier: test cases that skip without it
+#                  (today trellis-latency-bench-repeat.bats, 30 worktree
+#                  attach/detach cycles). Unset in per-change gates; the weekly
+#                  uncached battery (scripts/weekly-full-battery.py) sets it.
+#                  It also forces --native-stages=always.
 #
 # Every stage runs even if an earlier one fails; the exit code is the number of
 # failed stages, so one red suite cannot hide behind another.
@@ -93,7 +110,10 @@ unset TRELLIS_TEST_PROVENANCE_RECEIPT
 unset PG_TESTS_BASE PG_TESTS_HEAD PG_TESTS_RECEIPT_FILE PG_PUSH_TEST_SCOPE
 
 # shellcheck source=scripts/lib/test-suites.sh
-. "$ROOT/scripts/lib/test-suites.sh"
+if ! . "$ROOT/scripts/lib/test-suites.sh"; then
+  printf 'run-tests: could not load scripts/lib/test-suites.sh\n' >&2
+  exit 1
+fi
 # shellcheck source=scripts/lib/bats-jobs.sh
 . "$ROOT/scripts/lib/bats-jobs.sh"
 
@@ -104,6 +124,8 @@ SCOPE=local
 SHARD_INDEX=1
 SHARD_TOTAL=1
 SELECTED_TESTS=()
+RANGE_BASE=''
+NATIVE_STAGES=auto
 for arg in "$@"; do
   case "$arg" in
     --quick) QUICK=1 ;;
@@ -111,6 +133,8 @@ for arg in "$@"; do
     --plan) PLAN=1 ;;
     --test-file=*) SELECTED_TESTS+=( "${arg#--test-file=}" ) ;;
     --scope=*) SCOPE="${arg#--scope=}" ;;
+    --base=*) RANGE_BASE="${arg#--base=}" ;;
+    --native-stages=*) NATIVE_STAGES="${arg#--native-stages=}" ;;
     --shard=*)
       SHARD_INDEX="${arg#--shard=}"
       SHARD_TOTAL="${SHARD_INDEX#*/}"
@@ -124,6 +148,10 @@ case "$SCOPE" in
   local|ci) ;;
   *) printf 'run-tests: unknown scope: %s\n' "$SCOPE" >&2; exit 64 ;;
 esac
+case "$NATIVE_STAGES" in
+  auto|always) ;;
+  *) printf 'run-tests: unknown --native-stages: %s\n' "$NATIVE_STAGES" >&2; exit 64 ;;
+esac
 case "$SHARD_INDEX$SHARD_TOTAL" in
   *[!0-9]*|'') printf 'run-tests: --shard expects I/N\n' >&2; exit 64 ;;
 esac
@@ -131,6 +159,31 @@ if [ "$SHARD_TOTAL" -lt 1 ] || [ "$SHARD_INDEX" -lt 1 ] || [ "$SHARD_INDEX" -gt 
   printf 'run-tests: --shard=%s/%s is out of range\n' "$SHARD_INDEX" "$SHARD_TOTAL" >&2
   exit 64
 fi
+
+# Decide the cargo stages once, before the Git fence, so every shard of one run
+# (same checkout, same base) registers the same plan.
+NATIVE_DECISION=run
+NATIVE_REASON=''
+if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+  if [ "$NATIVE_STAGES" = always ]; then
+    NATIVE_REASON='--native-stages=always'
+  elif [ "${TRELLIS_SLOW_TESTS:-}" = 1 ]; then
+    NATIVE_REASON='TRELLIS_SLOW_TESTS=1 runs every stage'
+  else
+    _native_line="$(test_suites_native_decision "$SCOPE" "$RANGE_BASE")"
+    NATIVE_DECISION="${_native_line%%$'\t'*}"
+    NATIVE_REASON="${_native_line#*$'\t'}"
+    case "$NATIVE_DECISION" in
+      run|skip) ;;
+      *) NATIVE_DECISION=run; NATIVE_REASON="decision unreadable ($_native_line); fail closed" ;;
+    esac
+  fi
+fi
+# The labels belong to a run. --list and --plan print only the stage inventory
+# (callers merge stderr into it), and a skipped stage is simply absent there.
+native_note() {
+  [ "$LIST" -eq 1 ] || [ "$PLAN" -eq 1 ] || printf 'run-tests: %s\n' "$1"
+}
 
 for test_file in ${SELECTED_TESTS[@]+"${SELECTED_TESTS[@]}"}; do
   if [[ ! "$test_file" =~ ^scripts/tests/[A-Za-z0-9_-]+\.bats$ ]] ||
@@ -612,6 +665,36 @@ if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
     stage "bats $suite" bats "$suite"
   done < <(test_suites_core skills)
 
+  # Native contract/event/proof/supervision targets and the local Pi suites.
+  # They are separate files and separate stages for the same reason the bats
+  # files are: a failure names its target, and the LPT planner can spread them.
+  # The cargo stages are scoped to native build-input changes (see
+  # --native-stages); a skipped one is unregistered, so it costs no shard time,
+  # and is named on a labelled line instead.
+  native_stage() {
+    if [ "$NATIVE_DECISION" = skip ]; then
+      native_note "skipped stage '$1': $NATIVE_REASON"
+      return 0
+    fi
+    stage "$@"
+  }
+  native_note "native cargo stages: $NATIVE_DECISION ($NATIVE_REASON)"
+  while IFS= read -r suite; do
+    [ -n "$suite" ] || continue
+    target="${suite##*/}"
+    target="${target%.rs}"
+    native_stage "cargo test $suite" cargo +1.97.1 test --locked --offline \
+      --manifest-path native/trellis-hooks/Cargo.toml --test "$target"
+  done < <(test_suites_native)
+  # The crate's own #[cfg(test)] modules (lib and bin). `--test <stem>` above
+  # never compiles them, so without this stage they ran nowhere.
+  native_stage "cargo unit-tests native/trellis-hooks (lib + bins)" cargo +1.97.1 test --locked \
+    --offline --manifest-path native/trellis-hooks/Cargo.toml --lib --bins
+  while IFS= read -r suite; do
+    [ -n "$suite" ] || continue
+    stage "node --test $suite" node --test --test-reporter=tap "$suite"
+  done < <(test_suites_pi)
+
 fi
 
 if [ "$QUICK" -eq 0 ]; then
@@ -682,6 +765,9 @@ printf '\n===============================\n'
 printf 'run-tests: receipt=%s\n' "$TRELLIS_TEST_TSV"
 printf 'run-tests: scope=%s shard=%s/%s stages ran=%s skipped=%s\n' \
   "$SCOPE" "$SHARD_INDEX" "$SHARD_TOTAL" "$RAN" "$SKIPPED"
+if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+  printf 'run-tests: native cargo stages: %s (%s)\n' "$NATIVE_DECISION" "$NATIVE_REASON"
+fi
 if [ "$FAILED" -eq 0 ]; then
   printf 'run-tests: all stages passed\n'
 else

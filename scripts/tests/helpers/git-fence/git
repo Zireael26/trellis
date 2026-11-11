@@ -22,6 +22,26 @@ fence_die() {
   exit 97
 }
 
+# fence_lower VALUE: ASCII-lowercase VALUE into FENCE_LOWER without external
+# tools. Hooks under test run on deliberately narrow PATHs that resolve git to
+# this fence; a missing tr would read every config key as empty and skip the
+# core.worktree route check. Bash 3.2 has no ${var,,}.
+fence_lower() {
+  local rest="$1" ch upper=ABCDEFGHIJKLMNOPQRSTUVWXYZ lower=abcdefghijklmnopqrstuvwxyz prefix
+  FENCE_LOWER=""
+  while [ -n "$rest" ]; do
+    ch="${rest:0:1}"
+    rest="${rest:1}"
+    case "$upper" in
+      *"$ch"*)
+        prefix="${upper%%"$ch"*}"
+        ch="${lower:${#prefix}:1}"
+        ;;
+    esac
+    FENCE_LOWER="$FENCE_LOWER$ch"
+  done
+}
+
 [ -n "$FENCE_ROOT" ] || fence_die "TRELLIS_TEST_GIT_FENCE_ROOT is not set"
 [ -d "$FENCE_ROOT" ] || fence_die "test root is unavailable: $FENCE_ROOT"
 [ -n "$REAL_GIT" ] || fence_die "TRELLIS_TEST_REAL_GIT is not set"
@@ -128,7 +148,7 @@ while [ "$#" -gt 0 ]; do
     -c)
       [ "$#" -ge 2 ] || fence_die "Git option -c is missing its value"
       GIT_PREFIX+=("$1" "$2")
-      config_key_prefix="$(printf '%s' "${2%%=*}" | tr '[:upper:]' '[:lower:]')"
+      fence_lower "${2%%=*}"; config_key_prefix="$FENCE_LOWER"
       if [ "$config_key_prefix" = "core.worktree" ] && [ "${2#*=}" != "$2" ]; then
         ROUTED_WORK_TREE="${2#*=}"
       fi
@@ -137,7 +157,7 @@ while [ "$#" -gt 0 ]; do
     --config-env)
       [ "$#" -ge 2 ] || fence_die "Git option --config-env is missing its value"
       GIT_PREFIX+=("$1" "$2")
-      config_env_key="$(printf '%s' "${2%%=*}" | tr '[:upper:]' '[:lower:]')"
+      fence_lower "${2%%=*}"; config_env_key="$FENCE_LOWER"
       config_env_name="${2#*=}"
       if [ "$config_env_key" = "core.worktree" ] && [ "$config_env_name" != "$2" ]; then
         case "$config_env_name" in
@@ -151,7 +171,7 @@ while [ "$#" -gt 0 ]; do
     --config-env=*)
       GIT_PREFIX+=("$1")
       config_env_spec="${1#--config-env=}"
-      config_env_key="$(printf '%s' "${config_env_spec%%=*}" | tr '[:upper:]' '[:lower:]')"
+      fence_lower "${config_env_spec%%=*}"; config_env_key="$FENCE_LOWER"
       config_env_name="${config_env_spec#*=}"
       if [ "$config_env_key" = "core.worktree" ] && [ "$config_env_name" != "$config_env_spec" ]; then
         case "$config_env_name" in
@@ -255,12 +275,17 @@ require_fenced_repo() {
   require_fenced_path "$operation per-worktree Git directory" "$git_dir"
   # A persisted core.worktree can redirect checkout/clean even without an env or
   # CLI routing option. It is absent for ordinary linked worktrees; when present
-  # it must be an absolute path below the private root.
+  # it must resolve below the private root. A submodule records a relative one,
+  # which Git resolves against the Git directory (git-config(1)); prove both the
+  # per-worktree and the common directory spelling, so neither reading escapes.
   configured_work_tree="$(GIT_OPTIONAL_LOCKS=0 "$REAL_GIT" ${GIT_PREFIX[@]+"${GIT_PREFIX[@]}"} config --get core.worktree 2>/dev/null || true)"
   if [ -n "$configured_work_tree" ]; then
     case "$configured_work_tree" in
       /*) require_fenced_path "$operation configured work tree" "$configured_work_tree" ;;
-      *) fence_die "$operation has an unprovable relative configured work tree: $configured_work_tree" ;;
+      *)
+        require_fenced_path "$operation configured work tree" "$git_dir/$configured_work_tree"
+        require_fenced_path "$operation configured work tree" "$common/$configured_work_tree"
+        ;;
     esac
   fi
 }
@@ -428,7 +453,7 @@ fence_config_mutation() {
         ;;
     esac
   done
-  config_key="$(printf '%s' "$config_key" | tr '[:upper:]' '[:lower:]')"
+  fence_lower "$config_key"; config_key="$FENCE_LOWER"
   if [ "$config_key" = "core.worktree" ] && [ -n "$config_value" ]; then
     case "$config_value" in
       /*) require_fenced_path "git config core.worktree" "$config_value" ;;

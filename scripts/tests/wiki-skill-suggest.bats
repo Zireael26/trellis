@@ -257,8 +257,10 @@ assert_missing_dependency() {
 }
 
 @test "both attach-rendered local templates carry one exact PostToolUse registration" {
-  local claude_template="$REPO_ROOT/core-rules/templates/claude-settings.local.json"
-  local codex_template="$REPO_ROOT/core-rules/templates/codex-hooks.local.json"
+  # T34: the legacy registration lives in the pinned fallback surface; the
+  # production templates reach this member through the native PostToolUse entry.
+  local claude_template="$REPO_ROOT/core-rules/legacy-hooks/claude-settings.local.json"
+  local codex_template="$REPO_ROOT/core-rules/legacy-hooks/codex-hooks.local.json"
   local manifest="$REPO_ROOT/core-rules/inheritance-manifest.json"
   local template
   local claude_hook codex_hook hook

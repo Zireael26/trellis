@@ -304,6 +304,10 @@ attachment_reconcile() {
   # A target row with an attachment ID is an explicit repair request. A new
   # worktree may inherit this checkout's attachment only from a fully verified
   # sibling, never from scalar registry metadata alone.
+  # The donor fast path honours this proof only from this process (pid), for
+  # the exact owner bytes judged here and this release. Never inherit one.
+  _ATTACHMENT_DONOR_PROOF=""
+  export -n _ATTACHMENT_DONOR_PROOF
   if [ -z "$attachment_id" ] || [ "$PRE_ADD" -eq 1 ]; then
     donor_ok=0
     while IFS=$'\t' read -r donor_worktree donor_root donor_attachment; do
@@ -320,7 +324,7 @@ attachment_reconcile() {
         [ "$donor_common" = "$common" ] &&
         [ "$donor_worktree_actual" = "$donor_worktree" ] &&
         [ "$donor_root_actual" = "$donor_root" ] || continue
-      attachment_verify "$home" "$donor_owner" >/dev/null 2>&1 || continue
+      donor_digest="$(attachment_verify_donor "$home" "$donor_owner" 2>/dev/null)" || continue
       jq -e --arg fleet "$fleet" --arg project_id "$project_id" --arg checkout "$checkout" \
         --arg worktree "$donor_worktree" --arg attachment "$donor_attachment" \
         --arg root "$donor_root" --arg release "$release" --arg payload "$payload" '
@@ -336,6 +340,7 @@ attachment_reconcile() {
                          and .target == $payload)] | length) == 1
         ' "$donor_owner" >/dev/null 2>&1 || continue
       donor_ok=1
+      _ATTACHMENT_DONOR_PROOF="$$"$'\t'"$donor_owner"$'\t'"$donor_digest"$'\t'"$release"
       donor_args=(
         "--expected-donor-root" "$donor_root"
         "--expected-donor-checkout-id" "$checkout"

@@ -44,6 +44,61 @@ sandbox_list() {
   [[ "$output" == *"scripts/trellis"* ]] || { echo "$output"; false; }
 }
 
+@test "CRLF shell shebangs are classified without admitting non-shell scripts" {
+  printf '#!/usr/bin/env bash\r\ntrue\r\n' > "$SANDBOX/core-rules/githooks/pre-push"
+  printf '#!/usr/bin/env python3\r\npass\r\n' > "$SANDBOX/scripts/report"
+  sandbox_list
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'core-rules/githooks/pre-push'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'scripts/report'* ]] || { echo "$output"; false; }
+}
+
+@test "an extensionless binary is skipped under a UTF-8 locale" {
+  # macOS awk aborts on invalid multibyte input outside the C locale; the
+  # shipped core-rules/native/*/trellis-hooks Mach-O broke the whole stage.
+  plant core-rules/githooks/pre-push '#!/usr/bin/env bash'
+  mkdir -p "$SANDBOX/core-rules/native/aarch64-apple-darwin"
+  printf '\317\372\355\376\014\000\000\001\000\000\000\000\002\000\000\000' \
+    > "$SANDBOX/core-rules/native/aarch64-apple-darwin/trellis-hooks"
+  run bash -c "cd '$SANDBOX' && LC_ALL=en_US.UTF-8 bash scripts/lint-shell-tree.sh --list"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'core-rules/githooks/pre-push'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'trellis-hooks'* ]] || { echo "$output"; false; }
+}
+
+@test "shebang read and parser errors fail the enumeration" {
+  local tool real
+  plant core-rules/githooks/pre-push '#!/usr/bin/env bash'
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  for tool in head awk; do
+    real="$(command -v "$tool")"
+    printf '#!/bin/bash\nexit 7\n' > "$BATS_TEST_TMPDIR/bin/$tool"
+    chmod +x "$BATS_TEST_TMPDIR/bin/$tool"
+    run bash -c "cd '$SANDBOX' && PATH='$BATS_TEST_TMPDIR/bin:$PATH' bash scripts/lint-shell-tree.sh --list"
+    [ "$status" -ne 0 ] || { echo "$tool failure was ignored: $output"; false; }
+    printf '#!/bin/bash\nexec "%s" "$@"\n' "$real" > "$BATS_TEST_TMPDIR/bin/$tool"
+  done
+  run bash -c "cd '$SANDBOX' && PATH='$BATS_TEST_TMPDIR/bin:$PATH' bash scripts/lint-shell-tree.sh --list"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'core-rules/githooks/pre-push'* ]]
+}
+
+@test "both find traversals fail closed in list and shellcheck modes" {
+  local mode pass
+  plant core-rules/githooks/pre-push '#!/usr/bin/env bash'
+  mkdir -p "$BATS_TEST_TMPDIR/bin"
+  printf '#!/bin/bash\n/usr/bin/find "$@"\nfor arg in "$@"; do\n  if [ "$arg" = "$FAIL_ON" ]; then exit 7; fi\ndone\n' > "$BATS_TEST_TMPDIR/bin/find"
+  chmod +x "$BATS_TEST_TMPDIR/bin/find"
+  for mode in --list lint; do
+    for pass in '*.sh' '!'; do
+      run bash -c "cd '$SANDBOX' && PATH='$BATS_TEST_TMPDIR/bin:$PATH' FAIL_ON='$pass' bash scripts/lint-shell-tree.sh $([ "$mode" = --list ] && printf %s --list)"
+      [ "$status" -ne 0 ] || { echo "$mode ignored find failure $pass: $output"; false; }
+    done
+  done
+  run bash -c "cd '$SANDBOX' && PATH='$BATS_TEST_TMPDIR/bin:$PATH' FAIL_ON=never bash scripts/lint-shell-tree.sh --list"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
 @test "an extensionless script with a non-shell shebang is not in the tree" {
   plant "scripts/report" "#!/usr/bin/env python3"
   plant "scripts/probe" "#!/usr/bin/env bats"
@@ -138,8 +193,12 @@ scripts/trellis"
 
     # There were three hand-kept copies of the same suffix-only `find`, and each
     # one silently defined its own shell tree. Comments are stripped so the
-    # prose explaining the history does not match itself.
-    run bash -c "grep -vE '^[[:space:]]*#' '$REPO_ROOT/$consumer' | grep -nE \"find .*-name '..\\\\.sh'\""
-    [ "$status" -ne 0 ] || { echo "$consumer grew its own find again: $output"; false; }
+    # prose explaining the history does not match itself. Lines are joined
+    # before matching so a multi-line find (find ... \ newline \( -name '*.sh'
+    # ...) cannot evade a line-based pattern, and the pattern requires a
+    # literal '*.sh' argument, not a two-character suffix. It also catches
+    # the unquoted \*.sh spelling and the case-insensitive -iname form.
+    run bash -c "grep -vE '^[[:space:]]*#' '$REPO_ROOT/$consumer' | tr '\n' ' ' | grep -qE \"find[[:space:]][^;]*-i?name[[:space:]][^[:space:]]*[*]\\\\.sh\""
+    [ "$status" -ne 0 ] || { echo "$consumer grew its own find again"; false; }
   done
 }

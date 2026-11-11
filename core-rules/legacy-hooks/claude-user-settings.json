@@ -1,0 +1,27 @@
+{
+  "workflowSizeGuideline": "large",
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/trellis-worktree-create.sh\"",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$HOME/.claude/hooks/trellis-worktree-remove.sh\"",
+            "timeout": 120
+          }
+        ]
+      }
+    ]
+  }
+}

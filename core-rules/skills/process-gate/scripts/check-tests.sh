@@ -121,6 +121,8 @@ pg_has_npm_script() {
 
 worst="pass"
 findings=()
+auto_test_language=""
+auto_missing_suites=""
 
 # Auto-detect package manager if not declared
 if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE_TEST_CMD:-}" ]; then
@@ -140,7 +142,10 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
   if [ -n "$PM" ] && [ -f "package.json" ]; then
     if pg_has_npm_script typecheck; then PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-$PM run typecheck}"; fi
     if pg_has_npm_script lint;      then PROCESS_GATE_LINT_CMD="${PROCESS_GATE_LINT_CMD:-$PM run lint}"; fi
-    if pg_has_npm_script test;      then PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-$PM run test}"; fi
+    if pg_has_npm_script test; then
+      PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-$PM run test}"
+      auto_test_language=js
+    fi
   fi
 
   # Python toolchain detection (order: uv → pdm → bare pyproject)
@@ -170,7 +175,10 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
     # Default tests: pytest if configured and runnable.
     if { grep -q '^\[tool\.pytest\.ini_options\]' pyproject.toml 2>/dev/null \
        || [ -f "pytest.ini" ] || [ -f "conftest.py" ]; } && $PY_RUN pytest --version >/dev/null 2>&1; then
-      PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-$PY_RUN pytest}"
+      if [ -z "${PROCESS_GATE_TEST_CMD:-}" ]; then
+        PROCESS_GATE_TEST_CMD="$PY_RUN pytest"
+        auto_test_language=python
+      fi
     fi
   fi
 
@@ -197,7 +205,10 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
       # target whose recipe genuinely fails (`make test` exits 1) still hard-fails.
       if grep -qE '^vet:'  Makefile 2>/dev/null; then PROCESS_GATE_TYPECHECK_CMD="${PROCESS_GATE_TYPECHECK_CMD:-make vet}"; fi
       if grep -qE '^lint:' Makefile 2>/dev/null; then PROCESS_GATE_LINT_CMD="${PROCESS_GATE_LINT_CMD:-make lint}"; fi
-      if grep -qE '^test:' Makefile 2>/dev/null; then PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-make test}"; fi
+      if grep -qE '^test:' Makefile 2>/dev/null && [ -z "${PROCESS_GATE_TEST_CMD:-}" ]; then
+        PROCESS_GATE_TEST_CMD="make test"
+        auto_test_language=go
+      fi
     elif [ -f "go.work" ]; then
       # go.work workspace ROOT with no Makefile vet/lint/test target: the
       # root-level `go vet ./...` / `go test ./...` are BROKEN here (they exit
@@ -215,9 +226,30 @@ if [ -z "${PROCESS_GATE_TYPECHECK_CMD:-}${PROCESS_GATE_LINT_CMD:-}${PROCESS_GATE
       if command -v golangci-lint >/dev/null 2>&1; then
         PROCESS_GATE_LINT_CMD="${PROCESS_GATE_LINT_CMD:-golangci-lint run ./...}"
       fi
-      PROCESS_GATE_TEST_CMD="${PROCESS_GATE_TEST_CMD:-go test ./...}"
+      if [ -z "${PROCESS_GATE_TEST_CMD:-}" ]; then
+        PROCESS_GATE_TEST_CMD="go test ./..."
+        auto_test_language=go
+      fi
     fi
   fi
+
+  # Autodetection chooses one command; it cannot prove that command dispatches
+  # the other detected languages. A base-declared command remains authoritative.
+  suite_count=0
+  if [ -f package.json ] && pg_has_npm_script test; then
+    suite_count=$((suite_count + 1))
+    [ "$auto_test_language" = js ] || auto_missing_suites="${auto_missing_suites:+$auto_missing_suites, }JavaScript (package.json test)"
+  fi
+  if [ -f pyproject.toml ] && { grep -q '^\[tool\.pytest\.ini_options\]' pyproject.toml 2>/dev/null ||
+       [ -f pytest.ini ] || [ -f conftest.py ]; }; then
+    suite_count=$((suite_count + 1))
+    [ "$auto_test_language" = python ] || auto_missing_suites="${auto_missing_suites:+$auto_missing_suites, }Python (pytest)"
+  fi
+  if [ -f go.mod ] || [ -f go.work ]; then
+    suite_count=$((suite_count + 1))
+    [ "$auto_test_language" = go ] || auto_missing_suites="${auto_missing_suites:+$auto_missing_suites, }Go (go test)"
+  fi
+  [ "$suite_count" -gt 1 ] || auto_missing_suites=""
 fi
 
 # Docs-only Tests path (C08, Sol's FOLD-GATE rule). The test battery is
@@ -858,6 +890,11 @@ fi
 # Narrowed with no policy tests command: the battery is skipped, not undeclared.
 if [ -z "$PG_REUSED_VERDICT" ] && { [ -z "$docs_only_files" ] || [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; }; then
   run_check "tests"     "${PROCESS_GATE_TEST_CMD:-}"
+fi
+if [ -n "$auto_missing_suites" ] && [ -z "$docs_only_files" ]; then
+  findings+=("tests: autodetection did not run $auto_missing_suites; declare PROCESS_GATE_TEST_CMD in process-gate-local/local.config.sh as a project-wide command")
+  if [ "$worst" = pass ]; then worst=warn; fi
+  if [ "$tests_scope" = full ]; then tests_scope=partial; fi
 fi
 
 # Optional: coverage. Routed through run_with_timeout at the check ceiling like

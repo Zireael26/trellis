@@ -72,6 +72,36 @@ commit_and_check() {
   [ "$status" -eq 0 ]
 }
 
+@test "range accepts real merge commits but rejects an authored Merge subject" {
+  commit_and_check 'Merge invented subject'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  git -C "$PROJECT_DIR" switch -qc feature
+  git -C "$PROJECT_DIR" commit --allow-empty -qm 'feat: real work'
+  git -C "$PROJECT_DIR" switch -q main
+  git -C "$PROJECT_DIR" merge --no-ff -qm 'Merge feature: real merge' feature
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD^1..HEAD"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "range accepts a standard revert only when its referenced commit exists" {
+  local target
+  target="$(git -C "$PROJECT_DIR" rev-parse HEAD)"
+  git -C "$PROJECT_DIR" commit --allow-empty -qm 'Revert "init"' -m "This reverts commit $target."
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  git -C "$PROJECT_DIR" commit --allow-empty -qm 'Revert "init"' -m 'This reverts commit deadbeef.'
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "range refuses autosquash and Applying subjects even with existing targets" {
+  local subject
+  for subject in 'fixup! init' 'squash! init' 'amend! init' 'Applying patch subject'; do
+    commit_and_check "$subject"
+    [ "$status" -eq 1 ] || { echo "$subject passed: $output"; false; }
+  done
+}
+
 @test "baseline: 'feat: subject' passes" {
   commit_and_check "feat: subject"
   [ "$status" -eq 0 ]

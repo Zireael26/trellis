@@ -449,6 +449,8 @@ install_portable_doctor_release() {
     "$repo/core-rules/presets"
   cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$repo/core-rules/inheritance-manifest.json"
   cp -R "$REPO_ROOT/core-rules/pi" "$repo/core-rules/pi"
+  mkdir -p "$repo/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$repo/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
@@ -479,7 +481,13 @@ EOF
   chmod 755 "$repo/core-rules/githooks/pre-push"
   # The carrier attach selects when the project has a .husky/ directory.
   mkdir -p "$repo/core-rules/husky"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/husky/pre-push"
+  if [ -n "${PORTABLE_CARRIER_SENTINEL:-}" ]; then
+    # Optional test witness is sealed into the fixture release before install.
+    printf '#!/usr/bin/env bash\nprintf carrier > %q\nexit 0\n' \
+      "$PORTABLE_CARRIER_SENTINEL" > "$repo/core-rules/husky/pre-push"
+  else
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/husky/pre-push"
+  fi
   chmod 755 "$repo/core-rules/husky/pre-push"
   # Mirrors doctor.bats: every lib the manifest declares as an explicit codex link
   # source is mandatory in the payload, so a new manifest entry lands here too.

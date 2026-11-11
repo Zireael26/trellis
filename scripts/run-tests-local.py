@@ -1208,25 +1208,31 @@ def _write_verdict(state: RunState, before: Optional[Dict[str, Any]], after: Opt
     print("run-tests-local: wrote verdict {}".format(record["id"]), flush=True)
 
 
-def _receipt(data: Dict[str, Any], survivors: int, retained: bool) -> None:
+def _receipt(data: Dict[str, Any], survivors: int, retained: bool,
+             record: Optional[str] = None, root: Optional[str] = None) -> None:
+    # record: retained | deleted | deleted-unsynced (unlinked, but the
+    # directory fsync that makes the unlink durable failed). root: present |
+    # absent | unknown, observed rather than assumed when the caller passes it.
     entries = data.get("unreadable_excluded", [])
     for entry in entries:
         print("run-tests-local: unreadable_excluded pid={} start_us={} executable={}".format(
             entry["pid"], entry["start_us"], json.dumps(entry["executable"])), flush=True)
-    print("run-tests-local: containment=qualified run={} survivors={} record={} unreadable_excluded={} clock_step={}".format(
-        data["token"], survivors, "retained" if retained else "deleted", len(entries), data.get("clock_step", 0)), flush=True)
+    print("run-tests-local: containment=qualified run={} survivors={} record={} unreadable_excluded={} clock_step={} root={}".format(
+        data["token"], survivors, record or ("retained" if retained else "deleted"), len(entries),
+        data.get("clock_step", 0), root or ("present" if retained else "absent")), flush=True)
 
 
 def sweep_records(state: RunState, reserve: float, grace: float, end: Optional[float] = None) -> bool:
     cleared = True
     for path in state.records():
+        data = None
         try:
             data = _read_record(path)
             if data["boot_session"] != boot_session():
-                # Earlier-boot PIDs/groups/inodes are not evidence of ownership.
-                path.unlink()
-                _fsync_directory(path.parent)
-                _remove_run_root(data)
+                # Earlier-boot PIDs/groups/inodes are not evidence of ownership,
+                # so nothing is signaled. The record is the only way back to
+                # the root: it goes only after the root does.
+                _delete_empty_record(path, data)
                 _receipt(data, 0, False)
                 continue
             owner = (data["owner"]["pid"], data["owner"]["start_us"])
@@ -1252,7 +1258,19 @@ def sweep_records(state: RunState, reserve: float, grace: float, end: Optional[f
             _receipt(data, 0, False)
         except (ContainmentError, OSError) as exc:
             print("run-tests-local: {}".format(exc), file=sys.stderr)
-            _receipt({"token": path.stem}, 1, True)
+            # Report what is on disk, not what the failure path assumes. The
+            # root goes before the record, so a missing record means both are
+            # gone and only the directory fsync after the unlink failed: the
+            # cleanup happened but is not durable. Admission still waits.
+            root = "unknown"
+            if data is not None:
+                run_root = Path(data["run_root"])
+                root = "present" if run_root.exists() or run_root.is_symlink() else "absent"
+            if path.exists() or path.is_symlink():
+                _receipt({"token": path.stem}, 1, True, root=root)
+            else:
+                print("run-tests-local: record {} deleted but not durable".format(path.name), file=sys.stderr)
+                _receipt({"token": path.stem}, 0, False, record="deleted-unsynced", root=root)
             cleared = False
     return cleared
 

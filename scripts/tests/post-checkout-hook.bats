@@ -216,8 +216,11 @@ assert_broken_generator_attach_is_recoverable() {
   [[ "$output" == *'managed hook generation failed'* ]] || { echo "$output"; false; }
   [ "$(t14_sha256_text "$(cat "$T14_PROJECT/.git/hooks/post-checkout")")" = "$before" ]
   [ -x "$T14_PROJECT/.git/hooks/post-checkout" ]
-  [ ! -e "$T14_PROJECT/.trellis/runtime" ] && [ ! -L "$T14_PROJECT/.trellis/runtime" ]
-  [ ! -e "$marker.args" ] && [ ! -e "$marker.stdin" ]
+  # A refused attach must not leave the runtime anchor behind (23710bcd0).
+  [ ! -e "$T14_PROJECT/.trellis/runtime" ]
+  [ ! -L "$T14_PROJECT/.trellis/runtime" ]
+  [ ! -e "$marker.args" ]
+  [ ! -e "$marker.stdin" ]
   run git -C "$T14_PROJECT" config --local --get core.hooksPath
   [ "$status" -eq 1 ]
   [ -z "$(find "$TRELLIS_HOME/state/git-hooks" -type f -print 2>/dev/null)" ]
@@ -226,7 +229,8 @@ assert_broken_generator_attach_is_recoverable() {
   # a bare config write (spec 055 R4.6); doctor --fix repairs only .husky/_, so
   # set the managed path by hand before checking detach restores the prior hook.
   run t14_owner_for_root "$T14_PROJECT"
-  [ "$status" -eq 0 ] && [ -f "$output" ]
+  [ "$status" -eq 0 ]
+  [ -f "$output" ]
   owner="$output"
   jq -e --arg release "$T14_RELEASE" '.release == $release and .git_hooks.enabled == true' "$owner"
   managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
@@ -250,6 +254,27 @@ assert_broken_generator_attach_is_recoverable() {
 @test "empty successful release hook generation refuses attach without publishing empty hooks" {
   install_broken_generator_release empty
   assert_broken_generator_attach_is_recoverable
+}
+
+@test "a refused re-attach leaves the runtime link of an earlier attach unchanged" {
+  local runtime="$T14_PROJECT/.trellis/runtime" managed launcher target inode
+  t14_attach
+  wait_for_postjob
+  target="$(readlink "$runtime")"
+  [ "$target" = "$TRELLIS_HOME/releases/$T14_RELEASE/payload" ]
+  # ls -d names the link itself on both BSD and GNU.
+  inode="$(ls -di "$runtime" | awk '{print $1}')"
+  managed="$(dispatcher_path)"
+  launcher="$TRELLIS_HOME/releases/$T14_RELEASE/payload/scripts/trellis-launcher.sh"
+  chmod u+w "$(dirname "$launcher")"
+  rm "$launcher"
+  rm "$managed/post-checkout"
+
+  run t14_attach
+  [ "$status" -eq 4 ] || { echo "attach status=$status"; echo "$output"; false; }
+  [ -L "$runtime" ]
+  [ "$(readlink "$runtime")" = "$target" ]
+  [ "$(ls -di "$runtime" | awk '{print $1}')" = "$inode" ]
 }
 
 @test "owned-state verification refuses blank hooks when the pinned generator becomes unavailable" {
@@ -541,7 +566,14 @@ dispatcher_scripts() {
     queue=("${queue[@]:1}")
     case "$seen" in *" $file "*) continue ;; esac
     seen="$seen$file "
-    printf '%s\n' "$listed" | grep -qxF "$file" || { echo "unlisted: $file"; false; }
+    if [ "$file" = scripts/lib/release_verify.py ]; then
+      # Checked whenever the release carries it (conditional append in
+      # trellis_verify_release_executed), not in the unconditional list.
+      grep -q 'paths+=(scripts/lib/release_verify.py)' "$REPO_ROOT/scripts/lib/attachment.sh" ||
+        { echo 'release_verify.py is neither listed nor conditionally checked'; false; }
+    else
+      printf '%s\n' "$listed" | grep -qxF "$file" || { echo "unlisted: $file"; false; }
+    fi
     [ "$file" != scripts/trellis-launcher.sh ] || continue
     if grep -v '^[[:space:]]*#' "$REPO_ROOT/$file" |
         grep -vE '^hc_(conformance_passes|codex_plugin_surface)\(\)' |
@@ -642,6 +674,32 @@ dispatcher_scripts() {
   chmod +a "$(id -un) allow write" "$file"
   [[ "$(LC_ALL=C /bin/ls -ld "$file")" != *+* ]]
 
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$T14_PROJECT" "$managed/post-checkout"
+  chmod -a# 0 "$file"
+
+  [ "$status" -ne 0 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *'managed release reconciliation payload is unavailable'* ]] || { printf '%s\n' "$output"; false; }
+}
+
+# The same hidden marker on the release record: the anchor's read-only check is
+# the only ACL check that covers release.json.
+@test "post-checkout refuses a release record with a write ACL hidden behind an xattr" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: ls -e ACL listing and chmod +a fixture'
+  t14_attach
+  [ "$?" -eq 0 ]
+  managed="$(dispatcher_path)"
+  file="$TRELLIS_HOME/releases/$T14_RELEASE/release.json"
+  mode="$(stat -f '%Lp' "$file")"
+  chmod u+w "$file"
+  xattr -w com.trellis.fixture 1 "$file"
+  chmod "$mode" "$file"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
+    _ "$T14_PROJECT" "$managed/post-checkout"
+  [ "$status" -eq 0 ] || { printf 'xattr alone: status=%s\n%s\n' "$status" "$output"; false; }
+
+  chmod +a "$(id -un) allow write" "$file"
+  [[ "$(LC_ALL=C /bin/ls -ld "$file")" != *+* ]]
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
     _ "$T14_PROJECT" "$managed/post-checkout"
   chmod -a# 0 "$file"

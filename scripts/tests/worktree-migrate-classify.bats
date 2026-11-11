@@ -31,11 +31,109 @@ teardown() {
   git -C "$HOME/projects/beta" worktree lock "$HOME/projects/beta-wt/locked"
   wm_owner "$HOME/projects/beta-wt/owned" 1.2.3
   rm -rf "$HOME/projects/alpha-wt/gone" "$HOME/projects/beta-wt/locked" "$HOME/projects/beta-wt/owned"
-  migrate --json
+  migrate --json --prune-recent
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   row "$HOME/projects/alpha-wt/gone" | jq -e '.class == "prune"'
   row "$HOME/projects/beta-wt/locked" | jq -e '.class == "hold" and (.reasons | index("locked"))'
   row "$HOME/projects/beta-wt/owned" | jq -e '.class == "hold" and (.reasons[0] | test("owner record names the missing path"))'
+}
+
+@test "fresh missing worktrees are held until expiry or explicit prune-recent" {
+  alpha
+  local repo="$HOME/projects/alpha" fresh="$HOME/projects/alpha-wt/fresh"
+  local stale="$HOME/projects/alpha-wt/stale" locked="$HOME/projects/alpha-wt/locked"
+  local moved="$SANDBOX/outside-scan/fresh" fresh_admin stale_admin locked_admin real_git
+  wm_wt "$repo" fresh "$fresh"
+  wm_wt "$repo" stale "$stale"
+  wm_wt "$repo" locked "$locked"
+  fresh_admin="$(git -C "$fresh" rev-parse --absolute-git-dir)"
+  stale_admin="$(git -C "$stale" rev-parse --absolute-git-dir)"
+  locked_admin="$(git -C "$locked" rev-parse --absolute-git-dir)"
+  git -C "$repo" worktree lock "$locked"
+  mkdir "$SANDBOX/outside-scan"
+  mv "$fresh" "$moved"
+  rm -rf "${stale:?}" "${locked:?}"
+  python3 -I -c 'import os,sys,time; t=time.time()-120*86400; [os.utime(p,(t,t)) for p in sys.argv[1:]]' \
+    "$stale_admin" "$stale_admin/gitdir" "$stale_admin/index"
+  # Record the exact Git invocation: bare `worktree prune` expires fresh
+  # missing entries immediately even though gc's default is three months.
+  real_git="$(readlink "$SANDBOX/bin/git")"
+  rm -f "${SANDBOX:?}/bin/git"
+  cat > "$SANDBOX/bin/git" <<'SH'
+#!/bin/bash
+case " $* " in *' worktree prune '*) printf '%s\n' "$*" >> "$WM_PRUNE_LOG" ;; esac
+exec "$WM_REAL_GIT" "$@"
+SH
+  chmod 755 "$SANDBOX/bin/git"
+  export WM_REAL_GIT="$real_git" WM_PRUNE_LOG="$SANDBOX/prune.log"
+
+  migrate --json
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  row "$fresh" | jq -e '.class == "hold" and (.reasons | any(test("missing-recent.*git worktree repair.*--prune-recent")))'
+  row "$stale" | jq -e '.class == "prune"' || { row "$stale"; printf '%s\n' 'git prune log:'; [ ! -f "$WM_PRUNE_LOG" ] || cat "$WM_PRUNE_LOG"; false; }
+  row "$locked" | jq -e '.class == "hold" and (.reasons | index("locked"))'
+  migrate --apply --yes
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$fresh_admin" ] && [ ! -e "$stale_admin" ] && [ -d "$locked_admin" ]
+  git -C "$moved" rev-parse --absolute-git-dir >/dev/null
+  grep -F -- '--expire=3.months.ago' "$WM_PRUNE_LOG" >/dev/null
+  ! grep -v -- '--expire=' "$WM_PRUNE_LOG"
+
+  migrate --json --prune-recent
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  row "$fresh" | jq -e '.class == "prune" and (.reasons | any(test("--prune-recent")))'
+  migrate --apply --yes --prune-recent
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$fresh_admin" ] && [ -d "$locked_admin" ] && [ -f "$moved/.git" ]
+  grep -F -- '--expire=now' "$WM_PRUNE_LOG" >/dev/null
+  ! grep -v -- '--expire=' "$WM_PRUNE_LOG"
+}
+
+@test "the repository gc.worktreePruneExpire controls eligibility" {
+  alpha
+  local repo="$HOME/projects/alpha" wt="$HOME/projects/alpha-wt/expiry"
+  wm_wt "$repo" expiry "$wt"
+  rm -rf "${wt:?}"
+  git -C "$repo" config gc.worktreePruneExpire now
+  migrate --json
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  row "$wt" | jq -e '.class == "prune"'
+  git -C "$repo" config gc.worktreePruneExpire never
+  migrate --json
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  row "$wt" | jq -e '.class == "hold" and (.reasons | any(test("missing-recent")))'
+}
+
+@test "unreadable or corrupt owner inventory refuses a plan and apply" {
+  [ "$(id -u)" -ne 0 ] || skip 'root bypasses directory permissions'
+  alpha
+  local wt="$HOME/projects/alpha-wt/owned" owner checkout admin
+  wm_wt "$HOME/projects/alpha" owned "$wt"
+  wm_owner "$wt" 1.2.3
+  owner="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -print)"
+  checkout="${owner%/*}"
+  admin="$(git -C "$wt" rev-parse --absolute-git-dir)"
+  rm -rf "${wt:?}"
+
+  # A valid owner protects the missing worktree.
+  migrate --json
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  row "$wt" | jq -e '.class == "hold" and .owner_count == 1'
+  printf '{"worktree_root":' > "$owner"
+  migrate --json
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  migrate --apply --yes
+  [ "$status" -ne 0 ] && [ -d "$admin" ] || { echo "$output"; false; }
+
+  # A well-formed but incomplete record is also unknown, not no owner.
+  printf '{}\n' > "$owner"
+  migrate --json
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  wm_owner "$wt" 1.2.3
+  chmod 000 "$checkout"
+  migrate --apply --yes
+  chmod 700 "$checkout"
+  [ "$status" -ne 0 ] && [ -d "$admin" ] || { echo "$output"; false; }
 }
 
 @test "prune is per repository: one held missing entry holds its siblings" {
@@ -44,7 +142,7 @@ teardown() {
   wm_wt "$HOME/projects/alpha" b "$HOME/projects/alpha-wt/b"
   wm_owner "$HOME/projects/alpha-wt/b" 1.2.3
   rm -rf "$HOME/projects/alpha-wt/a" "$HOME/projects/alpha-wt/b"
-  migrate --json
+  migrate --json --prune-recent
   row "$HOME/projects/alpha-wt/a" | jq -e '.class == "hold" and (.reasons | any(test("per repository")))'
 }
 
@@ -89,6 +187,39 @@ merged_fixture() {
   export TRELLIS_ATTACH_CALLER_PATH="$SANDBOX/ghbin"
   migrate --json
   row "$HOME/projects/alpha-wt/done" | jq -e '.class == "remove" and .merged == "merged" and .regenerable == ["node_modules"]'
+}
+
+@test "hidden tracked edits hold a removable worktree, but unchanged index flags do not" {
+  merged_fixture
+  local wt="$HOME/projects/alpha-wt/done" flag index
+  index="$(git -C "$wt" rev-parse --path-format=absolute --git-path index)"
+  export TRELLIS_ATTACH_CALLER_PATH="$SANDBOX/ghbin"
+  for flag in skip-worktree assume-unchanged; do
+    git -C "$wt" update-index "--$flag" seed.txt
+    printf 'hidden edit\n' >> "$wt/seed.txt"
+    [ -z "$(git -C "$wt" status --porcelain=v1)" ]
+    index_before="$(git -C "$wt" ls-files -v -- seed.txt)"
+    cp "$index" "$SANDBOX/index-before"
+    migrate --json
+    row "$wt" | jq -e '.class == "hold" and (.reasons | any(test("index flags mask tracked changes")))'
+    [ "$(git -C "$wt" ls-files -v -- seed.txt)" = "$index_before" ]
+    cmp "$index" "$SANDBOX/index-before"
+    git -C "$wt" update-index "--no-$flag" seed.txt
+    git -C "$wt" checkout -- seed.txt
+    git -C "$wt" update-index "--$flag" seed.txt
+    index_before="$(git -C "$wt" ls-files -v -- seed.txt)"
+    wm_age "$wt" 2
+    migrate --json
+    row "$wt" | jq -e '.class == "remove"' || { row "$wt"; false; }
+    [ "$(git -C "$wt" ls-files -v -- seed.txt)" = "$index_before" ]
+    git -C "$wt" update-index "--no-$flag" seed.txt
+  done
+  # A sparse checkout may intentionally omit an unchanged skip-worktree path.
+  git -C "$wt" update-index --skip-worktree seed.txt
+  rm -f "${wt:?}/seed.txt"
+  wm_age "$wt" 2
+  migrate --json
+  row "$wt" | jq -e '.class == "remove"' || { row "$wt"; false; }
 }
 
 @test "gh absent from the control PATH and no caller PATH: merge unverified, never remove" {
@@ -145,7 +276,7 @@ merged_fixture() {
   row "$wt" | jq -e '.class == "preserve" and .modified == 1 and .untracked == 1
     and (.ignored_kept | sort) == [".env.local", "app.db"] and .regenerable == [".venv"]
     and .preserve_branch == "feat/wip" and .push == false
-    and .dehydrate == [".venv"] and (.after | index("uv sync (in .)"))'
+    and .dehydrate == [".venv"] and (.after | index("uv sync (in .)"))' || { row "$wt"; false; }
 }
 
 @test "preserve on a detached head or the default branch uses preserve/<dir>" {
@@ -254,7 +385,7 @@ merged_fixture() {
   wm_wt "$HOME/projects/alpha" l "$HOME/projects/alpha-wt/l"
   git -C "$HOME/projects/alpha" worktree lock "$HOME/projects/alpha-wt/l"
   rm -rf "$HOME/projects/alpha-wt/a" "$HOME/projects/alpha-wt/l"
-  migrate --json
+  migrate --json --prune-recent
   row "$HOME/projects/alpha-wt/a" | jq -e '.class == "prune"'
   row "$HOME/projects/alpha-wt/l" | jq -e '.class == "hold" and (.reasons | index("locked"))'
 }
@@ -329,4 +460,16 @@ merged_fixture() {
     row "$HOME/projects/alpha-wt/$p" | jq -e --arg t "$WT_ROOT/alpha/a-b" '.class == "hold"
       and (.reasons | index("convention path " + $t + " is also the target of another worktree"))'
   done
+}
+
+@test "an owner record without file artifacts never erases kept ignored work" {
+  alpha
+  local wt="$HOME/projects/alpha-wt/owned-empty"
+  merged_wt owned-empty
+  wm_owner "$wt" 1.2.3
+  printf 'TOKEN=fixture-only\n' > "$wt/.env.local"
+  export TRELLIS_ATTACH_CALLER_PATH="$SANDBOX/ghbin"
+  migrate --json
+  row "$wt" | jq -e '.class == "preserve" and (.ignored_kept | index(".env.local"))' ||
+    { row "$wt"; false; }
 }

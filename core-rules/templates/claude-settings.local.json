@@ -24,82 +24,19 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Skill|Edit|MultiEdit|Write",
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env",
+            "command": "__TRELLIS_LAUNCHER__",
             "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "/bin/sh",
-              "-c",
-              "r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0",
-              "guard-supervise",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl",
+              "hook",
+              "event",
               "claude",
-              "block-destructive",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/block-destructive.sh"
+              "PreToolUse"
             ],
             "timeout": 30,
-            "onFailure": "block",
-            "statusMessage": "Checking command safety..."
-          },
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/pr-gate-shiftleft.sh"
-            ],
-            "if": "Bash(*gh*)",
-            "timeout": 10,
-            "statusMessage": "Running PR process-gate pre-flight..."
-          }
-        ]
-      },
-      {
-        "matcher": "Skill",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "/bin/sh",
-              "-c",
-              "r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0",
-              "guard-supervise",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl",
-              "claude",
-              "skill-preload-guard",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/skill-preload-guard.sh"
-            ],
-            "timeout": 30,
-            "onFailure": "block",
-            "statusMessage": "Checking Skill pre-load size..."
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|MultiEdit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "/bin/sh",
-              "-c",
-              "r=127; if [ -f \"$1\" ] && command -v perl >/dev/null 2>&1; then o=$(env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB -u ENV -u BASH_ENV perl \"$@\"); r=$?; fi; case $r in 10) exit 0;; 11) printf \"%s\\n\" \"$o\"; exit 0;; 12) printf \"%s\\n\" \"$o\"; exit 2;; esac; printf \"%s\\n\" \"{\\\"hookSpecificOutput\\\":{\\\"hookEventName\\\":\\\"PreToolUse\\\",\\\"permissionDecision\\\":\\\"deny\\\",\\\"permissionDecisionReason\\\":\\\"$3: guard supervisor failed (status $r); refusing\\\"}}\"; exit 0",
-              "guard-supervise",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/lib/guard-supervise.pl",
-              "claude",
-              "reread-guard",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/reread-guard.sh"
-            ],
-            "timeout": 30,
-            "onFailure": "block",
-            "statusMessage": "Re-read guard..."
+            "onFailure": "block"
           }
         ]
       }
@@ -110,13 +47,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env",
+            "command": "__TRELLIS_LAUNCHER__",
             "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/skill-slash-guard.sh"
+              "hook",
+              "event",
+              "claude",
+              "UserPromptExpansion"
             ],
-            "timeout": 5,
-            "statusMessage": "Checking slash-command Skill size..."
+            "timeout": 30,
+            "onFailure": "block"
           }
         ]
       }
@@ -126,93 +65,34 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env",
+            "command": "__TRELLIS_LAUNCHER__",
             "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/turn-baseline.sh"
+              "hook",
+              "event",
+              "claude",
+              "UserPromptSubmit"
             ],
-            "timeout": 10,
-            "statusMessage": "Recording turn baseline..."
+            "timeout": 30,
+            "onFailure": "block"
           }
         ]
       }
     ],
     "PostToolUse": [
       {
-        "matcher": "Write|Edit|MultiEdit",
+        "matcher": "Read|Write|Edit|MultiEdit|Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env",
+            "command": "__TRELLIS_LAUNCHER__",
             "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/post-edit-verify.sh"
+              "hook",
+              "event",
+              "claude",
+              "PostToolUse"
             ],
-            "timeout": 120,
-            "statusMessage": "Verifying edit..."
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/slop-tripwire.sh"
-            ],
-            "timeout": 5,
-            "statusMessage": "Checking evidence doctrine..."
-          }
-        ]
-      },
-      {
-        "matcher": "Read|Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/track-read.sh"
-            ],
-            "timeout": 5,
-            "statusMessage": "Recording reads..."
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit|MultiEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/wiki-skill-suggest.sh"
-            ],
-            "timeout": 5,
-            "statusMessage": "Suggesting wiki maintenance..."
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/bin/sh",
-            "args": [
-              "-c",
-              "[ -f \"$1\" ] || exit 0; TRELLIS_ROOT=\"$2\" exec \"$1\"",
-              "hookspath-guard",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/hookspath-guard.sh",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime"
-            ],
-            "timeout": 10,
-            "statusMessage": "Checking git hooks path..."
+            "timeout": 130,
+            "onFailure": "block"
           }
         ]
       }
@@ -234,13 +114,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env",
+            "command": "__TRELLIS_LAUNCHER__",
             "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/save-context-log.sh"
+              "hook",
+              "event",
+              "claude",
+              "PreCompact"
             ],
-            "timeout": 10,
-            "statusMessage": "Saving session context..."
+            "timeout": 30,
+            "onFailure": "block"
           }
         ]
       }
@@ -250,63 +132,15 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/env",
+            "command": "__TRELLIS_LAUNCHER__",
             "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/spec-gate.sh"
+              "hook",
+              "event",
+              "claude",
+              "Stop"
             ],
-            "timeout": 15,
-            "statusMessage": "Checking spec-gate..."
-          },
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/decision-receipt.sh"
-            ],
-            "timeout": 15,
-            "statusMessage": "Checking decision receipts..."
-          },
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/stop-verify.sh"
-            ],
-            "timeout": 300,
-            "statusMessage": "Running final verification..."
-          },
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/code-review-subagent.sh"
-            ],
-            "timeout": 120,
-            "statusMessage": "Code review on diff..."
-          },
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/ui-verify.sh"
-            ],
-            "timeout": 120,
-            "statusMessage": "UI verification..."
-          },
-          {
-            "type": "command",
-            "command": "/usr/bin/env",
-            "args": [
-              "TRELLIS_ROOT=${CLAUDE_PROJECT_DIR}/.trellis/runtime",
-              "${CLAUDE_PROJECT_DIR}/.trellis/runtime/core-rules/hooks/stamp-turn.sh"
-            ],
-            "timeout": 5,
-            "statusMessage": "Stamping turn..."
+            "timeout": 310,
+            "onFailure": "block"
           }
         ]
       }

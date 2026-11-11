@@ -451,6 +451,36 @@ SH
 }
 
 # ===========================================================================
+# Git's user configuration must not hide local work from either reap gate.
+@test "worktree clean gates ignore status.showUntrackedFiles=no" {
+  local repo="$SANDBOX/config-hidden"
+  git_init_at "$repo"
+  printf '.env.local\n' > "$repo/.gitignore"
+  git -C "$repo" add .gitignore
+  git -C "$repo" commit -qm 'ignore local environment'
+  git -C "$repo" config status.showUntrackedFiles no
+
+  run dj_worktree_clean "$repo"
+  [ "$status" -eq 0 ]
+  run dj_worktree_porcelain_clean "$repo"
+  [ "$status" -eq 0 ]
+
+  printf 'untracked work\n' > "$repo/notes.txt"
+  run dj_worktree_clean "$repo"
+  [ "$status" -ne 0 ]
+  run dj_worktree_porcelain_clean "$repo"
+  [ "$status" -ne 0 ]
+
+  mv "$repo/notes.txt" "$SANDBOX/notes.txt"
+  printf 'ignored local data\n' > "$repo/.env.local"
+  run dj_worktree_clean "$repo"
+  [ "$status" -ne 0 ]
+  # The narrow diagnostic intentionally ignores ignored paths; the reap gate
+  # immediately follows it with the broader predicate above.
+  run dj_worktree_porcelain_clean "$repo"
+  [ "$status" -eq 0 ]
+}
+
 # dj_worktree_porcelain_clean — tracked/untracked distinction
 # ===========================================================================
 
@@ -621,6 +651,26 @@ SH
   [ "$status" -eq 1 ]
 }
 
+@test "dj_build_active explains an unavailable build process cwd but keeps busy builds quiet" {
+  local bin="$SANDBOX/bin" project="$SANDBOX/project"
+  mkdir -p "$bin" "$project"
+  cat > "$bin/ps" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$PS_FIXTURE"
+SH
+  chmod +x "$bin/ps"
+  export PATH="$bin:/usr/bin:/bin:/usr/sbin:/sbin"
+  export PS_FIXTURE='999999999 1 999999999 node node ./node_modules/.bin/next build'
+  run dj_build_active "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'pid=999999999'* && "$output" == *'target=next'* && \
+     "$output" == *'cwd=<unavailable>'* && "$output" == *"project=$project"* ]] || { echo "$output"; false; }
+
+  PS_FIXTURE="600 1 600 node node $project/node_modules/.bin/next build"
+  run dj_build_active "$project"
+  [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$output"; false; }
+}
+
 @test "dj_build_active fails closed when the process snapshot fails" {
   local bin="$SANDBOX/bin"
   mkdir -p "$bin"
@@ -778,6 +828,35 @@ JSON
   [ -d "$root" ]
 }
 
+@test "dj_reap_worktree holds files hidden by status.showUntrackedFiles=no" {
+  local root="$SANDBOX/checkout-hidden" linked="$SANDBOX/linked-hidden"
+  local identity checkout_id worktree_id common
+  git_init_at "$root"
+  printf '.env.local\n' > "$root/.gitignore"
+  git -C "$root" add .gitignore
+  git -C "$root" commit -qm 'ignore local environment'
+  git -C "$root" config status.showUntrackedFiles no
+  register_fixture_root "$root" fixture
+  git -C "$root" worktree add -q -b feat/hidden "$linked"
+  register_fixture_root "$linked" fixture
+  identity="$(local_registry_identity_for_root "$linked")"
+  checkout_id="$(printf '%s\n' "$identity" | jq -r '.checkout_id')"
+  worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
+  common="$(printf '%s\n' "$identity" | jq -r '.git_common_dir')"
+
+  printf 'local notes\n' > "$linked/notes.txt"
+  run dj_reap_worktree "$TRELLIS_HOME" personal fixture "$checkout_id" "$worktree_id" "$common" "$linked"
+  [ "$status" -ne 0 ] && [ -f "$linked/notes.txt" ] || { echo "$output"; false; }
+  mv "$linked/notes.txt" "$SANDBOX/notes-saved"
+  printf 'local credentials\n' > "$linked/.env.local"
+  run dj_reap_worktree "$TRELLIS_HOME" personal fixture "$checkout_id" "$worktree_id" "$common" "$linked"
+  [ "$status" -ne 0 ] && [ -f "$linked/.env.local" ] || { echo "$output"; false; }
+  mv "$linked/.env.local" "$SANDBOX/env-saved"
+  run dj_reap_worktree "$TRELLIS_HOME" personal fixture "$checkout_id" "$worktree_id" "$common" "$linked"
+  [ "$status" -eq 0 ] && [ ! -e "$linked" ] || { echo "$output"; false; }
+  [ -d "$root" ]
+}
+
 @test "dj_reap_worktree refuses ignored local content at the destructive sink" {
   local root="$SANDBOX/checkout" linked="$SANDBOX/linked"
   local identity checkout_id worktree_id common
@@ -798,4 +877,47 @@ JSON
   [ "$status" -ne 0 ]
   [ -d "$linked" ]
   [ -f "$linked/.env" ]
+}
+
+# Plant a module the stdin program imports, so an unisolated interpreter would
+# execute it before reaching the walker's own code.
+shadow_module() {
+  local dir="$1" name="$2"
+  mkdir -p "$dir"
+  cat > "$dir/$name" <<'PY'
+import os
+open(os.environ["SHADOW_MARKER"], "w").write("shadowed\n")
+raise SystemExit(0)
+PY
+}
+
+@test "dj_find_caches isolates its stdin python from modules in the caller cwd" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  local proj="$SANDBOX/proj" poison="$SANDBOX/poison" marker="$SANDBOX/find-marker"
+  mkdir -p "$proj/.next/cache"
+  printf 'cache\n' > "$proj/.next/cache/blob"
+  shadow_module "$poison" ctypes.py
+  run env SHADOW_MARKER="$marker" bash -c 'cd "$1" && . "$2" && dj_find_caches "$3"' \
+    _ "$poison" "$LIB" "$proj"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$marker" ] || { echo "cwd ctypes.py executed"; false; }
+  [[ "$output" == *".next/cache"* ]] || { echo "$output"; false; }
+}
+
+@test "dj_remove_cache_tree_safely isolates its stdin python from modules in the caller cwd" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  local root="$SANDBOX/root" cache="$SANDBOX/root/.next/cache"
+  local poison="$SANDBOX/poison-remove" marker="$SANDBOX/remove-marker"
+  mkdir -p "$cache"
+  printf 'cache\n' > "$cache/blob"
+  shadow_module "$poison" ctypes.py
+  run env SHADOW_MARKER="$marker" bash -c 'cd "$1" && . "$2" && dj_remove_cache_tree_safely "$3" "$4"' \
+    _ "$poison" "$LIB" "$root" "$cache"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$marker" ] || { echo "cwd ctypes.py executed"; false; }
+  [ ! -d "$cache" ] || { echo "cache not removed"; false; }
+}
+
+@test "every python stdin helper in disk-janitor-lib is isolated" {
+  ! grep -n 'python3 - ' "$LIB" || { echo "unisolated python3 - invocation"; false; }
 }

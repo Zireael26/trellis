@@ -82,6 +82,95 @@ write_transcript_stale_receipt() {
 EOF
 }
 
+assert_143_stop_block() {
+  if [ "$1" = "$HOOKS_DIR/stop-verify.sh" ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+  printf '%s' "$output" | jq -e --arg prefix "$2" '.decision == "block" and (.reason | startswith($prefix))' >/dev/null
+}
+
+@test "R2 L1: non-Git Stop policy is documented accurately and remains fail-closed" {
+  local candidate outside="$BATS_TEST_TMPDIR/not-a-worktree"
+  mkdir -p "$outside"
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    # A comment-only fix: prevent the old promise from returning while pinning
+    # the actual behavior and the valid-worktree negative case beside it.
+    if grep -Fq "If git isn't here, fall through" "$candidate"; then
+      echo "stale non-Git fall-through promise: $candidate" >&2
+      return 1
+    fi
+    run env CLAUDE_PROJECT_DIR="$outside" CODEX_PROJECT_DIR="$outside" bash "$candidate" \
+      <<<'{"last_assistant_message":"Done. <!-- dod-receipt cmd=fixture exit=0 diff=+1 --> <!-- follow-ups: none -->"}'
+    assert_143_stop_block "$candidate" 'git changed files:'
+    run env CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR" bash "$candidate" <<<'{}'
+    [ "$status" -eq 0 ]; [[ "$output" != *'"decision":"block"'* ]]
+  done
+}
+
+@test "143-stop unborn staged code requires a receipt and staged docs stay exempt" {
+  local project="$BATS_TEST_TMPDIR/unborn-code" docs="$BATS_TEST_TMPDIR/unborn-docs" candidate
+  mkdir -p "$project" "$docs"
+  git -C "$project" init -q
+  git -C "$docs" init -q
+  export CLAUDE_PROJECT_DIR="$project" CODEX_PROJECT_DIR="$project"
+  printf 'const x = 1;\n' > "$project/app.js"
+  git -C "$project" add app.js
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run bash "$candidate" <<<'{"last_assistant_message":"Done."}'
+    assert_143_stop_block "$candidate" 'receipts:'
+    run bash "$candidate" <<<'{"last_assistant_message":"Done. <!-- dod-receipt cmd=fixture exit=0 diff=+1 --> <!-- follow-ups: none -->"}'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+  done
+  export CLAUDE_PROJECT_DIR="$docs" CODEX_PROJECT_DIR="$docs"
+  printf '# documentation\n' > "$docs/readme.md"
+  git -C "$docs" add readme.md
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run bash "$candidate" <<<'{"last_assistant_message":"Done."}'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+  done
+}
+
+@test "143-stop code-to-doc rename requires a receipt but doc-only rename does not" {
+  local project="$BATS_TEST_TMPDIR/rename" candidate
+  mkdir -p "$project/src" "$project/docs"
+  git -C "$project" init -q
+  git -C "$project" config user.name 'Trellis CI'
+  git -C "$project" config user.email ci-bats@trellis.test
+  git -C "$project" config diff.renames true
+  printf 'const x = 1;\n' > "$project/src/app.ts"
+  printf '# notes\n' > "$project/docs/old.md"
+  git -C "$project" add .
+  git -C "$project" commit -qm seed
+  export CLAUDE_PROJECT_DIR="$project" CODEX_PROJECT_DIR="$project"
+  git -C "$project" mv docs/old.md docs/new.md
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run bash "$candidate" <<<'{"last_assistant_message":"Done."}'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+  done
+  git -C "$project" mv src/app.ts docs/app.md
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run bash "$candidate" <<<'{"last_assistant_message":"Done."}'
+    assert_143_stop_block "$candidate" 'receipts:'
+  done
+}
+
+@test "143-stop unreadable git changed files cannot waive a receipt" {
+  local bin="$BATS_TEST_TMPDIR/no-git" candidate
+  mkdir -p "$bin"
+  printf '#!/bin/sh\nexit 127\n' > "$bin/git"
+  chmod +x "$bin/git"
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+  make_dirty_code
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run env PATH="$bin:$PATH" bash "$candidate" <<<'{"last_assistant_message":"Done."}'
+    assert_143_stop_block "$candidate" 'git changed files:'
+    run bash "$candidate" <<<'{"last_assistant_message":"Done. <!-- dod-receipt cmd=fixture exit=0 diff=+1 --> <!-- follow-ups: none -->"}'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+  done
+}
+
 # =========================================================================
 # Receipt present THIS turn on a dirty non-doc tree → pass (exit 0).
 # =========================================================================

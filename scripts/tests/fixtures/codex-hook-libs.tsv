@@ -41,9 +41,9 @@ skill-slash-guard.sh	skill-size.sh
 slop-tripwire.sh	action-normalize.sh
 slop-tripwire.sh	deps.sh
 slop-tripwire.sh	slop-patterns.sh
-spec-gate.sh	deps.sh
 spec-gate.sh	spec-gate-core.sh
 stamp-turn.sh	deps.sh
+stop-verify.sh	attach-verdict.sh
 stop-verify.sh	deps.sh
 stop-verify.sh	pm.sh
 stop-verify.sh	verification-receipt.sh

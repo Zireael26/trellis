@@ -163,7 +163,8 @@ setup() {
   [ "$status" -eq 3 ]
   [[ "$output" == *'stale owned exclude plan'*'remedy:'* ]]
   [ ! -e "$GROUP_PLAN_NEW" ]
-  ! git -C "$GROUP_PLAN_MAIN" show-ref --verify refs/heads/gp-blocked
+  run git -C "$GROUP_PLAN_MAIN" show-ref --verify --quiet refs/heads/gp-blocked
+  [ "$status" -ne 0 ]
   [ "$(group_plan_state)" = "$before" ]
   GROUP_PLAN_NEW="$TRELLIS_WORKTREE_ROOT/group-plan/gp-deferred"
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add --no-checkout gp-deferred' _ \
@@ -249,7 +250,7 @@ PY
 
 @test "group plan (u): signal rollback and crash recovery preserve group exclude hashes" {
   group_plan_setup_group
-  local signal before
+  local signal before live_block_hash
   mkdir "$RELEASE_TEST_ADOPTION_BARRIER"
   printf '%s\n' "$GROUP_PLAN_EXCLUDE" > "$RELEASE_TEST_ADOPTION_BARRIER/exclude.target"
   : > "$RELEASE_TEST_ADOPTION_BARRIER/after-plan-validation.release"
@@ -278,7 +279,85 @@ PY
       group_plan_adopt
       [ "$status" -eq 0 ] || { echo "$output"; false; }
       grep -Fx '/.codex/hooks/hookspath-guard.sh' "$GROUP_PLAN_EXCLUDE"
+      [ "$(tail -c 31 "$GROUP_PLAN_EXCLUDE")" = '# external tail without newline' ]
+      live_block_hash="$(python3 -I - "$GROUP_PLAN_EXCLUDE" <<'PY'
+import hashlib, pathlib, sys
+data = pathlib.Path(sys.argv[1]).read_bytes()
+start = data.index(b'# --- Trellis local attachment exclude block ---\n')
+end = data.index(b'# --- end Trellis local attachment exclude block ---\n') + len(b'# --- end Trellis local attachment exclude block ---\n')
+print(hashlib.sha256(data[start:end]).hexdigest())
+PY
+)"
+      [ "$(jq -r '.exclude_block_hash' "$GROUP_PLAN_OWNER")" = "$live_block_hash" ]
+      [ "$(jq -r '.exclude.managed_block_sha256' "$GROUP_PLAN_OWNER")" = "$live_block_hash" ]
       group_plan_assert_no_journal
     fi
   done
 }
+
+# Shared scaffold sections below; existing tests above remain unchanged.
+# BEGIN LANE A0
+# END LANE A0
+
+# BEGIN LANE A1
+# END LANE A1
+
+# BEGIN LANE A2
+# END LANE A2
+
+# BEGIN LANE A3
+# END LANE A3
+
+# BEGIN LANE A4
+# END LANE A4
+
+# BEGIN LANE B1
+# END LANE B1
+
+# BEGIN LANE B2
+# END LANE B2
+
+# BEGIN LANE B3
+# END LANE B3
+
+# BEGIN LANE B4
+# END LANE B4
+
+# BEGIN LANE B5
+# END LANE B5
+
+# BEGIN LANE B6
+# END LANE B6
+
+# BEGIN LANE B7
+# END LANE B7
+
+# BEGIN LANE B8
+# END LANE B8
+
+# BEGIN LANE B9
+# END LANE B9
+
+# BEGIN LANE B10
+# END LANE B10
+
+# BEGIN LANE B11
+# END LANE B11
+
+# BEGIN LANE C0
+# END LANE C0
+
+# BEGIN LANE C1
+# END LANE C1
+
+# BEGIN LANE C2
+# END LANE C2
+
+# BEGIN LANE C3
+# END LANE C3
+
+# BEGIN LANE C4
+# END LANE C4
+
+# BEGIN LANE serial-tail
+# END LANE serial-tail

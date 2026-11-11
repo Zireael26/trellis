@@ -48,7 +48,7 @@ PROCESS_GATE_ADR_DIR="docs/adr"
 
 A change to any ADR-trigger path without:
 - A new file in `$PROCESS_GATE_ADR_DIR/`, OR
-- A reference in the commit message body to an existing ADR number (`Refs: ADR-0042`)
+- A reference in the commit message to an existing ADR number (`Refs: ADR-42` or `ADR-0042`), backed by a tracked regular file such as `docs/adr/0042-<slug>.md` or `docs/adr/ADR-0042-<slug>.md` at the gated range's head; or a literal repository-relative path to an existing ADR, such as `docs/adr/2026-10-18-retire-astra-routing.md` (including in a Markdown link). A literal path must name a numbered, optionally `ADR-`/`adr-`-prefixed, or `YYYY-MM-DD-<slug>.md` ADR; `README.md` and `template.md` do not qualify. Date-named ADRs require the path because multiple decisions may share a date. Untracked files and symlinks do not qualify.
 
 …is a **fail**.
 

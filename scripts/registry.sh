@@ -187,7 +187,16 @@ legacy_blacklist_records() {
     /^## 1\. Temporarily excluded \(registered projects\)[[:space:]]*$/ { section=1; temporary_seen++; next }
     /^## 2\. Permanently excluded from management[[:space:]]*$/ { section=2; permanent_seen++; next }
     /^## / { section=0; next }
-    section == 0 || !/^\|/ { next }
+    section == 0 { next }
+    !/^\|/ {
+      # Keep prose, but never discard something shaped like a table row.
+      cells=split($0, skipped, /[|]/)
+      first=trim(skipped[1])
+      if ($0 ~ /^[[:space:]]+\|/ ||
+          (section == 1 && temporary_header && cells >= 4 && first ~ /^[A-Za-z0-9][A-Za-z0-9._-]*$/) ||
+          (section == 2 && permanent_header && cells >= 2 && first ~ /^`\/[^`]+`$/)) bad=1
+      next
+    }
     {
       if (index($0, "\t") > 0) { bad=1; next }
       line=$0; sub(/^\|/, "", line); sub(/\|[[:space:]]*$/, "", line)
@@ -747,8 +756,8 @@ cmd_rebuild() {
 # `deregistered: <project_id> <worktree_root>`; all diagnostics go to stderr.
 cmd_deregister() {
   local home_opt="" fleet="" project="" root="" worktree_root="" force=0 home state matched proposal base
-  local selector="" selector_value="" row row_project row_worktree_root row_checkout still=""
-  local live_refused=0 rc=0 result_rc
+  local selector="" selector_value="" row row_project row_worktree_root row_checkout still="" python_helper
+  local live_refused=0 row_live=0 rc=0 result_rc
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --home) [ "$#" -ge 2 ] || usage_error "--home requires PATH"; home_opt="$2"; shift 2 ;;
@@ -819,9 +828,60 @@ cmd_deregister() {
     row_project="$(printf '%s\n' "$row" | jq -r '.project_id')" || { rm -f "$state" "$matched"; return "$TRELLIS_EX_STATE"; }
     row_worktree_root="$(printf '%s\n' "$row" | jq -r '.worktree_root')" || { rm -f "$state" "$matched"; return "$TRELLIS_EX_STATE"; }
     row_checkout="$(printf '%s\n' "$row" | jq -r '.checkout_id')" || { rm -f "$state" "$matched"; return "$TRELLIS_EX_STATE"; }
-    if [ "$force" -eq 0 ] && { [ -e "$row_worktree_root" ] || [ -L "$row_worktree_root" ]; }; then
-      local_registry_err "deregister refuses a live row without --force: $fleet/$row_project root $row_worktree_root checkout $row_checkout"
-      live_refused=1
+    if [ "$force" -eq 0 ]; then
+      row_live=0
+      if [ -e "$row_worktree_root" ] || [ -L "$row_worktree_root" ]; then
+        row_live=1
+      else
+        # Shell tests collapse ENOENT, permission errors and I/O errors. Only a
+        # definite absence permits deregistration without an explicit --force.
+        python_helper="$SCRIPT_DIR/lib/trellis-python.sh"
+        # A clean child strips exported functions before the resolver is
+        # sourced; it also runs lstat, so no caller-selected Python is used.
+        if /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc -c '
+          helper=$1
+          [ -f "$helper" ] && [ ! -L "$helper" ] || exit 40
+          . "$helper" && declare -F trellis_python_trusted >/dev/null || exit 40
+          trellis_python_trusted || exit 41
+          "$TRELLIS_PYTHON" -I - "$2" <<'"'"'PY'"'"'
+import os
+import sys
+
+try:
+    os.lstat(sys.argv[1])
+except (FileNotFoundError, NotADirectoryError):
+    sys.exit(0)
+except OSError:
+    sys.exit(2)
+sys.exit(1)
+PY
+        ' _ "$python_helper" "$row_worktree_root"; then
+          :
+        else
+          rc=$?
+          case "$rc" in
+            1) row_live=1 ;;
+            40|41)
+              if [ "$rc" -eq 40 ]; then
+                local_registry_err "trusted python3 interpreter resolver unavailable; cannot classify deregister root: $row_worktree_root"
+              else
+                local_registry_err "trusted python3 interpreter unavailable; cannot classify deregister root: $row_worktree_root"
+              fi
+              rm -f "${state:?}" "${matched:?}"
+              return "$TRELLIS_EX_UNAVAILABLE"
+              ;;
+            *)
+              local_registry_err "cannot inspect deregister root: $row_worktree_root"
+              rm -f "${state:?}" "${matched:?}"
+              return "$TRELLIS_EX_UNAVAILABLE"
+              ;;
+          esac
+        fi
+      fi
+      if [ "$row_live" -ne 0 ]; then
+        live_refused=1
+        local_registry_err "deregister refuses a live row without --force: $fleet/$row_project root $row_worktree_root checkout $row_checkout"
+      fi
     fi
   done < "$matched"
   if [ "$live_refused" -ne 0 ]; then

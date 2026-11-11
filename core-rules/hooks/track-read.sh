@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # track-read.sh — Claude PostToolUse on Read|Write|Edit|MultiEdit.
 # Source: Trellis / core-rules / hooks. Phase 5a (E2 re-read-before-edit guard).
 #
@@ -58,9 +59,9 @@ _gr_jq_fields "$INPUT" \
   '.tool_name // empty' \
   '.tool_response | type' \
   'if (.tool_response | type) == "object" then
-     ((.tool_response.error // empty) != "")
+     ((.tool_response.error // "") != "")
      or ((.tool_response.is_error // false) == true)
-     or ((.tool_response.tool_use_error // empty) != "")
+     or ((.tool_response.tool_use_error // "") != "")
    else empty end' \
   'if (.tool_response | type) == "string" then .tool_response else empty end' \
   '.transcript_path // empty' \
@@ -105,6 +106,14 @@ T=$(_se_normpath "$T")
 
 TOOL_NAME=${GR_FV[1]}
 
+# Keep the fallback adapter aligned with the native event member: a shell or
+# unknown tool cannot earn read credit by supplying a file_path field. Empty
+# names retain compatibility with older file-only registrations/fixtures.
+case "$TOOL_NAME" in
+  Read|Edit|MultiEdit|Write|'') ;;
+  *) exit 0 ;;
+esac
+
 # --- success detection (SHAPE-based for the edit family) ------------------
 # DL-P5-08: a successful Edit/Write/MultiEdit response is an OBJECT; a genuine
 # failure arrives as an error STRING. Branch on the tool_response type so a
@@ -116,8 +125,8 @@ case "$TOOL_NAME" in
     case "$RTYPE" in
       object)
         # Successful edit → RECORD, UNLESS an explicit error key is present.
-        # Read as `jq -e` read it: the last value printed is true. With no
-        # .error key the first operand prints nothing, so nothing is printed.
+        # Each operand emits a boolean, even when a key is absent; otherwise
+        # jq's empty stream can suppress later explicit error indicators.
         if [ "${GR_FE[3]}" = 0 ] && [ "${GR_FV[3]##*$'\n'}" = true ]; then
           exit 0   # explicit error key → a failed edit → do NOT record
         fi

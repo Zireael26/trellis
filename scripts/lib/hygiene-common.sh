@@ -159,10 +159,21 @@ hy_project_dir() {
   common="$(_hy_common_dir "$repo")" || return 2
   registry="${TRELLIS_HOME:-$HOME/.trellis}/registry.json"
   ids=""
-  if [ -e "$registry" ]; then
-    ids="$(jq -r --arg common "$common" '
-      [.projects[]? | select(any(.checkouts[]?; .git_common_dir == $common)) | .project_id]
-      | unique | .[]' "$registry" 2>/dev/null)" || return 4
+  if [ -e "$registry" ] || [ -L "$registry" ]; then
+    # Slurp exactly one value: jq otherwise accepts an empty file as success.
+    # Validate every row that could hide an ownership claim before selecting.
+    ids="$(jq -rs --arg common "$common" '
+      def collection: type == "object" or type == "array";
+      if length != 1 or (.[0] | type) != "object" then error("invalid registry")
+      else .[0] end
+      | if (.projects | collection) and
+          all(.projects[]; type == "object" and
+            (.project_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")) and
+            (.checkouts | collection) and
+            all(.checkouts[]; type == "object" and (.git_common_dir | type == "string")))
+        then [.projects[] | select(any(.checkouts[]; .git_common_dir == $common)) | .project_id]
+             | unique | join("\n")
+        else error("invalid projects") end' "$registry" 2>/dev/null)" || return 4
   fi
   count="$(printf '%s' "$ids" | grep -c . || true)"
   if [ "$count" -eq 1 ]; then

@@ -53,6 +53,8 @@ setup_deployed_hook() {
   # sibling lib; these are the same bytes as the canonical Claude core libs.
   cp "$(_codex_lib_dir)/deps.sh" "$deploy/lib/deps.sh"
   cp "$(_codex_lib_dir)/pm.sh"   "$deploy/lib/pm.sh"
+  # Spec 074 T14 (amended): Stop step 0 sources the attachment-verdict lib.
+  cp "$(_codex_lib_dir)/attach-verdict.sh" "$deploy/lib/attach-verdict.sh"
   chmod +x "$deploy/stop-verify.sh"
   # HOOK is consumed by the .bats files that `load` this helper, not here.
   # shellcheck disable=SC2034

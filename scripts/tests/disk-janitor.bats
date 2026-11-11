@@ -337,7 +337,9 @@ JSON
 
   # Real process, real cwd, real lsof predicate — no lsof mocking. Redirect its
   # inherited descriptors so bats' output capture never waits for the sleeper.
-  ( cd "$wt" && exec sleep 30 ) >/dev/null 2>&1 &
+  # It lives until teardown kills it: both janitor runs must see it, however
+  # slowly they run (under strace they take most of half a minute).
+  ( cd "$wt" && exec sleep 3600 ) >/dev/null 2>&1 &
   LIVE_PID=$!
 
   # Avoid a spawn-vs-snapshot race: require the exact primitive from the safety
@@ -364,6 +366,8 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" != *"git worktree remove  $wt"* ]] || { echo "$output"; false; }
   [ -d "$wt" ]
+  # The worktree was in use for the whole run, not only at its start.
+  kill -0 "$LIVE_PID"
 }
 
 # ===========================================================================
@@ -385,7 +389,7 @@ JSON
   # Fail only dj_find_caches: registry identity validation must still run.
   cat > "$shim_dir/python3" <<EOF
 #!/bin/sh
-if [ "\$#" -eq 2 ] && [ "\$1" = "-" ] && [ "\$2" = "$PROJECTS/alpha" ]; then
+if [ "\$#" -eq 3 ] && [ "\$1" = "-I" ] && [ "\$2" = "-" ] && [ "\$3" = "$PROJECTS/alpha" ]; then
   printf 'cache walker reached\n' > "$marker"
   exit 73
 fi

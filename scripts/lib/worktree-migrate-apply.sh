@@ -31,13 +31,17 @@ wm_id() {
 
 # wm_journal JOURNAL ACTION OLD NEW STEP [ERROR] [EXTRA-JSON]
 wm_journal() {
-  local extra="${7:-}"
+  local extra="${7:-}" id ts
   [ -n "$extra" ] || extra='{}'
-  jq -nc --arg id "$(wm_id "$3")" --arg action "$2" --arg old "$3" --arg new "$4" \
+  id="$(wm_id "$3")" && ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || return 5
+  if ! jq -nc --arg id "$id" --arg action "$2" --arg old "$3" --arg new "$4" \
     --arg step "$5" --arg error "${6:-}" --argjson extra "$extra" \
-    --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --arg ts "$ts" \
     '{id:$id, action:$action, old:$old, new:(if $new == "" then null else $new end),
-      step:$step, error:(if $error == "" then null else $error end), ts:$ts} + $extra' >> "$1"
+      step:$step, error:(if $error == "" then null else $error end), ts:$ts} + $extra' >> "$1"; then
+    printf 'trellis worktree migrate: cannot append journal: %s\n' "$1" >&2
+    return 5
+  fi
   # Test seam: stop dead after a named step, as a crash or kill would.
   if [ -n "${WM_FAULT_STEP:-}" ] && [ "$WM_FAULT_STEP" = "$5" ]; then
     exit 99
@@ -82,7 +86,7 @@ wm_revalidate() {
   path="$(printf '%s' "$row" | jq -r '.path')"
   class="$(printf '%s' "$row" | jq -r '.class')"
   root="$(hy_root)" || { printf 'cannot resolve the worktree root'; return 1; }
-  wm_owner_index "$work"
+  wm_owner_index "$work" || { printf 'cannot inspect attachment owners'; return 1; }
   wm_facts_repo "$work" "$common" "$root" "$path" > "$work/one.jsonl"
   if [ ! -s "$work/one.jsonl" ]; then
     printf 'changed since the plan: no longer listed by git'
@@ -101,10 +105,31 @@ wm_revalidate() {
 # wm_apply_prune WORK JOURNAL ROWS COMMON — prune one repository when its
 # prunable set is still exactly the planned prune rows.
 wm_apply_prune() {
-  local work="$1" journal="$2" rows="$3" common="$4" planned live owned linked admin path
+  local work="$1" journal="$2" rows="$3" common="$4" planned live owned linked admin path expiry prune_rc
   planned="$(jq -r --arg c "$common" 'select(.class == "prune" and .common == $c) | .path' "$rows" | sort)"
-  live="$(wm_porcelain "$common" | jq -r 'select(.prunable and (.locked | not) and (.main | not)) | .path' | sort)"
-  wm_owner_index "$work"
+  expiry="$(wm_prune_expiry "$common")" || return 4
+  wm_porcelain "$common" > "$work/prune-porcelain" || return 4
+  : > "$work/prune-live" || return 4
+  jq -r 'select(.prunable and (.locked | not) and (.main | not)) | .path' \
+    "$work/prune-porcelain" > "$work/prune-candidates" || return 4
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    prune_rc=0
+    wm_prune_would_remove "$common" "$path" "$expiry" || prune_rc=$?
+    case "$prune_rc" in
+      0) printf '%s\n' "$path" >> "$work/prune-live" || return 4 ;;
+      1) ;;
+      *) return 4 ;;
+    esac
+  done < "$work/prune-candidates"
+  live="$(sort "$work/prune-live")" || return 4
+  wm_owner_index "$work" || return 4
+  if [ -L "$work/links.jsonl" ] || [ ! -f "$work/links.jsonl" ] ||
+     ! jq -se 'all(.[]; type == "object" and (.path | type == "string") and (.admin | type == "string"))' \
+       "$work/links.jsonl" >/dev/null 2>&1; then
+    wm_err 'cannot inspect inventoried worktree back-links'
+    return 4
+  fi
   owned="$(printf '%s\n' "$planned" | while IFS= read -r path; do
     jq -r --arg p "$path" 'select(.root == $p) | .root' "$work/owners.jsonl"
   done)"
@@ -115,18 +140,44 @@ wm_apply_prune() {
   done)"
   if [ "$planned" != "$live" ] || [ -n "$owned" ] || [ -n "$linked" ]; then
     printf '%s\n' "$planned" | while IFS= read -r path; do
-      wm_journal "$journal" prune "$path" "" failed "changed since the plan: the prunable set, its owner records or its back-links moved"
-    done
+      wm_journal "$journal" prune "$path" "" failed "changed since the plan: the prunable set, its owner records or its back-links moved" || exit 5
+    done || return 5
     return 1
   fi
-  if ! wm_git --git-dir="$common" worktree prune >> "$WM_LOG" 2>&1; then
+  # Porcelain omits some corrupt admin entries that Git's prune still removes.
+  # Compare its complete preview, not just the candidates porcelain listed.
+  : > "$work/prune-expected" || return 4
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    admin="$(wm_admin_dir "$common" "$path")" || {
+      wm_err "cannot inspect planned worktree admin: $path"
+      return 4
+    }
+    printf 'Removing worktrees/%s: gitdir file points to non-existent location\n' "${admin##*/}" >> "$work/prune-expected" || return 4
+  done <<EOF
+$planned
+EOF
+  if ! LC_ALL=C wm_git --git-dir="$common" worktree prune --dry-run --verbose "--expire=$expiry" > "$work/prune-dryrun" 2>&1; then
+    wm_err 'cannot inspect Git worktree prune preview'
+    return 4
+  fi
+  LC_ALL=C sort "$work/prune-expected" > "$work/prune-expected.sorted" || return 4
+  LC_ALL=C sort "$work/prune-dryrun" > "$work/prune-dryrun.sorted" || return 4
+  if ! cmp -s "$work/prune-expected.sorted" "$work/prune-dryrun.sorted"; then
+    wm_err 'Git would remove an unplanned worktree admin or the planned set changed'
     printf '%s\n' "$planned" | while IFS= read -r path; do
-      wm_journal "$journal" prune "$path" "" failed "git worktree prune failed: $(wm_log_tail)"
-    done
+      wm_journal "$journal" prune "$path" "" failed "Git would remove an unplanned worktree admin or the planned set changed" || exit 5
+    done || return 5
+    return 1
+  fi
+  if ! wm_git --git-dir="$common" worktree prune "--expire=$expiry" >> "$WM_LOG" 2>&1; then
+    printf '%s\n' "$planned" | while IFS= read -r path; do
+      wm_journal "$journal" prune "$path" "" failed "git worktree prune failed: $(wm_log_tail)" || exit 5
+    done || return 5
     return 1
   fi
   printf '%s\n' "$planned" | while IFS= read -r path; do
-    wm_journal "$journal" prune "$path" "" "done"
+    wm_journal "$journal" prune "$path" "" "done" || exit 5
   done
 }
 
@@ -189,22 +240,22 @@ wm_move_steps() {
     if [ "$action" != revert ]; then
       target="$(wm_canonical_move_target "$target")" || {
         wm_journal "$journal" "$action" "$path" "$target" failed \
-          "move target parent is outside the sanctioned worktree root or cannot be canonicalized"
+          "move target parent is outside the sanctioned worktree root or cannot be canonicalized" || return 5
         return 1
       }
       if ! mkdir -p "${target%/*}" ||
          ! target="$(wm_canonical_move_target "$target")"; then
         wm_journal "$journal" "$action" "$path" "$target" failed \
-          "move target parent changed or escaped the sanctioned worktree root"
+          "move target parent changed or escaped the sanctioned worktree root" || return 5
         return 1
       fi
     fi
     if [ -n "$release" ]; then
       if ! wm_attach_cmd detach "$path"; then
-        wm_journal "$journal" "$action" "$path" "$target" failed "detach failed: $(wm_log_tail)"
+        wm_journal "$journal" "$action" "$path" "$target" failed "detach failed: $(wm_log_tail)" || return 5
         return 1
       fi
-      wm_journal "$journal" "$action" "$path" "$target" detached "" "$(jq -nc --arg r "$release" '{release:$r}')"
+      wm_journal "$journal" "$action" "$path" "$target" detached "" "$(jq -nc --arg r "$release" '{release:$r}')" || return 5
     fi
     # B4: a regenerable directory that bakes in absolute paths (.venv) is
     # deleted, never carried or copied; the row names the reinstall.
@@ -220,36 +271,36 @@ $(printf '%s' "$row" | jq -r '.dehydrate[]?')
 EOF
     if [ -n "$dehydrated" ]; then
       wm_journal "$journal" "$action" "$path" "$target" dehydrated "" \
-        "$(jq -nc --arg d "$dehydrated" '{dehydrated:($d | split("\n") | map(select(. != "")))}')"
+        "$(jq -nc --arg d "$dehydrated" '{dehydrated:($d | split("\n") | map(select(. != "")))}')" || return 5
     fi
     if [ "$action" = revert ]; then mkdir -p "$(dirname "$target")"; fi
     if ! wm_git --git-dir="$common" worktree move "$path" "$target" >> "$WM_LOG" 2>&1; then
       wm_rollback_move "$journal" "$action" "$path" "$target" "$common" "$release" 0 \
-        "git worktree move failed: $(wm_log_tail)"
+        "git worktree move failed: $(wm_log_tail)" || return 5
       return 1
     fi
     moved=1
-    wm_journal "$journal" "$action" "$path" "$target" moved
+    wm_journal "$journal" "$action" "$path" "$target" moved || return 5
     from=moved
   fi
   moved=1
   if [ "$from" = moved ]; then
     if ! wm_git -C "$target" worktree repair >> "$WM_LOG" 2>&1; then
       wm_rollback_move "$journal" "$action" "$path" "$target" "$common" "$release" "$moved" \
-        "git worktree repair failed: $(wm_log_tail)"
+        "git worktree repair failed: $(wm_log_tail)" || return 5
       return 1
     fi
-    wm_journal "$journal" "$action" "$path" "$target" repaired
+    wm_journal "$journal" "$action" "$path" "$target" repaired || return 5
   fi
   if [ -n "$release" ] && [ "$from" != attached ]; then
     if ! wm_attach_cmd attach "$target" "$release"; then
       wm_rollback_move "$journal" "$action" "$path" "$target" "$common" "$release" "$moved" \
-        "attach at $release failed: $(wm_log_tail)"
+        "attach at $release failed: $(wm_log_tail)" || return 5
       return 1
     fi
-    wm_journal "$journal" "$action" "$path" "$target" attached "" "$(jq -nc --arg r "$release" '{release:$r}')"
+    wm_journal "$journal" "$action" "$path" "$target" attached "" "$(jq -nc --arg r "$release" '{release:$r}')" || return 5
   fi
-  wm_deregister "$journal" "$action" "$path" "$target"
+  wm_deregister "$journal" "$action" "$path" "$target" || return 5
   wm_journal "$journal" "$action" "$path" "$target" "done" "" "$(jq -nc --argjson a "$after" '{after:$a}')"
 }
 
@@ -258,7 +309,7 @@ wm_apply_move() {
   local work="$1" journal="$2" row="$3" fresh path
   path="$(printf '%s' "$row" | jq -r '.path')"
   if ! fresh="$(wm_revalidate "$work" "$row")"; then
-    wm_journal "$journal" move "$path" "" failed "$fresh"
+    wm_journal "$journal" move "$path" "" failed "$fresh" || return 5
     return 1
   fi
   wm_move_steps "$work" "$journal" move "$fresh" start
@@ -272,26 +323,26 @@ wm_apply_remove() {
   local work="$1" journal="$2" row="$3" fresh path common release
   path="$(printf '%s' "$row" | jq -r '.path')"
   if ! fresh="$(wm_revalidate "$work" "$row")"; then
-    wm_journal "$journal" remove "$path" "" failed "$fresh"
+    wm_journal "$journal" remove "$path" "" failed "$fresh" || return 5
     return 1
   fi
   common="$(printf '%s' "$fresh" | jq -r '.common')"
   release="$(printf '%s' "$fresh" | jq -r '.release // ""')"
   if [ -n "$release" ]; then
     if ! wm_attach_cmd detach "$path"; then
-      wm_journal "$journal" remove "$path" "" failed "detach failed: $(wm_log_tail)"
+      wm_journal "$journal" remove "$path" "" failed "detach failed: $(wm_log_tail)" || return 5
       return 1
     fi
-    wm_journal "$journal" remove "$path" "" detached "" "$(jq -nc --arg r "$release" '{release:$r}')"
+    wm_journal "$journal" remove "$path" "" detached "" "$(jq -nc --arg r "$release" '{release:$r}')" || return 5
   fi
   if ! wm_git --git-dir="$common" worktree remove "$path" >> "$WM_LOG" 2>&1; then
     wm_rollback_move "$journal" remove "$path" "" "$common" "$release" 0 \
-      "git worktree remove refused: $(wm_log_tail)"
+      "git worktree remove refused: $(wm_log_tail)" || return 5
     return 1
   fi
   wm_journal "$journal" remove "$path" "" removed "" \
-    "$(printf '%s' "$fresh" | jq -c '{branch, head}')"
-  wm_deregister "$journal" remove "$path" ""
+    "$(printf '%s' "$fresh" | jq -c '{branch, head}')" || return 5
+  wm_deregister "$journal" remove "$path" "" || return 5
   wm_journal "$journal" remove "$path" "" "done"
 }
 
@@ -300,7 +351,7 @@ wm_apply_remove() {
 # remaining steps run from the journal's own record (release, target), never
 # from a fresh plan, which would no longer see them as attached.
 wm_resume() {
-  local work="$1" journal="$2" id last action old new release common from row failed=0
+  local work="$1" journal="$2" only="${3:-}" id last action old new release common from row failed=0 step_rc
   WM_LOG="$work/attach.log"
   : >> "$WM_LOG"
   while IFS= read -r id; do
@@ -316,6 +367,9 @@ wm_resume() {
     action="$(printf '%s' "$last" | jq -r '.action')"
     old="$(printf '%s' "$last" | jq -r '.old')"
     new="$(printf '%s' "$last" | jq -r '.new // ""')"
+    if [ -n "$only" ] && [ "$old" != "$only" ] && [ "$new" != "$only" ]; then
+      continue
+    fi
     release="$(jq -r --arg id "$id" 'select(.id == $id and .step == "detached") | .release' "$journal" | tail -n 1)"
     if [ "$from" = start ]; then
       common="$(wm_git -C "$old" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
@@ -323,17 +377,21 @@ wm_resume() {
       common="$(wm_git -C "$new" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || common=""
     fi
     if [ -z "$common" ]; then
-      wm_journal "$journal" "$action" "$old" "$new" failed "resume: the worktree is at neither $old nor $new"
+      wm_journal "$journal" "$action" "$old" "$new" failed "resume: the worktree is at neither $old nor $new" || return 5
       failed=1
       continue
     fi
     row="$(jq -nc --arg p "$old" --arg t "$new" --arg c "$common" --arg r "$release" \
       '{path:$p, target:$t, common:$c, release:(if $r == "" then null else $r end), dehydrate:[], after:[]}')"
     if [ "$action" = remove ]; then
-      wm_rollback_move "$journal" remove "$old" "" "$common" "$release" 0 "interrupted after detach"
+      wm_rollback_move "$journal" remove "$old" "" "$common" "$release" 0 "interrupted after detach" || return 5
       failed=1
+    elif wm_move_steps "$work" "$journal" "$action" "$row" "$from"; then
+      :
     else
-      wm_move_steps "$work" "$journal" "$action" "$row" "$from" || failed=1
+      step_rc=$?
+      [ "$step_rc" -ne 5 ] || return 5
+      failed=1
     fi
   done <<EOF
 $(jq -r '.id' "$journal" | awk '!seen[$0]++')
@@ -351,7 +409,7 @@ wm_apply_entry() {
     remove) wm_apply_remove "$work" "$journal" "$row" ;;
     preserve) wm_apply_preserve "$work" "$journal" "$row" ;;
     *)
-      wm_journal "$journal" "$class" "$path" "" failed "no apply step for class $class in this build"
+      wm_journal "$journal" "$class" "$path" "" failed "no apply step for class $class in this build" || return 5
       return 1 ;;
   esac
 }
@@ -361,10 +419,10 @@ wm_apply_entry() {
 # rollback). Removals and prunes cannot be undone and are listed; preserve
 # commits and pushed branches stay where they are.
 wm_revert() {
-  local work="$1" journal="$2" out="$3" id last old new common release after failed=0 row
+  local work="$1" journal="$2" out="$3" id last old new common release after failed=0 row step_rc
   WM_LOG="$work/attach.log"
   : >> "$WM_LOG"
-  wm_owner_index "$work"
+  wm_owner_index "$work" || return 4
   while IFS= read -r id; do
     [ -n "$id" ] || continue
     last="$(jq -c --arg id "$id" 'select(.id == $id)' "$journal" | jq -s 'last')"
@@ -376,7 +434,7 @@ wm_revert() {
     esac
     new="$(printf '%s' "$last" | jq -r '.new')"
     if [ -e "$old" ] || ! common="$(wm_git -C "$new" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
-      wm_journal "$out" revert "$new" "$old" failed "cannot revert: $old exists or $new is not a worktree"
+      wm_journal "$out" revert "$new" "$old" failed "cannot revert: $old exists or $new is not a worktree" || return 5
       failed=1
       continue
     fi
@@ -384,7 +442,13 @@ wm_revert() {
     after="$(printf '%s' "$last" | jq -c '.after // []')"
     row="$(jq -nc --arg p "$new" --arg t "$old" --arg c "$common" --arg r "$release" --argjson a "$after" \
       '{path:$p, target:$t, common:$c, release:(if $r == "" then null else $r end), dehydrate:[], after:$a}')"
-    wm_move_steps "$work" "$out" revert "$row" start || failed=1
+    if wm_move_steps "$work" "$out" revert "$row" start; then
+      :
+    else
+      step_rc=$?
+      [ "$step_rc" -ne 5 ] || return 5
+      failed=1
+    fi
     printf '%s\n' "$(wm_report_entry "$out" "$new")"
   done <<EOF
 $(jq -r '.id' "$journal" | awk '!seen[$0]++' | sed '1!G;h;$!d')
@@ -404,7 +468,7 @@ wm_report_entry() {
 
 # wm_apply WORK ROWS JOURNAL — run every actionable row; 4 when any failed.
 wm_apply() {
-  local work="$1" rows="$2" journal="$3" failed=0 common row path class moved
+  local work="$1" rows="$2" journal="$3" failed=0 common row path class moved step_rc
   WM_LOG="$work/attach.log"
   : > "$WM_LOG"
   # A worktree moved by hand is re-linked first (its old entry is held), so
@@ -414,9 +478,9 @@ wm_apply() {
     path="$(printf '%s' "$row" | jq -r '.path')"
     moved="$(printf '%s' "$row" | jq -r '.moved_to')"
     if wm_git -C "$moved" worktree repair >> "$WM_LOG" 2>&1; then
-      wm_journal "$journal" relink "$path" "$moved" relinked
+      wm_journal "$journal" relink "$path" "$moved" relinked || return 5
     else
-      wm_journal "$journal" relink "$path" "$moved" failed "git worktree repair failed: $(wm_log_tail)"
+      wm_journal "$journal" relink "$path" "$moved" failed "git worktree repair failed: $(wm_log_tail)" || return 5
       failed=1
     fi
   done <<EOF
@@ -424,14 +488,26 @@ $(jq -c 'select(.moved_to != null)' "$rows")
 EOF
   while IFS= read -r common; do
     [ -n "$common" ] || continue
-    wm_apply_prune "$work" "$journal" "$rows" "$common" || failed=1
+    if wm_apply_prune "$work" "$journal" "$rows" "$common"; then
+      :
+    else
+      step_rc=$?
+      [ "$step_rc" -ne 5 ] || return 5
+      failed=1
+    fi
   done <<EOF
 $(jq -r 'select(.class == "prune") | .common' "$rows" | sort -u)
 EOF
   for class in remove preserve move; do
     while IFS= read -r row; do
       [ -n "$row" ] || continue
-      wm_apply_entry "$work" "$journal" "$row" || failed=1
+      if wm_apply_entry "$work" "$journal" "$row"; then
+        :
+      else
+        step_rc=$?
+        [ "$step_rc" -ne 5 ] || return 5
+        failed=1
+      fi
     done <<EOF
 $(jq -c --arg c "$class" 'select(.class == $c)' "$rows")
 EOF

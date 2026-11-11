@@ -470,3 +470,177 @@ seed_wide_change() {
 
   [ "$status" -ne 0 ]
 }
+
+@test "143-pg: quoted code filenames trigger a changelog without rejecting docs-only changes" {
+  printf 'docs\n' > "$PROJECT_DIR/notes.md"
+  commit_all_and_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  mkdir -p "$PROJECT_DIR/src"
+  printf 'code\n' > "$PROJECT_DIR/src/café.ts"
+  commit_all_and_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]]
+}
+
+@test "143-pg: deleted code requires a changelog but docs deletion does not" {
+  mkdir -p "$PROJECT_DIR/src"
+  printf 'code\n' > "$PROJECT_DIR/src/old.ts"
+  printf 'docs\n' > "$PROJECT_DIR/old-doc.md"
+  git -C "$PROJECT_DIR" add src/old.ts old-doc.md
+  git -C "$PROJECT_DIR" commit -qm 'seed files'
+  git -C "$PROJECT_DIR" rm -q old-doc.md
+  commit_all_and_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  git -C "$PROJECT_DIR" rm -q src/old.ts
+  commit_all_and_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]]
+}
+
+@test "143-pg-r2: unpadded reference resolves Trellis numbered ADR" {
+  local trellis_root
+  trellis_root="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd -P)"
+  mkdir -p "$PROJECT_DIR/docs/adr"
+  cp "$trellis_root/docs/adr/0001-security-gate-stack-consolidation.md" "$PROJECT_DIR/docs/adr/"
+  git -C "$PROJECT_DIR" add docs/adr
+  git -C "$PROJECT_DIR" commit -qm 'seed real numbered ADR'
+  printf '{"dependencies":{"new":"1.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m 'Refs: ADR-1'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "143-pg-r2: full path cites Trellis date-named ADR without accepting prefixes" {
+  local trellis_root path='docs/adr/2026-10-18-retire-astra-routing.md'
+  trellis_root="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd -P)"
+  mkdir -p "$PROJECT_DIR/docs/adr"
+  cp "$trellis_root/$path" "$PROJECT_DIR/$path"
+  git -C "$PROJECT_DIR" add "$path"
+  git -C "$PROJECT_DIR" commit -qm 'seed real dated ADR'
+  printf '{"dependencies":{"new":"1.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m "Refs: [decision]($path)"
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '{"dependencies":{"other":"2.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies again' -m "Refs: ${path}-not-the-adr"
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  printf '{"dependencies":{"prefix":"3.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies with prefixed path' -m "Refs: x${path}"
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  printf '{"dependencies":{"another":"3.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies once more' -m 'Refs: ADR-2026'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"ADR: trigger paths changed"* ]]
+}
+
+@test "143-pg-r3: literal paths must name ADRs, not README or template files" {
+  mkdir -p "$PROJECT_DIR/docs/adr"
+  local name i=0
+  for name in README.md template.md 0042-decision.md ADR-0043-decision.md adr-0044.md 2026-10-18-decision.md; do
+    printf '# fixture\n' > "$PROJECT_DIR/docs/adr/$name"
+  done
+  git -C "$PROJECT_DIR" add docs/adr
+  git -C "$PROJECT_DIR" commit -qm 'seed ADR directory'
+  for name in README.md template.md; do
+    i=$((i + 1))
+    printf '{"dependencies":{"new":"%s.0.0"}}\n' "$i" > "$PROJECT_DIR/package.json"
+    git -C "$PROJECT_DIR" add package.json
+    git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m "Refs: docs/adr/$name"
+    run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+    [ "$status" -eq 1 ] || { echo "accepted $name: $output"; false; }
+    [[ "$output" == *"ADR: trigger paths changed"* ]]
+  done
+  for name in 0042-decision.md ADR-0043-decision.md adr-0044.md 2026-10-18-decision.md; do
+    i=$((i + 1))
+    printf '{"dependencies":{"new":"%s.0.0"}}\n' "$i" > "$PROJECT_DIR/package.json"
+    git -C "$PROJECT_DIR" add package.json
+    git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m "Refs: docs/adr/$name"
+    run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+    [ "$status" -eq 0 ] || { echo "rejected $name: $output"; false; }
+  done
+}
+
+@test "143-pg-r2: numbered ADR filenames may carry ADR prefixes" {
+  mkdir -p "$PROJECT_DIR/docs/adr"
+  printf '# ADR\n' > "$PROJECT_DIR/docs/adr/ADR-0042-decision.md"
+  printf '# ADR\n' > "$PROJECT_DIR/docs/adr/adr-0043-decision.md"
+  git -C "$PROJECT_DIR" add docs/adr
+  git -C "$PROJECT_DIR" commit -qm 'seed prefixed ADRs'
+  local number
+  for number in 42 43; do
+    printf '{"dependencies":{"new":"%s.0.0"}}\n' "$number" > "$PROJECT_DIR/package.json"
+    git -C "$PROJECT_DIR" add package.json
+    git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m "Refs: ADR-$number"
+    run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+  done
+}
+
+@test "143-pg-r2: symlink ADR cannot satisfy a reference but a tracked regular ADR can" {
+  mkdir -p "$PROJECT_DIR/docs/adr"
+  ln -s ../../missing "$PROJECT_DIR/docs/adr/0042-link.md"
+  git -C "$PROJECT_DIR" add docs/adr/0042-link.md
+  git -C "$PROJECT_DIR" commit -qm 'seed symlink ADR'
+  printf '{"dependencies":{"new":"1.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m 'Refs: ADR-0042'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  unlink "$PROJECT_DIR/docs/adr/0042-link.md"
+  printf '# Real ADR\n' > "$PROJECT_DIR/docs/adr/0042-link.md"
+  git -C "$PROJECT_DIR" add docs/adr/0042-link.md
+  git -C "$PROJECT_DIR" commit -qm 'make ADR regular'
+  printf '{"dependencies":{"new":"2.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies again' -m 'Refs: ADR-0042'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "143-pg-r2: changelog path enumeration failure is independently fatal" {
+  git -C "$PROJECT_DIR" commit --allow-empty -qm 'chore: no changes'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  local mock_bin="$BATS_TEST_TMPDIR/mock-git" real_git
+  real_git="$(command -v git)"
+  mkdir "$mock_bin"
+  printf '%s\n' '#!/bin/bash' \
+    'case " $* " in *" --name-only --no-renames --diff-filter=ACMRDT -z "*) exit 73 ;; esac' \
+    'exec "$REAL_GIT" "$@"' > "$mock_bin/git"
+  chmod +x "$mock_bin/git"
+  run env PATH="$mock_bin:$PATH" REAL_GIT="$real_git" \
+    bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"CHANGELOG: unable to enumerate changed paths"* ]]
+}
+
+@test "143-pg: ADR reference must resolve to an existing tracked ADR" {
+  mkdir -p "$PROJECT_DIR/docs/adr"
+  printf '# Existing ADR\n' > "$PROJECT_DIR/docs/adr/0001-decision.md"
+  git -C "$PROJECT_DIR" add docs/adr/0001-decision.md
+  git -C "$PROJECT_DIR" commit -qm 'seed existing decision'
+  # An untracked file with the requested number must not satisfy the range.
+  printf '# Untracked\n' > "$PROJECT_DIR/docs/adr/0099-untracked.md"
+  printf '{"dependencies":{"new":"1.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m 'See ADR-0099'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  printf '{"dependencies":{"new":"1.0.0","another":"2.0.0"}}\n' > "$PROJECT_DIR/package.json"
+  git -C "$PROJECT_DIR" add package.json
+  git -C "$PROJECT_DIR" commit -qm 'change dependencies again' -m 'See ADR-0099 and ADR-0001'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}

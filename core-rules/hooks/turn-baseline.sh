@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # turn-baseline.sh — Claude UserPromptSubmit hook, single purpose (C01).
 # Source: Trellis / core-rules / hooks.
 #
@@ -23,9 +24,9 @@
 # "no edits".
 #
 # Contract:
-#   - Reads the UserPromptSubmit JSON on stdin. Prints NOTHING (stdout on this
-#     event becomes prompt context) and exits 0 on every path past the jq
-#     check, so it can never block or alter a prompt.
+#   - Reads UserPromptSubmit JSON and exits 0. Successful publication is
+#     silent; if no failure can be recorded, emit non-blocking model context
+#     warning that the next Stop may not detect this turn.
 #   - Fingerprint failure → appends a poison line (or removes the file), so
 #     the Stop side reads unknown.
 #   - Unparseable input or no session_id → removes every Claude baseline in
@@ -41,6 +42,10 @@
 
 set -u
 
+_se_prompt_baseline_notice() {
+  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"turn-baseline degraded: the next Stop may not detect this turn; verify changes and receipts manually."}}'
+}
+
 # Nested reviewers skip stop-verify, so nothing would ever consume a baseline
 # recorded for them. Same guard as stop-verify's.
 if [ "${TRELLIS_REVIEW_IN_PROGRESS:-0}" = "1" ]; then
@@ -51,31 +56,15 @@ INPUT=$(cat)
 
 # Source shared lib (sibling to this script) + enforce jq dependency.
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
-[ -f "$__se_lib" ] || { echo "turn-baseline: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+[ -f "$__se_lib" ] || { _se_prompt_baseline_notice; exit 0; }
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
+command -v jq >/dev/null 2>&1 || { _se_prompt_baseline_notice; exit 0; }
 _se_require_jq "turn-baseline"
 
 PROJECT_DIR=$(_se_project_dir)
-STATE_DIR=$(_se_turn_state_dir "$PROJECT_DIR") || exit 0
-
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || SID=""
-KEY=""
-[ -z "$SID" ] || KEY=$(_se_state_key "" "$SID") || KEY=""
-if [ -z "$KEY" ]; then
-  rm -f "$STATE_DIR"/"claude".* 2>/dev/null
-  exit 0
-fi
-
-FILE="$STATE_DIR/claude.$KEY"
-( umask 077 && mkdir -p "$STATE_DIR" ) 2>/dev/null || exit 0
-# The nonce goes to the hook-only log first; a baseline line whose nonce is not
-# in the log reads as unknown at Stop.
-if NONCE=$(_se_turn_nonce) && FP=$(_se_tree_fingerprint "$PROJECT_DIR" "$STATE_DIR/fp-cache") \
-   && ( umask 077 && printf '%s %s\n' "claude.$KEY" "$NONCE" >> "$STATE_DIR/nonces.log" ) 2>/dev/null; then
-  ( umask 077 && printf 'trellis-turn-baseline v2 %s %s\n' "$NONCE" "$FP" >> "$FILE" ) 2>/dev/null || rm -f "$FILE" 2>/dev/null
-else
-  ( umask 077 && printf 'trellis-turn-baseline v2 unknown\n' >> "$FILE" ) 2>/dev/null || rm -f "$FILE" 2>/dev/null
-fi
-chmod 600 "$FILE" "$STATE_DIR/nonces.log" 2>/dev/null
+# Non-string session ids cannot name a session. Invalidate earlier baselines
+# rather than stringify malformed input into a different, apparently valid key.
+SID=$(printf '%s' "$INPUT" | jq -er 'if type == "object" and (.session_id | type == "string") then .session_id else empty end' 2>/dev/null) || SID=""
+_se_turn_baseline_publish "$PROJECT_DIR" claude "$SID" || _se_prompt_baseline_notice
 exit 0

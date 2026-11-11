@@ -432,6 +432,168 @@ EOF
   [ ! -e "$TRELLIS_HOME/state/migrations" ]
 }
 
+@test "a project edit after the snapshot is preserved instead of overwritten" {
+  local bin marker real_python
+  prepare_exact_legacy_project
+  bin="$SANDBOX/mutate-project-after-snapshot"
+  marker="$SANDBOX/project-mutated"
+  real_python="$(command -v python3)"
+  mkdir -p "$bin"
+  cat > "$bin/python3" <<'EOF'
+#!/usr/bin/env bash
+arg2="${2:-}"; arg3="${3:-}"
+if [ "${1:-}" = -I ]; then arg2="${3:-}"; arg3="${4:-}"; fi
+if [ "$arg2" = no-replace ] && [ "$arg3" = "$MIGRATE_PROJECT/.trellis.config.json" ] && [ ! -e "$MIGRATE_MARKER" ]; then
+  printf '# concurrent project edit\n' >> "$MIGRATE_PROJECT/CLAUDE.md" || exit 91
+  : > "$MIGRATE_MARKER"
+fi
+exec "$MIGRATE_REAL_PYTHON" "$@"
+EOF
+  chmod 755 "$bin/python3"
+  run env HOME="$HOME_DIR" TRELLIS_HOME="$TRELLIS_HOME" PATH="$bin:$PATH" \
+    MIGRATE_PROJECT="$PROJECT" MIGRATE_MARKER="$marker" MIGRATE_REAL_PYTHON="$real_python" \
+    bash "$MIGRATE" --prepare --home "$TRELLIS_HOME" \
+      --project-id "$PROJECT_ID" --legacy-root "$CANONICAL" "$PROJECT"
+  [ -e "$marker" ] || { echo "interleaving was not reached: $output"; false; }
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  grep -Fx '# concurrent project edit' "$PROJECT/CLAUDE.md"
+}
+
+@test "each forward entry is rechecked after earlier actions" {
+  local bin marker real_rm
+  prepare_exact_legacy_project
+  bin="$SANDBOX/mutate-between-actions"
+  marker="$SANDBOX/later-edit"
+  real_rm="$(command -v rm)"
+  mkdir -p "$bin"
+  cat > "$bin/rm" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -f ] && [ "${2:-}" = "$MIGRATE_PROJECT/.agents/rules/trellis.md" ] && [ ! -e "$MIGRATE_MARKER" ]; then
+  printf '# edit between actions\n' >> "$MIGRATE_PROJECT/CLAUDE.md" || exit 91
+  : > "$MIGRATE_MARKER"
+fi
+exec "$MIGRATE_REAL_RM" "$@"
+EOF
+  chmod 755 "$bin/rm"
+  run env HOME="$HOME_DIR" TRELLIS_HOME="$TRELLIS_HOME" PATH="$bin:$PATH" \
+    MIGRATE_PROJECT="$PROJECT" MIGRATE_MARKER="$marker" MIGRATE_REAL_RM="$real_rm" \
+    bash "$MIGRATE" --prepare --home "$TRELLIS_HOME" \
+      --project-id "$PROJECT_ID" --legacy-root "$CANONICAL" "$PROJECT"
+  [ -e "$marker" ] || { echo "interleaving was not reached: $output"; false; }
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  grep -Fx '# edit between actions' "$PROJECT/CLAUDE.md"
+}
+
+@test "a managed link replaced between actions is not deleted" {
+  local bin marker real_rm
+  prepare_exact_legacy_project
+  bin="$SANDBOX/replace-link-between-actions"
+  marker="$SANDBOX/link-replaced"
+  real_rm="$(command -v rm)"
+  mkdir -p "$bin"
+  cat > "$bin/rm" <<'EOF'
+#!/usr/bin/env bash
+if [ "${1:-}" = -f ] && [ "${2:-}" = "$MIGRATE_PROJECT/.agents/rules/trellis.md" ] && [ ! -e "$MIGRATE_MARKER" ]; then
+  /bin/rm -f "${MIGRATE_PROJECT:?}/.claude/rules/trellis.md" || exit 91
+  printf 'operator file\n' > "$MIGRATE_PROJECT/.claude/rules/trellis.md" || exit 92
+  : > "$MIGRATE_MARKER"
+fi
+exec "$MIGRATE_REAL_RM" "$@"
+EOF
+  chmod 755 "$bin/rm"
+  run env HOME="$HOME_DIR" TRELLIS_HOME="$TRELLIS_HOME" PATH="$bin:$PATH" \
+    MIGRATE_PROJECT="$PROJECT" MIGRATE_MARKER="$marker" MIGRATE_REAL_RM="$real_rm" \
+    bash "$MIGRATE" --prepare --home "$TRELLIS_HOME" \
+      --project-id "$PROJECT_ID" --legacy-root "$CANONICAL" "$PROJECT"
+  [ -e "$marker" ] || { echo "interleaving was not reached: $output"; false; }
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ ! -L "$PROJECT/.claude/rules/trellis.md" ]
+  [ "$(< "$PROJECT/.claude/rules/trellis.md")" = 'operator file' ]
+}
+
+@test "a newly created portable manifest is not overwritten during migration" {
+  local bin marker real_python
+  prepare_exact_legacy_project
+  bin="$SANDBOX/create-manifest-after-snapshot"
+  marker="$SANDBOX/manifest-created"
+  real_python="$(command -v python3)"
+  mkdir -p "$bin"
+  cat > "$bin/python3" <<'EOF'
+#!/usr/bin/env bash
+arg2="${2:-}"; arg3="${3:-}"
+if [ "${1:-}" = -I ]; then arg2="${3:-}"; arg3="${4:-}"; fi
+if [ "$arg2" = no-replace ] && [ "$arg3" = "$MIGRATE_PROJECT/.trellis.config.json" ] && [ ! -e "$MIGRATE_MARKER" ]; then
+  printf '{"operator":"new manifest"}\n' > "$MIGRATE_PROJECT/.trellis.json" || exit 91
+  : > "$MIGRATE_MARKER"
+fi
+exec "$MIGRATE_REAL_PYTHON" "$@"
+EOF
+  chmod 755 "$bin/python3"
+  run env HOME="$HOME_DIR" TRELLIS_HOME="$TRELLIS_HOME" PATH="$bin:$PATH" \
+    MIGRATE_PROJECT="$PROJECT" MIGRATE_MARKER="$marker" MIGRATE_REAL_PYTHON="$real_python" \
+    bash "$MIGRATE" --prepare --home "$TRELLIS_HOME" \
+      --project-id "$PROJECT_ID" --legacy-root "$CANONICAL" "$PROJECT"
+  [ -e "$marker" ] || { echo "interleaving was not reached: $output"; false; }
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [ "$(jq -r '.operator' "$PROJECT/.trellis.json")" = 'new manifest' ]
+}
+
+@test "exclusive portable manifest publication refuses a last-moment creation" {
+  local bin marker real_python real_cp
+  prepare_exact_legacy_project
+  bin="$SANDBOX/mutate-before-portable-publish"
+  marker="$SANDBOX/portable-publish-race"
+  real_python="$(command -v python3)"
+  real_cp="$(command -v cp)"
+  mkdir -p "$bin"
+  cat > "$bin/python3" <<'EOF'
+#!/usr/bin/env bash
+arg2="${2:-}"; arg3="${3:-}"; arg4="${4:-}"
+if [ "${1:-}" = -I ]; then arg2="${3:-}"; arg3="${4:-}"; arg4="${5:-}"; fi
+if [ "$arg2" = no-replace ] && [[ "$arg3" == "$MIGRATE_PROJECT"/.trellis-migrate-publish.* ]] &&
+   [ "$arg4" = "$MIGRATE_PROJECT/.trellis.json" ] && [ ! -e "$MIGRATE_MARKER" ]; then
+  printf '{"operator":"last moment"}\n' > "$arg4" || exit 91
+  : > "$MIGRATE_MARKER"
+fi
+exec "$MIGRATE_REAL_PYTHON" "$@"
+EOF
+  # A mutant that restores the old cp+mv publisher must hit the same race.
+  cat > "$bin/cp" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${2:-}" == "$MIGRATE_PROJECT"/.trellis.json.migrate.* ]] && [ ! -e "$MIGRATE_MARKER" ]; then
+  printf '{"operator":"last moment"}\n' > "$MIGRATE_PROJECT/.trellis.json" || exit 91
+  : > "$MIGRATE_MARKER"
+fi
+exec "$MIGRATE_REAL_CP" "$@"
+EOF
+  chmod 755 "$bin/python3" "$bin/cp"
+  run env HOME="$HOME_DIR" TRELLIS_HOME="$TRELLIS_HOME" PATH="$bin:$PATH" \
+    MIGRATE_PROJECT="$PROJECT" MIGRATE_MARKER="$marker" MIGRATE_REAL_PYTHON="$real_python" MIGRATE_REAL_CP="$real_cp" \
+    bash "$MIGRATE" --prepare --home "$TRELLIS_HOME" \
+      --project-id "$PROJECT_ID" --legacy-root "$CANONICAL" "$PROJECT"
+  [ -e "$marker" ] || { echo "interleaving was not reached: $output"; false; }
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ "$(jq -r '.operator' "$PROJECT/.trellis.json")" = 'last moment' ]
+}
+
+@test "rollback restores the pre-action backup of a replaced project file" {
+  local snapshot file before
+  prepare_exact_legacy_project
+  before="$(sha256_file "$PROJECT/CLAUDE.md")"
+  run_prepare
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  snapshot="$(snapshot_from_output "$output")"
+  file="$(jq -r '.entries[] | select(.path == "CLAUDE.md") | .file' "$snapshot/manifest.json")"
+  [ -n "$file" ]
+  [ -f "$snapshot/forward-backups/$file" ]
+  [ "$(sha256_file "$snapshot/forward-backups/$file")" = "$before" ]
+  # Prove rollback selects the backup, not the earlier snapshot copy.
+  rm -f "${snapshot:?}/files/$file"
+  run_rollback "$snapshot"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(sha256_file "$PROJECT/CLAUDE.md")" = "$before" ]
+}
+
 @test "legacy gptx edit after snapshot is preserved and aborts migration" {
   local before_claude before_ignore bin claim head index marker real_python snapshot
   prepare_exact_legacy_project
@@ -448,9 +610,11 @@ EOF
   mkdir -p "$bin"
   cat > "$bin/python3" <<'EOF'
 #!/usr/bin/env bash
-if [ "${2:-}" = no-replace ] &&
-  [ "${3:-}" = "$MIGRATE_LEGACY" ] &&
-  [[ "${4:-}" == "$MIGRATE_PROJECT"/.trellis-migrate-removal.* ]] &&
+arg2="${2:-}"; arg3="${3:-}"; arg4="${4:-}"
+if [ "${1:-}" = -I ]; then arg2="${3:-}"; arg3="${4:-}"; arg4="${5:-}"; fi
+if [ "$arg2" = no-replace ] &&
+  [ "$arg3" = "$MIGRATE_LEGACY" ] &&
+  [[ "$arg4" == "$MIGRATE_PROJECT"/.trellis-migrate-removal.* ]] &&
   [ ! -e "$MIGRATE_MARKER" ]; then
   jq '.gptx.routing.default_family = "changed-after-snapshot"' \
     "$MIGRATE_LEGACY" > "$MIGRATE_LEGACY.tmp" || exit 91
@@ -478,10 +642,12 @@ EOF
   [ "$(sha256_file "$PROJECT/.gitignore")" = "$before_ignore" ]
   assert_git_metadata_unchanged "$head" "$index"
   for claim in "$PROJECT"/.trellis-migrate-removal.*; do
-    [ ! -e "$claim" ] && [ ! -L "$claim" ]
+    [ ! -e "$claim" ]
+    [ ! -L "$claim" ]
   done
   snapshot="$(snapshot_from_output "$output")"
-  [ -n "$snapshot" ] && [ -f "$snapshot/machine-local.json" ]
+  [ -n "$snapshot" ]
+  [ -f "$snapshot/machine-local.json" ]
   [ "$(jq -r '.gptx.routing.default_family' "$snapshot/machine-local.json")" = gpt ]
   [[ "$output" != *"machine-local snapshot:"* ]] || { echo "$output"; false; }
 
@@ -500,7 +666,8 @@ EOF
   run_prepare
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   snapshot="$(snapshot_from_output "$output")"
-  [ -n "$snapshot" ] && [ -d "$snapshot" ]
+  [ -n "$snapshot" ]
+  [ -d "$snapshot" ]
   before_claude="$(sha256_file "$PROJECT/CLAUDE.md")"
   before_manifest="$(sha256_file "$PROJECT/.trellis.json")"
   bin="$SANDBOX/mutate-on-publish"
@@ -509,9 +676,11 @@ EOF
   mkdir -p "$bin"
   cat > "$bin/python3" <<'EOF'
 #!/usr/bin/env bash
-if [ "${2:-}" = no-replace ] &&
-  [[ "${3:-}" == "$MIGRATE_PROJECT"/.trellis-migrate-publish.* ]] &&
-  [ "${4:-}" = "$MIGRATE_PROJECT/.trellis.config.json" ] &&
+arg2="${2:-}"; arg3="${3:-}"; arg4="${4:-}"
+if [ "${1:-}" = -I ]; then arg2="${3:-}"; arg3="${4:-}"; arg4="${5:-}"; fi
+if [ "$arg2" = no-replace ] &&
+  [[ "$arg3" == "$MIGRATE_PROJECT"/.trellis-migrate-publish.* ]] &&
+  [ "$arg4" = "$MIGRATE_PROJECT/.trellis.config.json" ] &&
   [ ! -e "$MIGRATE_MARKER" ]; then
   printf '%s\n' '{"gptx":{"routing":{"default_family":"concurrent"}}}' > "${4}" || exit 91
   : > "$MIGRATE_MARKER" || exit 92
@@ -532,7 +701,8 @@ EOF
   [ "$(sha256_file "$PROJECT/.trellis.json")" = "$before_manifest" ]
   [ -d "$snapshot" ]
   for stage in "$PROJECT"/.trellis-migrate-publish.*; do
-    [ ! -e "$stage" ] && [ ! -L "$stage" ]
+    [ ! -e "$stage" ]
+    [ ! -L "$stage" ]
   done
 }
 
@@ -578,16 +748,17 @@ EOF
   run_prepare
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$PROJECT/AGENTS.md" ] && [ ! -L "$PROJECT/AGENTS.md" ]
-  [ -f "$PROJECT/.omp/AGENTS.md" ] && [ ! -L "$PROJECT/.omp/AGENTS.md" ]
+  [ -f "$PROJECT/AGENTS.md" ]
+  [ ! -L "$PROJECT/AGENTS.md" ]
+  [ -f "$PROJECT/.omp/AGENTS.md" ]
+  [ ! -L "$PROJECT/.omp/AGENTS.md" ]
   [ "$(sha256_file "$PROJECT/AGENTS.md")" = "$agents_before" ]
   [ "$(sha256_file "$PROJECT/.omp/AGENTS.md")" = "$omp_before" ]
   [[ "$output" == *"left in place, ownership not provable: AGENTS.md"* ]] || { echo "$output"; false; }
   [[ "$output" == *"left in place, ownership not provable: .omp/AGENTS.md"* ]] || { echo "$output"; false; }
   snapshot="$(snapshot_from_output "$output")"
   [ -n "$snapshot" ]
-  ! jq -e '[.entries[].path] | any(. == "AGENTS.md" or . == ".omp/AGENTS.md")' \
-    "$snapshot/manifest.json" >/dev/null
+  [ "$(jq -r '[.entries[].path | select(. == "AGENTS.md" or . == ".omp/AGENTS.md")] | length' "$snapshot/manifest.json")" -eq 0 ]
   assert_exact_legacy_cleanup
   assert_portable_manifest
   assert_git_metadata_unchanged "$head" "$index"
@@ -608,12 +779,13 @@ EOF
   run_prepare
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$PROJECT/AGENTS.md" ] && [ ! -L "$PROJECT/AGENTS.md" ]
+  [ -f "$PROJECT/AGENTS.md" ]
+  [ ! -L "$PROJECT/AGENTS.md" ]
   [ "$(sha256_file "$PROJECT/AGENTS.md")" = "$before" ]
   [[ "$output" == *"left in place, ownership not provable: AGENTS.md"* ]] || { echo "$output"; false; }
   snapshot="$(snapshot_from_output "$output")"
   [ -n "$snapshot" ]
-  ! jq -e '[.entries[].path] | any(. == "AGENTS.md")' "$snapshot/manifest.json" >/dev/null
+  [ "$(jq -r '[.entries[].path | select(. == "AGENTS.md")] | length' "$snapshot/manifest.json")" -eq 0 ]
   assert_exact_legacy_cleanup
   assert_git_metadata_unchanged "$head" "$index"
 }
@@ -633,7 +805,8 @@ EOF
   run_prepare
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ -f "$PROJECT/.omp/AGENTS.md" ] && [ ! -L "$PROJECT/.omp/AGENTS.md" ]
+  [ -f "$PROJECT/.omp/AGENTS.md" ]
+  [ ! -L "$PROJECT/.omp/AGENTS.md" ]
   [ "$(sha256_file "$PROJECT/.omp/AGENTS.md")" = "$before" ]
   [[ "$output" == *"left in place, ownership not provable: .omp/AGENTS.md"* ]] || { echo "$output"; false; }
   assert_exact_legacy_cleanup

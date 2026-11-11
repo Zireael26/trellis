@@ -54,6 +54,116 @@ user_attach() {
   run "$USER_CLI" attach --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
 }
 
+@test "T56 user owned event prefixes preserve appended project hooks through detach" {
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local settings="$HOME/.claude/settings.json"
+  jq '.hooks.SessionStart[0].hooks += [{type:"command",command:"project-only-hook"}] | .project = true' "$settings" > "$SANDBOX/appended"
+  cp "$SANDBOX/appended" "$settings"
+  chmod 600 "$settings"
+  make_user_release 2.0.0 true false
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '[.hooks.SessionStart[].hooks[].command] == ["fixture Trellis SessionStart","project-only-hook"]' "$settings" >/dev/null
+  user_detach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '.project == true and [.hooks.SessionStart[].hooks[].command] == ["project-only-hook"]' "$settings" >/dev/null
+}
+
+@test "B1 review H1 user hooks survive four release relinks exactly once" {
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local settings="$HOME/.claude/settings.json" version primary added
+  jq '.hooks.SessionStart[0].hooks += [{type:"command",command:"user-residual-R"}]' "$settings" > "$SANDBOX/appended"
+  cp "$SANDBOX/appended" "$settings"
+  chmod 600 "$settings"
+  for version in 2.0.0 3.0.0 4.0.0 5.0.0; do
+    primary="fixture g$version"; added=''
+    case "$version" in 4.0.0|5.0.0) primary='fixture g4'; added='fixture added hook' ;; esac
+    make_user_release "$version" true false false false "$primary" "$added"
+    run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$version"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    jq -e --arg primary "$primary" --arg added "$added" '[.hooks.SessionStart[].hooks[].command] == ([$primary] + (if $added=="" then [] else [$added] end) + ["user-residual-R"])' "$settings" >/dev/null
+  done
+  jq '.after_four_relinks=true' "$settings" > "$SANDBOX/after-four"
+  cp "$SANDBOX/after-four" "$settings"
+  user_detach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '.after_four_relinks==true and [.hooks.SessionStart[].hooks[].command]==["user-residual-R"]' "$settings" >/dev/null
+}
+
+@test "B1 M-A1 adopted canonical hooks are replaced across changing releases without restoring retired bytes" {
+  local settings="$HOME/.claude/settings.json" version
+  mkdir -p "$HOME/.claude"
+  cp "$TRELLIS_HOME/releases/$USER_RELEASE/payload/core-rules/templates/claude-user-settings.json" "$settings"
+  chmod 600 "$settings"
+  user_attach_adopt_identical
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq '.hooks.SessionStart[0].hooks += [{type:"command",command:"user-residual-R"}]' "$settings" > "$SANDBOX/appended"
+  cp "$SANDBOX/appended" "$settings"
+  for version in 2.0.0 3.0.0; do
+    make_user_release "$version" true false false false 'fixture replacement SessionStart'
+    run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$version"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    jq -e '[.hooks.SessionStart[].hooks[].command] == ["fixture replacement SessionStart","user-residual-R"]' "$settings" >/dev/null
+  done
+  jq '.unrelated_edit = true' "$settings" > "$SANDBOX/edited"
+  cp "$SANDBOX/edited" "$settings"
+  user_detach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '.unrelated_edit == true and [.hooks.SessionStart[].hooks[].command] == ["user-residual-R"]' "$settings" >/dev/null
+}
+
+@test "B1 M-A1 adopt-identical keep-one-add-one relinks cleanly without duplicate hooks" {
+  local settings="$HOME/.claude/settings.json"
+  cp "$TRELLIS_HOME/releases/$USER_RELEASE/payload/core-rules/templates/claude-user-settings.json" "$settings"
+  chmod 600 "$settings"
+  user_attach_adopt_identical
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  make_user_release 2.0.0 true false false false 'fixture Trellis SessionStart' 'fixture added hook'
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '[.hooks.SessionStart[].hooks[].command]==["fixture Trellis SessionStart","fixture added hook"]' "$settings" >/dev/null
+  make_user_release 3.0.0 true false false false 'fixture next canonical'
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 3.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '[.hooks.SessionStart[].hooks[].command]==["fixture next canonical"]' "$settings" >/dev/null
+  user_detach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '(.hooks.SessionStart // [])==[] and (.managed | has("release") | not)' "$settings" >/dev/null
+}
+
+@test "B1 review M1 non-exact user detach after relink keeps residual once" {
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local settings="$HOME/.claude/settings.json"
+  jq '.hooks.SessionStart[0].hooks += [{type:"command",command:"user-residual-R"}]' "$settings" > "$SANDBOX/appended"
+  cp "$SANDBOX/appended" "$settings"
+  chmod 600 "$settings"
+  make_user_release 2.0.0 true false
+  run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release 2.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq '.unrelated_edit = true' "$settings" > "$SANDBOX/edited"
+  cp "$SANDBOX/edited" "$settings"
+  user_detach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '.unrelated_edit == true and [.hooks.SessionStart[].hooks[].command] == ["user-residual-R"]' "$settings" >/dev/null
+}
+
+@test "T56 user owned event positional drift refuses without deleting project hooks" {
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  local settings="$HOME/.claude/settings.json" before
+  jq '.hooks.SessionStart[0].hooks = ([{type:"command",command:"project-before-owned"}] + .hooks.SessionStart[0].hooks)' "$settings" > "$SANDBOX/drifted"
+  cp "$SANDBOX/drifted" "$settings"
+  chmod 600 "$settings"
+  before="$(sha256_file "$settings")"
+  user_detach
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [ "$(sha256_file "$settings")" = "$before" ]
+  [ -f "$(user_owner_path)" ]
+}
+
 user_attach_adopt_identical() {
   run "$USER_CLI" attach --user --adopt-identical --home "$TRELLIS_HOME" --release "$USER_RELEASE"
 }
@@ -94,7 +204,7 @@ copy_user_release_runtime() {
 }
 
 make_user_release() {
-  local version="$1" include_second_render="${5:-false}" repo
+  local version="$1" include_second_render="${5:-false}" hook_command="${6:-fixture Trellis SessionStart}" repo
   repo="$SANDBOX/release source $version"
 
   mkdir -p "$repo/core-rules/templates"
@@ -103,19 +213,19 @@ make_user_release() {
   printf '%s\n' "$version" > "$repo/core-rules/VERSION"
   printf 'fixture user output style for release %s\n' "$version" \
     > "$repo/core-rules/templates/claude-user-output-style.md"
-  jq -n --arg release "$version" '{
+  jq -n --arg release "$version" --arg hook_command "$hook_command" --arg added_hook "${7:-}" '{
     managed: {release: $release, policy: "fixture"},
     hooks: {
       SessionStart: [
         {
           matcher: "*",
-          hooks: [
+          hooks: ([
             {
               type: "command",
-              command: "fixture Trellis SessionStart",
+              command: $hook_command,
               timeout: 60
             }
-          ]
+          ] + (if $added_hook=="" then [] else [{type:"command",command:$added_hook,timeout:60}] end))
         }
       ]
     }
@@ -147,11 +257,80 @@ make_user_release() {
   release_fixture_install "$HOME" "$TRELLIS_HOME" "$version" "$repo"
 }
 
+b1_make_worktree_user_release() {
+  local version="$1" native="$2" repo="$SANDBOX/worktree-user-$1"
+  mkdir -p "$repo/core-rules/templates" "$repo/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/"
+  copy_user_release_runtime "$repo"
+  printf '%s\n' "$version" > "$repo/core-rules/VERSION"
+  printf '{}\n' > "$repo/trellis.config.json"
+  if [ "$native" = true ]; then
+    cp -R "$REPO_ROOT/core-rules/native" "$repo/core-rules/native"
+    jq --arg version "$version" '.version=$version' "$repo/core-rules/native/artifacts.json" > "$repo/core-rules/native/artifacts.next"
+    mv "$repo/core-rules/native/artifacts.next" "$repo/core-rules/native/artifacts.json"
+    jq -n '{hooks:(["WorktreeCreate","WorktreeRemove"] | map(. as $event | {key:$event,value:[{hooks:[{type:"command",command:"__TRELLIS_LAUNCHER__",args:["hook","event","claude",$event],timeout:30,onFailure:"block"}]}]}) | from_entries)}' > "$repo/core-rules/templates/claude-user-settings.json"
+  else
+    cp "$REPO_ROOT/core-rules/legacy-hooks/claude-user-settings.json" "$repo/core-rules/templates/claude-user-settings.json"
+  fi
+  jq -n '{schema_version:1,harnesses:{claude:{links:[],render:[]},codex:{links:[],render:[]},user:{links:[],render:[{template:"core-rules/templates/claude-user-settings.json",destination:".claude/settings.json",destination_home:true,merge:"explicit-json",mode:"0600",required:true}]}}}' > "$repo/core-rules/inheritance-manifest.json"
+  release_fixture_install "$HOME" "$TRELLIS_HOME" "$version" "$repo" || return 1
+  B1_WORKTREE_USER_SOURCE="$repo"
+}
+
+b1_user_doctor_check() {
+  # Exact read-only user-surface predicate used by doctor, without unrelated
+  # whole-machine warnings from this deliberately minimal release fixture.
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    lib="$1/scripts/lib"
+    . "$lib/trellis-home.sh"; . "$lib/release-store.sh"; . "$lib/local-registry.sh"
+    . "$lib/attachment.sh"; . "$lib/health-checks.sh"
+    hc_portable_user_surface "$TRELLIS_HOME"
+  ' _ "$REPO_ROOT"
+}
+
+@test "B1 M-A1 full legacy worktree callbacks switch to native once and doctor detects a planted duplicate" {
+  local target settings="$HOME/.claude/settings.json"
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) target=aarch64-apple-darwin ;;
+    Linux:x86_64) target=x86_64-unknown-linux-musl ;;
+    Linux:aarch64) target=aarch64-unknown-linux-musl ;;
+    *) skip 'native user fixture needs a listed host asset' ;;
+  esac
+  jq -e --arg target "$target" '.assets | has($target)' "$REPO_ROOT/core-rules/native/artifacts.json" >/dev/null || skip 'native user fixture host asset unlisted'
+  b1_make_worktree_user_release 1.1.0 false
+  run "$USER_CLI" configure --source "$B1_WORKTREE_USER_SOURCE" --release 1.1.0 --no-install-launcher
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cp "$TRELLIS_HOME/releases/1.1.0/payload/core-rules/templates/claude-user-settings.json" "$settings"
+  chmod 640 "$settings"
+  USER_RELEASE=1.1.0
+  user_attach_adopt_identical
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq '.hooks.WorktreeCreate[0].hooks += [{type:"command",command:"project-user-create"}] | .hooks.WorktreeRemove[0].hooks += [{type:"command",command:"project-user-remove"}]' "$settings" > "$SANDBOX/worktree-residuals"
+  cp "$SANDBOX/worktree-residuals" "$settings"
+  b1_make_worktree_user_release 1.5.0 true
+  run "$USER_CLI" configure --source "$B1_WORKTREE_USER_SOURCE" --release 1.5.0 --launcher-template "$TRELLIS_HOME/releases/1.5.0/payload/scripts/trellis-launcher.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  jq -e '(.hooks.WorktreeCreate | length)==2 and (.hooks.WorktreeRemove | length)==2 and (.hooks.WorktreeCreate[0].hooks | length)==1 and (.hooks.WorktreeRemove[0].hooks | length)==1 and .hooks.WorktreeCreate[1].hooks[0].command=="project-user-create" and .hooks.WorktreeRemove[1].hooks[0].command=="project-user-remove" and ([.hooks[][] | .hooks[].command | select(contains("trellis-worktree-"))] | length)==0 and (has("workflowSizeGuideline") | not)' "$settings" >/dev/null
+  b1_user_doctor_check
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"user surface: exact committed owner"* ]]
+  jq '.hooks.WorktreeCreate += [.hooks.WorktreeCreate[0]]' "$settings" > "$SANDBOX/duplicate-native"
+  cp "$SANDBOX/duplicate-native" "$settings"
+  b1_user_doctor_check
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"duplicate owned hook registration"* ]] || { echo "$output"; return 1; }
+}
+
 make_full_user_release() {
   local version="$1" repo
   repo="$SANDBOX/full release source $version"
   mkdir -p "$repo"
   cp -R "$REPO_ROOT/core-rules" "$repo/"
+  # T34b: as in release-fixture.bash, a fixture release cannot carry the
+  # 1.5.0 native manifest without its companion; legacy-only, it renders the
+  # pinned legacy user surface. The native user render is covered by B1 M-A1
+  # here and events.rs t34b_worktree.
+  rm -rf "${repo:?}/core-rules/native"
   copy_user_release_runtime "$repo"
   printf '%s\n' "$version" > "$repo/core-rules/VERSION"
   release_fixture_install "$HOME" "$TRELLIS_HOME" "$version" "$repo"
@@ -1353,7 +1532,7 @@ PY
   [ ! -L "$owner" ]
 }
 
-@test "an adopted equal JSON leaf relinks and later restores the original operator snapshot" {
+@test "changed adopted JSON keys relink and detach preserves only unchanged original values" {
   local settings before_hash before_base64
   settings="$HOME/.claude/settings.json"
   printf '%s' '{"operator":{"theme":"violet","keep":true},"managed":{"policy":"fixture","release":"1.0.0"},"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"operator-owned pre-tool hook"}]}],"SessionStart":[{"matcher":"*","hooks":[{"type":"command","command":"fixture Trellis SessionStart","timeout":60}]}]},"extra":{"format":"operator","enabled":true}}' > "$settings"
@@ -1372,8 +1551,9 @@ PY
   user_detach
 
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(sha256_file "$settings")" = "$before_hash" ]
-  [ "$(base64 < "$settings" | tr -d '\n')" = "$before_base64" ]
+  [ "$(sha256_file "$settings")" != "$before_hash" ]
+  [ "$(base64 < "$settings" | tr -d '\n')" != "$before_base64" ]
+  jq -e '.operator.keep==true and .extra.enabled==true and (.managed | has("release") | not) and .managed.policy=="fixture" and .hooks.SessionStart[0].hooks[0].command=="fixture Trellis SessionStart" and .hooks.PreToolUse[0].hooks[0].command=="operator-owned pre-tool hook"' "$settings" >/dev/null
   [ "$(file_mode "$settings")" = 640 ]
   [ ! -e "$(user_owner_path)" ]
 }

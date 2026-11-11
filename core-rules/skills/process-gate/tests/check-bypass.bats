@@ -658,6 +658,12 @@ registered_pi_fixture() {
     "$PROJECT_DIR/.trellis" "$PROJECT_DIR/.pi/extensions" "$PROJECT_DIR/.pi/hooks"
   cp "$source/extensions/trellis.ts" "$PI_PAYLOAD/core-rules/pi/extensions/trellis.ts"
   cp "$source/hooks/dispatch.sh" "$PI_PAYLOAD/core-rules/pi/hooks/dispatch.sh"
+  mkdir -p "$PI_PAYLOAD/core-rules/hooks/rules"
+  cp "$source/../hooks/rules/"{destructive,reread}.json "$PI_PAYLOAD/core-rules/hooks/rules/"
+  jq -n --argjson single "${PI_SINGLE_ENTRY:-false}" '{schema_version:2,harnesses:{pi:{links:
+    ([{source:"core-rules/pi/extensions/trellis.ts",destination:".pi/extensions/trellis.ts"}] +
+      if $single then [] else [{source:"core-rules/pi/hooks/dispatch.sh",destination:".pi/hooks/dispatch.sh"}] end),render:[]}}}' \
+    > "$PI_PAYLOAD/core-rules/inheritance-manifest.json"
   # Symlink owners pin targets; their content baseline is the sealed release tree.
   python3 -I - "$PI_PAYLOAD" <<'PY'
 import hashlib, json, pathlib, sys
@@ -678,9 +684,59 @@ PY
   ln -s '../../.trellis/runtime/core-rules/pi/extensions/trellis.ts' "$PROJECT_DIR/.pi/extensions/trellis.ts"
   ln -s '../../.trellis/runtime/core-rules/pi/hooks/dispatch.sh' "$PROJECT_DIR/.pi/hooks/dispatch.sh"
   write_attachment_owner pi "$@"
+  if [ "${PI_SINGLE_ENTRY:-false}" = true ]; then
+    rm "${PROJECT_DIR:?}/.pi/hooks/dispatch.sh"
+    rmdir "$PROJECT_DIR/.pi/hooks"
+    jq '.artifacts = ([.artifacts[] | select(.path != ".pi/hooks/dispatch.sh")] +
+      [{path:".pi",kind:"parent"},{path:".pi/extensions",kind:"parent"}])' "$OWNER_PATH" > "$OWNER_PATH.tmp"
+    mv "$OWNER_PATH.tmp" "$OWNER_PATH"
+  fi
   jq '.artifacts += [{kind:"symlink",path:"AGENTS.md",target:".agents/rules/trellis.md"}]' \
     "$OWNER_PATH" > "$OWNER_PATH.tmp"
   mv "$OWNER_PATH.tmp" "$OWNER_PATH"
+  run_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T63: Pi sole manifest-linked trellis.ts with runtime rules passes without linked hooks" {
+  PI_SINGLE_ENTRY=true registered_pi_fixture
+  [ ! -e "$PROJECT_DIR/.pi/hooks" ]
+  [ ! -e "$PI_PAYLOAD/core-rules/pi/extensions/hook-runtime.ts" ]
+  [ "$(find "$PROJECT_DIR/.pi/extensions" -type l | wc -l | tr -d ' ')" -eq 1 ]
+  run_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  if grep -qF 'not registered' <<< "$output"; then echo "$output"; false; fi
+}
+
+@test "T63: sole Pi entry cannot mask missing or changed runtime rules" {
+  PI_SINGLE_ENTRY=true registered_pi_fixture
+  for rule in destructive reread; do
+    file="$PI_PAYLOAD/core-rules/hooks/rules/$rule.json"
+    mv "$file" "$BATS_TEST_TMPDIR/rule-backup"
+    run_check
+    [ "$status" -eq 1 ] || { echo "$output"; false; }
+    grep -qF ".trellis/runtime/core-rules/hooks/rules/$rule.json: native Pi hook artifact" <<< "$output"
+    printf '{}\n' > "$file"
+    run_check
+    [ "$status" -eq 1 ] || { echo "$output"; false; }
+    grep -qF 'payload content hash or mode mismatch' <<< "$output"
+    mv "$BATS_TEST_TMPDIR/rule-backup" "$file"
+  done
+}
+
+@test "T63: sole Pi extension remains required when its owner entry is removed" {
+  PI_SINGLE_ENTRY=true registered_pi_fixture
+  jq '.artifacts |= map(select(.path != ".pi/extensions/trellis.ts"))' "$OWNER_PATH" > "$OWNER_PATH.tmp"
+  mv "$OWNER_PATH.tmp" "$OWNER_PATH"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  grep -qF '.pi/extensions/trellis.ts: native Pi hook artifact' <<< "$output"
+}
+
+@test "T63: pinned legacy dispatcher delivery retains its historical data contract" {
+  registered_pi_fixture
+  rm "${PI_PAYLOAD:?}/core-rules/hooks/rules/destructive.json" \
+    "${PI_PAYLOAD:?}/core-rules/hooks/rules/reread.json"
   run_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
@@ -1466,4 +1522,146 @@ linked_managed_hooks_fixture() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"project root must equal the Git worktree top level"* ]]
   [[ "$output" != *"not attached"* ]]
+}
+
+@test "143-pg: reflog subject is not hook evidence and the limitation is visible" {
+  printf '#!/bin/sh\nprintf ran > "%s"\n' "$BATS_TEST_TMPDIR/hook-ran" > "$PROJECT_DIR/.git/hooks/pre-commit"
+  chmod +x "$PROJECT_DIR/.git/hooks/pre-commit"
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit --allow-empty -qm 'docs: explain no-verify'
+  [ -f "$BATS_TEST_TMPDIR/hook-ran" ]
+  run "$BASH_BIN" -c "cd '$PROJECT_DIR' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Bypass coverage: Git reflog does not record --no-verify"* ]]
+  [[ "$output" == *"hook execution cannot be verified post-hoc"* ]]
+  [[ "$output" != *"committed with --no-verify"* ]]
+  mkdir "$PROJECT_DIR/.husky"
+  printf '#!/bin/sh\nexit 0\n' > "$PROJECT_DIR/.husky/pre-push"
+  run "$BASH_BIN" -c "cd '$PROJECT_DIR' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"short-circuit"* && "$output" == *"Bypass coverage:"* ]]
+}
+
+@test "143-pg-r2: leading no-ops cannot hide exit zero" {
+  mkdir "$PROJECT_DIR/.husky"
+  local hook="$PROJECT_DIR/.husky/pre-push" line
+  for line in true ':'; do
+    printf '#!/bin/sh\n%s\n# comment\n\nexit 0\npnpm test\n' "$line" > "$hook"
+    run_check
+    [ "$status" -eq 1 ] || { echo "missed $line then exit: $output"; false; }
+    [[ "$output" == *"short-circuit"* ]]
+  done
+  printf '#!/bin/sh\ntrue\n : # no-op\necho check\n' > "$hook"
+  run_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Husky coverage:"* && "$output" == *"heuristic"* ]]
+}
+
+@test "143-pg-r2: large commit messages preserve both trailer warnings" {
+  local message="$BATS_TEST_TMPDIR/large-commit-message"
+  python3 -I - "$message" <<'PY'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).write_text(
+    'chore: trailer test\n\nTRELLIS_ALLOW_MAIN_PUSH=1\nPROCESS_GATE_SKIP=1\n' + 'padding line\n' * 300000)
+PY
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit --allow-empty -q -F "$message"
+  run "$BASH_BIN" -c "cd '$PROJECT_DIR' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"TRELLIS_ALLOW_MAIN_PUSH=1 found"* && "$output" == *"PROCESS_GATE_SKIP=1 found"* ]]
+}
+
+@test "143-pg: symlinked husky directory is scanned and valid hooks still pass" {
+  local outside="$BATS_TEST_TMPDIR/external-husky"
+  mkdir "$outside"
+  ln -s "$outside" "$PROJECT_DIR/.husky"
+  printf '#!/bin/sh\necho check\n' > "$outside/pre-commit"
+  run_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '#!/bin/sh\nexit 0\n' > "$outside/pre-commit"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *".husky/pre-commit: short-circuit"* ]]
+}
+
+@test "143-pg: symlinked hook is scanned without rejecting a valid target" {
+  mkdir "$PROJECT_DIR/.husky"
+  local target="$BATS_TEST_TMPDIR/hook-target"
+  printf '#!/bin/sh\necho check\n' > "$target"
+  ln -s "$target" "$PROJECT_DIR/.husky/pre-push"
+  run_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '#!/bin/sh\nexit 0\n' > "$target"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *".husky/pre-push: short-circuit"* ]]
+}
+
+@test "143-pg: first effective hook command catches exit variants, not ordinary commands" {
+  mkdir "$PROJECT_DIR/.husky"
+  local hook="$PROJECT_DIR/.husky/pre-push" line
+  for line in 'echo exit 0' 'exit 1' 'exit 0foo'; do
+    printf '#!/bin/sh\n%s\n' "$line" > "$hook"
+    run_check
+    [ "$status" -eq 0 ] || { echo "unexpected rejection for $line: $output"; false; }
+  done
+  for line in '  exit 0' 'exit 0;' 'exit 0 # disabled'; do
+    printf '#!/bin/sh\n  # a comment\n%s\necho check\n' "$line" > "$hook"
+    run_check
+    [ "$status" -eq 1 ] || { echo "missed $line: $output"; false; }
+    [[ "$output" == *"short-circuit"* ]]
+  done
+  printf 'exit 0\necho check\n' > "$hook"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"short-circuit"* ]]
+}
+
+@test "143-pg: leading no-op is not a short circuit when checks follow" {
+  mkdir "$PROJECT_DIR/.husky"
+  local hook="$PROJECT_DIR/.husky/pre-push" line
+  for line in '  true' ':'; do
+    printf '#!/bin/sh\n%s\necho check\n' "$line" > "$hook"
+    run_check
+    [ "$status" -eq 0 ] || { echo "rejected harmless $line before a check: $output"; false; }
+    printf '#!/bin/sh\n%s\n# no checks\n' "$line" > "$hook"
+    run_check
+    [ "$status" -eq 1 ] || { echo "missed standalone $line: $output"; false; }
+  done
+}
+
+@test "143-pg: invalid sibling owner cannot hide managed hooks" {
+  linked_managed_hooks_fixture
+  rmdir "$MANAGED_HOOKS"
+  git -C "$PROJECT_DIR" config core.hooksPath .husky/_
+  # Valid disabled sibling is genuinely unmanaged and remains allowed.
+  jq '.git_hooks.enabled = false' "$MAIN_OWNER_PATH" > "$MAIN_OWNER_PATH.tmp"
+  mv "$MAIN_OWNER_PATH.tmp" "$MAIN_OWNER_PATH"
+  run_check
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  cp "$MAIN_OWNER_PATH" "$BATS_TEST_TMPDIR/valid-sibling-owner"
+  # A non-private enabled owner and a malformed record are not absence.
+  jq '.git_hooks.enabled = true' "$MAIN_OWNER_PATH" > "$MAIN_OWNER_PATH.tmp"
+  mv "$MAIN_OWNER_PATH.tmp" "$MAIN_OWNER_PATH"
+  chmod 644 "$MAIN_OWNER_PATH"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  chmod 600 "$MAIN_OWNER_PATH"
+  printf '{broken\n' > "$MAIN_OWNER_PATH"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  # Parseable JSON with only the managed-hook fields is not an owner record.
+  jq -n --arg checkout "$(jq -r '.checkout_id' "$OWNER_PATH")" \
+    '{schema_version:1,status:"committed",checkout_id:$checkout,git_hooks:{enabled:false}}' > "$MAIN_OWNER_PATH"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  jq '.worktree_root = "/different/worktree"' "$BATS_TEST_TMPDIR/valid-sibling-owner" > "$MAIN_OWNER_PATH"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  jq '.git_hooks = {}' "$BATS_TEST_TMPDIR/valid-sibling-owner" > "$MAIN_OWNER_PATH"
+  run_check
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
 }

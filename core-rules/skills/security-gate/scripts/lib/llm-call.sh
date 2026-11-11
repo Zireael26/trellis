@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Provider-neutral LLM driver.
-# Usage: llm-call.sh <prompt-path> <input-path> <out-path>
+# Usage: llm-call.sh <prompt-path> <input-path> <out-path> [project-dir]
 # Env:
 #   LLM_PROVIDER  anthropic | openai | gemini | ollama | none   (default: anthropic if `llm` available)
 #   LLM_MODEL     provider-specific model id                    (default: claude-opus-5 for anthropic; required for openai/gemini/ollama)
@@ -27,6 +27,9 @@ set -euo pipefail
 PROMPT="${1:?prompt-path required}"
 INPUT="${2:?input-path required}"
 OUT="${3:?out-path required}"
+PROJECT_DIR="${4:-$PWD}"
+case "$0" in */*) _sg_lib_dir="${0%/*}" ;; *) _sg_lib_dir=. ;; esac
+builtin source "$_sg_lib_dir/engine.sh"
 
 PROVIDER="${LLM_PROVIDER:-}"
 MODEL="${LLM_MODEL:-}"
@@ -38,9 +41,9 @@ if [ "${PROVIDER}" = "none" ]; then
   exit 2
 fi
 
-LLM_BIN="$(builtin type -P llm)" || LLM_BIN=""
+LLM_BIN="$(sg_resolve_engine llm "$PROJECT_DIR")" || LLM_BIN=""
 if [ -z "$LLM_BIN" ]; then
-  echo "warn: llm CLI not found on PATH — skipping triage" >&2
+  echo "warn: llm CLI not found or unsafe on PATH — skipping triage" >&2
   : > "$OUT"
   exit 2
 fi
@@ -59,19 +62,28 @@ if [ -z "$MODEL" ]; then
       ;;
   esac
 fi
-# Compose the call. simonw/llm reads stdin as the user message; -s sets the system prompt.
-SYSTEM_PROMPT="$(cat "$PROMPT")"
-
-# Honor `timeout` when available (GNU coreutils / brew).
-if TIMEOUT_BIN="$(builtin type -P timeout)"; then
-  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
-elif TIMEOUT_BIN="$(builtin type -P gtimeout)"; then
-  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
-else
-  echo "warn: neither timeout nor gtimeout is available — refusing to invoke llm without a deadline" >&2
+# Honor `timeout` when available (GNU coreutils / brew), but never fall
+# through from an unsafe timeout to a different executable.
+TIMEOUT_RC=0
+TIMEOUT_BIN="$(sg_resolve_engine timeout "$PROJECT_DIR")" || TIMEOUT_RC=$?
+if [ "$TIMEOUT_RC" -eq 1 ]; then
+  TIMEOUT_RC=0
+  TIMEOUT_BIN="$(sg_resolve_engine gtimeout "$PROJECT_DIR")" || TIMEOUT_RC=$?
+fi
+if [ "$TIMEOUT_RC" -ne 0 ]; then
+  echo "warn: neither timeout nor gtimeout is available or trusted — refusing to invoke llm without a deadline" >&2
   : > "$OUT"
   exit 2
 fi
+RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
+if ! sg_path_sanitize "$PROJECT_DIR" || ! sg_vet_helpers "$PROJECT_DIR" bash cat mktemp rm; then
+  echo "warn: unsafe llm helper — skipping triage" >&2
+  : > "$OUT"
+  exit 2
+fi
+builtin unset BASH_ENV ENV PYTHONPATH PYTHONHOME
+# Compose the call. simonw/llm reads stdin as the user message; -s sets the system prompt.
+SYSTEM_PROMPT="$(cat "$PROMPT")"
 
 # Try the call. If it fails (auth, network, model unknown), surface a `warn`
 # and write an empty out so the caller falls through to no-LLM mode.

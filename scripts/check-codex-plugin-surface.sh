@@ -5,7 +5,7 @@
 # Usage: check-codex-plugin-surface.sh [--quiet] [--repair]
 # Exit: 0 healthy or not installed; 1 drift/error; 64 invalid arguments.
 set -euo pipefail
-exec python3 - "$@" <<'PY'
+exec python3 -I - "$@" <<'PY'
 import glob
 import json
 import os

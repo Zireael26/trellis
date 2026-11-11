@@ -1,0 +1,2 @@
+# Preserve the exact frontmatter bytes for cross-platform differential tests.
+*.md binary

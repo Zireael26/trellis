@@ -207,6 +207,35 @@ for (const toolName of ['custom', 'mcp_mutate', 'MultiEdit', 'NotebookEdit', 'ap
   });
 }
 
+for (const toolName of ['read', 'edit', 'write', 'bash']) {
+  for (const source of ['local', 'mcp']) {
+    test(`built-in name ${toolName} rejects ${source} tool overrides`, async t => {
+      const f = await deliveredFixture(t);
+      const input = { path: 'new-file', command: 'printf harmless' };
+      assert.equal(await blocked(f, toolName, input), undefined, 'real builtin still works');
+      f.pi.getAllTools = () => [{ name: toolName, sourceInfo: { source } }];
+      const result = await blocked(f, toolName, input);
+      assert.equal(result?.block, true);
+      assert.match(result.reason, /unmediated|provenance/);
+    });
+  }
+}
+
+test('missing or ambiguous built-in provenance denies, while user shell stays guarded', async t => {
+  const f = await deliveredFixture(t);
+  for (const tools of [[], [{ name: 'write' }], [
+    { name: 'write', sourceInfo: { source: 'builtin' } },
+    { name: 'write', sourceInfo: { source: 'local' } },
+  ]]) {
+    f.pi.getAllTools = () => tools;
+    assert.equal((await blocked(f, 'write', { path: 'new-file' })).block, true);
+  }
+  f.pi.getAllTools = () => [{ name: 'bash', sourceInfo: { source: 'local' } }];
+  assert.equal(await f.fire('user_bash', { command: 'printf harmless', cwd: f.cwd, excludeFromContext: true }), undefined);
+  const denied = await f.fire('user_bash', { command: 'rm -rf /fixture-never-executed', cwd: f.cwd, excludeFromContext: true });
+  assert.equal(denied.result.exitCode, 1);
+});
+
 for (const toolName of ['grep', 'find', 'ls']) {
   test(`M2 pure builtin ${toolName} allows, local name collision refuses`, async t => {
     const f = await deliveredFixture(t);

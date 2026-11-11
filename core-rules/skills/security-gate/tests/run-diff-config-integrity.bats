@@ -320,11 +320,15 @@ push_notice() {
   ! grep -q 'vendor/skip.sh' "$SHELLCHECK_ARGS_LOG"
 }
 
-@test "an exported semgrep function in the environment is ignored" {
+@test "exported git is purged and exported semgrep cannot replace the engine" {
+  run env 'BASH_FUNC_git%%=() { printf imported; }' bash -c 'git'
+  [ "$status" -eq 0 ] && [ "$output" = imported ] || skip "Bash does not import BASH_FUNC_name%%"
   change_ts
   commit_all
-  run_diff "BASH_FUNC_semgrep%%=() { printf '%s\\n' '{\"results\":[],\"errors\":[],\"paths\":{\"scanned\":[\"x\"]}}'; }"
+  run_diff "BASH_FUNC_git%%=() { : > '$TEST_ROOT/purge-ran'; return 1; }" \
+    "BASH_FUNC_semgrep%%=() { printf '%s\\n' '{\"results\":[],\"errors\":[],\"paths\":{\"scanned\":[\"x\"]}}'; }"
   assert_blocked_by "semgrep/detector"
+  [ ! -e "$TEST_ROOT/purge-ran" ]
 }
 
 @test "a range with no derivable base is BLOCKED" {
@@ -668,6 +672,33 @@ fake_project_semgrep() {
   [ ! -e "$TEST_ROOT/pwned" ]
 }
 
+@test "diff project autodetection never runs git from the project" {
+  change_ts
+  commit_all
+  mkdir -p "$PROJECT/sub" "$PROJECT/.tools"
+  printf '#!/bin/sh\n: > "%s"\nexit 1\n' "$TEST_ROOT/autodetect-git-ran" > "$PROJECT/.tools/git"
+  chmod +x "$PROJECT/.tools/git"
+  run env -u CODEX_PROJECT_DIR -u CLAUDE_PROJECT_DIR PATH="$PROJECT/.tools:$BIN" \
+    SECURITY_GATE_PROJECT_NAME=project bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD --no-llm' _ \
+    "$PROJECT/sub" "$SCRIPT_ROOT/scripts/run-diff.sh"
+  assert_blocked_by "semgrep/detector"
+  [ ! -e "$TEST_ROOT/autodetect-git-ran" ]
+}
+
+@test "a diff helper symlinked into the project is refused before it runs" {
+  mkdir -p "$PROJECT/.tools"
+  printf '#!/bin/sh\n: > "%s"\nexec /bin/cat "$@"\n' "$TEST_ROOT/helper-ran" > "$PROJECT/.tools/cat"
+  chmod +x "$PROJECT/.tools/cat"
+  mv "$BIN/cat" "$BIN/cat-safe"
+  ln -s "$PROJECT/.tools/cat" "$BIN/cat"
+  change_ts
+  commit_all
+  run_diff SEMGREP_MODE=clean
+  assert_blocked_by "unsafe helper"
+  [[ "$output" == *"cat"*"$BIN/cat"* ]] || { echo "$output"; false; }
+  [ ! -e "$TEST_ROOT/helper-ran" ]
+}
+
 @test "an engine symlinked into the project is refused" {
   fake_project_semgrep
   mkdir -p "$TEST_ROOT/linkbin"
@@ -679,13 +710,16 @@ fake_project_semgrep() {
   [ ! -e "$TEST_ROOT/pwned" ]
 }
 
-@test "an exported type function cannot steer engine resolution" {
+@test "exported git is purged and exported type cannot steer engine resolution" {
+  run env 'BASH_FUNC_git%%=() { printf imported; }' bash -c 'git'
+  [ "$status" -eq 0 ] && [ "$output" = imported ] || skip "Bash does not import BASH_FUNC_name%%"
   fake_project_semgrep
   change_ts
   commit_all
-  run_diff "BASH_FUNC_type%%=() { if [ \"\$2\" = semgrep ]; then printf '%s\\n' \"$PROJECT/.tools/semgrep\"; else builtin type \"\$@\"; fi; }"
+  run_diff "BASH_FUNC_git%%=() { : > '$TEST_ROOT/purge-ran'; return 1; }" \
+    "BASH_FUNC_type%%=() { if [ \"\$2\" = semgrep ]; then printf '%s\\n' \"$PROJECT/.tools/semgrep\"; else builtin type \"\$@\"; fi; }"
   assert_blocked_by "semgrep/detector"
-  [ ! -e "$TEST_ROOT/pwned" ]
+  [ ! -e "$TEST_ROOT/purge-ran" ] && [ ! -e "$TEST_ROOT/pwned" ]
 }
 
 # --- round 2: parser vectors ------------------------------------------------
@@ -856,19 +890,16 @@ extend_attack() {
 }
 
 @test "R1: without tomllib a base .gitleaks.toml cannot be verified and BLOCKS" {
-  real="$(readlink "$BIN/python3")"
+  # The gate runs the real binary behind any python3 wrapper (lib/engine.sh
+  # sg_resolve_python), so a wrapper that hides tomllib no longer stands in for
+  # an interpreter without it. Use a real one older than 3.11.
+  local old="" cand
+  for cand in /usr/bin/python3 $(command -v python3.10 python3.9 python3.8 2>/dev/null); do
+    if "$cand" -I -c 'import sys; sys.exit(sys.version_info >= (3, 11))' 2>/dev/null; then old="$cand"; break; fi
+  done
+  [ -n "$old" ] || skip "no python3 older than 3.11 (so without tomllib) on this host"
   rm "$BIN/python3"
-  cat > "$BIN/python3" <<SH
-#!/usr/bin/env bash
-for a in "\$@"; do
-  if [ "\$a" = "-" ]; then
-    { printf 'import sys\nsys.modules["tomllib"] = None\n'; cat; } | "$real" "\$@"
-    exit \$?
-  fi
-done
-exec "$real" "\$@"
-SH
-  chmod +x "$BIN/python3"
+  ln -s "$old" "$BIN/python3"
   printf '[allowlist]\ndescription = "base"\n' > "$PROJECT/.gitleaks.toml"
   commit_all "base gitleaks config"
   change_ts
@@ -1216,11 +1247,13 @@ PY
   assert_loader_path_notice ".agents/ſkills/evil/SKILL.md"
 }
 
-@test "BGSEC-C: a fullwidth sub/.ｐｉ/x is gate config" {
+# Bash 3.2 printf %q escapes UTF-8 bytes 0x80-0x9f, so Bats cannot find a
+# test so named; these names spell the code points, the bodies use them.
+@test "BGSEC-C: a fullwidth sub/.pi/x (U+FF50 U+FF49) is gate config" {
   assert_loader_path_notice "sub/.ｐｉ/x"
 }
 
-@test "BGSEC-C: a Kelvin-sign .agents/sKills/x is gate config" {
+@test "BGSEC-C: a Kelvin-sign .agents/sKills/x (U+212A) is gate config" {
   assert_loader_path_notice ".agents/s"$'\xe2\x84\xaa'"ills/x"
 }
 
@@ -1285,7 +1318,7 @@ PY
   assert_loader_path_notice ".аgents/skills/x"
 }
 
-@test "BGSEC-C: a Cyrillic-er .рi/x is gate config" {
+@test "BGSEC-C: a Cyrillic-er .pi/x (U+0440) is gate config" {
   assert_loader_path_notice ".рi/x"
 }
 
@@ -1293,7 +1326,7 @@ PY
   assert_loader_path_notice ".agents/ѕkills/x"
 }
 
-@test "BGSEC-C: merge mode BLOCKS a Cyrillic .рi change without approval" {
+@test "BGSEC-C: merge mode BLOCKS a Cyrillic .pi (U+0440) change without approval" {
   mkdir -p "$PROJECT/.рi"
   printf 'x\n' > "$PROJECT/.рi/x"
   change_ts
@@ -1319,15 +1352,14 @@ PY
   assert_loader_path_notice "docs/café.md"
 }
 
-@test "BGSEC-C: a fullwidth full stop sub/．pi/x is gate config (only folding catches it)" {
+@test "BGSEC-C: a fullwidth full stop sub/．pi/x is protected as non-ASCII" {
   assert_loader_path_notice "sub/．pi/x"
 }
 
-# --- finding #25: the look-alike rule on raw AND folded segments, Cf-stripped
-# A dot-like leader (U+2024, U+FE52) folds to "."; an invisible format
-# character (Unicode Cf: U+200B, U+FEFF) before the dot survives NFKC and
-# hides it from startswith("."). Each test below is caught by exactly the
-# check its title names, so dropping that check turns it red.
+# --- finding #25: non-ASCII look-alike paths -------------------------------
+# All of these paths are protected by the conservative any-non-ASCII-byte
+# rule. They do not independently prove NFKC folding or format-character
+# stripping; the ASCII alias of a non-ASCII audit directory below tests folding.
 
 @test "#25: a ONE DOT LEADER U+2024pi/x is gate config" {
   assert_loader_path_notice $'\xe2\x80\xa4'"pi/x"
@@ -1337,20 +1369,35 @@ PY
   assert_loader_path_notice $'\xef\xb9\x92'"pi/x"
 }
 
-@test "#25: a ZERO WIDTH SPACE before .pi (U+200B.pi/x) is gate config (Cf strip)" {
+@test "#25: a ZERO WIDTH SPACE before .pi is protected as non-ASCII" {
   assert_loader_path_notice $'\xe2\x80\x8b'".pi/x"
 }
 
-@test "#25: a BOM before .agents (U+FEFF.agents/skills/x) is gate config (Cf strip)" {
+@test "#25: a BOM before .agents is protected as non-ASCII" {
   assert_loader_path_notice $'\xef\xbb\xbf'".agents/skills/x"
 }
 
-@test "#25: a ligature in a dot segment (.conﬁg/x) is gate config (raw-side check)" {
+@test "#25: a ligature in a dot segment is protected as non-ASCII" {
   assert_loader_path_notice ".conﬁg/x"
 }
 
-@test "#25: a fullwidth stop before Cyrillic (．рi/x) is gate config (folded-side check)" {
+@test "#25: a fullwidth stop before Cyrillic is protected as non-ASCII" {
   assert_loader_path_notice "．рi/x"
+}
+
+@test "an ASCII alias of a non-ASCII audit directory is protected by folding" {
+  write_config 'SECURITY_GATE_AUDIT_DIR="ａｕｄｉｔｓ"'
+  mkdir -p "$PROJECT/ａｕｄｉｔｓ"
+  [ ! "$PROJECT/ａｕｄｉｔｓ" -ef "$PROJECT/audits" ] || skip "filesystem aliases the two directory names"
+  printf '{"findings":[]}\n' > "$PROJECT/ａｕｄｉｔｓ/2026-01-01-baseline-project.json"
+  commit_all "base non-ASCII audit directory"
+  printf '{"findings":[],"changed":true}\n' > "$PROJECT/audits/2026-01-01-baseline-project.json"
+  change_ts
+  commit_all
+  DIFF_ARGS=(--target=main)
+  run_diff SEMGREP_MODE=clean
+  assert_blocked_by "cannot change gate config, approved or not"
+  [[ "$output" == *"audits/2026-01-01-baseline-project.json"* ]] || { echo "$output"; false; }
 }
 
 # --- finding #27: .trellis.json and .trellis/ at any depth ------------------

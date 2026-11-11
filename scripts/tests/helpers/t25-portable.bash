@@ -184,6 +184,8 @@ t25_make_immutable_release() {
   chmod 755 "$repo/core-rules/githooks/pre-push"
   # The contextual SessionStart renders are validated against the real shipped
   # templates by path, so the fixture release carries the real bytes.
+  mkdir -p "$repo/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$repo/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \

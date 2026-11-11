@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # post-edit-verify.sh — Codex PostToolUse on Edit|Write|MultiEdit. Lint the touched file.
 # Source: Trellis / core-rules / codex hooks.
 #
@@ -68,26 +69,22 @@ lint_target() {
 # --- JS / TS ---
 case "$FILE_PATH" in
   *.ts|*.tsx|*.js|*.jsx)
-    if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
-       || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
-       || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
-      # A local install runs directly: one node start, not npx's probe plus
-      # run (~0.4 s each). Anything else keeps the npx lookup unchanged.
+    SE_ESLINT_DIR="" SE_ESLINT_BIN="" SE_ESLINT_FILE=""
+    if _se_find_eslint_config "$FILE_PATH"; then
+      # Resolve a local or hoisted install independently of npx. Run from the
+      # config's workspace so ESLint can find nested flat configs.
       ESLINT=()
-      if command -v npx >/dev/null 2>&1; then
-        if [ -f node_modules/.bin/eslint ] && [ -x node_modules/.bin/eslint ]; then
-          ESLINT=(./node_modules/.bin/eslint)
-        elif npx --no-install eslint --version >/dev/null 2>&1; then
-          ESLINT=(npx --no-install eslint)
-        fi
+      if [ -n "$SE_ESLINT_BIN" ]; then
+        ESLINT=("$SE_ESLINT_BIN")
+      elif command -v npx >/dev/null 2>&1 && (cd "$SE_ESLINT_DIR" && npx --no-install eslint --version >/dev/null 2>&1); then
+        ESLINT=(npx --no-install eslint)
       fi
       if [ "${#ESLINT[@]}" -gt 0 ]; then
-        OUT=$("${ESLINT[@]}" --quiet "$FILE_PATH" 2>&1)
+        OUT=$(cd "$SE_ESLINT_DIR" && "${ESLINT[@]}" --quiet "$SE_ESLINT_FILE" 2>&1)
         RC=$?
-        # A local install that cannot even print --version (missing module, no
-        # node) is no eslint, as when npx probed first; only failures pay this.
-        if [ "$RC" -ne 0 ] && [ "${ESLINT[0]}" = ./node_modules/.bin/eslint ] &&
-           ! ./node_modules/.bin/eslint --version >/dev/null 2>&1; then
+        # Preserve the existing opportunistic treatment of a broken install.
+        if [ "$RC" -ne 0 ] && [ -n "$SE_ESLINT_BIN" ] &&
+           ! (cd "$SE_ESLINT_DIR" && "$SE_ESLINT_BIN" --version >/dev/null 2>&1); then
           RC=0
         fi
         if [ "$RC" -ne 0 ]; then
@@ -96,6 +93,8 @@ ${OUT}
 
 "
         fi
+      else
+        echo "post-edit-verify: eslint not found (no local install and no npx eslint on PATH); JS/TS lint skipped for ${FILE_PATH}" >&2
       fi
     fi
     ;;
@@ -112,6 +111,8 @@ ${OUT}
 
 "
       fi
+    else
+      echo "post-edit-verify: ruff not found on PATH; Python lint skipped for ${FILE_PATH}" >&2
     fi
     ;;
 esac
@@ -128,6 +129,8 @@ ${OUT}
 
 "
       fi
+    elif [ -f "Cargo.toml" ] && ! command -v cargo >/dev/null 2>&1; then
+      echo "post-edit-verify: cargo not found on PATH; Rust lint skipped for ${FILE_PATH}" >&2
     fi
     ;;
 esac
@@ -175,6 +178,8 @@ ${OUT}
 
 "
       fi
+    else
+      echo "post-edit-verify: neither golangci-lint nor go found on PATH; Go lint skipped for ${FILE_PATH}" >&2
     fi
     ;;
 esac

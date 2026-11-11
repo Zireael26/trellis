@@ -44,9 +44,13 @@ ROOTS=(core-rules/ scripts/ scheduled-tasks/ local/ .claude/ specs/)
 # `#!/usr/bin/env python3` do not classify as shell.
 shebang_is_shell() {
   # Bounded read: only the shebang line can matter, and a changed file may be a
-  # large binary.
-  head -c 256 "$1" 2>/dev/null | awk 'BEGIN { rc = 1 }
+  # large binary. LC_ALL=C: under a UTF-8 locale macOS awk aborts with "towc:
+  # multibyte conversion failure" on binary bytes (the shipped
+  # core-rules/native/*/trellis-hooks), which would fail the whole stage.
+  local kind
+  kind="$(head -c 256 "$1" | LC_ALL=C awk '
        NR == 1 {
+         sub(/\r$/, "")
          if ($0 ~ /^#!/) {
            sub(/^#![ \t]*/, "")
            interp = $1
@@ -54,11 +58,16 @@ shebang_is_shell() {
              for (i = 2; i <= NF; i++) { if ($i !~ /^-/) { interp = $i; break } }
            }
            sub(/.*\//, "", interp)
-           if (interp ~ /^(sh|bash|dash|ksh)$/) rc = 0
+           if (interp ~ /^(sh|bash|dash|ksh)$/) shell = 1
          }
-         exit rc
+         exit
        }
-       END { exit rc }' 2>/dev/null
+       END { print shell ? "shell" : "other" }')" || return 2
+  case "$kind" in
+    shell) return 0 ;;
+    other) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # `scripts/tests/doctor-fix-common.bash` is Bats context: the byte-identical
@@ -71,26 +80,37 @@ shebang_is_shell() {
 # can reappear in the shebang pass.
 shell_tree_files() {
   find "${ROOTS[@]}" \
-    \( -name '*.sh' -o -name '*.bash' \) -type f \
-    -not -path 'core-rules/evals/*' \
-    -not -path '.claude/worktrees/*' \
-    -not -path 'scripts/tests/doctor-fix-common.bash' -print0
+    \( -path 'core-rules/evals' -o -path '.claude/worktrees' \) -prune -o \
+    \( \( -name '*.sh' -o -name '*.bash' \) -type f \
+       -not -path 'scripts/tests/doctor-fix-common.bash' -print0 \) || {
+    printf 'lint-shell-tree: shell-file traversal failed\n' >&2
+    return 1
+  }
 
-  local file
-  # `if`, not `&&`: a while loop's status is its body's last command, so a final
-  # non-shell file left the function at 1. Under `set -o pipefail` that turned a
-  # clean lint into a silent red gate — exit 1, no output, ShellCheck itself 0.
+  local file rc ended=0 find_status=""
+  # NUL-frame the find status: process substitution otherwise hides its exit.
   while IFS= read -r -d '' file; do
-    if shebang_is_shell "$file"; then printf '%s\0' "$file"; fi
+    if [ "$ended" -eq 1 ]; then find_status="$file"; continue; fi
+    if [ -z "$file" ]; then ended=1; continue; fi
+    rc=0
+    shebang_is_shell "$file" || rc=$?
+    case "$rc" in
+      0) printf '%s\0' "$file" ;;
+      1) ;;
+      *) printf 'lint-shell-tree: could not classify %s\n' "$file" >&2; return 1 ;;
+    esac
   done < <(find "${ROOTS[@]}" \
-    ! -name '*.*' -type f \
-    -not -path 'core-rules/evals/*' \
-    -not -path '.claude/worktrees/*' -print0)
+    \( -path 'core-rules/evals' -o -path '.claude/worktrees' \) -prune -o \
+    \( ! -name '*.*' -type f -print0 \); printf '\0%s\0' "$?")
+  if [ "$find_status" != 0 ]; then
+    printf 'lint-shell-tree: extensionless-file traversal failed\n' >&2
+    return 1
+  fi
 }
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   shell_tree_files | tr '\0' '\n'
-  exit 0
+  exit $?
 fi
 
 shell_tree_files | xargs -0 shellcheck --severity=warning

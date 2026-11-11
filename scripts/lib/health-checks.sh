@@ -193,6 +193,9 @@ hc_disk_janitor_agent_rows() {
         printf '%s\t%s\n' "$HC_ERROR" "disk-janitor agent: $path does not match the installer's expected arguments and schedule ($detail); remedy: $(dj_agent_remedy "$path")"
         mismatched=true
         ;;
+      unreadable)
+        printf '%s\t%s\n' "$HC_ERROR" "disk-janitor agents: cannot inspect $path ($detail); restore read and search access"
+        ;;
       disabled)
         printf '%s\t%s\n' "$HC_INFO" "disk-janitor agent: $path is disabled ($detail; launchd does not load it)" ;;
     esac
@@ -501,7 +504,7 @@ hc_gate_interpreters() {
 hc_expected_link_target() {
   local target="$1" link="$2"
   if [ "${SYMLINK_STYLE:-absolute}" = "relative" ] && command -v python3 >/dev/null 2>&1; then
-    python3 - "$target" "$(dirname "$link")" <<'PY'
+    python3 -I - "$target" "$(dirname "$link")" <<'PY'
 import os
 import sys
 print(os.path.relpath(sys.argv[1], sys.argv[2]), end="")
@@ -865,7 +868,7 @@ hc_worktree_links_ok() {
 }
 
 hc_realpath() {
-  python3 - "$1" <<'HCPY'
+  python3 -I - "$1" <<'HCPY'
 import os
 import sys
 print(os.path.realpath(sys.argv[1]), end="")
@@ -935,6 +938,13 @@ hc_worktree_inheritance() {
   fi
   if ! command -v python3 >/dev/null 2>&1; then
     echo "worktree-inheritance: python3 unavailable — link resolution skipped"
+    return "$HC_OK"
+  fi
+  # A stub interpreter on PATH (for example /usr/bin/python3 without the
+  # Command Line Tools) makes every hc_realpath fail. That is an unknown, not
+  # a healthy worktree, so probe the interpreter before trusting silence.
+  if ! python3 -I -c 'pass' >/dev/null 2>&1; then
+    echo "worktree-inheritance: python3 unavailable or non-functional — link resolution skipped"
     return "$HC_OK"
   fi
   local offenders wt_count
@@ -1010,8 +1020,9 @@ hc_turbo_fix_hint() {
 # carries a `.next/**`-class glob WITHOUT a matching `!.next/cache/**` negation —
 # the exact misconfiguration that let Next's cache get tarred into every Turbo
 # cache entry. Inspects both turbo v2 (`.tasks`) and v1 (`.pipeline`) shapes.
-#   - no turbo.json / jq unavailable / already-scoped / no .next glob -> OK
-#   - any task with an unscoped .next/** outputs glob               -> WARN + fix
+#   - no turbo.json / already-scoped / no .next glob -> OK
+#   - jq unavailable / unreadable or invalid turbo.json -> WARN: could not check
+#   - any task with an unscoped .next/** outputs glob -> WARN + fix
 # REPORT-ONLY: turbo.json is a user-owned project file — doctor NEVER auto-edits
 # it (same policy as the CLAUDE.md @-import). doctor.sh must NOT add a --fix
 # action for this check; it only prints the one-line fix as a suggested action.
@@ -1028,14 +1039,14 @@ hc_turbo_outputs() {
     return "$HC_OK"
   fi
   if ! command -v jq >/dev/null 2>&1; then
-    echo "turbo-outputs: jq unavailable — recurrence check skipped"
-    return "$HC_OK"
+    printf 'turbo-outputs: could not check %s: jq unavailable\n' "$turbo"
+    return "$HC_WARN"
   fi
   # A task is "unscoped" iff its outputs contain a positive `.next/**`-class glob
   # (a string with `.next/` AND `**`, not starting with `!`) but NO `!.next/cache`
   # negation. Probe v2 `.tasks` and v1 `.pipeline`; emit "unscoped" if any match.
   local verdict
-  verdict="$(jq -r '
+  if verdict="$(jq -r '
     ((.tasks // {}) + (.pipeline // {}))
     | to_entries
     | map(
@@ -1052,9 +1063,18 @@ hc_turbo_outputs() {
         | ($has_next and ($has_neg | not))
       )
     | if any(.) then "unscoped" else "scoped" end
-  ' "$turbo" 2>/dev/null)" || verdict=""
+  ' "$turbo" 2>&1)"; then
+    :
+  else
+    printf 'turbo-outputs: could not check %s: %s\n' "$turbo" "${verdict//$'\n'/; }"
+    return "$HC_WARN"
+  fi
   if [ "$verdict" = "unscoped" ]; then
     echo "turbo-outputs: turbo.json has an unscoped .next/** outputs glob (Next caches get tarred into the Turbo cache) — fix: $(hc_turbo_fix_hint)"
+    return "$HC_WARN"
+  fi
+  if [ "$verdict" != "scoped" ]; then
+    printf 'turbo-outputs: could not check %s: unexpected jq result\n' "$turbo"
     return "$HC_WARN"
   fi
   echo "turbo-outputs: turbo.json outputs are scoped (no unscoped .next/** glob)"
@@ -1372,7 +1392,7 @@ hc_portable_emit_verified_surface_plan_bundle() {
   local home="$1" version="$2" expected_digest="$3" releases python_bin
   releases="$(TRELLIS_HOME="$home" release_store_canonical_releases_dir)" || return 1
   python_bin="$(command -v python3)" || return 1
-  "$python_bin" - "$releases" "$version" "$expected_digest" <<'PY'
+  "$python_bin" -I - "$releases" "$version" "$expected_digest" <<'PY'
 import hashlib
 import json
 import os
@@ -1607,9 +1627,23 @@ hc_portable_surface_plan_metadata() (
   printf '%s\n' "$plan" | jq -S .
 )
 
+# One expanded plan per process (spec 074 T5), pinned by
+# hc_portable_surface_plan_pin. Its key holds this shell's $$, the home,
+# version, payload, harness selection and the release.json digest the plan was
+# expanded under. A reuse skips only the expansion: every call still locates
+# the release afresh (ACL refusal, then a stamp sweep or the full verify),
+# verifies it, and pins the digest before and after. Sourcing discards any
+# inherited value and neither variable is exported.
+unset _HC_SURFACE_PLAN_MEMO _HC_SURFACE_PLAN_MEMO_KEY
+_HC_SURFACE_PLAN_MEMO=""
+_HC_SURFACE_PLAN_MEMO_KEY=""
+
 # Expand a release plan using only planner code verified and read into memory.
-# The record digest is pinned before execution and the entire release is
-# re-verified afterward, so declarative payload drift is also refused.
+# The record digest is pinned before execution and the entire release remains
+# bound throughout, so declarative payload drift is also refused. Outside a
+# guarded diagnostic scope both checks run release_store_audit; inside one they
+# recheck the fingerprint of this operation's full audit. A stamp alone never
+# stands in for an audit.
 hc_portable_payload_surface_plan() (
   local home="${1:-}" version="${2:-}" payload="${3:-}" release_dir releases digest current plan
   [ "$#" -ge 3 ] || return 1
@@ -1629,28 +1663,60 @@ hc_portable_payload_surface_plan() (
   releases="$(TRELLIS_HOME="$home" release_store_canonical_releases_dir)" || return 1
   digest="$(TRELLIS_HOME="$home" release_store_release_json_sha256_no_follow "$releases" "$version")" ||
     return 1
-  TRELLIS_HOME="$home" release_store_verify "$version" >/dev/null 2>&1 || return 1
+  _hc_portable_scoped_release_audit "$home" "$version" >/dev/null 2>&1 || return 1
   current="$(TRELLIS_HOME="$home" release_store_release_json_sha256_no_follow "$releases" "$version")" ||
     return 1
   [ "$current" = "$digest" ] || return 1
-  plan="$(
-    set -o pipefail
-    hc_portable_emit_verified_surface_plan_bundle "$home" "$version" "$digest" |
-      /usr/bin/env -i \
-        HOME="${HOME:-/}" \
-        TRELLIS_HOME="$home" \
-        TMPDIR="${TMPDIR:-/tmp}" \
-        PATH="${PATH:-/usr/bin:/bin}" \
-        LC_ALL=C \
-        bash -s -- --payload "$payload" ${harness_args[@]+"${harness_args[@]}"}
-  )" || return 1
-  plan="$(hc_portable_surface_plan_metadata "$plan" "$payload")" || return 1
-  TRELLIS_HOME="$home" release_store_verify "$version" >/dev/null 2>&1 || return 1
+  if [ -n "$_HC_SURFACE_PLAN_MEMO_KEY" ] &&
+     [ "$_HC_SURFACE_PLAN_MEMO_KEY" = "$(hc_portable_surface_plan_key "$home" "$version" "$payload" "$digest" "$@")" ]; then
+    plan="$_HC_SURFACE_PLAN_MEMO"
+  else
+    plan="$(
+      set -o pipefail
+      hc_portable_emit_verified_surface_plan_bundle "$home" "$version" "$digest" |
+        /usr/bin/env -i \
+          HOME="${HOME:-/}" \
+          TRELLIS_HOME="$home" \
+          TMPDIR="${TMPDIR:-/tmp}" \
+          PATH="${PATH:-/usr/bin:/bin}" \
+          LC_ALL=C \
+          bash -s -- --payload "$payload" ${harness_args[@]+"${harness_args[@]}"}
+    )" || return 1
+    plan="$(hc_portable_surface_plan_metadata "$plan" "$payload")" || return 1
+  fi
+  _hc_portable_scoped_release_audit "$home" "$version" >/dev/null 2>&1 || return 1
   current="$(TRELLIS_HOME="$home" release_store_release_json_sha256_no_follow "$releases" "$version")" ||
     return 1
   [ "$current" = "$digest" ] || return 1
   printf '%s\n' "$plan"
 )
+
+hc_portable_surface_plan_key() {
+  local home="$1" version="$2" payload="$3" digest="$4" tab=$'\t'
+  shift 4
+  printf '%s\n' "$$$tab$home$tab$version$tab$payload$tab$digest$tab$*"
+}
+
+# Expand the plan once in this shell, so the checks after it reuse it. The
+# release.json digest must be the same before and after the expansion, or
+# nothing is pinned. Pinning decides nothing: a failure leaves each check to
+# expand the plan itself and report its own finding.
+hc_portable_surface_plan_pin() {
+  local home="$1" version="$2" payload="$3" releases before after plan
+  shift 3
+  _HC_SURFACE_PLAN_MEMO=""
+  _HC_SURFACE_PLAN_MEMO_KEY=""
+  version="$(release_store_normalize_version "$version" 2>/dev/null)" || return 1
+  releases="$(TRELLIS_HOME="$home" release_store_canonical_releases_dir 2>/dev/null)" || return 1
+  before="$(TRELLIS_HOME="$home" release_store_release_json_sha256_no_follow "$releases" "$version" 2>/dev/null)" ||
+    return 1
+  plan="$(hc_portable_payload_surface_plan "$home" "$version" "$payload" "$@" 2>/dev/null)" || return 1
+  after="$(TRELLIS_HOME="$home" release_store_release_json_sha256_no_follow "$releases" "$version" 2>/dev/null)" ||
+    return 1
+  [ "$before" = "$after" ] || return 1
+  _HC_SURFACE_PLAN_MEMO="$plan"
+  _HC_SURFACE_PLAN_MEMO_KEY="$(hc_portable_surface_plan_key "$home" "$version" "$payload" "$before" "$@")"
+}
 
 hc_portable_normalize_harnesses() {
   local raw="${1:-}" normalized
@@ -1805,9 +1871,310 @@ hc_portable_release_store() {
   return "$HC_ERROR"
 }
 
+# The diagnostic scope never imports a proof from the environment. It uses the
+# stamp only to capture a fine-ctime-qualified preflight fingerprint, then runs
+# a fresh full audit and re-stats every captured dependency before any reuse.
+# These arrays are shell memory, inherited by operation-local subshells only.
+unset _HC_DIAG_AUDIT_HOME _HC_DIAG_AUDIT_VERSION _HC_DIAG_AUDIT_ACTIVE \
+  _HC_DIAG_AUDIT_PATHS _HC_DIAG_AUDIT_KINDS _HC_DIAG_AUDIT_ROWS \
+  _HC_DIAG_EXTRA_HOME _HC_DIAG_EXTRA_VERSION _HC_DIAG_EXTRA_ACTIVE _HC_DIAG_EXTRA_INVALID \
+  _HC_DIAG_EXTRA_PATHS _HC_DIAG_EXTRA_KINDS _HC_DIAG_EXTRA_ROWS \
+  _HC_DIAG_OWNER_HOME _HC_DIAG_OWNER_PATH _HC_DIAG_OWNER_TOKEN _HC_DIAG_OWNER_ACTIVE _HC_DIAG_OWNER_INVALID \
+  _HC_DIAG_OWNER_FIELDS_READY _HC_DIAG_OWNER_RELEASE _HC_DIAG_OWNER_ROOT \
+  _HC_DIAG_OWNER_HARNESSES _HC_DIAG_OWNER_DEFERRED _HC_DIAG_OWNER_LEAVES
+_HC_DIAG_AUDIT_HOME=""
+_HC_DIAG_AUDIT_VERSION=""
+_HC_DIAG_AUDIT_ACTIVE=0
+_HC_DIAG_AUDIT_PATHS=()
+_HC_DIAG_AUDIT_KINDS=()
+_HC_DIAG_AUDIT_ROWS=()
+_HC_DIAG_EXTRA_HOME=""
+_HC_DIAG_EXTRA_VERSION=""
+_HC_DIAG_EXTRA_ACTIVE=0
+_HC_DIAG_EXTRA_INVALID=0
+_HC_DIAG_EXTRA_PATHS=()
+_HC_DIAG_EXTRA_KINDS=()
+_HC_DIAG_EXTRA_ROWS=()
+_HC_DIAG_OWNER_HOME=""
+_HC_DIAG_OWNER_PATH=""
+_HC_DIAG_OWNER_TOKEN=""
+_HC_DIAG_OWNER_ACTIVE=0
+_HC_DIAG_OWNER_INVALID=0
+_HC_DIAG_OWNER_FIELDS_READY=0
+_HC_DIAG_OWNER_RELEASE=""
+_HC_DIAG_OWNER_ROOT=""
+_HC_DIAG_OWNER_HARNESSES=""
+_HC_DIAG_OWNER_DEFERRED=""
+_HC_DIAG_OWNER_LEAVES=""
+export -n _HC_DIAG_AUDIT_HOME _HC_DIAG_AUDIT_VERSION _HC_DIAG_AUDIT_ACTIVE \
+  _HC_DIAG_AUDIT_PATHS _HC_DIAG_AUDIT_KINDS _HC_DIAG_AUDIT_ROWS \
+  _HC_DIAG_EXTRA_HOME _HC_DIAG_EXTRA_VERSION _HC_DIAG_EXTRA_ACTIVE _HC_DIAG_EXTRA_INVALID \
+  _HC_DIAG_EXTRA_PATHS _HC_DIAG_EXTRA_KINDS _HC_DIAG_EXTRA_ROWS \
+  _HC_DIAG_OWNER_HOME _HC_DIAG_OWNER_PATH _HC_DIAG_OWNER_TOKEN _HC_DIAG_OWNER_ACTIVE _HC_DIAG_OWNER_INVALID \
+  _HC_DIAG_OWNER_FIELDS_READY _HC_DIAG_OWNER_RELEASE _HC_DIAG_OWNER_ROOT \
+  _HC_DIAG_OWNER_HARNESSES _HC_DIAG_OWNER_DEFERRED _HC_DIAG_OWNER_LEAVES
+
+_hc_portable_clear_audit_scope() {
+  _HC_DIAG_AUDIT_HOME=""
+  _HC_DIAG_AUDIT_VERSION=""
+  _HC_DIAG_AUDIT_ACTIVE=0
+  _HC_DIAG_AUDIT_PATHS=()
+  _HC_DIAG_AUDIT_KINDS=()
+  _HC_DIAG_AUDIT_ROWS=()
+  _HC_DIAG_EXTRA_HOME=""
+  _HC_DIAG_EXTRA_VERSION=""
+  _HC_DIAG_EXTRA_ACTIVE=0
+  _HC_DIAG_EXTRA_INVALID=0
+  _HC_DIAG_EXTRA_PATHS=()
+  _HC_DIAG_EXTRA_KINDS=()
+  _HC_DIAG_EXTRA_ROWS=()
+  _HC_DIAG_OWNER_HOME=""
+  _HC_DIAG_OWNER_PATH=""
+  _HC_DIAG_OWNER_TOKEN=""
+  _HC_DIAG_OWNER_ACTIVE=0
+  _HC_DIAG_OWNER_INVALID=0
+  _HC_DIAG_OWNER_FIELDS_READY=0
+  _HC_DIAG_OWNER_RELEASE=""
+  _HC_DIAG_OWNER_ROOT=""
+  _HC_DIAG_OWNER_HARNESSES=""
+  _HC_DIAG_OWNER_DEFERRED=""
+  _HC_DIAG_OWNER_LEAVES=""
+  export -n _HC_DIAG_AUDIT_HOME _HC_DIAG_AUDIT_VERSION _HC_DIAG_AUDIT_ACTIVE \
+    _HC_DIAG_AUDIT_PATHS _HC_DIAG_AUDIT_KINDS _HC_DIAG_AUDIT_ROWS \
+    _HC_DIAG_EXTRA_HOME _HC_DIAG_EXTRA_VERSION _HC_DIAG_EXTRA_ACTIVE _HC_DIAG_EXTRA_INVALID \
+    _HC_DIAG_EXTRA_PATHS _HC_DIAG_EXTRA_KINDS _HC_DIAG_EXTRA_ROWS \
+    _HC_DIAG_OWNER_HOME _HC_DIAG_OWNER_PATH _HC_DIAG_OWNER_TOKEN _HC_DIAG_OWNER_ACTIVE _HC_DIAG_OWNER_INVALID \
+    _HC_DIAG_OWNER_FIELDS_READY _HC_DIAG_OWNER_RELEASE _HC_DIAG_OWNER_ROOT \
+    _HC_DIAG_OWNER_HARNESSES _HC_DIAG_OWNER_DEFERRED _HC_DIAG_OWNER_LEAVES
+}
+
+_hc_portable_audit_scope_matches() {
+  local -a _TRELLIS_RELEASE_STAMP_PATHS _TRELLIS_RELEASE_STAMP_KINDS _TRELLIS_RELEASE_STAMP_ROWS
+  [ "${#_HC_DIAG_AUDIT_PATHS[@]}" -gt 0 ] || return 1
+  _TRELLIS_RELEASE_STAMP_PATHS=("${_HC_DIAG_AUDIT_PATHS[@]}")
+  _TRELLIS_RELEASE_STAMP_KINDS=("${_HC_DIAG_AUDIT_KINDS[@]}")
+  _TRELLIS_RELEASE_STAMP_ROWS=("${_HC_DIAG_AUDIT_ROWS[@]}")
+  _release_stamp_matches
+}
+
+_hc_portable_extra_scope_matches() {
+  local -a _TRELLIS_RELEASE_STAMP_PATHS _TRELLIS_RELEASE_STAMP_KINDS _TRELLIS_RELEASE_STAMP_ROWS
+  [ "${#_HC_DIAG_EXTRA_PATHS[@]}" -gt 0 ] || return 1
+  _TRELLIS_RELEASE_STAMP_PATHS=("${_HC_DIAG_EXTRA_PATHS[@]}")
+  _TRELLIS_RELEASE_STAMP_KINDS=("${_HC_DIAG_EXTRA_KINDS[@]}")
+  _TRELLIS_RELEASE_STAMP_ROWS=("${_HC_DIAG_EXTRA_ROWS[@]}")
+  _release_stamp_matches
+}
+
+_hc_portable_owner_scope_matches() {
+  local token
+  token="$(_local_registry_file_token "${_HC_DIAG_OWNER_PATH%/*}" "$_HC_DIAG_OWNER_PATH" "$_HC_DIAG_OWNER_HOME")" || return 1
+  export -n token
+  [ "$token" = "$_HC_DIAG_OWNER_TOKEN" ]
+}
+
+_hc_portable_audit_scopes_match() {
+  [ "$_HC_DIAG_EXTRA_INVALID" = 0 ] && [ "$_HC_DIAG_OWNER_INVALID" = 0 ] || return 1
+  [ "$_HC_DIAG_AUDIT_ACTIVE" != 1 ] || _hc_portable_audit_scope_matches || return 1
+  [ "$_HC_DIAG_EXTRA_ACTIVE" != 1 ] || _hc_portable_extra_scope_matches || return 1
+  [ "$_HC_DIAG_OWNER_ACTIVE" != 1 ] || _hc_portable_owner_scope_matches || return 1
+}
+
+# Capture owner identity before any owner checks. A coarse/unavailable token
+# leaves owner evaluation on the legacy route, without a cached snapshot.
+_hc_portable_owner_scope_begin() {
+  local home="$1" owner="$2" token
+  [ "$_HC_DIAG_AUDIT_ACTIVE" = 1 ] || return 0
+  if [ "$_HC_DIAG_OWNER_ACTIVE" = 1 ]; then
+    if [ "$_HC_DIAG_OWNER_HOME" = "$home" ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ] &&
+       _hc_portable_owner_scope_matches; then return 0; fi
+    _HC_DIAG_OWNER_INVALID=1
+    export -n _HC_DIAG_OWNER_INVALID
+    return 1
+  fi
+  token="$(_local_registry_file_token "${owner%/*}" "$owner" "$home")" || return 0
+  export -n token
+  _HC_DIAG_OWNER_HOME="$home"
+  _HC_DIAG_OWNER_PATH="$owner"
+  _HC_DIAG_OWNER_TOKEN="$token"
+  _HC_DIAG_OWNER_ACTIVE=1
+  export -n _HC_DIAG_OWNER_HOME _HC_DIAG_OWNER_PATH _HC_DIAG_OWNER_TOKEN _HC_DIAG_OWNER_ACTIVE
+}
+
+# After the canonical owner predicate, decode all owner fields needed by the
+# surface predicate in one jq pass. Its result is never an ownership verdict.
+# The original file remains the input to the unchanged render and owned-key
+# checks, and must match this capture through the final operation postflight.
+_hc_portable_owner_capture_surface_fields() {
+  local owner="$1" release root harnesses deferred leaves
+  [ "$_HC_DIAG_OWNER_ACTIVE" = 1 ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ] || return 0
+  if ! _hc_portable_owner_scope_matches; then
+    _HC_DIAG_OWNER_INVALID=1
+    export -n _HC_DIAG_OWNER_INVALID
+    return 1
+  fi
+  if IFS= read -r -d '' release && IFS= read -r -d '' root &&
+     IFS= read -r -d '' harnesses && IFS= read -r -d '' deferred &&
+     IFS= read -r -d '' leaves; then
+    _HC_DIAG_OWNER_RELEASE="$release"
+    _HC_DIAG_OWNER_ROOT="$root"
+    _HC_DIAG_OWNER_HARNESSES="$harnesses"
+    _HC_DIAG_OWNER_DEFERRED="$deferred"
+    _HC_DIAG_OWNER_LEAVES="$leaves"
+    _HC_DIAG_OWNER_FIELDS_READY=1
+    export -n _HC_DIAG_OWNER_RELEASE _HC_DIAG_OWNER_ROOT _HC_DIAG_OWNER_HARNESSES \
+      _HC_DIAG_OWNER_DEFERRED _HC_DIAG_OWNER_LEAVES _HC_DIAG_OWNER_FIELDS_READY
+  fi < <(jq -j '
+    . as $owner | ($owner.artifacts + ($owner.pre_existing // [])) as $all
+    | (any($all[]; .path | startswith(".pi/"))) as $has_pi
+    | ($owner.release // ""), "\u0000", $owner.worktree_root, "\u0000",
+      ([$all[] | if (.path | startswith(".codex/")) then "codex"
+        elif (.path | startswith(".pi/")) then "pi"
+        elif (.path | startswith(".claude/")) then "claude"
+        elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
+        else empty end] | unique | sort | tojson), "\u0000",
+      (($owner.pre_existing // []) | tojson), "\u0000",
+      ([$owner.artifacts[] | select(.kind != "parent" and .kind != "directory")
+        | {kind:.kind,path:.path,target:(.target // null)}] | sort_by(.path, .kind) | tojson), "\u0000"
+  ' "$owner" 2>/dev/null)
+  export -n release root harnesses deferred leaves
+  if ! _hc_portable_owner_scope_matches; then
+    _HC_DIAG_OWNER_INVALID=1
+    export -n _HC_DIAG_OWNER_INVALID
+    return 1
+  fi
+}
+
+# A checkout can select a different attachment release from the active CLI.
+# Bind that second release independently, in this shell, before reusing it.
+# A missing/coarse stamp leaves that release on the unchanged legacy path.
+_hc_portable_prepare_extra_audit() {
+  local home="$1" version="$2" release_dir rc=0
+  if ! release_dir="$(TRELLIS_HOME="$home" release_store_release_path "$version" 2>/dev/null)" ||
+     ! release_stamp_check "$home" "$release_dir" || [ -z "${_TRELLIS_RELEASE_STAMP_KEY:-}" ]; then
+    TRELLIS_HOME="$home" release_store_audit "$version"
+    return "$?"
+  fi
+  _HC_DIAG_EXTRA_PATHS=("${_TRELLIS_RELEASE_STAMP_PATHS[@]}")
+  _HC_DIAG_EXTRA_KINDS=("${_TRELLIS_RELEASE_STAMP_KINDS[@]}")
+  _HC_DIAG_EXTRA_ROWS=("${_TRELLIS_RELEASE_STAMP_ROWS[@]}")
+  export -n _HC_DIAG_EXTRA_PATHS _HC_DIAG_EXTRA_KINDS _HC_DIAG_EXTRA_ROWS
+  # This first comparison binds the stamp's lists. One that cannot be made
+  # leaves the release on the legacy path, as a missing stamp does.
+  if ! _hc_portable_extra_scope_matches; then
+    _HC_DIAG_EXTRA_PATHS=() _HC_DIAG_EXTRA_KINDS=() _HC_DIAG_EXTRA_ROWS=()
+    TRELLIS_HOME="$home" release_store_audit "$version"
+    return "$?"
+  fi
+  _TRELLIS_RELEASE_STORE_VERIFY_MEMO=""
+  export -n _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+  TRELLIS_HOME="$home" release_store_audit "$version" || rc=$?
+  export -n _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+  if ! _hc_portable_extra_scope_matches; then
+    _HC_DIAG_EXTRA_INVALID=1
+    export -n _HC_DIAG_EXTRA_INVALID
+    return "$TRELLIS_EX_STATE"
+  fi
+  [ "$rc" -eq 0 ] || return "$rc"
+  _HC_DIAG_EXTRA_HOME="$home"
+  _HC_DIAG_EXTRA_VERSION="$version"
+  _HC_DIAG_EXTRA_ACTIVE=1
+  export -n _HC_DIAG_EXTRA_HOME _HC_DIAG_EXTRA_VERSION _HC_DIAG_EXTRA_ACTIVE _HC_DIAG_EXTRA_INVALID
+}
+
+_hc_portable_scoped_release_audit() {
+  local home="$1" version="$2"
+  if [ "$_HC_DIAG_AUDIT_ACTIVE" = 1 ]; then
+    if [ "$_HC_DIAG_AUDIT_HOME" = "$home" ] && [ "$_HC_DIAG_AUDIT_VERSION" = "$version" ]; then
+      _hc_portable_audit_scope_matches || return "$TRELLIS_EX_STATE"
+      return 0
+    fi
+    if [ "$_HC_DIAG_EXTRA_ACTIVE" = 1 ]; then
+      if [ "$_HC_DIAG_EXTRA_HOME" = "$home" ] && [ "$_HC_DIAG_EXTRA_VERSION" = "$version" ]; then
+        _hc_portable_extra_scope_matches || return "$TRELLIS_EX_STATE"
+        return 0
+      fi
+    else
+      _hc_portable_prepare_extra_audit "$home" "$version"
+      return "$?"
+    fi
+  fi
+  TRELLIS_HOME="$home" release_store_audit "$version"
+}
+
+# Run the diagnostic body only after the full audit; publish its captured output
+# only if the exact preflight fingerprint still matches after the body. A stamp
+# miss or unavailable/coarse fingerprint takes the unchanged legacy route.
+# Fingerprint drift is a refusal, not permission to use a later stamp or memo.
+_hc_portable_guarded_release_run() {
+  local home="$1" version="$2" release_dir rc=0 audit_rc=0 tmp_root="" out=""
+  shift 2
+  _hc_portable_clear_audit_scope
+  if ! declare -F release_stamp_check >/dev/null || ! declare -F _release_stamp_matches >/dev/null ||
+     ! release_dir="$(TRELLIS_HOME="$home" release_store_release_path "$version" 2>/dev/null)" ||
+     ! release_stamp_check "$home" "$release_dir" || [ -z "${_TRELLIS_RELEASE_STAMP_KEY:-}" ]; then
+    "$@"
+    return "$?"
+  fi
+  _HC_DIAG_AUDIT_PATHS=("${_TRELLIS_RELEASE_STAMP_PATHS[@]}")
+  _HC_DIAG_AUDIT_KINDS=("${_TRELLIS_RELEASE_STAMP_KINDS[@]}")
+  _HC_DIAG_AUDIT_ROWS=("${_TRELLIS_RELEASE_STAMP_ROWS[@]}")
+  export -n _HC_DIAG_AUDIT_PATHS _HC_DIAG_AUDIT_KINDS _HC_DIAG_AUDIT_ROWS
+  # This first comparison binds the stamp's lists. One that cannot be made
+  # takes the legacy route, as a missing stamp does.
+  if ! _hc_portable_audit_scope_matches; then
+    _hc_portable_clear_audit_scope
+    "$@"
+    return "$?"
+  fi
+  # A same-shell full or stamp memo is not this operation's full audit.
+  _TRELLIS_RELEASE_STORE_VERIFY_MEMO=""
+  export -n _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+  TRELLIS_HOME="$home" release_store_audit "$version" >/dev/null 2>&1 || audit_rc=$?
+  export -n _TRELLIS_RELEASE_STORE_VERIFY_MEMO
+  if ! _hc_portable_audit_scope_matches; then
+    _hc_portable_clear_audit_scope
+    echo 'show-config: release changed during audit; refusing' >&2
+    return "$TRELLIS_EX_STATE"
+  fi
+  if [ "$audit_rc" -eq 0 ]; then
+    _HC_DIAG_AUDIT_HOME="$home"
+    _HC_DIAG_AUDIT_VERSION="$version"
+    _HC_DIAG_AUDIT_ACTIVE=1
+    export -n _HC_DIAG_AUDIT_HOME _HC_DIAG_AUDIT_VERSION _HC_DIAG_AUDIT_ACTIVE
+  fi
+  # If the full audit refused, the body may still produce legacy diagnostic
+  # rows, but it cannot reuse a proof. Keep the original fingerprint around
+  # that fallback too: repairing a release mid-operation cannot rebind it.
+  tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/trellis-health-audit.XXXXXX")" || {
+    _hc_portable_clear_audit_scope
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  out="$tmp_root/output"
+  # Keep the callback in this shell: it may discover a distinct attachment
+  # release and add its independent proof to the final postflight.
+  if "$@" > "$out"; then rc=0; else rc=$?; fi
+  if { [ "$audit_rc" -eq 0 ] && ! _hc_portable_audit_scopes_match; } ||
+     { [ "$audit_rc" -ne 0 ] && ! _hc_portable_audit_scope_matches; }; then
+    rm -rf "${tmp_root:?}"
+    _hc_portable_clear_audit_scope
+    echo 'show-config: release or owner changed during diagnostic; refusing stale rows' >&2
+    [ "$rc" -ge "$TRELLIS_EX_STATE" ] && return "$rc"
+    return "$TRELLIS_EX_STATE"
+  fi
+  cat "$out" || rc="$TRELLIS_EX_UNAVAILABLE"
+  rm -rf "${tmp_root:?}"
+  _hc_portable_clear_audit_scope
+  [ "$rc" -ge "$audit_rc" ] || rc="$audit_rc"
+  return "$rc"
+}
+
+# A passed row requires a full audit. Within a guarded diagnostic operation it
+# may reuse that operation's audit only while every captured dependency matches;
+# otherwise release_store_audit never accepts an earlier locate's stamp hit.
 hc_portable_release() {
   local home="$1" version="$2" rc
-  if TRELLIS_HOME="$home" release_store_verify "$version" >/dev/null 2>&1; then
+  if _hc_portable_scoped_release_audit "$home" "$version" >/dev/null 2>&1; then
     echo "immutable release: $version passed installed payload integrity verification"
     return "$HC_OK"
   else
@@ -1868,6 +2235,28 @@ EOF
     return "$HC_WARN"
   fi
   echo "$message"
+  return "$HC_OK"
+}
+
+# C01/UI use mkdir locks with no guessed-stale recovery. A live or abandoned
+# nonce-log lock must be visible, but doctor never removes it or guesses that
+# the holder is dead. Healthy installations stay silent.
+hc_nonce_lock_state() {
+  local home="$1" root worktree lock
+  root="$home/state/turn-baseline"
+  if [ -L "$root" ]; then
+    echo "nonce lock: baseline state root is a symlink: $(hc_diagnostic_escape "$root")"
+    return "$HC_WARN"
+  fi
+  [ -d "$root" ] || return "$HC_OK"
+  for worktree in "$root"/*; do
+    [ -d "$worktree" ] && [ ! -L "$worktree" ] || continue
+    lock="$worktree/.nonces.lock"
+    if [ -e "$lock" ] || [ -L "$lock" ]; then
+      echo "nonce lock: present at $(hc_diagnostic_escape "$lock"); it may be active, so review only after hooks stop"
+      return "$HC_WARN"
+    fi
+  done
   return "$HC_OK"
 }
 
@@ -2012,7 +2401,34 @@ hc_portable_user_owner_matches_payload() {
 # operator content.
 hc_portable_user_owned_keys_match_payload() (
   local owner="$1" plan="$2" render destination planned mode expected actual artifact_sha after_sha
-  local temporary
+  local temporary home release payload template context rendered user_root duplicate_status native_render
+  hc_user_render_owned_values() {
+    printf '%s\n' "$1" | jq -cS '
+      def leaves($value; $path):
+        if ($value | type) == "object" and ($value | length) > 0
+        then [$value | to_entries[] | leaves(.value; $path + [.key])] | add
+        else [{path:$path,value:$value}] end;
+      leaves(.; []) | sort_by(.path)
+    '
+  }
+  hc_user_no_duplicate_owned_hooks() {
+    duplicate_status=0
+    jq -e --argjson keys "$2" '
+      . as $live
+      | any($keys[] | select((.path | length) == 2 and .path[0] == "hooks");
+          . as $owned
+          | [$owned.value[]? | objects | .hooks[]?] as $canonical
+          | [($live | getpath($owned.path))[]? | objects | .hooks[]?] as $actual
+          | any($canonical[]; . as $hook
+              | ([$actual[] | select(. == $hook)] | length)
+                > ([$canonical[] | select(. == $hook)] | length)))
+    ' "$1" >/dev/null 2>&1 || duplicate_status=$?
+    case "$duplicate_status" in
+      0) printf 'user surface: duplicate owned hook registration at %s\n' "$destination" >&2; return 1 ;;
+      1) return 0 ;;
+      *) return 1 ;;
+    esac
+  }
   temporary="$(mktemp "${TMPDIR:-/tmp}/trellis-health-user-render.XXXXXX")" || return 1
   trap 'rm -f "$temporary"' EXIT HUP INT TERM
   while IFS= read -r render; do
@@ -2028,6 +2444,31 @@ hc_portable_user_owned_keys_match_payload() (
     expected="$(printf '%s\n' "$planned" | jq -cS '.expected_owned_keys')" || return 1
     [ "$expected" != null ] || return 1
     actual="$(printf '%s\n' "$render" | jq -cS '.owned_keys | sort_by(.path)')" || return 1
+    native_render=false
+    if printf '%s\n' "$expected" | jq -e 'any(.. | objects; .command? == "__TRELLIS_LAUNCHER__")' >/dev/null; then
+      native_render=true
+      # The verified template metadata is pre-render data. Derive exact native
+      # values against the actual user root, just as the local render proof
+      # does, and never infer authorization from values recorded in the owner.
+      home="${owner%/attachments/user.json}"
+      release="$(jq -r '.release' "$owner")" || return 1
+      payload="$(TRELLIS_HOME="$home" release_store_locate "$release")/payload" || return 1
+      template="$(printf '%s\n' "$planned" | jq -r '.source')" || return 1
+      _attachment_canonical_file "$payload/$template" || return 1
+      context="$(attachment_contextual_render_context "$home")" || return 1
+      user_root="$(printf '%s\n' "$context" | jq -r '.user_home')" || return 1
+      rendered="$(attachment_contextual_template_render "$payload/$template" "$template" "$context" "$user_root")" || return 1
+      expected="$(hc_user_render_owned_values "$rendered")" || return 1
+      if [ "$actual" != "$expected" ]; then
+        # A canonical R2 registration stays valid after client discovery starts
+        # selecting R1. Never force R1 below its support floor.
+        rendered="$(
+          attachment_claude_on_failure_supported() { return 1; }
+          attachment_contextual_template_render "$payload/$template" "$template" "$context" "$user_root"
+        )" || return 1
+        expected="$(hc_user_render_owned_values "$rendered")" || return 1
+      fi
+    fi
     [ "$actual" = "$expected" ] || return 1
     [ "$(printf '%s\n' "$render" | jq -r '.mode')" = "$mode" ] || return 1
     [ "$(printf '%s\n' "$render" | jq -r '.after_mode')" = "$mode" ] || return 1
@@ -2043,9 +2484,15 @@ hc_portable_user_owned_keys_match_payload() (
     [ "$(hc_portable_sha256_file "$temporary")" = "$after_sha" ] || return 1
     jq -e 'type == "object"' "$temporary" >/dev/null 2>&1 || return 1
     _attachment_user_json_keys_match "$temporary" "$expected" || return 1
+    if [ "$native_render" = true ]; then
+      hc_user_no_duplicate_owned_hooks "$temporary" "$expected" || return 1
+    fi
     [ -f "$destination" ] && [ ! -L "$destination" ] || return 1
     _attachment_mode_matches "$destination" "$mode" || return 1
     _attachment_user_json_keys_match "$destination" "$expected" || return 1
+    if [ "$native_render" = true ]; then
+      hc_user_no_duplicate_owned_hooks "$destination" "$expected" || return 1
+    fi
   done < <(jq -c '.renders[]' "$owner")
 )
 
@@ -2153,8 +2600,8 @@ hc_user_skill_roots() {
   local home="$1" trellis_home="$2"
   local release payload_dir store_dir canonical
   local claude_root shared_root pi_root codex_root
-  local root rootdir entry name owned shared_entry
-  local stray="" dangling="" foreign="" unexpected="" dupes="" findings=""
+  local root rootdir entry name owned shared_entry display
+  local stray="" dangling="" foreign="" unexpected="" dupes="" unreadable="" findings=""
   if [ -z "$home" ] || [ ! -d "$home" ]; then
     echo "user skills: account home is unavailable: $home"
     return "$HC_WARN"
@@ -2194,6 +2641,11 @@ hc_user_skill_roots() {
     [ -n "$root" ] || continue
     rootdir="$home/$root"
     [ -d "$rootdir" ] || continue
+    if [ ! -r "$rootdir" ] || [ ! -x "$rootdir" ]; then
+      printf -v display '%q' "$rootdir"
+      unreadable="$unreadable $display"
+      continue
+    fi
     for entry in "$rootdir"/*; do
       [ -e "$entry" ] || [ -L "$entry" ] || continue
       name="${entry##*/}"
@@ -2244,8 +2696,12 @@ hc_user_skill_roots() {
       fi
     done
   done
+  if [ -n "$unreadable" ]; then
+    findings="could not check skill roots:${unreadable} (read or search access unavailable)"
+  fi
   if [ -n "$stray" ]; then
-    findings="stray copy:${stray} (move it into the store with 'trellis skills import <dir>')"
+    [ -z "$findings" ] || findings="${findings}; "
+    findings="${findings}stray copy:${stray} (move it into the store with 'trellis skills import <dir>')"
   fi
   if [ -n "$dangling" ]; then
     [ -n "$findings" ] && findings="${findings}; "
@@ -2354,7 +2810,7 @@ hc_portable_managed_hooks() {
       HC_PORTABLE_HOOK_STATE="conflict"
       return 1
     }
-    _attachment_verify_owner_artifacts "$candidate" "$home" || {
+    _hc_portable_verify_secondary_owner_artifacts "$candidate" "$home" || {
       HC_PORTABLE_HOOK_STATE="conflict"
       return 1
     }
@@ -2611,7 +3067,9 @@ hc_hooks_path_fix_needed() {
 # The write set is every file strict verification ties to that previous path:
 # one passthrough shim per passthrough-eligible hook name in `.husky/_/`, the
 # hooks-enabled owner record, and the previous-hooks-path sidecar every
-# worktree of the checkout shares. Linked worktrees' {"enabled":false} records
+# worktree of the checkout shares. Default hooks dir shims, which a null
+# previous calls for, are removed first: once core.hooksPath names .husky/_,
+# git no longer runs that dir. Linked worktrees' {"enabled":false} records
 # cannot carry a previous path, so they are validated and never written.
 # Shims come from this process's generator, which is the one every verifier
 # uses, so the preflight requires the active CLI release to be the release the
@@ -2622,6 +3080,8 @@ hc_hooks_path_fix_needed() {
 HC_ADOPT_NAMES=""
 HC_ADOPT_BACKUP=""
 HC_ADOPT_CREATED=""
+HC_ADOPT_DEFAULTS=""
+HC_ADOPT_REMOVED=""
 
 # All records name one release, that release is the active CLI release, and its
 # installed payload verifies.
@@ -2657,11 +3117,11 @@ EOF
 }
 
 # The enabled record's previous is present and null, the shared sidecar is one
-# empty line, and the managed dir holds no passthrough-named entry of any type:
-# with previous null strict verification forbids one, so a present entry is
-# foreign.
+# empty line, and every passthrough-named entry in the managed dir is a default
+# hooks dir shim, byte for byte at mode 700: any other entry is foreign.
 _hc_adopt_husky_set_preflight() {
   local root="$1" managed="$2" o="$HC_HOOKS_PATH_ENABLED" entry base found="" stored
+  HC_ADOPT_DEFAULTS=""
   if [ "$(jq -r '.git_hooks | has("previous_hooks_path") and .previous_hooks_path == null' "$o" 2>/dev/null)" != true ]; then
     _hc_hooks_path_refuse "$root" 'the hooks-enabled owner record does not record a null previous core.hooksPath; --adopt-husky adopts only over a null previous' \
       "detach and attach $(hc_diagnostic_escape "$root")"
@@ -2675,7 +3135,13 @@ _hc_adopt_husky_set_preflight() {
   for entry in "$managed"/?* "$managed"/.[!.]* "$managed"/..?*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     base="${entry##*/}"
-    _attachment_hooks_is_passthrough_name "$base" && found="${found:+$found, }$(hc_diagnostic_escape "$base")"
+    _attachment_hooks_is_passthrough_name "$base" || continue
+    if _attachment_hooks_file_matches "$entry" "$(_attachment_hooks_default_passthrough_shim_body "$base")" 700; then
+      HC_ADOPT_DEFAULTS="$HC_ADOPT_DEFAULTS$base
+"
+    else
+      found="${found:+$found, }$(hc_diagnostic_escape "$base")"
+    fi
   done
   if [ -n "$found" ]; then
     _hc_hooks_path_refuse "$root" "the managed dir $(hc_diagnostic_escape "$managed") already holds passthrough-named entries: $found" \
@@ -2726,10 +3192,21 @@ EOF
 _hc_adopt_husky_commit() {
   local home="$1" root="$2" managed="$3" record="$HC_HOOKS_PATH_ENABLED" name tmp json
   HC_ADOPT_CREATED=""
+  HC_ADOPT_REMOVED=""
   HC_ADOPT_BACKUP="$(mktemp -d "${TMPDIR:-/tmp}/trellis-adopt-husky.XXXXXX")" || return 1
   chmod 700 "$HC_ADOPT_BACKUP" || return 1
   cp -p "$managed/previous-hooks-path" "$HC_ADOPT_BACKUP/sidecar" || return 1
   cp -p "$record" "$HC_ADOPT_BACKUP/record" || return 1
+
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    cp -p "$managed/$name" "$HC_ADOPT_BACKUP/default-$name" || return 1
+    rm -f "$managed/$name" || return 1
+    HC_ADOPT_REMOVED="$HC_ADOPT_REMOVED$name
+"
+  done <<EOF
+$HC_ADOPT_DEFAULTS
+EOF
 
   while IFS= read -r name; do
     [ -n "$name" ] || continue
@@ -2764,9 +3241,10 @@ EOF
   _hc_adopt_disabled_unchanged
 }
 
-# Reverse order: sidecar, record, then every shim this repair created. Then
-# re-verify that each is back to its original bytes and mode, each created shim
-# is gone, and every disabled record is unchanged. The backup is kept, and
+# Reverse order: sidecar, record, every shim this repair created, then every
+# default hooks dir shim it removed. Then re-verify that each is back to its
+# original bytes and mode, each created shim is gone (or restored, where it
+# replaced a default one), and every disabled record is unchanged. The backup is kept, and
 # named, when that fails.
 _hc_adopt_husky_rollback() {
   local managed="$1" record="$HC_HOOKS_PATH_ENABLED" name ok=true
@@ -2785,6 +3263,12 @@ _hc_adopt_husky_rollback() {
   done <<EOF
 $HC_ADOPT_CREATED
 EOF
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    _hc_adopt_restore_file "$HC_ADOPT_BACKUP/default-$name" "$managed/$name" || ok=false
+  done <<EOF
+$HC_ADOPT_REMOVED
+EOF
 
   if [ -f "$HC_ADOPT_BACKUP/sidecar" ]; then
     cmp -s "$HC_ADOPT_BACKUP/sidecar" "$managed/previous-hooks-path" &&
@@ -2796,9 +3280,17 @@ EOF
   fi
   while IFS= read -r name; do
     [ -n "$name" ] || continue
+    printf '%s' "$HC_ADOPT_REMOVED" | grep -Fxq -- "$name" && continue
     [ ! -e "$managed/$name" ] && [ ! -L "$managed/$name" ] || ok=false
   done <<EOF
 $HC_ADOPT_CREATED
+EOF
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    cmp -s "$HC_ADOPT_BACKUP/default-$name" "$managed/$name" &&
+      [ "$(_attachment_mode "$HC_ADOPT_BACKUP/default-$name")" = "$(_attachment_mode "$managed/$name")" ] || ok=false
+  done <<EOF
+$HC_ADOPT_REMOVED
 EOF
   _hc_adopt_disabled_unchanged || ok=false
   [ "$ok" = true ] || return 1
@@ -3074,12 +3566,157 @@ hc_portable_remote_default() {
 # byte-identical to the active release's scripts/trellis-launcher.sh; otherwise
 # stay silent. A missing active release is reported by the machine rows.
 hc_launcher_currency() {
-  local user_home="$1" home="$2" installed release release_path payload_launcher
+  local user_home="$1" home="$2" installed release release_path payload_launcher native_manifest result rc pin_lines pinned=0
+  local deps target version digest launcher_digest extra platform launcher_dir launcher_policy
   installed="$user_home/.local/bin/trellis"
+  # A nonempty or duplicated bootstrap pin is an expected native installation.
+  # A broken config/release cannot silently turn it into a legacy OK.
+  if [ -f "$installed" ]; then
+    pin_lines=$(grep '^launcher_native_entry=' "$installed" 2>/dev/null) || pin_lines=""
+    [ -z "$pin_lines" ] || [ "$pin_lines" = "launcher_native_entry=''" ] || pinned=1
+  fi
   release="$(jq -r '.active_cli_release // empty' "$home/config.json" 2>/dev/null)" || release=""
-  [ -n "$release" ] || return "$HC_OK"
-  release_path="$(TRELLIS_HOME="$home" release_store_locate "$release" 2>/dev/null)" || return "$HC_OK"
+  if [ -z "$release" ]; then
+    [ "$pinned" = 0 ] && return "$HC_OK"
+    echo "launcher currency: native bootstrap has no valid active release"
+    return "$HC_ERROR"
+  fi
+  release_path="$(TRELLIS_HOME="$home" release_store_locate "$release" 2>/dev/null)" || {
+    [ "$pinned" = 0 ] && return "$HC_OK"
+    echo "launcher currency: native bootstrap release could not be verified"
+    return "$HC_ERROR"
+  }
   payload_launcher="$release_path/payload/scripts/trellis-launcher.sh"
+  native_manifest="$release_path/payload/core-rules/native/artifacts.json"
+  if [ ! -f "$native_manifest" ] && [ "$pinned" = 1 ]; then
+    echo "launcher currency: native bootstrap has no release manifest"
+    return "$HC_ERROR"
+  fi
+  if [ -f "$native_manifest" ]; then
+    # The verified source template contains blank pin slots; compare the
+    # installed launcher against the *rendered* bytes, not that raw template.
+    # Read the companion through a private no-follow descriptor chain and
+    # hash its bytes; codesign alone is not tamper evidence (F6). Resolve the
+    # launcher's physical directory only after confirming this host has an
+    # asset; legacy-only hosts may not have an installed launcher directory.
+    launcher_policy=$(trellis_home_launcher_directory_policy_python) || {
+      echo "launcher currency: shared launcher directory policy is unavailable"
+      return "$HC_ERROR"
+    }
+    result=$( { printf '%s\n' "$launcher_policy"; /bin/cat <<'PY'
+import hashlib, json, os, platform, re, stat, sys
+home, installed, source, manifest, release = sys.argv[1:]
+def require(ok, why):
+    if not ok: raise ValueError(why)
+def identity(s):
+    return (s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+def read_fd(fd):
+    before=os.fstat(fd); chunks=[]
+    while True:
+        data=os.read(fd,65536)
+        if not data: break
+        chunks.append(data)
+    require(identity(before)==identity(os.fstat(fd)), 'file changed while reading')
+    return b''.join(chunks), before
+def pairs(values):
+    d={}
+    for k,v in values:
+        require(k not in d, 'duplicate manifest key'); d[k]=v
+    return d
+try:
+    with open(manifest,'rb') as f: d=json.load(f,object_pairs_hook=pairs)
+    target={('Darwin','arm64'):'aarch64-apple-darwin',('Linux','x86_64'):'x86_64-unknown-linux-musl',('Linux','aarch64'):'aarch64-unknown-linux-musl'}.get((platform.system(),platform.machine()))
+    require(isinstance(d,dict) and isinstance(d.get('assets'),dict), 'invalid native manifest')
+    if target not in d['assets']: raise SystemExit(10)
+    a=d['assets'][target]; version=d.get('version'); digest=a.get('sha256')
+    require(version==release and re.fullmatch(r'[0-9A-Za-z.+-]+',version or '') and not version.startswith('.'), 'native release mismatch')
+    require(isinstance(digest,str) and re.fullmatch('[0-9a-f]{64}',digest), 'invalid companion digest')
+    require(a.get('path')==target+'/trellis-hooks' and type(a.get('size')) is int, 'invalid companion metadata')
+    home=os.path.realpath(home)
+    fd=os.open(home,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        for part in ('bin','native',version,target,digest):
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd); fd=child; s=os.fstat(fd)
+            require(s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o700, 'native directory is not private')
+        leaf=os.open('trellis-hooks',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+        try:
+            data,s=read_fd(leaf)
+            require(stat.S_ISREG(s.st_mode) and s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o500, 'unsafe native companion')
+            require(identity(s)==identity(os.stat('trellis-hooks',dir_fd=fd,follow_symlinks=False)), 'native companion name changed')
+        finally: os.close(leaf)
+    finally: os.close(fd)
+    require(len(data)==a['size'] and hashlib.sha256(data).hexdigest()==digest, 'native companion digest mismatch')
+    entry=os.path.join(home,'bin','native',version,target,digest,'trellis-hooks')
+    quote=lambda s:"'"+s.replace("'", "'\\''")+"'"
+    rendered=open(source,encoding='utf-8').read()
+    for key,value in (('launcher_native_entry',entry),('launcher_native_sha256',digest),('launcher_native_version',version)):
+        needle=key+"=''\n"; require(rendered.count(needle)==1, 'launcher pin slots invalid')
+        rendered=rendered.replace(needle,key+'='+quote(value)+'\n')
+    launcher_dir=os.path.realpath(os.path.dirname(installed))
+    parent=os.open(launcher_dir,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        directory=os.fstat(parent)
+        require(launcher_directory_safe(directory), 'unsafe launcher directory')
+        leaf=os.open('trellis',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+        try:
+            actual,s=read_fd(leaf)
+            require(stat.S_ISREG(s.st_mode) and s.st_uid==os.getuid() and s.st_mode & 0o111 and not s.st_mode & 0o022, 'unsafe installed launcher')
+            require(identity(s)==identity(os.stat('trellis',dir_fd=parent,follow_symlinks=False)), 'installed launcher name changed')
+        finally: os.close(leaf)
+    finally: os.close(parent)
+    expected=rendered.encode()
+    require(actual==expected, 'installed launcher does not match rendered release')
+    # The ledger is an additional ownership proof, never the source of the
+    # expected bytes: a matching forged launcher/ledger pair is not current.
+    launcher_digest=hashlib.sha256(expected).hexdigest()
+    fd=os.open(home,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        for part in ('bin','launchers',launcher_digest):
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            os.close(fd); fd=child; s=os.fstat(fd)
+            require(s.st_uid==os.getuid() and stat.S_IMODE(s.st_mode)==0o700, 'launcher ledger directory is not private')
+        leaf=os.open('trellis',os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+        try:
+            retained,s=read_fd(leaf)
+            require(stat.S_ISREG(s.st_mode) and s.st_uid==os.getuid() and s.st_nlink==1 and stat.S_IMODE(s.st_mode)==0o500, 'unsafe launcher ledger')
+            require(identity(s)==identity(os.stat('trellis',dir_fd=fd,follow_symlinks=False)), 'launcher ledger name changed')
+        finally: os.close(leaf)
+    finally: os.close(fd)
+    require(retained==expected and hashlib.sha256(retained).hexdigest()==launcher_digest, 'launcher ledger bytes mismatch')
+    print(target,version,digest,launcher_digest)
+except (OSError,ValueError,TypeError,KeyError,UnicodeError) as e:
+    print(str(e),file=sys.stderr); raise SystemExit(1)
+PY
+    } | /usr/bin/python3 -I - "$home" "$installed" "$payload_launcher" "$native_manifest" "$release" ) && {
+      # Reuse the exact path-only release-store ACL listing check used by
+      # Stop, without executing a helper selected from the project checkout.
+      read -r target version digest launcher_digest extra <<< "$result"
+      case "$target" in
+        aarch64-apple-darwin) platform=Darwin ;;
+        x86_64-unknown-linux-musl|aarch64-unknown-linux-musl) platform=Linux ;;
+        *) echo "launcher currency: native target is invalid"; return "$HC_ERROR" ;;
+      esac
+      [ -n "$version" ] && [ -n "$digest" ] && [ -n "$launcher_digest" ] && [ -z "${extra:-}" ] || { echo "launcher currency: native identity is invalid"; return "$HC_ERROR"; }
+      home=$(CDPATH='' cd "$home" 2>/dev/null && pwd -P) || { echo "launcher currency: native home is unavailable"; return "$HC_ERROR"; }
+      launcher_dir=$(CDPATH='' cd "${installed%/*}" 2>/dev/null && pwd -P) || { echo "launcher currency: launcher directory is unavailable"; return "$HC_ERROR"; }
+      deps="${BASH_SOURCE[0]%/*}/../../core-rules/hooks/lib/deps.sh"
+      # shellcheck source=core-rules/hooks/lib/deps.sh
+      if [ ! -f "$deps" ] || ! ( . "$deps"; _se_paths_no_acl "$platform" "$home" "$home/bin" "$home/bin/native" \
+          "$home/bin/native/$version" "$home/bin/native/$version/$target" "$home/bin/native/$version/$target/$digest" \
+          "$home/bin/native/$version/$target/$digest/trellis-hooks" "$home/bin/launchers" "$home/bin/launchers/$launcher_digest" \
+          "$home/bin/launchers/$launcher_digest/trellis" "$launcher_dir" "$launcher_dir/trellis" ); then
+        echo "launcher currency: native bootstrap, launcher or ledger path carries an ACL or could not be inspected"
+        return "$HC_ERROR"
+      fi
+      return "$HC_OK"
+    }
+    rc=$?
+    if [ "$rc" -ne 10 ] || [ "$pinned" = 1 ]; then
+      echo "launcher currency: native bootstrap or companion is invalid: $(hc_diagnostic_escape "$result")"
+      return "$HC_ERROR"
+    fi
+  fi
   [ -f "$payload_launcher" ] || return "$HC_OK"
   if [ -f "$installed" ] && cmp -s "$installed" "$payload_launcher"; then
     return "$HC_OK"
@@ -3173,7 +3810,8 @@ hc_stop_checks_fast() {
   return "$HC_WARN"
 }
 
-# WARN when a bright-line guard registration is not stall-safe: not started
+# WARN when a bright-line guard registration (the PreToolUse guards and the
+# UserPromptExpansion skill-slash-guard) is not stall-safe: not started
 # through guard-supervise.pl, a client timeout below 30 s, or a supervisor file
 # that is not there (the entry would then deny every guarded call). The
 # attach-rendered Claude settings must also carry `onFailure: "block"` when the
@@ -3182,15 +3820,75 @@ hc_stop_checks_fast() {
 # .claude/settings.json is checked too.
 hc_guard_registrations() {
   local root="$1" file rows found="" guard timeout on_failure sup path problem bad
-  local on_failure_supported=""
+  local on_failure_supported="" harness state deps home context template source expected
+  # Report malformed settings by path before the shared fail-closed arming
+  # check; a syntax error is not necessarily a native companion problem.
+  for file in .claude/settings.local.json .claude/settings.json .codex/hooks.json; do
+    if [ -f "$root/$file" ] && [ -r "$root/$file" ] && command -v jq >/dev/null 2>&1 &&
+      ! jq -se 'length == 1 and (.[0] | type == "object")' "$root/$file" >/dev/null 2>&1; then
+      echo "guard registration: $file: malformed settings"
+      return "$HC_ERROR"
+    fi
+  done
+  # Native is not represented by legacy .sh filenames. Inspect the same typed
+  # prompt arming state used by Stop before the legacy diagnostics below.
+  deps="${BASH_SOURCE[0]%/*}/../../core-rules/hooks/lib/deps.sh"
+  for harness in claude codex; do
+    if [ ! -f "$deps" ]; then
+      echo "guard registration: cannot inspect native baseline wiring"
+      return "$HC_ERROR"
+    fi
+    # shellcheck source=core-rules/hooks/lib/deps.sh disable=SC1090
+    state="$(. "$deps"; _se_turn_baseline_arming "$root" "$harness")" || state=unknown
+    case "$state" in
+      unknown)
+        echo "guard registration: $harness native wiring or companion could not be verified"
+        return "$HC_ERROR" ;;
+      native)
+        home="${TRELLIS_HOME:-${HOME%/}/.trellis}"
+        context="$(attachment_contextual_render_context "$home" 2>/dev/null)" || {
+          echo "guard registration: $harness native render context is invalid"; return "$HC_ERROR";
+        }
+        if [ "$harness" = claude ]; then
+          file=.claude/settings.local.json; template=claude-settings.local.json
+        else
+          file=.codex/hooks.json; template=codex-hooks.local.json
+        fi
+        source="$root/.trellis/runtime/core-rules/templates/$template"
+        expected="$(attachment_contextual_template_render "$source" "core-rules/templates/$template" "$context" "$root" 2>/dev/null)" || {
+          echo "guard registration: $harness native expected render is unavailable"; return "$HC_ERROR";
+        }
+        # Compare exact effective command/argv and matcher, allowing a longer
+        # client timeout and independent project hooks. A native row cannot
+        # silently disappear just because legacy .sh regexes matched zero.
+        if ! jq -e --argjson expected "$expected" --arg h "$harness" '
+          def rows($doc): [ ["PreToolUse","UserPromptExpansion"][] as $event
+            | $doc.hooks[$event][]? | . as $block | .hooks[]?
+            | {event:$event, type, matcher:($block.matcher // ".*"), command, args:(.args // null), onFailure:(.onFailure // null), timeout} ];
+          def covers($rows; $name): any($rows[]; . as $r | $r.event == "PreToolUse" and (try ($name | test($r.matcher)) catch false));
+          rows($expected) as $want | rows(.) as $have |
+          ($want | length > 0)
+          and covers($want; "Bash") and covers($want; "Edit") and covers($want; "MultiEdit") and covers($want; "Write")
+          and (if $h == "claude" then covers($want; "Skill") and any($want[]; .event == "UserPromptExpansion") else true end)
+          and all($want[]; . as $w | any($have[]; .event == $w.event and .matcher == $w.matcher
+            and .type == "command" and .type == $w.type and .command == $w.command and .args == $w.args and .onFailure == $w.onFailure
+            and (.timeout | type == "number" and . >= 30 and floor == .)))
+        ' "$root/$file" >/dev/null 2>&1; then
+          echo "guard registration: $harness native member coverage or wiring differs from its expected render"
+          return "$HC_ERROR"
+        fi ;;
+      unarmed|legacy) ;;
+      *) echo "guard registration: invalid $harness arming state"; return "$HC_ERROR" ;;
+    esac
+  done
   for file in .claude/settings.local.json .claude/settings.json .codex/hooks.json; do
     [ -f "$root/$file" ] || continue
     # Exec form (`args`) names the supervisor as the argument after
     # `guard-supervise`; shell form quotes it inside the command string.
     if ! rows="$(jq -r '
-      .hooks.PreToolUse[]?.hooks[]?
+      (.hooks.PreToolUse[]?, .hooks.UserPromptExpansion[]?) | .hooks[]?
       | ([.command // ""] + (.args // []) | join(" ")) as $text
-      | select($text | test("/(block-destructive|reread-guard|skill-preload-guard)\\.sh"))
+      | select($text | test("/(block-destructive|reread-guard|skill-preload-guard|skill-slash-guard)\\.sh"))
       | [($text | capture("/(?<g>[a-z-]+)\\.sh") | .g), (.timeout // "unset"), (.onFailure // "none"),
          (if has("args")
           then (.args | index("guard-supervise")) as $i | if $i == null then "" else .args[$i + 1] // "" end
@@ -3253,11 +3951,351 @@ hc_portable_owner_without_runtime_exact() {
   return 0
 }
 
+# A private, conservative implementation of the canonical owner-artifact
+# predicates for a single guarded diagnostic. Metadata and Git identity still
+# use the canonical checks. The child holds each traversed directory and leaf
+# through one typed jq comparison and postflight; no verdict is cached. Any
+# unsupported shape, changed input, or operational error is a miss, and the
+# caller asks the original predicates for their exact result and diagnostics.
+_hc_portable_owner_artifacts_batch() {
+  local owner="$1" home="$2" record root verdict
+  command -v python3 >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || return 1
+  record="$(jq -c . "$owner")" || return 1
+  _attachment_contextual_render_context_record_valid "$record" "$home" || return 1
+  root="$(printf '%s\n' "$record" | jq -r '.worktree_root')" || return 1
+  [ -d "$root" ] || return 1
+  _attachment_validate_roots "$record" || return 1
+  _attachment_validate_ids "$record" || return 1
+  _attachment_render_pairings_valid "$record" || return 1
+  verdict="$(python3 -I - "$root" 3<<<"$record" <<'PY'
+import base64
+import hashlib
+import json
+import os
+import stat
+import subprocess
+import sys
+
+# Bounds only select the optimization: exceeding one takes the legacy path.
+MAX_RECORD = 8 * 1024 * 1024
+MAX_RENDER = 8 * 1024 * 1024
+MAX_FILE = 64 * 1024 * 1024
+
+
+def miss():
+    raise ValueError('owner batch miss')
+
+
+def fingerprint(info, qualify=True):
+    if qualify and info.st_ctime_ns % 1000000 == 0:
+        miss()
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+            info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def components(value, absolute=False):
+    if not isinstance(value, str) or not value or value.startswith('/') != absolute:
+        miss()
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        miss()
+    value.encode('utf-8')
+    parts = value[1:].split('/') if absolute else value.split('/')
+    if any(part in ('', '.', '..') for part in parts):
+        miss()
+    return tuple(parts)
+
+
+# Mirror the accepting subset of settings_owned_json detail. jq alone cannot
+# implement the type-strict numeric comparison (1 differs from 1.0)
+# or detect duplicate document keys. A miss always delegates to that planner.
+def unique_pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            miss()
+        result[key] = value
+    return result
+
+
+def same(left, right):
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return set(left) == set(right) and all(same(left[key], right[key]) for key in left)
+    if type(left) is list:
+        return len(left) == len(right) and all(same(a, b) for a, b in zip(left, right))
+    return left == right
+
+
+def owned_matches(document, keys):
+    current = json.loads(document.decode('utf-8'), object_pairs_hook=unique_pairs)
+    if type(current) is not dict or type(keys) is not list:
+        miss()
+    seen = []
+    for key in keys:
+        if type(key) is not dict or set(key) != {'path', 'value'}:
+            miss()
+        path = key['path']
+        if (type(path) is not list or not path or
+                any(type(part) is not str or not part or
+                    any(ord(ch) < 32 for ch in part) for part in path) or
+                any(path[:len(old)] == old or old[:len(path)] == path for old in seen)):
+            miss()
+        seen.append(path)
+        actual = current
+        for part in path:
+            if type(actual) is not dict or part not in actual:
+                miss()
+            actual = actual[part]
+        expected = key['value']
+        if len(path) == 2 and path[0] == 'hooks':
+            if type(actual) is not list or type(expected) is not list or len(actual) < len(expected):
+                miss()
+            for block, owned in zip(actual, expected):
+                if (type(block) is not dict or type(owned) is not dict or
+                        'hooks' not in owned or set(block) != set(owned) or
+                        type(block.get('hooks')) is not list or type(owned['hooks']) is not list or
+                        any(not same(block[name], value) for name, value in owned.items() if name != 'hooks') or
+                        len(block['hooks']) < len(owned['hooks']) or
+                        any(not same(a, b) for a, b in zip(block['hooks'], owned['hooks']))):
+                    miss()
+        elif not same(actual, expected):
+            miss()
+
+
+try:
+    raw = os.fdopen(3, 'rb').read(MAX_RECORD + 1)
+    if len(raw) > MAX_RECORD:
+        miss()
+    owner = json.loads(raw)
+    root = sys.argv[1]
+    if not isinstance(owner, dict) or owner.get('worktree_root') != root:
+        miss()
+    artifacts = owner.get('artifacts')
+    renders = owner.get('renders') or []
+    if not isinstance(artifacts, list) or not isinstance(renders, list):
+        miss()
+    render_paths = set()
+    for render in renders:
+        if not isinstance(render, dict):
+            miss()
+        components(render.get('path'))
+        if render['path'] in render_paths or not isinstance(render.get('owned_keys'), list):
+            miss()
+        render_paths.add(render['path'])
+
+    flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags_file = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+    root_fd = os.open('/', flags_dir)
+    # Root is the permanent namespace anchor, not a named child. Some systems
+    # report its ctime only to whole seconds; all named entries must be fine.
+    held = [(root_fd, None, None, fingerprint(os.fstat(root_fd), False), False)]
+    directories = {(): root_fd}
+    empty_directories = []
+
+    def open_directory(parent_fd, name):
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(before.st_mode):
+            miss()
+        expected = fingerprint(before)
+        fd = os.open(name, flags_dir, dir_fd=parent_fd)
+        held.append((fd, parent_fd, name, expected, True))
+        if fingerprint(os.fstat(fd)) != expected:
+            miss()
+        return fd
+
+    root_parts = components(root, True)
+    for index, name in enumerate(root_parts):
+        prefix = root_parts[:index + 1]
+        directories[prefix] = open_directory(directories[root_parts[:index]], name)
+
+    def parent_and_name(path):
+        parts = components(path)
+        prefix = root_parts
+        for name in parts[:-1]:
+            child = prefix + (name,)
+            if child not in directories:
+                directories[child] = open_directory(directories[prefix], name)
+            prefix = child
+        return directories[prefix], parts[-1]
+
+    def regular(parent_fd, name, mode, expected_hash=None, render=False):
+        before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            miss()
+        expected = fingerprint(before)
+        if mode is not None and (not isinstance(mode, str) or len(mode) != 4 or
+                                 mode[0] != '0' or any(ch not in '01234567' for ch in mode) or
+                                 format(stat.S_IMODE(before.st_mode), 'o') != mode[1:]):
+            miss()
+        fd = os.open(name, flags_file, dir_fd=parent_fd)
+        held.append((fd, parent_fd, name, expected, True))
+        if fingerprint(os.fstat(fd)) != expected:
+            miss()
+        digest = hashlib.sha256()
+        blocks = []
+        size = 0
+        while True:
+            block = os.read(fd, 131072)
+            if not block:
+                break
+            size += len(block)
+            if size > (MAX_RENDER if render else MAX_FILE):
+                miss()
+            if render:
+                blocks.append(block)
+            else:
+                digest.update(block)
+        if fingerprint(os.fstat(fd)) != expected:
+            miss()
+        if not render and digest.hexdigest() != expected_hash:
+            miss()
+        return b''.join(blocks) if render else None
+
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            miss()
+        path = artifact.get('path')
+        components(path)
+        if path in render_paths:
+            continue
+        parent_fd, name = parent_and_name(path)
+        kind = artifact.get('kind')
+        if kind == 'file':
+            if 'mode' in artifact and not isinstance(artifact['mode'], str):
+                miss()
+            regular(parent_fd, name, artifact.get('mode') if 'mode' in artifact else None,
+                    artifact.get('sha256'))
+        elif kind == 'symlink':
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if not stat.S_ISLNK(before.st_mode):
+                miss()
+            expected = fingerprint(before)
+            if os.readlink(name, dir_fd=parent_fd) != artifact.get('target'):
+                miss()
+            held.append((None, parent_fd, name, expected, True))
+        elif kind in ('directory', 'parent'):
+            parts = root_parts + components(path)
+            if parts not in directories:
+                directories[parts] = open_directory(parent_fd, name)
+            fd = directories[parts]
+            if kind == 'directory':
+                if os.listdir(fd):
+                    miss()
+                empty_directories.append(fd)
+        else:
+            miss()
+
+    documents = []
+    document_bytes = 0
+    for render in renders:
+        if not isinstance(render.get('after_mode'), str):
+            miss()
+        parent_fd, name = parent_and_name(render['path'])
+        document = regular(parent_fd, name, render['after_mode'], render=True)
+        document.decode('utf-8')
+        document_bytes += len(document)
+        if document_bytes > MAX_RENDER:
+            miss()
+        documents.append(document)
+    for document, render in zip(documents, renders):
+        owned_matches(document, render['owned_keys'])
+    # Frame each document as base64, not raw JSON: even a malformed document
+    # cannot close the array and replace the owner or another document. The
+    # additional jq pass checks typed keys; Python above enforces the stricter
+    # canonical numeric, duplicate-key and positional-prefix rules.
+    encoded = [base64.b64encode(document).decode('ascii') for document in documents]
+    request = b'{"owner":' + raw + b',"documents":' + json.dumps(encoded).encode('ascii') + b'}'
+    jq_filter = r'''
+      def lookup($value; $path):
+        reduce $path[] as $key ({value:$value,exists:true};
+          if .exists and (.value | type) == "object" and (.value | has($key))
+          then .value = .value[$key] else .exists = false end);
+      def matches($actual; $expected; $path):
+        if ($path | length) == 2 and $path[0] == "hooks" then
+          if ($actual | type) != "array" or ($expected | type) != "array"
+             or ($actual | length) < ($expected | length) then false
+          else all(range(0; ($expected | length));
+            . as $i | $actual[$i] as $block | $expected[$i] as $owned
+            | if ($block | type) != "object" or ($owned | type) != "object"
+                 or ($block.hooks | type) != "array" or ($owned.hooks | type) != "array"
+              then false
+              else ($block | keys) == ($owned | keys)
+                and all(($owned | keys[] | select(. != "hooks")); . as $k | $block[$k] == $owned[$k])
+                and ($block.hooks | length) >= ($owned.hooks | length)
+                and all(range(0; ($owned.hooks | length)); . as $j | $block.hooks[$j] == $owned.hooks[$j])
+              end)
+          end
+        else $actual == $expected end;
+      . as $input | ($input.owner.renders // []) as $renders
+      | (($input.documents | length) == ($renders | length))
+        and all(range(0; ($renders | length));
+          . as $i | ($input.documents[$i] | @base64d | fromjson) as $current | $renders[$i] as $render
+          | ($current | type) == "object"
+            and all($render.owned_keys[];
+              . as $owned | lookup($current; $owned.path) as $found
+              | $found.exists and matches($found.value; $owned.value; $owned.path)))
+    '''
+    result = subprocess.run(['jq', '-ce', jq_filter], input=request,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0 or result.stdout != b'true\n':
+        miss()
+    for fd, parent_fd, name, expected, qualified in held:
+        if fd is not None and fingerprint(os.fstat(fd), qualified) != expected:
+            miss()
+        if parent_fd is not None and fingerprint(
+                os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != expected:
+            miss()
+    if any(os.listdir(fd) for fd in empty_directories):
+        miss()
+    print('ok')
+except (AttributeError, KeyError, OSError, TypeError, ValueError, OverflowError,
+        UnicodeError, subprocess.SubprocessError):
+    raise SystemExit(1)
+PY
+)" || return 1
+  [ "$verdict" = ok ]
+}
+
+_hc_portable_verify_owner_artifacts() {
+  local owner="$1" home="$2"
+  if [ "$_HC_DIAG_AUDIT_ACTIVE" = 1 ] && [ "$_HC_DIAG_OWNER_ACTIVE" = 1 ] &&
+     [ "$_HC_DIAG_OWNER_HOME" = "$home" ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ] &&
+     _hc_portable_owner_scope_matches &&
+     _hc_portable_owner_artifacts_batch "$owner" "$home" >/dev/null 2>&1 &&
+     _hc_portable_owner_scope_matches; then
+    return 0
+  fi
+  _attachment_verify_owner_artifacts "$owner" "$home"
+}
+
+# Hook authority can belong to another worktree. Its owner gets an independent
+# before/after token; it is never placed in the primary owner's memo or exported.
+# Any uncertainty, including a changed token, delegates to the original check.
+_hc_portable_verify_secondary_owner_artifacts() {
+  local owner="$1" home="$2" _hc_secondary_before="" _hc_secondary_after=""
+  export -n _hc_secondary_before _hc_secondary_after
+  if [ "$_HC_DIAG_AUDIT_ACTIVE" = 1 ] && [ "$_HC_DIAG_OWNER_ACTIVE" = 1 ] &&
+     [ "$_HC_DIAG_OWNER_HOME" = "$home" ] && [ "$_HC_DIAG_OWNER_PATH" != "$owner" ] &&
+     _hc_portable_owner_scope_matches &&
+     _hc_secondary_before="$(_local_registry_file_token "${owner%/*}" "$owner" "$home")" &&
+     export -n _hc_secondary_before && [ -n "$_hc_secondary_before" ] &&
+     _hc_portable_owner_artifacts_batch "$owner" "$home" >/dev/null 2>&1 &&
+     _hc_secondary_after="$(_local_registry_file_token "${owner%/*}" "$owner" "$home")" &&
+     export -n _hc_secondary_after && [ "$_hc_secondary_before" = "$_hc_secondary_after" ] &&
+     _hc_portable_owner_scope_matches; then
+    return 0
+  fi
+  _attachment_verify_owner_artifacts "$owner" "$home"
+}
+
 HC_PORTABLE_OWNER_STATE=""
 HC_PORTABLE_OWNER_HOOKS_ONLY=false
 # Pi symlink owners record literal targets; the shared validator also checks
 # resolved bytes against release.json and validates literal parent modes.
 hc_portable_pi_artifacts() {
+  # Doctor/show-config accept the sole trellis.ts link plus sealed runtime rule
+  # data; the shared validator requires a dispatcher only for older manifests.
   local owner="$1" root="$2" payload="$3" source_root
   jq -e 'any((.artifacts + (.pre_existing // []))[]; .path | startswith(".pi/"))' \
     "$owner" >/dev/null 2>&1 || return 0
@@ -3360,7 +4398,7 @@ hc_portable_owner() {
     return "$HC_ERROR"
   fi
   local artifact_diagnostic
-  if ! artifact_diagnostic="$(_attachment_verify_owner_artifacts "$owner" "$home" 2>&1)"; then
+  if ! artifact_diagnostic="$(_hc_portable_verify_owner_artifacts "$owner" "$home" 2>&1)"; then
     HC_PORTABLE_OWNER_STATE="conflict"
     # show-config reports the last line, so the finding goes after its detail.
     [ -z "$artifact_diagnostic" ] || printf '%s\n' "$artifact_diagnostic"
@@ -3409,7 +4447,7 @@ hc_portable_exclude_parse() {
   fi
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 - "$file" "$block_file" <<'PY'
+  python3 -I - "$file" "$block_file" <<'PY'
 import sys
 
 source_path, block_path = sys.argv[1:3]
@@ -3633,6 +4671,7 @@ hc_portable_verify_payload_render_record() (
   local home="$1" owner="$2" payload="$3" record="$4" context="${5:-}"
   local merge template destination mode source expected expected_render render_record artifact_record tmp_root="" before_path before_document after_path reconstructed_path
   local before_exists before64 before_mode before_hash expected_before_hash after64 after_hash
+  local actual_root rendered_template reconstruction derived_keys preserved_prefix=false
   merge="$(printf '%s\n' "$record" | jq -r '.merge')" || return 1
   template="$(printf '%s\n' "$record" | jq -r '.template')" || return 1
   destination="$(printf '%s\n' "$record" | jq -r '.destination')" || return 1
@@ -3686,6 +4725,60 @@ hc_portable_verify_payload_render_record() (
           ;;
         *) return 1 ;;
       esac
+      if jq -e --argjson keys "$(printf '%s\n' "$render_record" | jq -c '.owned_keys')" '
+        . as $before | any($keys[]; .path as $p
+          | ($p | length) == 2 and $p[0] == "hooks"
+            and (($before | getpath($p)) | type) == "array")
+      ' "$before_document" >/dev/null 2>&1; then preserved_prefix=true; fi
+      if [ -f "$payload/core-rules/native/artifacts.json" ] || [ "$preserved_prefix" = true ]; then
+        actual_root="$(jq -r '.worktree_root' "$owner")" || return 1
+        _attachment_canonical_dir "$actual_root" || return 1
+        _attachment_parent_safe "$actual_root" "$destination" || return 1
+        rendered_template="$tmp_root/current-template.json"
+        # Concrete native argv roots bind the real attachment, never this
+        # verifier's reconstruction scratch directory. The verified payload's
+        # own retained companion binds policy; a global management-launcher
+        # repin must not invalidate this older checkout's exact source render.
+        attachment_contextual_template_render "$source" "$template" "$context" "$actual_root" > "$rendered_template" || return 1
+        reconstruction="$(settings_owned_json reconstruct "$before_document" '[]' "$rendered_template")" || return 1
+        derived_keys="$(printf '%s\n' "$reconstruction" | jq -c '.owned_keys')" || return 1
+        if ! printf '%s\n' "$render_record" | jq -e --argjson keys "$derived_keys" '
+          (.owned_keys | sort_by(.path)) == ($keys | sort_by(.path))
+        ' >/dev/null; then
+          # R2 remains valid after a Claude client upgrade. Reconstruct that
+          # canonical fallback too, rather than treating client discovery at
+          # health-check time as the historical render selection. Never force
+          # R1 on a client below its support floor, or trust recorded argv.
+          (
+            attachment_claude_on_failure_supported() { return 1; }
+            attachment_contextual_template_render "$source" "$template" "$context" "$actual_root"
+          ) > "$rendered_template" || return 1
+          reconstruction="$(settings_owned_json reconstruct "$before_document" '[]' "$rendered_template")" || return 1
+          derived_keys="$(printf '%s\n' "$reconstruction" | jq -c '.owned_keys')" || return 1
+        fi
+        printf '%s\n' "$render_record" | jq -e --argjson keys "$derived_keys" \
+          --argjson created "$(printf '%s\n' "$reconstruction" | jq -c '.created_paths')" --arg mode "$mode" '
+          .merge == "explicit-json" and .mode == $mode and .after_mode == $mode
+          and .created_paths == $created
+          and ((.owned_keys | sort_by(.path)) == ($keys | sort_by(.path)))
+        ' >/dev/null || return 1
+        after64="$(printf '%s\n' "$render_record" | jq -r '.after_base64')" || return 1
+        after_hash="$(printf '%s\n' "$render_record" | jq -r '.after_sha256')" || return 1
+        after_path="$tmp_root/after.json"
+        hc_portable_decode_base64 "$after64" > "$after_path" || return 1
+        [ "$(hc_portable_sha256_file "$after_path")" = "$after_hash" ] || return 1
+        jq -se 'length == 1 and (.[0] | type == "object")' "$after_path" >/dev/null 2>&1 || return 1
+        reconstructed_path="$tmp_root/reconstructed.json"
+        printf '%s\n' "$reconstruction" | jq -S '.after' > "$reconstructed_path" || return 1
+        [ "$(hc_portable_sha256_file "$reconstructed_path")" = "$after_hash" ] || return 1
+        cmp -s "$reconstructed_path" "$after_path" || return 1
+        printf '%s\n' "$artifact_record" | jq -e --arg mode "$mode" --arg hash "$after_hash" --arg path "$destination" '
+          .kind == "file" and .path == $path and .mode == $mode and .sha256 == $hash
+        ' >/dev/null || return 1
+        _attachment_mode_matches "$actual_root/$destination" "$mode" || return 1
+        attach_detach_json_keys_match "$actual_root/$destination" "$derived_keys" || return 1
+        return 0
+      fi
       expected="$(attach_json_render_plan "$tmp_root" "$payload" "$record" "$context" 2>/dev/null)" || return 1
       expected_render="$(printf '%s\n' "$expected" | jq -c '.render')" || return 1
       after64="$(printf '%s\n' "$render_record" | jq -r '.after_base64')" || return 1
@@ -3848,7 +4941,11 @@ hc_portable_native_surfaces() (
   local expected actual plan project_claude=false harness deferred release
   local -a harnesses=()
   HC_PORTABLE_SURFACE_STATE=""
-  release="$(jq -r '.release // empty' "$owner" 2>/dev/null)" || release=""
+  if [ "$_HC_DIAG_OWNER_FIELDS_READY" = 1 ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ]; then
+    release="$_HC_DIAG_OWNER_RELEASE"
+  else
+    release="$(jq -r '.release // empty' "$owner" 2>/dev/null)" || release=""
+  fi
   if [ -z "$release" ]; then
     HC_PORTABLE_SURFACE_STATE="corrupt"
     echo "native surfaces: owner release is unavailable"
@@ -3859,13 +4956,20 @@ hc_portable_native_surfaces() (
     echo "native surfaces: registry harness selection is empty or invalid"
     return "$HC_ERROR"
   }
-  root="$(jq -r '.worktree_root' "$owner" 2>/dev/null)" || root=""
+  if [ "$_HC_DIAG_OWNER_FIELDS_READY" = 1 ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ]; then
+    root="$_HC_DIAG_OWNER_ROOT"
+  else
+    root="$(jq -r '.worktree_root' "$owner" 2>/dev/null)" || root=""
+  fi
   if [ -z "$root" ] || [ -L "$root" ] || [ ! -d "$root" ]; then
     HC_PORTABLE_SURFACE_STATE="corrupt"
     echo "native surfaces: owner worktree root is unavailable or symlinked"
     return "$HC_ERROR"
   fi
-  owner_harnesses="$(jq -cS '
+  if [ "$_HC_DIAG_OWNER_FIELDS_READY" = 1 ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ]; then
+    owner_harnesses="$_HC_DIAG_OWNER_HARNESSES"
+  else
+    owner_harnesses="$(jq -cS '
     (.artifacts + (.pre_existing // [])) as $leaves
     | (any($leaves[]; .path | startswith(".pi/"))) as $has_pi
     | [$leaves[]
@@ -3874,7 +4978,8 @@ hc_portable_native_surfaces() (
         elif (.path | startswith(".claude/")) then "claude"
         elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
         else empty end] | unique | sort
-  ' "$owner" 2>/dev/null)" || owner_harnesses=""
+    ' "$owner" 2>/dev/null)" || owner_harnesses=""
+  fi
   if [ "$owner_harnesses" != "$normalized_registry" ]; then
     HC_PORTABLE_SURFACE_STATE="conflict"
     echo "native surfaces: registry harness selection does not exactly match the committed attachment owner"
@@ -3887,7 +4992,11 @@ hc_portable_native_surfaces() (
     echo "native surfaces: installed immutable inheritance manifest is invalid for this attachment"
     return "$HC_ERROR"
   }
-  deferred="$(jq -c '.pre_existing // []' "$owner" 2>/dev/null)" || deferred=""
+  if [ "$_HC_DIAG_OWNER_FIELDS_READY" = 1 ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ]; then
+    deferred="$_HC_DIAG_OWNER_DEFERRED"
+  else
+    deferred="$(jq -c '.pre_existing // []' "$owner" 2>/dev/null)" || deferred=""
+  fi
   if [ -z "$deferred" ]; then
     HC_PORTABLE_SURFACE_STATE="corrupt"
     echo "native surfaces: owner record has no readable project-owned deferral list"
@@ -3915,12 +5024,16 @@ hc_portable_native_surfaces() (
     echo "native surfaces: could not normalize installed inheritance manifest"
     return "$HC_ERROR"
   }
-  actual="$(jq -cS '
-    [.artifacts[]
-     | select(.kind != "parent" and .kind != "directory")
-     | {path:.path,kind:.kind,target:(.target // null)}]
-    | sort_by(.path, .kind)
-  ' "$owner" 2>/dev/null)" || actual=""
+  if [ "$_HC_DIAG_OWNER_FIELDS_READY" = 1 ] && [ "$_HC_DIAG_OWNER_PATH" = "$owner" ]; then
+    actual="$_HC_DIAG_OWNER_LEAVES"
+  else
+    actual="$(jq -cS '
+      [.artifacts[]
+       | select(.kind != "parent" and .kind != "directory")
+       | {path:.path,kind:.kind,target:(.target // null)}]
+      | sort_by(.path, .kind)
+    ' "$owner" 2>/dev/null)" || actual=""
+  fi
   if [ "$actual" != "$expected" ]; then
     HC_PORTABLE_SURFACE_STATE="conflict"
     echo "native surfaces: committed leaves differ from the exact immutable inheritance manifest"
@@ -4056,8 +5169,14 @@ hc_portable_attachment() {
   local harness_list="${10}" release_path
   HC_PORTABLE_ATTACHMENT_RELEASE_PATH=""
   HC_PORTABLE_ATTACHMENT_STATE=""
+  _hc_portable_owner_scope_begin "$home" "$owner" || return "$HC_ERROR"
   hc_portable_owner "$home" "$owner" "$root" "$fleet" "$project_id" \
     "$checkout_id" "$worktree_id" "$attachment_id" "$release" || return "$HC_ERROR"
+  if ! _hc_portable_owner_capture_surface_fields "$owner"; then
+    HC_PORTABLE_OWNER_STATE="corrupt"
+    echo "attachment ownership: owner changed while the diagnostic was running"
+    return "$HC_ERROR"
+  fi
   if [ "$HC_PORTABLE_OWNER_STATE" != attached ]; then
     echo "attachment: exact owner verification did not reach an attached state"
     return "$HC_ERROR"
@@ -4066,6 +5185,17 @@ hc_portable_attachment() {
   if ! release_path="$(TRELLIS_HOME="$home" release_store_locate "$release" 2>/dev/null)"; then
     echo "attachment: verified immutable release disappeared before strict attachment verification"
     return "$HC_ERROR"
+  fi
+  # Excludes and native surfaces expand the same plan: the registry harness
+  # selection over this owner's release, which hc_portable_owner matched.
+  local normalized harness
+  local -a harnesses=()
+  if normalized="$(hc_portable_normalize_harnesses "$harness_list")"; then
+    while IFS= read -r harness; do
+      [ -n "$harness" ] && harnesses+=("$harness")
+    done < <(printf '%s\n' "$normalized" | jq -r '.[]')
+    [ "${#harnesses[@]}" -eq 0 ] ||
+      hc_portable_surface_plan_pin "$home" "$release" "$release_path/payload" "${harnesses[@]}" || :
   fi
   hc_portable_excludes "$home" "$owner" "$release_path/payload" "$harness_list" ||
     return "$HC_ERROR"
@@ -4295,6 +5425,7 @@ hc_anti_slop_profile() {
 # comments stripped (outside string literals), it matches HC_VITEST_EXCLUDE_ERE:
 # a literal `'**/.trellis/**'` (or `.trellis/**`) inside an `exclude: [` array.
 # An exclude built from a variable does not pass (a documented false positive).
+# Known gap: coverage.exclude can match this heuristic without setting test.exclude.
 # The row WARNs unless every config read passes, and always when a
 # `vitest.workspace.*` or `test.projects` is present. No payload tests, or no
 # config read and no workspace, means no row: nothing printed, HC_OK returned.

@@ -286,6 +286,13 @@ _pgcfg_validate_policy_fallback() {
 _pgcfg_validate_policy() {
   local cfg schema
   cfg="$1"
+  # The npx probe below runs from /, so make the policy path independent of the
+  # caller's cwd before it is handed to that subshell. A relative TRELLIS_CONFIG
+  # was accepted before the probe moved to a neutral directory.
+  case "$cfg" in
+    /*) ;;
+    *) cfg="$(CDPATH='' cd "$(dirname "$cfg")" 2>/dev/null && pwd -P)/${cfg##*/}" || cfg="$1" ;;
+  esac
   schema="$_PGCFG_POLICY_SCHEMA"
 
   if [ ! -f "$schema" ]; then
@@ -314,8 +321,12 @@ _pgcfg_validate_policy() {
   fi
 
   # Prefer an AJV executable injected by the caller (including
-  # `npx -p ajv-cli`), then a local-only npx probe (--offline --no-install).
+  # `npx -p ajv-cli`), then an offline npx probe from a neutral directory.
   # --no-update-notifier also prevents npm's independent update metadata fetch.
+  # npx resolves ./node_modules/.bin before PATH, so running it from the
+  # caller's cwd would execute a repository-supplied binary. The probe only
+  # answers whether a usable AJV is already installed; a neutral cwd keeps a
+  # cloned tree out of that decision.
   # Compilation is the capability probe: unavailable or unsupported AJV versions
   # fall back to the deterministic jq validator instead of rejecting valid policy.
   if command -v ajv >/dev/null 2>&1 &&
@@ -327,8 +338,8 @@ _pgcfg_validate_policy() {
     return "$?"
   fi
   if command -v npx >/dev/null 2>&1 &&
-     npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s "$schema" >/dev/null 2>&1; then
-    if npx --no-install --offline --no-update-notifier ajv validate --spec=draft2020 --strict=false -s "$schema" -d "$cfg" >/dev/null 2>&1; then
+     (CDPATH='' cd / && npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s "$schema") >/dev/null 2>&1; then
+    if (CDPATH='' cd / && npx --no-install --offline --no-update-notifier ajv validate --spec=draft2020 --strict=false -s "$schema" -d "$cfg") >/dev/null 2>&1; then
       return 0
     fi
     _pgcfg_error "$_PGCFG_EX_STATE" "portable policy failed schema validation: $cfg"

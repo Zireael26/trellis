@@ -328,6 +328,14 @@ verify_pinned_release_manifest() {
 }
 
 
+# Capture exactly the PID that the existing lock helper writes. Both calls are
+# in the same shell; do not recalculate it later from a cleanup subshell.
+materialize_lock_acquire() {
+  __materialize_lock_pid="$$"
+  __materialize_lock_path="${1%/}/locks/$2.lock"
+  trellis_home_lock_acquire "$@"
+}
+
 capture_registry_snapshot() {
   local home="${1:-}" fleet="${2:-}" capture="${3:-}" rc=0 release_rc=0
   local snapshot_home="" snapshot_registry="" registry="" projection=""
@@ -342,7 +350,7 @@ capture_registry_snapshot() {
   # Freeze the persisted registry beneath its writer lock before projecting it.
   # The strict list operation then validates identities and reads only the
   # private copy, so no later materialization step touches the live pathname.
-  trellis_home_lock_acquire "$home" registry 30 || return "$?"
+  materialize_lock_acquire "$home" registry 30 || return "$?"
   snapshot_home="$(mktemp -d "$(dirname "$capture")/.registry-home.XXXXXX")" || rc="$TRELLIS_EX_UNAVAILABLE"
   if [ "$rc" -eq 0 ]; then
     chmod 700 "$snapshot_home" 2>/dev/null || rc="$TRELLIS_EX_UNAVAILABLE"
@@ -405,6 +413,7 @@ capture_registry_snapshot() {
   fi
   trellis_home_lock_release >/dev/null 2>&1
   release_rc="$?"
+  __materialize_lock_path='' __materialize_lock_pid=''
   if [ "$rc" -eq 0 ] && [ "$release_rc" -ne 0 ]; then
     rc="$release_rc"
   fi
@@ -715,6 +724,7 @@ excluded_unavailable_projects() {
       | select(any($rows[]; (.excluded // false) | not))
       | select((any($rows[];
           .status == "active" and .kind == "worktree" and .availability == "available"
+          and ((.excluded // false) | not)
         )) | not)
       | $rows[0].project_id
     ] | sort | unique
@@ -731,6 +741,7 @@ eligible_active_project_count() {
       | select(any(.[]; (.excluded // false) | not))
       | select(any(.[];
           .status == "active" and .kind == "worktree" and .availability == "available"
+          and ((.excluded // false) | not)
         ))
       | .[0].project_id
     ] | unique | length
@@ -768,7 +779,7 @@ aeo_url_matches_target_parser() {
     materialize_error "python3 is required to validate AEO target URLs"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
-  python3 - "$url" <<'PY'
+  python3 -I - "$url" <<'PY'
 import sys
 from urllib.parse import urlparse
 
@@ -1194,11 +1205,15 @@ materialize_conductor_backlog() {
   chmod 600 "$destination" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"
 }
 
+# This CLI executes one command per process. Keep cleanup state in uniquely
+# named process variables so EXIT after a return/errexit is safe on Bash 3.2,
+# without forking a subshell that could outlive a TERM sent to the script PID.
 cmd_materialize() {
   local home_opt="" fleet="" task="" home="" config="" release_version=""
   local release_dir="" release_payload="" release_commit="" release_manifest="" release_manifest_sha256="" stage=""
   local tasks_dir="" fleet_dir="" task_root="" output_root="" snapshot_path="" errors_file=""
-  local tasks_dir_real="" fleet_dir_real="" fleet_dir_identity="" stage_identity="" task_lock_held=false
+  local tasks_dir_real="" fleet_dir_real="" fleet_dir_identity="" stage_identity=""
+  __materialize_stage='' __materialize_lock_path='' __materialize_lock_pid=''
   local canonical_snapshot="" excluded_unavailable="[]" excluded_rows="[]" requires_checkout=false lane_cache=null
   local entry_count=0 unavailable_count=0 eligible_count=0 nonexcluded_count=0
   local detached_only_count=0 conductor_backlog=false conductor_auto_execute_top_n=0 registry_state_errors=0
@@ -1293,18 +1308,34 @@ cmd_materialize() {
   validate_existing_task_root "$task_root" || return "$?"
   output_root="$task_root/output"
   snapshot_path="$task_root/snapshot.json"
-  stage="$(mktemp -d "$fleet_dir/.${task}.tmp.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  chmod 700 "$stage" 2>/dev/null || { rm -rf "$stage"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  fleet_dir_identity="$(task_publish_identity "$fleet_dir")" || return "$?"
-
   cleanup_stage() {
-    [ -n "${stage:-}" ] && [ -d "$stage" ] && rm -rf "$stage"
-    if [ "${task_lock_held:-false}" = true ]; then
-      trellis_home_lock_release >/dev/null 2>&1 || true
-      task_lock_held=false
+    local status="$1" recorded_pid=''
+    trap '' HUP INT TERM
+    trap - EXIT
+    if [ -n "$__materialize_stage" ] && [ -d "$__materialize_stage" ]; then
+      rm -rf "${__materialize_stage:?}"
     fi
+    # The helper may be interrupted after writing its PID but before setting
+    # _TRELLIS_HOME_LOCK_DIR. Release only the exact lock attempted here, with
+    # the PID captured by that same acquire call, through the normal checker.
+    if [ -n "$__materialize_lock_path" ] && [ -n "$__materialize_lock_pid" ] &&
+      { [ -z "${_TRELLIS_HOME_LOCK_DIR:-}" ] || [ "$_TRELLIS_HOME_LOCK_DIR" = "$__materialize_lock_path" ]; } &&
+      [ -d "$__materialize_lock_path" ] && [ ! -L "$__materialize_lock_path" ] &&
+      recorded_pid="$(trellis_home_lock_read_pid "$__materialize_lock_path/pid" 2>/dev/null)" &&
+      [ "$recorded_pid" = "$__materialize_lock_pid" ]; then
+      _TRELLIS_HOME_LOCK_DIR="$__materialize_lock_path"
+      trellis_home_lock_release >/dev/null 2>&1 || true
+    fi
+    return "$status"
   }
-  trap cleanup_stage EXIT HUP INT TERM
+  trap 'cleanup_stage "$?"' EXIT
+  trap 'cleanup_stage 129; exit 129' HUP
+  trap 'cleanup_stage 130; exit 130' INT
+  trap 'cleanup_stage 143; exit 143' TERM
+  __materialize_stage="$(mktemp -d "$fleet_dir/.${task}.tmp.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  stage="$__materialize_stage"
+  chmod 700 "$stage" 2>/dev/null || return "$TRELLIS_EX_UNAVAILABLE"
+  fleet_dir_identity="$(task_publish_identity "$fleet_dir")" || return "$?"
   release_manifest="$stage/.release-manifest.json"
   release_manifest_sha256="$(pin_verified_release_manifest "$release_dir" "$release_version" "$release_manifest")" || return "$?"
   # Every asset identity below comes from this pinned release manifest, never a
@@ -1381,8 +1412,7 @@ EOF
   # Serialize the old private conductor state and the final directory swap.
   # The lock is acquired only after the registry capture has released its own
   # writer lock, because the shared lock helper is intentionally non-reentrant.
-  trellis_home_lock_acquire "$home" scheduled-tasks 30 || return "$?"
-  task_lock_held=true
+  materialize_lock_acquire "$home" scheduled-tasks 30 || return "$?"
   validate_task_publication_sink "$tasks_dir" "$fleet_dir" "$task_root" "$stage" "$tasks_dir_real" "$fleet_dir_real" || return "$?"
   stage_identity="$(task_publish_identity "$stage")" || return "$?"
 
@@ -1492,13 +1522,14 @@ EOF
   validate_task_publication_sink "$tasks_dir" "$fleet_dir" "$task_root" "$stage" "$tasks_dir_real" "$fleet_dir_real" || return "$?"
   verify_pinned_release_manifest "$release_dir" "$release_version" "$release_manifest" "$release_manifest_sha256" || return "$?"
   publish_stage "$fleet_dir" "$fleet" "$stage" "$task" "$fleet_dir_identity" "$stage_identity" || return "$?"
+  __materialize_stage=''
   stage=""
   if ! trellis_home_lock_release; then
-    task_lock_held=false
+    __materialize_lock_path='' __materialize_lock_pid=''
     materialize_error "published task but could not release scheduled-task lock"
     return "$TRELLIS_EX_STATE"
   fi
-  task_lock_held=false
+  __materialize_lock_path='' __materialize_lock_pid=''
   trap - EXIT HUP INT TERM
 
   printf '%s\n' "$task_root"

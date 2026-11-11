@@ -97,6 +97,25 @@ write_lines() {
   [[ "$(ctx)" == *"ts-as-unknown-as at $PROJECT_DIR/src/legacy.ts:4"* ]] || { echo "$output"; false; }
 }
 
+@test "ts wrapped signatures: both tripwires respect diff gaps and report real parameters" {
+  commit_lines src/gaps.ts 'function oldName(' '  input: unknown,' '): void {}' 'type Model = {' '};'
+  write_lines src/gaps.ts 'function newName(' '  input: unknown,' '): void {}' 'type Model = {' '  value: any,' '};'
+  write_lines src/params.ts 'export function apply(' '  input: any,' '): void {}'
+  export TRELLIS_ROOT="$(cd "$HOOKS_DIR/../.." && pwd -P)"
+  export CODEX_PROJECT_DIR="$PROJECT_DIR"
+  local hook envelope
+  for hook in "$TRIPWIRE" "$CODEX_HOOKS_DIR/slop-tripwire.sh"; do
+    envelope="$(jq -nc --arg t "$PROJECT_DIR/src/gaps.ts" --arg cwd "$PROJECT_DIR" '{cwd:$cwd,tool_name:"Edit",tool_input:{file_path:$t}}')"
+    run_with_stderr "$hook" "$envelope"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"ts-any-signature"* ]]
+    envelope="$(jq -nc --arg t "$PROJECT_DIR/src/params.ts" --arg cwd "$PROJECT_DIR" '{cwd:$cwd,tool_name:"Edit",tool_input:{file_path:$t}}')"
+    run_with_stderr "$hook" "$envelope"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"ts-any-signature"* ]] || { echo "$hook: $output $stderr"; false; }
+  done
+}
+
 @test "ts-green: idiomatic added lines stay silent" {
   commit_lines src/green.ts 'export const a = 1;'
   append_lines src/green.ts \

@@ -23,7 +23,6 @@ if [ -z "${BASH_VERSION-}" ] || [ "${BASH_SOURCE-}" = "$0" ]; then
     "TRELLIS_ATTACH_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH-}" \
     "TRELLIS_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH:-${PATH-}}" \
     "TRELLIS_TEST_VAR_FOLDERS_PREFIX=${TRELLIS_TEST_VAR_FOLDERS_PREFIX-}" \
-    "TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN-}" \
     "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
     /bin/bash --noprofile --norc -c '
 set -u
@@ -52,7 +51,6 @@ exec /usr/bin/env -i \
   "TRELLIS_ATTACH_CALLER_PATH=${TRELLIS_ATTACH_CALLER_PATH-}" \
   "TRELLIS_CALLER_PATH=${TRELLIS_CALLER_PATH-}" \
   "TRELLIS_TEST_VAR_FOLDERS_PREFIX=${TRELLIS_TEST_VAR_FOLDERS_PREFIX-}" \
-  "TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN-}" \
   "TRELLIS_DISK_JANITOR_INSTALLER_SOURCE=$installer_source" \
   "TRELLIS_DISK_JANITOR_INSTALLER_BODY=$installer_body" \
   /bin/bash --noprofile --norc "$installer_body" "$@"
@@ -214,6 +212,10 @@ path_has_extended_acl() {
     *) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" ;;
   esac
   [ -n "$listing" ] || return 2
+  # Darwin's ls prints an xattr's "@" in place of an ACL's "+"; with -e each
+  # ACL entry is a line of its own after the first.
+  case "$listing" in *"
+"*) return 0 ;; esac
   marker="${listing%% *}"
   case "$marker" in *+) return 0 ;; *) return 1 ;; esac
 }
@@ -833,6 +835,10 @@ require_matching_janitor_agents() {
         printf 'trellis launchd: remedy:\n  %s\n' "$(dj_agent_remedy "$path")" >&2
         refused=true
         ;;
+      unreadable)
+        printf 'trellis launchd: refusing to install: cannot inspect %s (%s); restore read and search access\n' "$path" "$detail" >&2
+        refused=true
+        ;;
       disabled)
         printf 'note: disabled disk-janitor agent left in place: %s\n' "$path"
         ;;
@@ -961,11 +967,14 @@ install_agent() {
     had_existing=true
     verify_finalized_destination "$label" "$expected_identity" || return "$?"
   fi
-  if [ "$label" = "$apply_label" ] && [ "${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN:-0}" != "1" ]; then
+  if [ "$label" = "$apply_label" ]; then
     local dj_script="$SCRIPT_DIR/disk-janitor.sh"
     local dry_run_rc=0 dry_run_out=""
     if [ -x "$dj_script" ]; then
       dry_run_out="$(TRELLIS_HOME="$trellis_home" HOME="$user_home" "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker" --dry-run 2>&1)" || dry_run_rc=$?
+    else
+      dry_run_rc=126
+      dry_run_out="janitor script is missing or not executable: $dj_script"
     fi
     if [ "$dry_run_rc" -ne 0 ]; then
       printf 'trellis launchd: refusing to load %s: nightly apply argv failed dry-run (exit %d): %s\n' \

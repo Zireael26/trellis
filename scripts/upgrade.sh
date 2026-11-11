@@ -355,5 +355,57 @@ elif [ -n "$fleet" ]; then
 else
   adopt_args+=(--all)
 fi
-upgrade_release_command "${adopt_args[@]}"
+# The first hop from 1.4.x deliberately remains the documented two-configure
+# bootstrap. Once this body is active, its verified in-memory trellis-home
+# library publishes the target pair without executing a target helper/binary.
+# Preserve the historical scope: upgrade adopts project policy; it does not
+# silently switch active_cli_release or the user-global attachment.
+upgrade_adopt_with_pair() (
+  # Plain assignments, not local: the subshell already isolates them, and the
+  # launcher's /bin/bash 3.2 runs this EXIT trap after exit has dropped a
+  # function's locals, so under set -u the rollback died on $expected and the
+  # new launcher stayed in place.
+  home="${TRELLIS_HOME:-}" target='' launcher='' snapshot='' before=0 expected='' rc=0 tmp=''
+  target="$home/releases/$version/payload/scripts/trellis-launcher.sh"
+  if [ ! -e "$home/releases/$version/payload/core-rules/native/artifacts.json" ] &&
+     [ ! -L "$home/releases/$version/payload/core-rules/native/artifacts.json" ]; then
+    upgrade_release_command "${adopt_args[@]}"
+    exit "$?"
+  fi
+  trellis_home_lock_acquire "$home" config 30 || exit "$?"
+  launcher="$HOME/.local/bin/trellis"
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/trellis.upgrade.launcher.XXXXXX")" || exit 5
+  upgrade_pair_cleanup() {
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ -n "$expected" ]; then
+      if [ -L "$launcher" ] || [ ! -f "$launcher" ] ||
+         [ "$(shasum -a 256 "$launcher" | awk '{print $1}')" != "$expected" ]; then
+        printf '%s\n' 'trellis upgrade: launcher changed; refusing rollback' >&2
+        rc=3
+      elif [ "$before" -eq 1 ]; then
+        tmp="$(mktemp "${launcher%/*}/.trellis.rollback.XXXXXX")" &&
+          cp -p "$snapshot" "$tmp" && mv -f "$tmp" "$launcher" || rc=5
+        [ -z "${tmp:-}" ] || { [ ! -e "$tmp" ] || rm -f "${tmp:?}"; }
+      else
+        rm -f "${launcher:?}" || rc=5
+      fi
+    fi
+    rm -f "${snapshot:?}"
+    trellis_home_lock_release || rc=5
+    trap - EXIT
+    exit "$rc"
+  }
+  trap upgrade_pair_cleanup EXIT
+  trap 'exit 5' HUP INT TERM
+  if [ -e "$launcher" ] || [ -L "$launcher" ]; then
+    [ -f "$launcher" ] && [ ! -L "$launcher" ] || exit 3
+    cp -p "$launcher" "$snapshot" || exit 5
+    before=1
+  fi
+  trellis_home_install_launcher "$target" "$launcher" "$home" "$version" || exit "$?"
+  expected="$(shasum -a 256 "$launcher" | awk '{print $1}')" || exit 5
+  upgrade_release_command "${adopt_args[@]}"
+  exit "$?"
+)
+upgrade_adopt_with_pair
 exit $?

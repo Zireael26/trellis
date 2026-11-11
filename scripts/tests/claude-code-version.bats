@@ -91,5 +91,23 @@ stub_claude() {
 }
 
 @test "portable doctor reports the row only when it is not healthy" {
-  grep -q 'if claude_row="$(hc_claude_code_version)"; then :; else' "$REPO/scripts/doctor.sh"
+  local report_fn claude_block
+  report_fn="$(awk '/^report\(\) \{/,/^}/' "$REPO/scripts/doctor.sh")"
+  [ -n "$report_fn" ] || { echo 'report function not found in doctor.sh'; false; }
+  claude_block="$(awk '/if claude_row=/,/^fi$/' "$REPO/scripts/doctor.sh")"
+  [[ "$claude_block" == *"report '  ' \"\$?\" \"\$claude_row\""* ]] || { echo "claude block missing report: $claude_block"; false; }
+  eval "$report_fn"
+  GLYPH_OK='✓'; GLYPH_WARN='⚠'; GLYPH_ERR='✗'; GLYPH_INFO='i'; N_WARN=0; N_ERROR=0; N_INFO=0
+  stub_claude "echo '2.1.295 (Claude Code)'"
+  output="$(eval "$claude_block")"
+  [ -z "$output" ] || { echo "healthy claude reported: $output"; false; }
+  stub_claude "echo '2.1.294 (Claude Code)'"
+  output="$(eval "$claude_block")"
+  [[ "$output" == *"2.1.294"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"2.1.295"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"⚠"* ]] || { echo "$output"; false; }
+  rm -f "$SANDBOX/bin/claude"
+  output="$(eval "$claude_block")"
+  [[ "$output" == *"not found"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"  i claude-code version:"* ]] || { echo "$output"; false; }
 }

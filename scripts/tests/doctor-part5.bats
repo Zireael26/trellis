@@ -224,6 +224,7 @@ build_portable_release() {
   cp "$REPO_ROOT/core-rules/inheritance-manifest.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/inheritance-manifest.json"
   cp -R "$REPO_ROOT/core-rules/pi" "$PORTABLE_RELEASE_PAYLOAD/core-rules/pi"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks" "$PORTABLE_RELEASE_PAYLOAD/core-rules/legacy-hooks"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
@@ -507,7 +508,12 @@ add_portable_identity_error_sibling() {
 prepare_portable_attachment() {
   local owner_project_id="${1:-portable-fixture}" release="${2:-1.2.3}"
   local identity checkout_id worktree_id owner
-  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+  # No detached post-attach job may outlive the attach: a no-op `chmod 700`
+  # of TRELLIS_HOME by GNU chmod (BSD chmod skips the call) bumps the home's
+  # ctime, so a show-config racing it refuses its rows as "registry changed
+  # during diagnostic". attach-postjob.bats covers the job itself.
+  run env -u TRELLIS_CONFIG TRELLIS_ATTACH_POSTJOB=off \
+    HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
     bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
       --fleet personal --release "$release" \
       --harness claude --harness codex "$PORTABLE_PROJECT"
@@ -831,4 +837,65 @@ run_container_runtime_rows() {
     RUNTIME_RESOLVED="${RUNTIME_RESOLVED:-$RUNTIME_BIN/docker}" "$@" \
     /bin/bash -c '. "$1"; hc_container_runtime_rows "$2"' \
     _ "$REPO_ROOT/scripts/lib/health-checks.sh" "$RUNTIME_APP"
+}
+
+@test "portable show-config succeeds at once while the attach postjob is still running" {
+  # The real deferred job, not the fixture's postjob-off attach: its lock and
+  # state preparation re-asserts 0700 on TRELLIS_HOME. A same-mode GNU chmod
+  # moved the home's ctime, so show-config racing it refused every row as
+  # "registry changed during diagnostic".
+  #
+  # Since spec 074 T14 attach returns only after the job's ok, so the job can
+  # no longer be live when attach returns. It still runs detached from
+  # post-checkout and doctor --fix, so drive the same job directly: attach with
+  # the job off, then start it in the background and render alongside it. The
+  # one-second hold (after its lock and state preparation, before the checks)
+  # keeps the job live for the first render on a fast host.
+  local identity status_file state seen_live=0 runs=0 first_failure="" job_pid job_rc
+  build_portable_doctor_home
+  prepare_portable_attachment
+  identity="$(bash -c '. "$1"; . "$2"; local_registry_identity_for_root "$3"' _ \
+    "$REPO_ROOT/scripts/lib/trellis-home.sh" "$REPO_ROOT/scripts/lib/local-registry.sh" "$PORTABLE_PROJECT")"
+  status_file="$PORTABLE_HOME/state/attachment-status/$(printf '%s\n' "$identity" | jq -r '.checkout_id')/$(printf '%s\n' "$identity" | jq -r '.worktree_id').json"
+  [ ! -e "$status_file" ] || { echo "the postjob-off attach recorded a status"; cat "$status_file"; false; }
+  env -u TRELLIS_CONFIG -u TRELLIS_ATTACH_POSTJOB -u TMPDIR ATTACH_POSTJOB_TEST_HOLD=1 \
+    HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    bash "$REPO_ROOT/scripts/lib/attach-postjob.sh" run --target "$PORTABLE_PROJECT" \
+    </dev/null >"$SANDBOX/postjob.out" 2>&1 3>&- &
+  job_pid=$!
+
+  # Render back to back until the job records a final verdict, so the renders
+  # cover its whole run. Keep going after a failure: the job must not outlive
+  # the test.
+  while :; do
+    state="$(jq -r '.state' "$status_file" 2>/dev/null)" || state=""
+    case "$state" in ok|failed) break ;; esac
+    seen_live=1
+    [ "$runs" -lt 90 ] || break
+    runs=$((runs + 1))
+    run_portable_show_config
+    if [ -z "$first_failure" ] &&
+       { [ "$status" -ne 0 ] || [[ "$output" != *"valid strict local attachment"* ]] ||
+         [[ "$output" == *"registry changed during diagnostic"* ]]; }; then
+      first_failure="run $runs (job state ${state:-unknown}, exit $status):"$'\n'"$output"
+    fi
+  done
+
+  job_rc=0
+  wait "$job_pid" || job_rc=$?
+  [ "$seen_live" -eq 1 ] && [ "$runs" -ge 1 ] || { echo "the job finished before any render (runs=$runs)"; false; }
+  [ "$job_rc" -eq 0 ] || { echo "postjob exit $job_rc"; cat "$SANDBOX/postjob.out"; false; }
+  [ -z "$first_failure" ] || { echo "$first_failure"; false; }
+  # The loop stops on either verdict so a broken job costs no wait, but only
+  # success proves the job ran its whole path, including the final checkout
+  # lock and state preparation this race needs.
+  [ "$state" = ok ] || {
+    echo "job did not succeed after $runs renders (state ${state:-unknown})"
+    cat "$status_file" 2>/dev/null
+    cat "${status_file%.json}.log" 2>/dev/null
+    false
+  }
+  run_portable_show_config
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"valid strict local attachment"* ]] || { echo "$output"; false; }
 }

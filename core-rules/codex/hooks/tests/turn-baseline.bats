@@ -10,6 +10,7 @@
 # live under a private TRELLIS_HOME, never ~/.trellis.
 
 load helpers
+load ../../../hooks/tests/native-arming-fixture
 bats_require_minimum_version 1.5.0
 
 setup() {
@@ -338,6 +339,73 @@ SH
   assert_receipt_demanded
 }
 
+@test "B9 unreadable or malformed settings block Codex fallback Stop" {
+  local file="$PROJECT_DIR/.codex/hooks.json" layout
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m clean-start )
+  for layout in absent present; do
+    export TRELLIS_HOME="$BATS_TEST_TMPDIR/stop-home-$layout"
+    mkdir -p "$TRELLIS_HOME/state"
+    [ "$layout" != present ] || mkdir -p "$TRELLIS_HOME/state/attachments"
+    printf '%s\n' '{"native":"/bin/native/companion"}' > "$file"
+    chmod 000 "$file"
+    [ ! -r "$file" ] || skip 'requires a non-root user to make a settings file unreadable'
+    turn_stop
+    chmod 600 "$file"
+    [ "$status" -eq 0 ] || { echo "unreadable $layout: $status $output"; return 1; }
+    printf '%s' "$output" | jq -e '.decision == "block" and (.reason | startswith("turn-baseline:"))' >/dev/null || return 1
+    printf '%s\n' '{"hooks":' > "$file"
+    turn_stop
+    [ "$status" -eq 0 ] || { echo "malformed $layout: $status $output"; return 1; }
+    printf '%s' "$output" | jq -e '.decision == "block" and (.reason | startswith("turn-baseline:"))' >/dev/null || return 1
+  done
+}
+
+@test "T62 Codex native prompt arms a clean committed fallback Stop" {
+  local state
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m clean-start )
+  HOOKS_DIR="$(cd "$BATS_TEST_DIRNAME/../../../hooks" && pwd -P)"
+  native_prompt_candidate codex
+  source "${HOOK%/*}/lib/deps.sh"
+  state="$(_se_turn_baseline_arming "$PROJECT_DIR" codex)"
+  [ "$state" = native ] || { echo "Codex native candidate: $state"; return 1; }
+  turn_stop
+  assert_receipt_demanded
+}
+
+@test "T62 Codex native fractional prompt timeout is unknown" {
+  local file="$PROJECT_DIR/.codex/hooks.json" original="$BATS_TEST_TMPDIR/original.json" state
+  HOOKS_DIR="$(cd "$BATS_TEST_DIRNAME/../../../hooks" && pwd -P)"
+  native_prompt_candidate codex
+  source "${HOOK%/*}/lib/deps.sh"
+  state="$(_se_turn_baseline_arming "$PROJECT_DIR" codex)"
+  [ "$state" = native ] || { echo "Codex positive control: $state"; return 1; }
+  cp "$file" "$original"
+  jq '(.hooks.UserPromptSubmit[0].hooks[0].timeout) = 30.5' "$original" > "$file"
+  turn_stop
+  [ "$status" -eq 0 ] || { echo "fractional Codex timeout: status=$status output=$output"; return 1; }
+  printf '%s' "$output" | jq -e '.decision == "block" and (.reason | startswith("turn-baseline:"))' >/dev/null || {
+    echo "fractional Codex timeout was not an arming block: $output"; return 1;
+  }
+}
+
+@test "B9 L2 an escaped native marker blocks Codex fallback Stop" {
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m clean-start )
+  printf '%s\n' '{"note":"\/bin\/native\/companion"}' > "$PROJECT_DIR/.codex/hooks.json"
+  turn_stop
+  [ "$status" -eq 0 ] || { echo "escaped Codex Stop: $status $output"; return 1; }
+  printf '%s' "$output" | jq -e '.decision == "block" and (.reason | startswith("turn-baseline:"))' >/dev/null
+}
+
+@test "B9 L1 an unsearchable Codex directory blocks fallback Stop" {
+  ( cd "$PROJECT_DIR" && git add -A && git commit -q -m clean-start )
+  chmod 600 "$PROJECT_DIR/.codex"
+  [ ! -x "$PROJECT_DIR/.codex" ] || { chmod 700 "$PROJECT_DIR/.codex"; skip 'requires non-root permission checks'; }
+  run --separate-stderr bash "$HOOK" <<<"$(stop_payload)"
+  chmod 700 "$PROJECT_DIR/.codex"
+  [ "$status" -eq 0 ] || { echo "unsearchable Codex Stop: $status $output"; return 1; }
+  printf '%s' "$output" | jq -e '.decision == "block" and (.reason | startswith("turn-baseline:"))' >/dev/null
+}
+
 @test "codex: unarmed project: a clean tree with no baseline passes as before" {
   rm -f "$PROJECT_DIR/.codex/hooks.json"
   ( cd "$PROJECT_DIR" && git add -A && git commit -q -m clean-start )
@@ -404,6 +472,71 @@ SH
   assert_receipt_demanded
 }
 
+@test "T28 Codex consumed prompt is replaced, not retained alongside the carry" {
+  local file prompt carry
+  turn_entry
+  file="$(baseline_file)"
+  prompt="$(<"$file")"
+  turn_stop
+  assert_no_receipt_demand
+  carry="$(<"$file")"
+  [[ "$carry" = 'trellis-turn-carry v2 '* ]] || { echo "not a carry: $carry"; return 1; }
+  [ "$(printf '%s\n' "$carry" | wc -l | tr -d ' ')" = 1 ] || { echo 'consumed prompt was retained'; return 1; }
+  [ "$(printf '%s\n' "$prompt" | awk '{print $3}')" != "$(printf '%s\n' "$carry" | awk '{print $3}')" ]
+}
+
+@test "T28 Codex replaying a consumed prompt cannot waive the receipt" {
+  local file prompt
+  turn_entry
+  file="$(baseline_file)"
+  prompt="$(<"$file")"
+  turn_stop
+  assert_no_receipt_demand
+  # Restore the exact prior line with its original, now-consumed nonce. This
+  # tests nonce consumption separately from removal of the baseline file.
+  printf '%s\n' "$prompt" > "$file"
+  turn_stop
+  assert_receipt_demanded
+}
+
+@test "T28 Codex consuming one session preserves another session nonce" {
+  local file nonce1 nonce2 log
+  turn_entry sess-1
+  file="$(baseline_file)"
+  nonce1="$(awk '{print $3}' "$file")"
+  log="${file%/*}/nonces.log"
+  turn_entry sess-2
+  nonce2="$(awk -v n="$nonce1" '$2 != n {print $2}' "$log")"
+  [ "${#nonce2}" -eq 32 ] || { echo 'second session nonce missing'; return 1; }
+  turn_stop sess-1
+  assert_no_receipt_demand
+  ! grep -q " $nonce1\$" "$log" || { echo 'consumed nonce survived'; return 1; }
+  grep -q " $nonce2\$" "$log" || { echo 'another session nonce was removed'; return 1; }
+}
+
+@test "T28 Codex a nonce from another session cannot validate this prompt" {
+  local file nonce1 nonce2 log
+  turn_entry sess-1
+  file="$(baseline_file)"
+  nonce1="$(awk '{print $3}' "$file")"
+  log="${file%/*}/nonces.log"
+  turn_entry sess-2
+  nonce2="$(awk -v n="$nonce1" '$2 != n {print $2}' "$log")"
+  [ "${#nonce2}" -eq 32 ] || { echo 'second session nonce missing'; return 1; }
+  awk -v n="$nonce2" '{ $3 = n; print }' "$file" > "$file.next" && mv "$file.next" "$file"
+  turn_stop sess-1
+  assert_receipt_demanded
+  grep -q " $nonce2\$" "$log" || { echo 'another session nonce was removed'; return 1; }
+}
+
+@test "T28 Codex an unarmed project writes no carry state" {
+  rm -f "${PROJECT_DIR:?}/.codex/hooks.json"
+  ( cd "$PROJECT_DIR" && git add -A && git commit -qm clean-start )
+  turn_stop
+  assert_no_receipt_demand
+  [ ! -e "$TRELLIS_HOME/state/turn-baseline" ]
+}
+
 @test "codex: unarmed project: a dirty tree with no baseline demands, as on base" {
   rm -f "$PROJECT_DIR/.codex/hooks.json"
   turn_stop
@@ -440,7 +573,12 @@ SH
 
 @test "codex: both Codex manifests register turn-baseline once on UserPromptSubmit" {
   local manifest
-  for manifest in "$BATS_TEST_DIRNAME/../../hooks.json" "$BATS_TEST_DIRNAME/../../../templates/codex-hooks.local.json"; do
+  # T34: the project template routes UserPromptSubmit through the native
+  # entry (member turn-baseline); its shell registration is pinned in the
+  # legacy surface.
+  jq -e '[.hooks.UserPromptSubmit[]?.hooks[]? | .args // [] | select(. == ["hook","event","codex","UserPromptSubmit"])] | length == 1' \
+    "$BATS_TEST_DIRNAME/../../../templates/codex-hooks.local.json" >/dev/null || { echo "native UserPromptSubmit not wired once"; return 1; }
+  for manifest in "$BATS_TEST_DIRNAME/../../hooks.json" "$BATS_TEST_DIRNAME/../../../legacy-hooks/codex-hooks.local.json"; do
     jq -e '
       [.hooks.UserPromptSubmit[]?.hooks[]?.command | select(test("/turn-baseline\\.sh\"?$"))]
       | length == 1

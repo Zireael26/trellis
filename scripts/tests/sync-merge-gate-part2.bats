@@ -101,6 +101,8 @@ build_installed_release() {
     "$SOURCE/core-rules/githooks" \
     "$SOURCE/scripts"
   cp "$REPO/core-rules/CLAUDE.md" "$SOURCE/core-rules/CLAUDE.md"
+  mkdir -p "$SOURCE/core-rules/legacy-hooks"
+  cp -R "$REPO/core-rules/legacy-hooks/." "$SOURCE/core-rules/legacy-hooks/"
   cp "$REPO/core-rules/templates/claude-settings.local.json" \
     "$SOURCE/core-rules/templates/claude-settings.local.json"
   cp "$REPO/core-rules/templates/codex-hooks.local.json" \

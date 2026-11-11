@@ -305,8 +305,42 @@ setup() {
   source "$BATS_TEST_DIRNAME/../lib/attachment.sh"
 }
 
+# shellcheck source=scripts/tests/helpers/hfs-volume.bash
+. "$BATS_TEST_DIRNAME/helpers/hfs-volume.bash"
+
 teardown() {
   rm -rf "$ROOT"
+  hfs_volume_detach
+}
+
+# T39: HFS+ cannot hard-link a symlink (ENOTSUP); the commit publishes it by
+# the exclusive, inode-keeping rename and the owner record still verifies.
+@test "on a real HFS+ volume a symlink artifact attaches and its ownership verifies" {
+  hfs_volume_attach
+  local apfs_root="$ROOT" leaf='-leaf with spaces'
+  TMPDIR="$HFS_MNT" setup
+  rm -rf "$apfs_root"
+  python3 -I -c 'import os,sys
+os.symlink("t", sys.argv[1] + "/probe-stage")
+try:
+    os.link(sys.argv[1] + "/probe-stage", sys.argv[1] + "/probe-link", follow_symlinks=False)
+except OSError as e:
+    sys.exit(0 if e.errno == 45 else 1)
+sys.exit("this volume can hard-link symlinks; the fallback is not exercised")' "$ROOT"
+  make_plan "$PLAN" file
+  rewrite_json_0600 "$PLAN" --arg leaf "$leaf" '
+    .artifacts[0].path = $leaf
+    | .artifacts += [{path:"parent with spaces",kind:"parent"},
+                    {path:("parent with spaces/" + $leaf),kind:"symlink",target:$leaf}]'
+  run attachment_prepare "$TRELLIS_HOME" "$PLAN" "$JOURNAL"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run attachment_commit "$TRELLIS_HOME" "$JOURNAL"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cmp "$SOURCE_FILE" "$PROJECT/$leaf"
+  _attachment_symlink_matches "$PROJECT/parent with spaces/$leaf" "$leaf"
+  [ -z "$(find "$PROJECT" -name '.*attachment-stage-*')" ]
+  run _attachment_verify_owner_artifacts "$OWNER"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
 @test "Bash 3.2-compatible fixtures prepare a canonical 0600 journal without project writes" {
@@ -1176,6 +1210,27 @@ EOF
   [ ! -e "$ROOT/external/$(basename "$stage")" ]
 }
 
+@test "lean-wt-remove: the claim layout derives its token afresh, never from an inherited memo" {
+  prepare_plan file
+  cp "$SOURCE_FILE" "$PROJECT/attached.txt"
+  set_applied_prefix 1
+  _attachment_set_removal_intent "$JOURNAL" "$PROJECT/attached.txt"
+  _attachment_journal_claim_layout "$JOURNAL" "$PROJECT/attached.txt"
+  local expected=$_ATTACHMENT_QUARANTINE nonce
+  nonce=$(jq -r '.removal.nonce' "$JOURNAL")
+  # A planted memo for this exact input survives neither a fresh source nor
+  # an exported environment.
+  run env _ATTACHMENT_CLAIM_TOKEN_INPUT="$nonce:$PROJECT/attached.txt" \
+    _ATTACHMENT_CLAIM_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+    bash -c '. "$1" && _attachment_journal_claim_layout "$2" "$3" && printf "%s\n" "$_ATTACHMENT_QUARANTINE"' _ \
+    "$BATS_TEST_DIRNAME/../lib/attachment.sh" "$JOURNAL" "$PROJECT/attached.txt"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$expected" ]
+  # In-process reuse is keyed by the exact input: another path is hashed anew.
+  _attachment_claim_layout "$PROJECT/other.txt" "$nonce"
+  [ "$_ATTACHMENT_QUARANTINE" = "$PROJECT/.trellis-attachment-remove-$(printf '%s' "$nonce:$PROJECT/other.txt" | shasum -a 256 | cut -d ' ' -f 1)" ]
+}
+
 @test "recovery resumes an authenticated claimed removal after a crash" {
   prepare_plan file
   cp "$SOURCE_FILE" "$PROJECT/attached.txt"
@@ -1341,4 +1396,465 @@ assert_one_lock_winner() {
 
 @test "user lock: acquirers that meet at ln get one winner and a busy refusal" {
   assert_one_lock_winner user
+}
+
+@test "fork-free dirname basename and control-byte helpers match the real tools on an edge corpus" {
+  local shell seen=''
+  for shell in /bin/bash "$(command -v bash)"; do
+    [ -x "$shell" ] || continue
+    case " $seen " in *" $shell "*) continue ;; esac
+    seen="$seen $shell"
+    run "$shell" "$BATS_TEST_DIRNAME/helpers/builtin-differential.bash" "$BATS_TEST_DIRNAME/../.."
+    [ "$status" -eq 0 ]
+    [[ "$output" == *": 0 mismatches" ]]
+  done
+  [ -n "$seen" ]
+}
+
+t56_native_render_fixture() {
+  local repo="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)" digest target=aarch64-apple-darwin
+  export HOME="$BATS_TEST_TMPDIR/context user 'quoted;value"
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/context-trellis"
+  T56_PAYLOAD="$BATS_TEST_TMPDIR/render-payload"
+  mkdir -p "$HOME/.local/bin" "$TRELLIS_HOME" "$T56_PAYLOAD/core-rules/templates"
+  chmod 700 "$HOME" "$TRELLIS_HOME"
+  cp -R "$repo/core-rules/native" "$T56_PAYLOAD/core-rules/native"
+  digest="$(jq -r --arg target "$target" '.assets[$target].sha256' "$T56_PAYLOAD/core-rules/native/artifacts.json")"
+  T56_COMPANION="$TRELLIS_HOME/bin/native/1.5.0/$target/$digest/trellis-hooks"
+  mkdir -p "${T56_COMPANION%/*}"
+  cp "$T56_PAYLOAD/core-rules/native/$target/trellis-hooks" "$T56_COMPANION"
+  chmod 500 "$T56_COMPANION"
+  python3 -I - "$repo/scripts/trellis-launcher.sh" "$HOME/.local/bin/trellis" "$T56_COMPANION" "$digest" <<'PY'
+from pathlib import Path
+import sys
+source,dest,entry,digest=sys.argv[1:]
+s=Path(source).read_text(); q=lambda x:"'"+x.replace("'", "'\\''")+"'"
+for k,v in (('launcher_native_entry',entry),('launcher_native_sha256',digest),('launcher_native_version','1.5.0')):
+    s=s.replace(k+"=''\n",k+'='+q(v)+'\n')
+p=Path(dest); p.write_text(s); p.chmod(0o755)
+PY
+  T56_CONTEXT="$(attachment_contextual_render_context "$TRELLIS_HOME")"
+}
+
+@test "T56 legacy provider matches captured pre-native renders and declares only T67" {
+  local repo="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)" provider capture template version source context
+  provider="$repo/core-rules/legacy-hooks"
+  capture="$(jq -r '.capture_commit' "$provider/manifest.json")"
+  mkdir -p "$BATS_TEST_TMPDIR/reference"
+  git -C "$repo" show "$capture:scripts/lib/attachment.sh" > "$BATS_TEST_TMPDIR/reference/attachment.sh"
+  t56_native_render_fixture
+  context="$T56_CONTEXT"
+  for template in claude-settings.local.json codex-hooks.local.json claude-user-settings.json; do
+    source="$BATS_TEST_TMPDIR/reference/$template"
+    git -C "$repo" show "$capture:core-rules/templates/$template" > "$source"
+    cmp -s "$source" "$provider/$template"
+    for version in 2.1.295 2.1.294; do
+      bash -c '. "$1"; version=$6; attachment_claude_code_version() { printf "%s\n" "$version"; }; attachment_contextual_template_select "$2" "$3" "$4" "$5"' \
+        _ "$repo/scripts/lib/attachment.sh" "$provider/$template" "core-rules/templates/$template" "$context" "$PROJECT" "$version" > "$BATS_TEST_TMPDIR/provider-render"
+      bash -c '. "$1"; TRELLIS_LIBS_PRELOADED=1; . "$2"; version=$6; attachment_claude_code_version() { printf "%s\n" "$version"; }; attachment_contextual_template_render "$3" "$4" "$5"' \
+        _ "$repo/scripts/lib/attachment.sh" "$BATS_TEST_TMPDIR/reference/attachment.sh" "$source" "core-rules/templates/$template" "$context" "$version" > "$BATS_TEST_TMPDIR/reference-render"
+      cmp -s "$BATS_TEST_TMPDIR/reference-render" "$BATS_TEST_TMPDIR/provider-render"
+    done
+  done
+  python3 -I - "$repo" "$provider" <<'PY'
+import hashlib,json,pathlib,subprocess,sys
+repo,base=map(pathlib.Path,sys.argv[1:]); d=json.loads((base/'declared-deltas.json').read_text())
+read=lambda ref,name:subprocess.check_output(['git','-C',str(repo),'show',ref+':core-rules/templates/'+name])
+compact=lambda x:json.dumps(x,sort_keys=True,separators=(',',':')).encode()
+assert len(d['deltas'])==1 and d['deltas'][0]['id']=='T67'
+x=d['deltas'][0]; old=json.loads(read(d['base_commit'],x['file'])); new=json.loads((base/x['file']).read_bytes())
+a=old['hooks']['UserPromptExpansion']; b=new['hooks']['UserPromptExpansion']
+assert hashlib.sha256(compact(a)).hexdigest()==x['before_sha256']
+assert hashlib.sha256(compact(b)).hexdigest()==x['after_sha256']
+assert b[0]['hooks'][0]['timeout']==30 and b[0]['hooks'][0]['onFailure']=='block'
+assert 'guard-supervise.pl' in b[0]['hooks'][0]['args'][-4]
+old['hooks']['UserPromptExpansion']=b
+assert old==new, 'undeclared semantic delta from 1.4.1'
+for name in ('codex-hooks.local.json','claude-user-settings.json'):
+    assert read(d['base_commit'],name)==(base/name).read_bytes(), 'undeclared legacy byte delta'
+PY
+}
+
+@test "T56 native architecture miss selects the complete pinned legacy surface" {
+  [ "$(uname -s):$(uname -m)" = Darwin:arm64 ] || skip 'Darwin candidate rendering fixture'
+  t56_native_render_fixture
+  local repo="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)" source
+  cp -R "$repo/core-rules/legacy-hooks" "$T56_PAYLOAD/core-rules/legacy-hooks"
+  source="$T56_PAYLOAD/core-rules/templates/claude-settings.local.json"
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"__TRELLIS_LAUNCHER__","args":["hook","event","claude","PreToolUse"],"timeout":30,"onFailure":"block"}]}]}}' > "$source"
+  jq '.assets = {}' "$T56_PAYLOAD/core-rules/native/artifacts.json" > "$BATS_TEST_TMPDIR/no-target"
+  cp "$BATS_TEST_TMPDIR/no-target" "$T56_PAYLOAD/core-rules/native/artifacts.json"
+  attachment_claude_on_failure_supported() { return 0; }
+  attachment_contextual_template_select "$source" core-rules/templates/claude-settings.local.json "$T56_CONTEXT" "$PROJECT" > "$BATS_TEST_TMPDIR/fallback" 2> "$BATS_TEST_TMPDIR/fallback-label"
+  attachment_contextual_template_render_impl "$T56_PAYLOAD/core-rules/legacy-hooks/claude-settings.local.json" core-rules/templates/claude-settings.local.json "$T56_CONTEXT" "$PROJECT" > "$BATS_TEST_TMPDIR/legacy-reference"
+  # T34: the complete pinned legacy hook surface; every other key comes from
+  # the current template (here: none), as on the native route.
+  jq -e --slurpfile ref "$BATS_TEST_TMPDIR/legacy-reference" '.hooks == $ref[0].hooks and (keys == ["hooks"])' \
+    "$BATS_TEST_TMPDIR/fallback" >/dev/null
+  jq '.note = "kept"' "$source" > "$source.next" && mv "$source.next" "$source"
+  attachment_contextual_template_select "$source" core-rules/templates/claude-settings.local.json "$T56_CONTEXT" "$PROJECT" > "$BATS_TEST_TMPDIR/fallback-keyed" 2>/dev/null
+  jq -e --slurpfile ref "$BATS_TEST_TMPDIR/legacy-reference" '.hooks == $ref[0].hooks and .note == "kept"' \
+    "$BATS_TEST_TMPDIR/fallback-keyed" >/dev/null
+  grep -F 'legacy fallback: native selection miss 10' "$BATS_TEST_TMPDIR/fallback-label"
+  jq -e 'has("hooks") and (.hooks | has("Stop") and has("UserPromptExpansion") and has("PostToolUse"))' "$BATS_TEST_TMPDIR/fallback" >/dev/null
+}
+
+@test "T56 contextual native renders every event and all three surfaces with exact argv" {
+  [ "$(uname -s):$(uname -m)" = Darwin:arm64 ] || skip 'Darwin candidate rendering fixture'
+  t56_native_render_fixture
+  attachment_claude_on_failure_supported() { return 0; }
+  local template source harness result
+  for template in claude-settings.local.json codex-hooks.local.json claude-user-settings.json; do
+    harness=claude; [ "$template" != codex-hooks.local.json ] || harness=codex
+    source="$T56_PAYLOAD/core-rules/templates/$template"
+    jq -n --arg harness "$harness" '{hooks:(["PreToolUse","PostToolUse","UserPromptSubmit","SessionStart","Stop","PreCompact"] | map(. as $event | {key:$event,value:[{hooks:[({type:"command",command:"__TRELLIS_LAUNCHER__",args:["hook","event",$harness,$event],timeout:30} + (if $harness == "claude" then {onFailure:"block"} else {} end))]}]}) | from_entries)}' > "$source"
+    run attachment_contextual_template_render "$source" "core-rules/templates/$template" "$T56_CONTEXT" "$PROJECT"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    result="$BATS_TEST_TMPDIR/$template.rendered"; printf '%s\n' "$output" > "$result"
+    if [ "$harness" = claude ]; then
+      # R1 PATH ruling: PostToolUse and Stop are the shell form forwarding the
+      # caller PATH as data; every other Claude event is the R1 exec form.
+      jq -e --arg companion "$T56_COMPANION" --arg root "$(if [ "$template" = claude-user-settings.json ]; then printf '%s' "$HOME"; else printf '%s' "$PROJECT"; fi)" '
+        # I-A3 Q: always single-quoted, an embedded quote as '"'"'\'"'"''"'"'.
+        def q: "'"'"'" + gsub("'"'"'"; "'"'"'\\'"'"''"'"'") + "'"'"'";
+        all(.hooks | to_entries[] | .key as $event | .value[] | .hooks[] | {e: $event, h: .};
+          .e as $e
+          | if $e == "PostToolUse" or $e == "Stop" then
+            (.h | has("args") | not) and .h.onFailure == "block"
+            and (.h.command | startswith("/usr/bin/env -i HOME=") and contains(" \"TRELLIS_CALLER_PATH=$PATH\" ")
+              and endswith(($companion | q) + " event-client claude " + $e + " " + ($root | q)))
+          else
+            .h.command == "/usr/bin/env" and .h.args[4] == $companion and .h.args[5] == "event-client" and .h.args[8] == $root and .h.onFailure == "block"
+          end)' "$result" >/dev/null
+    else
+      jq -e 'all(.hooks[][] | .hooks[]; (has("args") | not) and (has("onFailure") | not) and (.command | startswith("HOME=")))' "$result" >/dev/null
+    fi
+  done
+}
+
+@test "T56 contextual native refuses drifted own companion bytes and misplaced markers" {
+  [ "$(uname -s):$(uname -m)" = Darwin:arm64 ] || skip 'Darwin candidate rendering fixture'
+  t56_native_render_fixture
+  attachment_claude_on_failure_supported() { return 0; }
+  local source="$T56_PAYLOAD/core-rules/templates/claude-settings.local.json"
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"__TRELLIS_LAUNCHER__","args":["hook","event","claude","PreToolUse"],"timeout":30,"onFailure":"block"}]}]}}' > "$source"
+  chmod u+w "$T56_COMPANION"
+  printf 'changed companion' >> "$T56_COMPANION"
+  chmod 500 "$T56_COMPANION"
+  run attachment_contextual_template_render "$source" core-rules/templates/claude-settings.local.json "$T56_CONTEXT" "$PROJECT"
+  [ "$status" -eq 4 ] || { echo "$output"; return 1; }
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"matcher":"__TRELLIS_HOME__","hooks":[{"type":"command","command":"echo __TRELLIS_HOME__"}]}]}}' > "$source"
+  run attachment_contextual_template_render "$source" core-rules/templates/claude-settings.local.json "$T56_CONTEXT" "$PROJECT"
+  [ "$status" -eq 4 ] || { echo "$output"; return 1; }
+}
+
+@test "B1 review M3 renderer resolves trusted source and launcher directory roots once" {
+  [ "$(uname -s):$(uname -m)" = Darwin:arm64 ] || skip 'Darwin candidate rendering fixture'
+  t56_native_render_fixture
+  local alias="$BATS_TEST_TMPDIR/render-alias" source
+  mv "$HOME/.local/bin" "$BATS_TEST_TMPDIR/actual-launchers"
+  ln -s "$BATS_TEST_TMPDIR/actual-launchers" "$HOME/.local/bin"
+  T56_CONTEXT="$(attachment_contextual_render_context "$TRELLIS_HOME")"
+  ln -s "$T56_PAYLOAD" "$alias"
+  source="$alias/core-rules/templates/claude-settings.local.json"
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"__TRELLIS_LAUNCHER__","args":["hook","event","claude","PreToolUse"],"timeout":30,"onFailure":"block"}]}]}}' > "$source"
+  run attachment_contextual_template_render "$source" core-rules/templates/claude-settings.local.json "$T56_CONTEXT" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "B1 M-A1 merge-base replaces adopted prefixes and records only residuals for changed values" {
+  local base="$BATS_TEST_TMPDIR/adopted-base.json" original="$BATS_TEST_TMPDIR/adopted-original.json" template="$BATS_TEST_TMPDIR/adopted-next.json" keys result
+  printf '%s\n' '{"managed":"old","project":true,"hooks":{"WorktreeCreate":[{"hooks":[{"command":"kept-hook"},{"command":"project-R"}]}]}}' > "$base"
+  printf '%s\n' '{"managed":"old","hooks":{"WorktreeCreate":[{"hooks":[{"command":"kept-hook"}]}]}}' > "$original"
+  printf '%s\n' '{"managed":"new","hooks":{"WorktreeCreate":[{"hooks":[{"command":"kept-hook"},{"command":"added-hook"}]}]}}' > "$template"
+  keys='[{"path":["managed"],"value":"old"},{"path":["hooks","WorktreeCreate"],"value":[{"hooks":[{"command":"kept-hook"}]}]}]'
+  run settings_owned_json merge-base "$base" "$keys" "$template" "$original" '[]'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  result="$output"
+  printf '%s\n' "$result" | jq -e '.after.managed=="new" and [.after.hooks.WorktreeCreate[].hooks[].command]==["kept-hook","added-hook","project-R"] and (.before | has("managed") | not) and [.before.hooks.WorktreeCreate[].hooks[].command]==["project-R"]' >/dev/null
+  printf '%s\n' "$result" | jq '.before' > "$BATS_TEST_TMPDIR/residual-before.json"
+  printf '%s\n' "$result" | jq '.after' > "$BATS_TEST_TMPDIR/adopted-after.json"
+  keys="$(printf '%s\n' "$result" | jq -c '.owned_keys')"
+  run settings_owned_json inverse "$BATS_TEST_TMPDIR/adopted-after.json" "$keys" '' "$BATS_TEST_TMPDIR/residual-before.json" '[]'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | jq -e '.project==true and (has("managed") | not) and [.hooks.WorktreeCreate[].hooks[].command]==["project-R"]' >/dev/null
+}
+
+@test "B1 review L3 ownership drift and subtraction share type-strict numeric comparison" {
+  local base="$BATS_TEST_TMPDIR/typed.json" template="$BATS_TEST_TMPDIR/typed-template.json" keys
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"command":"owned","timeout":30.0}]}]}}' > "$base"
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"command":"new","timeout":30}]}]}}' > "$template"
+  keys='[{"path":["hooks","Stop"],"value":[{"hooks":[{"command":"owned","timeout":30}]}]}]'
+  run attach_detach_json_keys_detail "$base" "$keys"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | jq -e '.[0].state == "changed"' >/dev/null
+  run settings_owned_json merge "$base" "$keys" "$template"
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+}
+
+@test "T56 owned-only merge preserves appended project hooks through inverse" {
+  local base="$BATS_TEST_TMPDIR/base.json" template="$BATS_TEST_TMPDIR/template.json" keys result
+  printf '%s\n' '{"project":true,"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"old-guard"},{"type":"command","command":"project-hook"}]},{"hooks":[{"type":"command","command":"project-block"}]}]}}' > "$base"
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"new-guard"}]}]}}' > "$template"
+  keys='[{"path":["hooks","PreToolUse"],"value":[{"matcher":"Bash","hooks":[{"type":"command","command":"old-guard"}]}]}]'
+  run settings_owned_json merge "$base" "$keys" "$template"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  result="$output"
+  printf '%s\n' "$result" | jq -e '.after.project == true and [.after.hooks.PreToolUse[].hooks[].command] == ["new-guard","project-hook","project-block"]' >/dev/null
+  printf '%s\n' "$result" | jq '.after' > "$BATS_TEST_TMPDIR/merged.json"
+  keys="$(printf '%s\n' "$result" | jq -c '.owned_keys')"
+  run settings_owned_json inverse "$BATS_TEST_TMPDIR/merged.json" "$keys"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  printf '%s\n' "$output" | jq -e '.project == true and [.hooks.PreToolUse[].hooks[].command] == ["project-hook","project-block"]' >/dev/null
+}
+
+@test "T56 local and user inverse helpers preserve appended project event members" {
+  local file="$PROJECT/t56-settings.json" keys render user_result local_result repo
+  repo="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+  keys='[{"path":["hooks","PreToolUse"],"value":[{"hooks":[{"command":"owned-guard"}]}]}]'
+  printf '%s\n' '{"project":true,"hooks":{"PreToolUse":[{"hooks":[{"command":"owned-guard"},{"command":"project-hook"}]}]}}' > "$file"
+  chmod 600 "$file"
+  render="$(jq -cn --arg destination "$file" --argjson keys "$keys" '{destination:$destination,owned_keys:$keys,created_paths:[["hooks"]],before_exists:false,before_mode:null,before_base64:"",before_sha256:"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",after_sha256:("0"*64),after_mode:"0600",mode:"0600"}')"
+  user_result="$(_attachment_user_inverse_render_result "$render")"
+  printf '%s\n' "$user_result" | jq -e '.result_base64 | @base64d | fromjson | .project == true and [.hooks.PreToolUse[].hooks[].command] == ["project-hook"]' >/dev/null
+  local_result="$(TRELLIS_LIBS_PRELOADED=1; source "$repo/scripts/attach-project.sh"; attach_detach_inverse_render_json "$PROJECT" "$(printf '%s\n' "$render" | jq '.path="t56-settings.json" | del(.destination)')")"
+  printf '%s\n' "$local_result" | jq -e '.result_base64 | @base64d | fromjson | .project == true and [.hooks.PreToolUse[].hooks[].command] == ["project-hook"]' >/dev/null
+}
+
+@test "T56 owned-only merge refuses positional drift and new project-key collisions" {
+  local base="$BATS_TEST_TMPDIR/base.json" template="$BATS_TEST_TMPDIR/template.json" keys
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"command":"project-hook"},{"command":"old-guard"}]}]}}' > "$base"
+  printf '%s\n' '{"hooks":{"PreToolUse":[{"hooks":[{"command":"new-guard"}]}]}}' > "$template"
+  keys='[{"path":["hooks","PreToolUse"],"value":[{"hooks":[{"command":"old-guard"}]}]}]'
+  run settings_owned_json merge "$base" "$keys" "$template"
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+  printf '%s\n' '{"project":true}' > "$base"
+  printf '%s\n' '{"project":false}' > "$template"
+  run settings_owned_json merge "$base" '[]' "$template"
+  [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+}
+
+@test "render context check decodes exactly one fully valid JSON value" {
+  local user_home="$ROOT/user" context quoted_user quoted_home quoted_launcher
+  mkdir -p "$user_home/.local/bin"
+  printf '#!/bin/sh\n' > "$user_home/.local/bin/trellis"
+  chmod 755 "$user_home/.local/bin/trellis"
+  quoted_user=$(attachment_contextual_posix_shell_quote "$user_home")
+  quoted_home=$(attachment_contextual_posix_shell_quote "$TRELLIS_HOME")
+  quoted_launcher=$(attachment_contextual_posix_shell_quote "$user_home/.local/bin/trellis")
+  context=$(jq -cn --arg u "$user_home" --arg h "$TRELLIS_HOME" --arg l "$user_home/.local/bin/trellis" \
+    --arg us "$quoted_user" --arg hs "$quoted_home" --arg ls "$quoted_launcher" \
+    '{schema_version: 1, user_home: $u, trellis_home: $h, launcher: $l,
+      user_home_shell: $us, trellis_home_shell: $hs, launcher_shell: $ls}')
+
+  run attachment_contextual_render_context_validate "$context" "$TRELLIS_HOME"
+  [ "$status" -eq 0 ]
+  run attachment_contextual_render_context_validate "$context $context" "$TRELLIS_HOME"
+  [ "$status" -eq 4 ]
+  run attachment_contextual_render_context_validate "$context"$'\n''null' "$TRELLIS_HOME"
+  [ "$status" -eq 4 ]
+  run attachment_contextual_render_context_validate "$(printf '%s' "$context" | jq -c '.user_home_shell += "\n"')" "$TRELLIS_HOME"
+  [ "$status" -eq 4 ]
+  run attachment_contextual_render_context_validate "$(printf '%s' "$context" | jq -c '.extra = 1')" "$TRELLIS_HOME"
+  [ "$status" -eq 4 ]
+  run attachment_contextual_render_context_validate '' "$TRELLIS_HOME"
+  [ "$status" -eq 4 ]
+  run attachment_contextual_render_context_validate "$context" "$user_home"
+  [ "$status" -eq 4 ]
+}
+
+@test "NUL field reader takes exactly one field per variable and strips trailing newlines" {
+  local first second
+  trellis_read_nul_fields first second < <(printf 'a\n\n\0b c\0')
+  [ "$first" = a ]
+  [ "$second" = 'b c' ]
+  run trellis_read_nul_fields first second < <(printf 'a\0')
+  [ "$status" -ne 0 ]
+  run trellis_read_nul_fields first second < <(printf 'a\0b\0c\0')
+  [ "$status" -ne 0 ]
+  run trellis_read_nul_fields first second < <(printf 'a\0b\0tail')
+  [ "$status" -ne 0 ]
+  run trellis_read_nul_fields first second < <(printf 'a\0b')
+  [ "$status" -ne 0 ]
+}
+
+# Exact permission bits, special bits included: BSD `%p` ends in the four
+# octal permission digits; GNU `%a` prints them without leading zeros.
+exact_mode_of() {
+  local candidate
+  candidate="$(stat -f %p "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-7]*) candidate="" ;;
+  esac
+  if [ -n "$candidate" ]; then
+    candidate="${candidate#"${candidate%????}"}"
+    candidate="${candidate#0}"
+  else
+    candidate="$(stat -c %a "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
+# Nanosecond ctime, probed BSD first in a separate capture as mode_of does.
+ctime_of() {
+  local candidate
+  candidate="$(stat -f %Fc "$1" 2>/dev/null)" || candidate=""
+  case "$candidate" in
+    ''|*[!0-9.]*) candidate="" ;;
+  esac
+  if [ -z "$candidate" ]; then
+    candidate="$(stat -c %z "$1" 2>/dev/null)" || return 1
+  fi
+  printf '%s\n' "$candidate"
+}
+
+# Seed MODE on a fresh directory owned by our own group (BSD drops setgid for
+# a group we are not in), and prove the seed took so no case passes vacuously.
+seed_private_dir_mode() {
+  mkdir -p "$1"
+  chgrp "$(id -g)" "$1"
+  chmod "$2" "$1"
+  [ "$(exact_mode_of "$1")" = "${2#0}" ] || { echo "seed $2 did not take on $1: $(exact_mode_of "$1")"; return 1; }
+}
+
+@test "private-dir preparers correct 0755 and special-bit directories to exactly 0700" {
+  local mode home dir generic
+  for mode in 0755 1700 2700 4700 6700 7700; do
+    home="$ROOT/prep-home-$mode" dir="$ROOT/prep-dir-$mode" generic="$ROOT/prep-generic-$mode"
+    seed_private_dir_mode "$home" "$mode"
+    seed_private_dir_mode "$home/state" "$mode"
+    seed_private_dir_mode "$dir" "$mode"
+    seed_private_dir_mode "$generic" "$mode"
+    _attachment_prepare_state "$home" || { echo "prepare_state refused from $mode"; false; }
+    _attachment_ensure_private_dir "$dir" || { echo "ensure_private_dir refused from $mode"; false; }
+    trellis_home_prepare_private_dir "$generic" "test directory" || { echo "prepare_private_dir refused from $mode"; false; }
+    [ "$(exact_mode_of "$home")" = 700 ] || { echo "home from $mode: $(exact_mode_of "$home")"; false; }
+    [ "$(exact_mode_of "$home/state")" = 700 ] || { echo "state from $mode: $(exact_mode_of "$home/state")"; false; }
+    [ "$(exact_mode_of "$home/state/locks")" = 700 ]
+    [ "$(exact_mode_of "$dir")" = 700 ] || { echo "dir from $mode: $(exact_mode_of "$dir")"; false; }
+    [ "$(exact_mode_of "$generic")" = 700 ] || { echo "generic from $mode: $(exact_mode_of "$generic")"; false; }
+  done
+}
+
+@test "private-dir preparers chmod when the exact-mode probe fails, even under errexit" {
+  local work="$ROOT/probe" fn
+  mkdir -p "$work"
+  for fn in _attachment_prepare_state _attachment_ensure_private_dir trellis_home_prepare_private_dir; do
+    seed_private_dir_mode "$work/once-$fn" 0700
+    seed_private_dir_mode "$work/always-$fn" 0755
+  done
+  run env T="$work" LIB="$BATS_TEST_DIRNAME/../lib/attachment.sh" /bin/bash -e -c '
+    . "$LIB"
+    chmod() { printf "%s\n" "$*" >> "$T/chmod.log"; command chmod "$@"; }
+    # once: the first probe of each path fails, later ones are real.
+    # always: every probe fails, so the post-chmod verify cannot pass.
+    find() {
+      local marker
+      case "$1" in
+        "$T"/always-*) return 42 ;;
+      esac
+      marker="$T/probed-$(printf "%s" "$1" | cksum | cut -d " " -f 1)"
+      if [ ! -e "$marker" ]; then : > "$marker"; return 42; fi
+      command find "$@"
+    }
+    for fn in _attachment_prepare_state _attachment_ensure_private_dir trellis_home_prepare_private_dir; do
+      : > "$T/chmod.log"
+      "$fn" "$T/once-$fn" "test directory"
+      grep -qxF "00700 $T/once-$fn" "$T/chmod.log" || { echo "$fn skipped the chmod after a failed probe"; exit 1; }
+      echo "once $fn ok"
+      : > "$T/chmod.log"
+      if "$fn" "$T/always-$fn" "test directory"; then
+        echo "$fn accepted a mode it could not verify"; exit 1
+      fi
+      grep -qxF "00700 $T/always-$fn" "$T/chmod.log" || { echo "$fn skipped the chmod after a failed probe"; exit 1; }
+      echo "always $fn refused"
+    done
+    echo REACHED_END
+  '
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *REACHED_END* ]] || { echo "$output"; false; }
+  for fn in _attachment_prepare_state _attachment_ensure_private_dir trellis_home_prepare_private_dir; do
+    [ "$(exact_mode_of "$work/once-$fn")" = 700 ]
+    [ "$(exact_mode_of "$work/always-$fn")" = 700 ]
+  done
+}
+
+@test "private-dir preparers leave an exact 0700 directory's ctime alone" {
+  # A same-mode GNU chmod moves ctime (BSD chmod skips the call); the show-config
+  # registry drift token binds TRELLIS_HOME's ctime, so a no-op chmod by a
+  # concurrent attach postjob read as a registry change.
+  local home="$ROOT/still-home" dir="$ROOT/still-dir" generic="$ROOT/still-generic"
+  local home_before dir_before generic_before
+  mkdir -p "$home" "$dir" "$generic"
+  _attachment_prepare_state "$home"
+  chmod 700 "$home" "$dir" "$generic"
+  home_before="$(ctime_of "$home")"
+  dir_before="$(ctime_of "$dir")"
+  generic_before="$(ctime_of "$generic")"
+  [ -n "$home_before" ] && [ -n "$dir_before" ] && [ -n "$generic_before" ]
+  # Let a coarse timestamp clock tick, so a chmod could not hide in the same tick.
+  sleep 0.1
+  _attachment_prepare_state "$home"
+  _attachment_ensure_private_dir "$dir"
+  trellis_home_prepare_private_dir "$generic" "test directory"
+  [ "$(ctime_of "$home")" = "$home_before" ]
+  [ "$(ctime_of "$dir")" = "$dir_before" ]
+  [ "$(ctime_of "$generic")" = "$generic_before" ]
+}
+
+@test "private-dir preparers run no chmod on an exact 0700 directory" {
+  # Tool independent: BSD chmod skips a same-mode call, so the ctime check
+  # above only bites with GNU chmod; counting the calls bites everywhere,
+  # whichever find or chmod flavour PATH resolves.
+  local work="$ROOT/nochmod"
+  mkdir -p "$work"
+  run env T="$work" LIB="$BATS_TEST_DIRNAME/../lib/attachment.sh" /bin/bash -e -c '
+    . "$LIB"
+    mkdir "$T/home" "$T/dir" "$T/generic"
+    _attachment_prepare_state "$T/home"
+    command chmod 00700 "$T/home" "$T/dir" "$T/generic"
+    chmod() { printf "%s\n" "$*" >> "$T/chmod.log"; command chmod "$@"; }
+    : > "$T/chmod.log"
+    _attachment_prepare_state "$T/home"
+    _attachment_ensure_private_dir "$T/dir"
+    trellis_home_prepare_private_dir "$T/generic" "test directory"
+    if [ -s "$T/chmod.log" ]; then echo "unexpected chmod:"; cat "$T/chmod.log"; exit 1; fi
+    echo REACHED_END
+  '
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *REACHED_END* ]] || { echo "$output"; false; }
+}
+
+@test "generated dispatcher quotes bypass-marker values against word splitting" {
+  prepare_managed_hooks
+  local body="$TRELLIS_HOME/state/git-hooks/$CHECKOUT_ID/pre-push"
+  grep -Fq 'TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}"' "$body" ||
+    { echo "ALLOW_MAIN_PUSH is not quoted"; false; }
+  grep -Fq 'SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}"' "$body" ||
+    { echo "SECURITY_GATE_SKIP is not quoted"; false; }
+  ! grep -Fq 'TRELLIS_ALLOW_MAIN_PUSH=${TRELLIS_ALLOW_MAIN_PUSH-}' "$body" ||
+    { echo "ALLOW_MAIN_PUSH is word-split"; false; }
+  ! grep -Fq 'SECURITY_GATE_SKIP=${SECURITY_GATE_SKIP-}' "$body" ||
+    { echo "SECURITY_GATE_SKIP is word-split"; false; }
+}
+
+@test "the recovery remedy preserves the bytes it says it preserved" {
+  local journal="$ROOT/recovery-journal.json" destination="$ROOT/recovery-dest"
+  local artifact repair
+  printf '{"release":"1.2.3"}\n' > "$journal"
+  artifact="$(jq -nc '{kind:"file",replace:{before_base64:"T1JJR0lOQUw=",before_mode:"0644"}}')"
+  printf 'USER EDITS ONLY COPY\n' > "$destination"
+
+  run _attachment_user_rollback_replace_conflict \
+    "$TRELLIS_HOME" "$journal" attach "$destination" "$artifact" "1:2"
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  repair="$(printf '%s\n' "$output" | sed -n 's/^trellis: user attachment recovery remedy: //p')"
+  [ -n "$repair" ] || { echo "no remedy printed"; false; }
+
+  run bash -c "$repair"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$destination")" = "ORIGINAL" ] || { echo "snapshot not restored"; false; }
+  # The operator's edited bytes survive somewhere beside the destination.
+  grep -Rl 'USER EDITS ONLY COPY' "$ROOT" | grep -v -F -x "$destination" | grep -q . ||
+    { echo "edited bytes were destroyed"; false; }
 }

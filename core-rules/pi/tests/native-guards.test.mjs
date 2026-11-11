@@ -2,9 +2,10 @@
 // returns backstop pi >=1.4's throw-to-block contract on older hosts too.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { deliveredFixture } from './delivered-fixture.mjs';
+import { mockDispatchExec } from './dispatch-test-transport.mjs';
 
 const allow = { stdout: '{"schema_version":1,"capability_status":"enforced","decision":"allow"}', stderr: '', code: 0 };
 const turn = f => f.fire('before_agent_start', { messageType: 'user', systemPrompt: 'parent' });
@@ -47,7 +48,7 @@ test('guard patterns, failure markers and warn budgets come from runtime JSON at
     reread.edit_failure_markers.pattern = 'DATA_FAILURE';
     writeFileSync(path('reread.json'), JSON.stringify(reread));
   });
-  f.pi.exec = async () => allow;
+  f.pi.exec = mockDispatchExec(async () => allow);
   assert.equal((await f.fire('tool_call', f.call('bash', { command: 'forbidden-by-data' }))).block, true);
   writeFileSync(resolve(f.cwd, 'file'), 'x');
   const edit = f.call('edit', { path: 'file' });
@@ -61,7 +62,7 @@ test('guard patterns, failure markers and warn budgets come from runtime JSON at
 
 test('native lowercase failure prefixes never grant mutation read credit', async t => {
   const f = await deliveredFixture(t);
-  f.pi.exec = async () => allow;
+  f.pi.exec = mockDispatchExec(async () => allow);
   writeFileSync(resolve(f.cwd, 'file'), 'x');
   for (const text of ['error without a colon', 'no files were modified.']) {
     turn(f);
@@ -89,13 +90,13 @@ test('rule matching keeps C-locale ASCII folding and exact line anchors', async 
 
 test('custom agent runs preserve read credit, pending calls and undelivered context', async t => {
   const f = await deliveredFixture(t);
-  f.pi.exec = async () => ({ ...allow, stdout: JSON.stringify({ schema_version: 1, capability_status: 'advisory', decision: 'allow', context: 'startup sentinel' }) });
+  f.pi.exec = mockDispatchExec(async () => ({ ...allow, stdout: JSON.stringify({ schema_version: 1, capability_status: 'advisory', decision: 'allow', context: 'startup sentinel' }) }));
   await f.fire('session_start', { reason: 'resume' });
   writeFileSync(resolve(f.cwd, 'file'), 'x');
   const event = f.call('read', { path: 'file' });
   await f.fire('tool_call', event);
   assert.equal(f.fire('before_agent_start', { messageType: 'custom', message: { customType: 'completion' }, systemPrompt: 'parent' }), undefined);
-  f.pi.exec = async () => allow;
+  f.pi.exec = mockDispatchExec(async () => allow);
   await f.result(event);
   for (let i = 0; i < 3; i++) assert.equal(await write(f), undefined);
   assert.match(turn(f).message.content, /startup sentinel/);
@@ -107,7 +108,7 @@ test('custom agent runs preserve read credit, pending calls and undelivered cont
 test('settlement clears pending generation; a late reused-id result cannot credit or consume a new call', async t => {
   const f = await deliveredFixture(t);
   let dispatches = 0;
-  f.pi.exec = async () => { dispatches++; return allow; };
+  f.pi.exec = mockDispatchExec(async () => { dispatches++; return allow; });
   writeFileSync(resolve(f.cwd, 'file'), 'x');
   const old = { ...f.call('read', { path: 'file' }), toolCallId: 'reused' };
   await f.fire('tool_call', old);
@@ -127,9 +128,9 @@ test('settlement clears pending generation; a late reused-id result cannot credi
 test('pre-action resuming after settlement blocks instead of publishing stale pending state', async t => {
   const f = await deliveredFixture(t);
   let release;
-  f.pi.exec = () => new Promise(done => { release = done; });
+  f.pi.exec = mockDispatchExec(() => new Promise(done => { release = done; }));
   const started = f.fire('tool_call', f.call('bash', { command: 'gh pr create' }));
-  f.pi.exec = async () => allow;
+  f.pi.exec = mockDispatchExec(async () => allow);
   await f.fire('agent_settled', {});
   release(allow);
   assert.match((await started).reason, /turn changed/);
@@ -139,7 +140,7 @@ test('async handlers snapshot cwd and context before awaiting a dispatcher', asy
   const f = await deliveredFixture(t);
   let reads = 0, stale = false;
   const ctx = { ...f.ctx, get cwd() { assert.equal(stale, false, 'stale ctx.cwd accessed'); reads++; return f.cwd; } };
-  f.pi.exec = async () => { stale = true; return allow; };
+  f.pi.exec = mockDispatchExec(async () => { stale = true; return allow; });
   assert.equal(await f.fire('tool_call', f.call('bash', { command: 'gh pr create' }), ctx), undefined);
   assert.equal(reads, 1);
 });
@@ -158,26 +159,77 @@ test('unhandled search pre/post callbacks do not dispatch or grant read credit',
   assert.equal((await write(f)).block, true);
 });
 
-test('successful mutation still runs every post-action advisory hook', async t => {
+test('native mutation joins lint failure and slop context without dispatching pure members', async t => {
   const f = await deliveredFixture(t);
-  const names = ['post-edit-verify', 'slop-tripwire', 'wiki-skill-suggest'];
-  for (const name of names) writeFileSync(resolve(f.runtime, `core-rules/codex/hooks/${name}.sh`),
-    `#!/bin/bash\nprintf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"${name} sentinel"}}'\n`);
-  const event = f.call('write', { path: 'new' });
+  mkdirSync(resolve(f.cwd, 'node_modules/.bin'), { recursive: true });
+  writeFileSync(resolve(f.cwd, 'node_modules/.bin/eslint'), '#!/bin/sh\n[ "$1" = --version ] && exit 0\necho lint-sentinel\nexit 1\n', { mode: 0o755 });
+  writeFileSync(resolve(f.cwd, 'eslint.config.js'), 'export default []');
+  const event = f.call('write', { path: 'new.ts' });
   assert.equal(await f.fire('tool_call', event), undefined);
+  writeFileSync(resolve(f.cwd, 'new.ts'), 'const value = data as any;\n');
   const post = await f.result(event);
-  for (const name of names) assert.match(post.content.at(-1).text, new RegExp(`${name} sentinel`));
-  assert.equal(f.calls.length, 1, 'post advisories remain one dispatcher call');
+  assert.match(post.content.at(-1).text, /lint-sentinel/);
+  assert.match(post.content.at(-1).text, /slop-tripwire: ts-as-any/);
+  assert.equal(f.notifications.at(-1)[1], 'warning');
+  assert.ok(f.calls.some(call => call.script.endsWith('/eslint')));
+  assert.ok(f.calls.every(call => !call.script.endsWith('dispatch.sh')));
 });
 
 for (const command of ['g\\h p\\r cr\\eate', 'g"h" p\'r\' cr"eate"', 'g\\\nh pr create']) {
   test(`PR advisory prefilter retains escaped/quoted command ${JSON.stringify(command)}`, async t => {
     const f = await deliveredFixture(t);
     let calls = 0;
-    f.pi.exec = async () => { calls++; return allow; };
+    f.pi.exec = mockDispatchExec(async () => { calls++; return allow; });
     assert.equal(await f.fire('tool_call', f.call('bash', { command })), undefined);
     assert.equal(calls, 1);
     await f.fire('user_bash', { command, cwd: f.cwd });
     assert.equal(calls, 2, 'actual scanner must get the chance to inspect both command paths');
   });
 }
+
+// QP H1: override records are the reread guard's escape authority; only the
+// CLI writes them. The Pi mutation guard refuses them before its create and
+// already-read exemptions, and the shared shell rule catches numbered redirects.
+test('override records are refused to builtin mutations and numbered shell redirects', async t => {
+  const f = await deliveredFixture(t);
+  f.pi.exec = mockDispatchExec(async () => allow);
+  const dir = resolve(f.cwd, 'trellis/state/reread-overrides');
+  mkdirSync(dir, { recursive: true });
+  const existing = resolve(dir, 'fedcba9876543210');
+  writeFileSync(existing, '9999999999\t1\tx\n');
+  // Grant read credit first, so the already-read exemption would otherwise apply.
+  const read = f.call('read', { path: existing });
+  await f.fire('tool_call', read);
+  await f.result(read);
+  for (const [tool, input] of [
+        ['write', { path: resolve(dir, '0123456789abcdef'), content: 'record\n' }],
+    ['write', { path: 'trellis/state/reread-overrides/../reread-overrides/new', content: 'record\n' }],
+    ['write', { path: existing, content: 'record\n' }],
+    ['edit', { path: existing, edits: [{ oldText: 'x', newText: 'y' }] }],
+    ['write', { path: dir, content: 'record\n' }],
+  ]) {
+    const call = await f.fire('tool_call', f.call(tool, input));
+    assert.equal(call?.block, true, `${tool} ${input.path}`);
+    assert.match(call.reason, /written only by trellis reread override/);
+  }
+  for (const command of [`printf x 1> ${dir}/k`, `printf x 2> ${dir}/k`, `printf x 1>>${dir}/k`]) {
+    assert.equal((await f.fire('tool_call', f.call('bash', { command })))?.block, true, command);
+  }
+  assert.equal(await f.fire('tool_call', f.call('bash', { command: `ls ${dir} 2>/dev/null` })), undefined);
+  assert.equal(await f.fire('tool_call', f.call('write', { path: resolve(f.cwd, 'trellis/state/other'), content: 'x' })), undefined);
+});
+
+test('override records are refused through case-folded and symlinked spellings', async t => {
+  const f = await deliveredFixture(t);
+  f.pi.exec = mockDispatchExec(async () => allow);
+  const dir = resolve(f.cwd, 'trellis/state/reread-overrides');
+  mkdirSync(dir, { recursive: true });
+  symlinkSync(resolve(f.cwd, 'trellis/state'), resolve(f.cwd, 'alias'));
+  symlinkSync(dir, resolve(f.cwd, 'records'));
+  for (const path of ['trellis/State/Reread-Overrides/0123456789abcdef', 'alias/reread-overrides/0123456789abcdef', 'records/0123456789abcdef', 'records']) {
+    const call = await f.fire('tool_call', f.call('write', { path, content: 'record\n' }));
+    assert.equal(call?.block, true, path);
+    assert.match(call.reason, /written only by trellis reread override/);
+  }
+  assert.equal(await f.fire('tool_call', f.call('write', { path: 'alias/other', content: 'x' })), undefined);
+});

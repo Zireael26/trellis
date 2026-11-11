@@ -284,6 +284,9 @@ load doctor-fix-common
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"safe repair delegated through trellis relink and passed strict post-repair verification"* ]] \
     || { echo "$output"; false; }
+  # The guard row read native arming through the missing anchor; only a
+  # fresh post-repair check may withdraw that error.
+  [[ "$output" == *"guard registration: verified after repair"* ]] || { echo "$output"; false; }
   [ -L "$PORTABLE_PROJECT/.trellis/runtime" ]
   [ "$(jq -r '.unrelated' "$settings")" = "keep-me" ]
   case "$(uname -s)" in

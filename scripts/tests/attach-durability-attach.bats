@@ -40,7 +40,12 @@ make_release() {
   printf '# fixture policy\n' > "$repo/core-rules/CLAUDE.md"
   printf '# generated primer index\n' > "$repo/core-rules/commands/templates/primer-index-template.md"
   # The contextual SessionStart renders are validated against the real shipped
-  # templates by path, so the fixture release carries the real bytes.
+  # templates by path, so the fixture release carries the real bytes. Historical
+  # pre-v2 sources predate the provider; do not rewrite those fixtures.
+  if [ -d "$source_root/core-rules/legacy-hooks" ]; then
+    mkdir -p "$repo/core-rules/legacy-hooks"
+    cp -R "$source_root/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/"
+  fi
   cp "$source_root/core-rules/templates/claude-settings.local.json" \
     "$repo/core-rules/templates/claude-settings.local.json"
   cp "$source_root/core-rules/templates/codex-hooks.local.json" \

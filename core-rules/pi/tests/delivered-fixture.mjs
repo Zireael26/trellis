@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { realDispatchExec } from './dispatch-test-transport.mjs';
 
 export async function deliveredFixture(t, source = process.env.B10_SOURCE_ROOT ?? resolve(new URL('../../../', import.meta.url).pathname), configureRuntime = () => {}) {
   const base = mkdtempSync(resolve(tmpdir(), 'b10-delivered-'));
@@ -23,12 +24,19 @@ export async function deliveredFixture(t, source = process.env.B10_SOURCE_ROOT ?
     getAllTools: () => ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', 'powershell'].map(name => ({ name, sourceInfo: { source: 'builtin' } })),
     getCommands: () => commands,
     sendMessage: (...args) => messages.push(args),
-    exec: async (script, args, options) => {
-      calls.push({ script, args, options });
-      const r = spawnSync('bash', [script, ...args], { cwd: options.cwd, encoding: 'utf8', timeout: 30_000,
-        env: { PATH: process.env.PATH, HOME: cwd, TRELLIS_HOME: resolve(cwd, 'trellis'), TMPDIR: resolve(cwd, 'tmp') } });
-      if (r.error) throw r.error;
-      return { stdout: r.stdout, stderr: r.stderr, code: r.status, killed: !!r.signal };
+    exec: async (command, args, options) => {
+      const run = async (script, args, options) => {
+        calls.push({ script, args, options });
+        const r = spawnSync(script.endsWith('.sh') ? 'bash' : script, script.endsWith('.sh') ? [script, ...args] : args, { cwd: options.cwd, encoding: 'utf8', timeout: 30_000,
+          env: { PATH: process.env.PATH, HOME: cwd, TRELLIS_HOME: resolve(cwd, 'trellis'), TMPDIR: resolve(cwd, 'tmp'), ...options.env } });
+        if (r.error) throw r.error;
+        return { stdout: r.stdout, stderr: r.stderr, code: r.status, killed: !!r.signal };
+      };
+      // Only dispatcher calls carry the completion nonce. In-process post
+      // probes also exec non-shell commands and must retain their raw results.
+      return command === '/usr/bin/env'
+        ? realDispatchExec(run)(command, args, options)
+        : run(command, args, options);
     },
   };
   configureRuntime(runtime);

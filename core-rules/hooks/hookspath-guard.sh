@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # hookspath-guard.sh — PostToolUse (Bash). core.hooksPath drift advisory.
 # Source: Trellis / core-rules / hooks.md (spec 055 R4.3)
 #

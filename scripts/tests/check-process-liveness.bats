@@ -185,12 +185,15 @@ PY
 }
 
 @test "build check anchors on the primary runtime program before project argv" {
-  local fixture
-  fixture="500 1 500 node node /repo/node_modules/vite/bin/vite.js build
-501 1 501 node node /other/node_modules/vite/bin/vite.js build
-502 1 502 node node /opt/herdr.js agent prompt /repo vite build"
+  local fixture project="$SANDBOX/project" other="$SANDBOX/other" pid
+  mkdir -p "$project" "$other"
+  cd "$other"
+  pid="$BASHPID"
+  fixture="500 1 500 node node $project/node_modules/vite/bin/vite.js build
+$pid 1 501 node node /other/node_modules/vite/bin/vite.js build
+502 1 502 node node /opt/herdr.js agent prompt $project vite build"
 
-  run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$project"
 
   [ "$status" -eq 1 ]
   [ "${#lines[@]}" -eq 1 ]
@@ -205,6 +208,215 @@ PY
     PS_EXIT=0 "$CHECK" --build /repo
   [ "$status" -eq 1 ]
   [[ "$output" == *$'pgid=504\tcomm=MainThread\ttarget=vite.js'* ]]
+}
+
+@test "build check recognizes named bundlers and default emitting actions" {
+  local program fixture
+  for program in astro esbuild rollup tsup parcel rspack nuxt; do
+    fixture="600 1 600 node node /repo/node_modules/.bin/$program build"
+    run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
+    [ "$status" -eq 1 ] || { echo "$program went clear: $output"; false; }
+    [[ "$output" == *"target=$program"* ]]
+  done
+  for fixture in 'node node /repo/node_modules/.bin/webpack --mode production' \
+                 'node node /repo/node_modules/.bin/tsc'; do
+    run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="601 1 601 $fixture" PS_EXIT=0 "$CHECK" --build /repo
+    [ "$status" -eq 1 ] || { echo "$fixture went clear: $output"; false; }
+  done
+  run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='602 1 602 node node /repo/node_modules/.bin/webpack --help' PS_EXIT=0 "$CHECK" --build /repo
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='603 1 603 node node /repo/node_modules/.bin/tsc --noEmit' PS_EXIT=0 "$CHECK" --build /repo
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "each known build tool defaults to busy but help and version stay clear" {
+  local program option fixture
+  for program in next vite turbo webpack webpack-cli tsc astro esbuild rollup tsup parcel rspack nuxt; do
+    fixture="620 1 620 node node /repo/node_modules/.bin/$program input.js"
+    run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
+    [ "$status" -eq 1 ] || { echo "$program implicit action went clear: $output"; false; }
+    for option in --help --version; do
+      fixture="621 1 621 node node /repo/node_modules/.bin/$program $option"
+      run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
+      [ "$status" -eq 0 ] || { echo "$program $option went busy: $output"; false; }
+    done
+  done
+}
+
+@test "build check skips value-taking Node runtime options" {
+  local option
+  for option in -r --import --loader -C --env-file; do
+    run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="610 1 610 node node $option dependency /repo/node_modules/.bin/next build" PS_EXIT=0 "$CHECK" --build /repo
+    [ "$status" -eq 1 ] || { echo "$option went clear: $output"; false; }
+    [[ "$output" == *'target=next'* ]]
+  done
+  run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='611 1 611 node node -r dependency /opt/app.js /repo next build' PS_EXIT=0 "$CHECK" --build /repo
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "absolute external bundlers and symlinked projects use the live process cwd" {
+  local project="$SANDBOX/project" other="$SANDBOX/other" pid fixture invocation
+  mkdir -p "$project" "$other"
+  ln -s "$project" "$SANDBOX/project-link"
+  cd "$project"
+  pid="$BASHPID"
+  for invocation in \
+    'node node /npx-cache/node_modules/.bin/vite build' \
+    'esbuild /opt/homebrew/bin/esbuild src/x.ts --outdir=dist' \
+    'node node /opt/homebrew/lib/node_modules/vite/bin/vite.js build' \
+    "node node $project/node_modules/.bin/next build" \
+    'node node --experimental-loader ts-node/esm ./node_modules/.bin/next build'; do
+    fixture="$pid 1 $pid $invocation"
+    run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$SANDBOX/project-link"
+    [ "$status" -eq 1 ] || { echo "missed $invocation: $output"; false; }
+    [[ "$output" == *'BUSY'* ]]
+  done
+  cd "$other"
+  fixture="$pid 1 $pid node node /opt/homebrew/lib/node_modules/vite/bin/vite.js build"
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$project"
+  [ "$status" -eq 0 ] || { echo "other project was blocked: $output"; false; }
+}
+
+@test "Node value-taking runtime flags do not hide the build script" {
+  local option
+  for option in --experimental-loader --title --watch-path --inspect-port \
+                --conditions --disable-warning --unhandled-rejections --dns-result-order; do
+    run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="610 1 610 node node $option value /repo/node_modules/.bin/next build" PS_EXIT=0 "$CHECK" --build /repo
+    [ "$status" -eq 1 ] || { echo "$option went clear: $output"; false; }
+    [[ "$output" == *'target=next'* ]]
+  done
+  run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='611 1 611 node node --experimental-loader x /opt/app.js /repo next build' PS_EXIT=0 "$CHECK" --build /repo
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "unknown Node options cannot hide later build markers" {
+  local option fixture project="$SANDBOX/project" other="$SANDBOX/other" pid
+  for option in --env-file-if-exists --redirect-warnings --report-dir --input-type \
+                --experimental-config-file --localstorage-file --future-option; do
+    fixture="610 1 610 node node $option value /repo/node_modules/.bin/next build"
+    run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
+    [ "$status" -eq 1 ] || { echo "$option went clear: $output"; false; }
+    [[ "$output" == *'target=next'* ]] || { echo "$output"; false; }
+  done
+  fixture='611 1 611 node node --future-option value -- /repo/node_modules/.bin/vite build'
+  run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
+  [ "$status" -eq 1 ] && [[ "$output" == *'target=vite'* ]] || { echo "$output"; false; }
+  fixture='612 1 612 node node --future-option value /opt/app.js /repo ordinary'
+  run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
+  [ "$status" -eq 0 ] || { echo "ordinary non-bundler blocked: $output"; false; }
+
+  mkdir -p "$project" "$other"
+  cd "$project"
+  pid="$BASHPID"
+  fixture="$pid 1 $pid node node --future-option value /opt/global/vite/bin/vite.js build"
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$project"
+  [ "$status" -eq 1 ] && [[ "$output" == *'target=vite.js'* ]] || { echo "$output"; false; }
+  cd "$other"
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$project"
+  [ "$status" -eq 0 ] || { echo "other project blocked: $output"; false; }
+}
+
+@test "relative bundler paths are attributed to the live process cwd" {
+  local project="$SANDBOX/project" other="$SANDBOX/other" pid fixture
+  mkdir -p "$project" "$other"
+  ln -s "$project" "$SANDBOX/alias"
+  cd "$project"
+  pid="$BASHPID"
+  fixture="$pid 1 $pid node node ./node_modules/.bin/next build"
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$SANDBOX/alias"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'target=next'* ]]
+  cd "$other"
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE='999999999 1 999999999 node node ./node_modules/.bin/next build' PS_EXIT=0 "$CHECK" --build "$project"
+  [ "$status" -eq 2 ] || { echo "unreadable cwd was treated as clear: $output"; false; }
+  [[ "$output" == *'build process cwd unavailable'* && "$output" == *'pid=999999999'* && \
+     "$output" == *'target=next'* && "$output" == *'cwd=<unavailable>'* && \
+     "$output" == *"project=$project"* ]] || { echo "$output"; false; }
+  run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$SANDBOX/missing"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *'project cwd unavailable'* && "$output" == *'cwd=<not-probed>'* && \
+     "$output" == *"project=$SANDBOX/missing"* ]] || { echo "$output"; false; }
+}
+
+@test "a live cwd-relative node build is not reported clear" {
+  command -v node >/dev/null || skip "node is not on PATH"
+  run python3 -I -B - "$SANDBOX" "$BIN" "$CHECK" <<'PY'
+import os
+import select
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sandbox, bin_path, check = map(Path, sys.argv[1:])
+project = sandbox / 'project'
+script = project / 'node_modules' / '.bin' / 'next'
+script.parent.mkdir(parents=True)
+script.write_text("console.log('ready'); process.stdin.resume();\n")
+child = subprocess.Popen([shutil.which('node'), './node_modules/.bin/next', 'build'],
+                         cwd=project, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+try:
+    assert select.select([child.stdout], [], [], 5)[0], 'fixture startup timed out'
+    assert child.stdout.readline() == b'ready\n'
+    snapshot = subprocess.check_output(
+        ['ps', '-ww', '-p', str(child.pid), '-o', 'pid=,ppid=,pgid=,ucomm=,args='], text=True)
+    environment = dict(os.environ, PATH=str(bin_path) + os.pathsep + os.environ['PATH'],
+                       PS_FIXTURE=snapshot, PS_EXIT='0')
+    result = subprocess.run([str(check), '--build', str(project)], env=environment,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1 and 'target=next' in result.stdout, (result, snapshot)
+finally:
+    child.stdin.close()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "a live build launched from an absolute external cache is not clear" {
+  command -v node >/dev/null || skip "node is not on PATH"
+  run python3 -I -B - "$SANDBOX" "$BIN" "$CHECK" <<'PY'
+import os
+import select
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+sandbox, bin_path, check = map(Path, sys.argv[1:])
+project = sandbox / 'project'
+project.mkdir()
+script = sandbox / 'npx-cache' / 'vite.js'
+script.parent.mkdir()
+script.write_text("console.log('ready'); process.stdin.resume();\n")
+child = subprocess.Popen([shutil.which('node'), str(script), 'build'],
+                         cwd=project, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+try:
+    assert select.select([child.stdout], [], [], 5)[0], 'fixture startup timed out'
+    assert child.stdout.readline() == b'ready\n'
+    snapshot = subprocess.check_output(
+        ['ps', '-ww', '-p', str(child.pid), '-o', 'pid=,ppid=,pgid=,ucomm=,args='], text=True)
+    environment = dict(os.environ, PATH=str(bin_path) + os.pathsep + os.environ['PATH'],
+                       PS_FIXTURE=snapshot, PS_EXIT='0')
+    result = subprocess.run([str(check), '--build', str(project)], env=environment,
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 1 and 'target=vite.js' in result.stdout, (result, snapshot)
+finally:
+    child.stdin.close()
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        child.kill()
+        child.wait()
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "build check recognizes a live node bundler from its kernel executable name" {

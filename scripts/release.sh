@@ -326,6 +326,7 @@ Usage:
   trellis release locate VERSION
   trellis release verify [VERSION]
   trellis release reap-tmp [--fix]
+  trellis release remove VERSION [--dry-run | --apply]
   trellis release adopt VERSION --project ID [--fleet NAME]
   trellis release adopt VERSION --fleet NAME
   trellis release adopt VERSION --all
@@ -342,6 +343,21 @@ reported and are never changed.
 reap-tmp lists leaked .tmp.* scratch in TRELLIS_HOME/releases and writes
 nothing; --fix removes the entries older than 1 h whose owner process is dead,
 or older than 24 h when no owner was recorded.
+
+remove lists what deleting an installed VERSION frees, with sizes: its release
+directory, execution snapshots and their locks, and release and exec stamps.
+It writes nothing; --apply deletes them. It refuses while anything still
+references VERSION: the active CLI release, an attachment owner record, a
+registry release pin or runtime anchor, a managed Git hook, a project
+trellis_version pin, a pending attachment or adoption journal, or a running
+process. A registry row
+that is not available refuses when it records VERSION or records no release.
+The running-process check covers the invoking user's inspectable processes
+only (lsof on macOS, /proc on Linux). Other users' processes, root's included,
+are skipped and counted on stderr. So is a process of this user that the
+kernel will not let it inspect (EACCES or EPERM, as for systemd --user or
+ssh-agent), listed by pid and name; such a process can still use VERSION
+unseen. Any other error reading a process refuses with exit 4.
 EOF
 }
 
@@ -411,6 +427,7 @@ payload_for() {
   release="$(release_store_locate "$version")" || return "$?"
   payload="$release/payload"
   [ -d "$payload" ] && [ ! -L "$payload" ] || return "$TRELLIS_EX_STATE"
+  release_store_assert_native_payload_layout "$payload" || return "$TRELLIS_EX_STATE"
   (CDPATH='' cd "$payload" && pwd -P)
 }
 
@@ -601,7 +618,9 @@ resolve_verified_adoption_target() {
 
 owner_replacement() {
   local original="$1" replacement="$2" version="$3" payload="$4" retired="$5" pruned="${6:-[]}"
-  jq --arg version "$version" --arg payload "$payload" --argjson retired "$retired" --argjson pruned "$pruned" '
+  local render_plans="${7:-[]}" context="${8:-null}"
+  jq --arg version "$version" --arg payload "$payload" --argjson retired "$retired" --argjson pruned "$pruned" \
+    --argjson render_plans "$render_plans" --argjson context "$context" '
     if ([.artifacts[] | select(.path == ".trellis/runtime" and .kind == "symlink")] | length) != 1
     then error("missing owned runtime anchor")
     else .release = $version
@@ -609,6 +628,15 @@ owner_replacement() {
       | .artifacts |= map(.path as $path | select(any($retired[]; .path == $path) | not))
       | .artifacts |= map(.path as $path
           | select(.kind == "parent" and any($pruned[]; .path == $path) | not))
+      | if ($render_plans | length) > 0 then
+          .renders = [$render_plans[].render]
+          | .artifacts |= map(.path as $path
+              | [$render_plans[] | select(.path == $path) | .render] as $renders
+              | if ($renders | length) == 1
+                then .sha256 = $renders[0].after_sha256 | .mode = $renders[0].after_mode
+                else . end)
+        else . end
+      | if $context != null then .render_context = $context else . end
     end
   ' "$original" > "$replacement" || return "$TRELLIS_EX_STATE"
   chmod 600 "$replacement" || return "$TRELLIS_EX_UNAVAILABLE"
@@ -733,51 +761,350 @@ adoption_prune_dir() {
   esac
 }
 
+# The checkout lock serializes release adoption for this group. Capture its
+# holder at acquisition, then recheck the link, identity, metadata and live
+# process before any optional stale-stage cleanup. A missing proof is a miss.
+release_adoption_lock_valid() {
+  local home="${__release_adoption_home:-}" checkout="${__release_adoption_checkout:-}"
+  local common="${__release_adoption_common:-}" link="${__release_adoption_link:-}"
+  local holder="${__release_adoption_holder:-}" pid="${__release_adoption_pid:-}"
+  local birth="${__release_adoption_birth:-}" target current_birth
+  case "$pid" in ''|*[!0-9]*|0*) return 1 ;; esac
+  [ -n "$home" ] && [ -n "$checkout" ] && [ -n "$common" ] && [ -n "$birth" ] || return 1
+  [ "$link" = "$home/state/locks/attachment-checkout-$checkout.lock" ] &&
+    [ "${_ATTACHMENT_CHECKOUT_LOCK_LINK:-}" = "$link" ] &&
+    [ "${_ATTACHMENT_CHECKOUT_LOCK_HOLDER:-}" = "$holder" ] && [ -L "$link" ] || return 1
+  target="$(readlink "$link")" || return 1
+  case "$target" in ''|*/*|.|..) return 1 ;; esac
+  [ "$holder" = "${link%/*}/$target" ] && release_entry_private_directory "$holder" || return 1
+  [ "$(_attachment_fs_identity "$holder")" = "${__release_adoption_holder_id:-}" ] &&
+    [ -f "$holder/owner.json" ] && [ ! -L "$holder/owner.json" ] && [ -O "$holder/owner.json" ] &&
+    _attachment_mode_matches "$holder/owner.json" 600 &&
+    [ "$(_attachment_fs_identity "$holder/owner.json")" = "${__release_adoption_owner_id:-}" ] || return 1
+  jq -e --arg checkout "$checkout" --arg common "$common" --arg birth "$birth" --argjson pid "$pid" '
+    type == "object" and (keys | sort) == ["checkout_id","git_common_dir","pid","process_birth"]
+    and .checkout_id == $checkout and .git_common_dir == $common
+    and .pid == $pid and .process_birth == $birth
+  ' "$holder/owner.json" >/dev/null 2>&1 || return 1
+  kill -0 "$pid" 2>/dev/null || return 1
+  current_birth="$(_attachment_process_birth "$pid")" || return 1
+  [ "$current_birth" = "$birth" ]
+}
+
+# Reap only old, owned, non-symlink stages of this exact transaction target.
+# The held checkout lock excludes a live publisher. The descriptor-relative
+# sink rechecks that lock, entry identities, membership and ACLs before each
+# unlink. A failed/indeterminate proof leaves the entry for a later run.
+release_adoption_reap_stale() {
+  local target="$1" kind="$2" render_root="${3:-}" shared="${4:-false}" parent base prefix candidate found=false
+  local python_bin allowed='' birth_program=''
+  case "$target" in /*/*) ;; *) return 0 ;; esac
+  parent="${target%/*}"; [ -n "$parent" ] || parent=/
+  base="${target##*/}"
+  case "$base" in ''|.|..) return 0 ;; esac
+  case "$kind" in
+    owner|hooks) prefix=".${base}.release-adopt." ;;
+    render) prefix=".${base}.release-adopt-render." ;;
+    *) return 0 ;;
+  esac
+  for candidate in "$parent/$prefix"??????; do
+    if [ -e "$candidate" ] || [ -L "$candidate" ]; then found=true; break; fi
+  done
+  [ "$found" = true ] || return 0
+  if [ "$kind" = render ]; then
+    if [ -n "$render_root" ]; then
+      case "$target" in "$render_root/"*) ;; *) return 0 ;; esac
+      _attachment_parent_safe "$render_root" "${target#"$render_root"/}" || return 0
+    else
+      [ "$shared" = true ] && [ "$target" = "${__release_adoption_common:-}/info/exclude" ] || return 0
+    fi
+  fi
+  release_adoption_lock_valid || return 0
+  python_bin="$(command -v python3)" || return 0
+  case "$python_bin" in /*) ;; *) return 0 ;; esac
+  if [ "$kind" = hooks ]; then
+    allowed="$(_attachment_hooks_passthrough_names)" || return 0
+  fi
+  if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then
+    birth_program="$(trellis_process_birth_python)" || return 0
+  fi
+  "$python_bin" -I - "$parent" "$prefix" "$kind" \
+    "$__release_adoption_link" "$__release_adoption_holder" "$__release_adoption_pid" \
+    "$__release_adoption_birth" "$__release_adoption_checkout" "$__release_adoption_common" \
+    "$__release_adoption_holder_id" "$__release_adoption_owner_id" "$allowed" "$birth_program" <<'PY' || release_err "stale adoption-stage inspection failed; leaving candidates in $parent"
+import ctypes, errno, json, os, re, stat, subprocess, sys, time
+
+(parent, prefix, kind, link, holder, pid_text, birth, checkout, common,
+ holder_id, owner_id, allowed_text, birth_program) = sys.argv[1:]
+uid = os.geteuid()
+try:
+    pid = int(pid_text)
+except ValueError:
+    sys.exit(0)
+if pid <= 0 or str(pid) != pid_text:
+    sys.exit(0)
+
+DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, 'O_CLOEXEC', 0)
+FILE = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, 'O_CLOEXEC', 0)
+allowed = set(allowed_text.splitlines()) | {
+    'post-checkout', 'pre-push', 'previous-hooks-path', 'release-payload', 'pre-push-source'}
+pattern = re.compile(re.escape(prefix) + r'[A-Za-z0-9]{6}\Z', re.ASCII)
+cutoff = time.time_ns() - 86400 * 1000000000
+
+def ident(st):
+    return (st.st_dev, st.st_ino, st.st_uid, st.st_mode, st.st_nlink,
+            st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+def key(st):
+    return '%d:%d' % (st.st_dev, st.st_ino)
+
+def no_acl(fd):
+    if sys.platform == 'darwin':
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.acl_get_fd_np.argtypes = [ctypes.c_int, ctypes.c_int]
+        libc.acl_get_fd_np.restype = ctypes.c_void_p
+        libc.acl_free.argtypes = [ctypes.c_void_p]
+        ctypes.set_errno(0)
+        acl = libc.acl_get_fd_np(fd, 0x100)
+        if not acl:
+            return ctypes.get_errno() == errno.ENOENT
+        # A returned ACL handle is not proof of absence. In particular,
+        # Darwin acl_get_entry returns 0 when an entry is present.
+        libc.acl_free(acl)
+        return False
+    for name in ('system.posix_acl_access', 'system.posix_acl_default'):
+        try:
+            os.getxattr(fd, name)
+        except OSError as error:
+            if error.errno != errno.ENODATA:
+                return False
+        else:
+            return False
+    return True
+
+def unique_object(pairs):
+    result = {}
+    for name, value in pairs:
+        if name in result:
+            raise ValueError('duplicate lock metadata')
+        result[name] = value
+    return result
+
+def live_birth():
+    if sys.platform == 'darwin':
+        if not birth_program:
+            return False
+        command = [sys.executable, '-I', '-c', birth_program, pid_text]
+    else:
+        command = ['/bin/ps', '-p', pid_text, '-o', 'lstart=']
+    result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL, timeout=5,
+                            env={'LC_ALL': 'C', 'PATH': '/usr/bin:/bin:/usr/sbin:/sbin'})
+    return result.returncode == 0 and result.stdout.decode('utf-8').rstrip('\n') == birth
+
+def lock_held():
+    try:
+        link_stat = os.lstat(link)
+        if (not stat.S_ISLNK(link_stat.st_mode) or link_stat.st_uid != uid
+                or os.path.dirname(holder) != os.path.dirname(link)
+                or os.readlink(link) != os.path.basename(holder)):
+            return False
+        holder_fd = os.open(holder, DIR)
+        try:
+            h = os.fstat(holder_fd)
+            if (not stat.S_ISDIR(h.st_mode) or h.st_uid != uid or stat.S_IMODE(h.st_mode) != 0o700
+                    or key(h) != holder_id or key(os.lstat(holder)) != holder_id or not no_acl(holder_fd)):
+                return False
+            owner_fd = os.open('owner.json', FILE, dir_fd=holder_fd)
+            try:
+                o = os.fstat(owner_fd)
+                if (not stat.S_ISREG(o.st_mode) or o.st_uid != uid or stat.S_IMODE(o.st_mode) != 0o600
+                        or o.st_nlink != 1 or key(o) != owner_id or not no_acl(owner_fd)):
+                    return False
+                data = os.read(owner_fd, 4097)
+                if len(data) > 4096:
+                    return False
+                record = json.loads(data, object_pairs_hook=unique_object)
+                if (not isinstance(record, dict) or set(record) != {'checkout_id', 'git_common_dir', 'pid', 'process_birth'}
+                        or type(record['pid']) is not int or record['pid'] != pid
+                        or record['checkout_id'] != checkout or record['git_common_dir'] != common
+                        or record['process_birth'] != birth
+                        or ident(os.stat('owner.json', dir_fd=holder_fd, follow_symlinks=False)) != ident(o)):
+                    return False
+            finally:
+                os.close(owner_fd)
+            if key(os.lstat(holder)) != holder_id or os.readlink(link) != os.path.basename(holder):
+                return False
+        finally:
+            os.close(holder_fd)
+        os.kill(pid, 0)
+        return live_birth()
+    except (OSError, ValueError, UnicodeError, subprocess.SubprocessError, AttributeError):
+        return False
+
+def safe_file(st):
+    return (stat.S_ISREG(st.st_mode) and st.st_uid == uid and st.st_nlink == 1
+            and not (st.st_mode & 0o022))
+
+try:
+    parent_fd = os.open(parent, DIR)
+    parent_id = os.fstat(parent_fd)
+    if (not stat.S_ISDIR(parent_id.st_mode) or parent_id.st_uid != uid
+            or parent_id.st_mode & 0o022 or not no_acl(parent_fd)
+            or key(os.lstat(parent)) != key(parent_id)):
+        sys.exit(0)
+except OSError:
+    sys.exit(0)
+
+def parent_current():
+    try:
+        current = os.lstat(parent)
+        return stat.S_ISDIR(current.st_mode) and key(current) == key(parent_id)
+    except OSError:
+        return False
+
+def stage_current(name, st):
+    try:
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        return (stat.S_ISDIR(current.st_mode) and current.st_uid == uid
+                and stat.S_IMODE(current.st_mode) == 0o700 and key(current) == key(st))
+    except OSError:
+        return False
+
+try:
+    for name in os.listdir(parent_fd):
+        if not pattern.fullmatch(name):
+            continue
+        try:
+            before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            if (before.st_uid != uid or before.st_dev != parent_id.st_dev
+                    or before.st_mtime_ns >= cutoff):
+                continue
+            if kind in ('owner', 'render'):
+                if not safe_file(before):
+                    continue
+                fd = os.open(name, FILE, dir_fd=parent_fd)
+                try:
+                    if (ident(os.fstat(fd)) != ident(before) or not no_acl(fd)
+                            or not lock_held() or not parent_current()
+                            or ident(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != ident(before)
+                            or ident(os.fstat(fd)) != ident(before)):
+                        continue
+                    os.unlink(name, dir_fd=parent_fd)
+                finally:
+                    os.close(fd)
+            elif kind == 'hooks' and stat.S_ISDIR(before.st_mode) and stat.S_IMODE(before.st_mode) == 0o700:
+                stage_fd = os.open(name, DIR, dir_fd=parent_fd)
+                files = []
+                try:
+                    if (ident(os.fstat(stage_fd)) != ident(before) or not no_acl(stage_fd)):
+                        continue
+                    good = True
+                    for child in os.listdir(stage_fd):
+                        item = os.stat(child, dir_fd=stage_fd, follow_symlinks=False)
+                        if child not in allowed or not safe_file(item) or item.st_dev != before.st_dev:
+                            good = False
+                            break
+                        fd = os.open(child, FILE, dir_fd=stage_fd)
+                        files.append((child, fd, item))
+                        if ident(os.fstat(fd)) != ident(item) or not no_acl(fd):
+                            good = False
+                            break
+                    if not good or not lock_held() or not parent_current() or not stage_current(name, before):
+                        continue
+                    for child, fd, item in files:
+                        if (not lock_held() or not parent_current() or not stage_current(name, before)
+                                or ident(os.fstat(fd)) != ident(item) or not no_acl(fd)
+                                or ident(os.stat(child, dir_fd=stage_fd, follow_symlinks=False)) != ident(item)):
+                            good = False
+                            break
+                        os.unlink(child, dir_fd=stage_fd)
+                    if good and not os.listdir(stage_fd) and lock_held() and parent_current() and stage_current(name, before):
+                        os.rmdir(name, dir_fd=parent_fd)
+                finally:
+                    for _, fd, _ in files:
+                        os.close(fd)
+                    os.close(stage_fd)
+        except (OSError, ValueError, UnicodeError):
+            continue
+finally:
+    os.close(parent_fd)
+PY
+}
+
+# Sweep only destinations from validated plans for the held checkout. Render
+# paths are rechecked beneath their recorded root; the shared exclude is a
+# separately bound exact path. Unknown or unsafe inputs are simply retained.
+release_adoption_reap_completed_stages() {
+  local plans="$1" shared="${2:-}" kind target render_root
+  [ -f "$plans" ] && [ ! -L "$plans" ] || return 0
+  if [ -n "$shared" ] && [ "$shared" = "${__release_adoption_common:-}/info/exclude" ]; then
+    release_adoption_reap_stale "$shared" render '' true
+  fi
+  while IFS= read -r -d '' kind && IFS= read -r -d '' target && IFS= read -r -d '' render_root; do
+    release_adoption_reap_stale "$target" "$kind" "$render_root"
+  done < <(jq -j --arg home "${__release_adoption_home:-}" --arg checkout "${__release_adoption_checkout:-}" \
+    --arg common "${__release_adoption_common:-}" '
+    select(.binding.checkout_id == $checkout and .binding.git_common_dir == $common)
+    | (.binding.root // "") as $root
+    | ((if .owner == ($home + "/state/attachments/" + $checkout + "/" + .binding.worktree_id + ".json")
+        then ["owner", .owner, ""] else empty end),
+       (.renders[]? | select((.destination | type) == "string") | ["render", .destination, $root]),
+       (if .hooks == "true" and .managed == ($home + "/state/git-hooks/" + $checkout)
+        then ["hooks", .managed, ""] else empty end))
+    | .[] | ., "\u0000"
+  ' "$plans" 2>/dev/null)
+}
+
 replace_owned_file() (
   local destination="$1" expected="$2" replacement="$3" parent base actual_parent temporary=''
-  local temporary_identity='' destination_identity='' committed=false rc
+  local rc
+  # The handler may interrupt a callee with same-named locals; keep its
+  # transaction state in uniquely named variables in this subshell.
+  __rof_destination="$destination" __rof_expected="$expected" __rof_replacement="$replacement"
+  __rof_temporary='' __rof_temporary_identity='' __rof_destination_identity='' __rof_committed=false
 
   replace_owned_file_cleanup() {
     local status="${1:-$?}" rollback=0 cleanup_status=0
-    trap - EXIT
     trap '' HUP INT TERM
+    trap - EXIT
 
-    if [ -n "$temporary" ]; then
-      if [ "$committed" = true ]; then
-        if [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
-          _attachment_identity_matches "$temporary" "$destination_identity" file &&
-          _attachment_mode_matches "$temporary" 600 &&
-          cmp -s "$expected" "$temporary"; then
-          rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
-          [ "$cleanup_status" -eq 0 ] && temporary=''
+    if [ -n "$__rof_temporary" ]; then
+      if [ "$__rof_committed" = true ]; then
+        if [ -f "$__rof_temporary" ] && [ ! -L "$__rof_temporary" ] &&
+          _attachment_identity_matches "$__rof_temporary" "$__rof_destination_identity" file &&
+          _attachment_mode_matches "$__rof_temporary" 600 &&
+          cmp -s "$__rof_expected" "$__rof_temporary"; then
+          rm "${__rof_temporary:?}" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+          [ "$cleanup_status" -eq 0 ] && __rof_temporary=''
         else
           cleanup_status="$TRELLIS_EX_CONFLICT"
         fi
-      elif [ -f "$destination" ] && [ ! -L "$destination" ] &&
-        _attachment_identity_matches "$destination" "$temporary_identity" file &&
-        _attachment_mode_matches "$destination" 600 &&
-        cmp -s "$replacement" "$destination"; then
-        release_store_rename_swap "$temporary" "$destination"
+      elif [ -f "$__rof_destination" ] && [ ! -L "$__rof_destination" ] &&
+        _attachment_identity_matches "$__rof_destination" "$__rof_temporary_identity" file &&
+        _attachment_mode_matches "$__rof_destination" 600 &&
+        cmp -s "$__rof_replacement" "$__rof_destination"; then
+        release_store_rename_swap "$__rof_temporary" "$__rof_destination"
         rollback=$?
         if [ "$rollback" -eq 0 ]; then
-          if [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
-            _attachment_identity_matches "$temporary" "$temporary_identity" file &&
-            _attachment_mode_matches "$temporary" 600 &&
-            cmp -s "$replacement" "$temporary"; then
-            rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
-            [ "$cleanup_status" -eq 0 ] && temporary=''
+          if [ -f "$__rof_temporary" ] && [ ! -L "$__rof_temporary" ] &&
+            _attachment_identity_matches "$__rof_temporary" "$__rof_temporary_identity" file &&
+            _attachment_mode_matches "$__rof_temporary" 600 &&
+            cmp -s "$__rof_replacement" "$__rof_temporary"; then
+            rm "${__rof_temporary:?}" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+            [ "$cleanup_status" -eq 0 ] && __rof_temporary=''
           else
             cleanup_status="$TRELLIS_EX_CONFLICT"
           fi
         else
           cleanup_status="$(max_status "$cleanup_status" "$rollback")"
         fi
-      elif [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
-        _attachment_identity_matches "$temporary" "$temporary_identity" file &&
-        _attachment_mode_matches "$temporary" 600 &&
-        cmp -s "$replacement" "$temporary"; then
-        rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
-        [ "$cleanup_status" -eq 0 ] && temporary=''
+      elif [ -f "$__rof_temporary" ] && [ ! -L "$__rof_temporary" ] &&
+        _attachment_identity_matches "$__rof_temporary" "$__rof_temporary_identity" file &&
+        _attachment_mode_matches "$__rof_temporary" 600 &&
+        cmp -s "$__rof_replacement" "$__rof_temporary"; then
+        rm "${__rof_temporary:?}" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+        [ "$cleanup_status" -eq 0 ] && __rof_temporary=''
       else
         cleanup_status="$TRELLIS_EX_CONFLICT"
       fi
@@ -786,7 +1113,9 @@ replace_owned_file() (
     exit "$status"
   }
   trap 'replace_owned_file_cleanup "$?"' EXIT
-  trap 'exit "$TRELLIS_EX_UNAVAILABLE"' HUP INT TERM
+  # Bash 3.2 can discard the transaction's locals before an EXIT trap reached
+  # through `exit`; roll back while the signal handler still has that scope.
+  trap 'replace_owned_file_cleanup "$TRELLIS_EX_UNAVAILABLE"' HUP INT TERM
 
   [ -f "$expected" ] && [ ! -L "$expected" ] || return "$TRELLIS_EX_CONFLICT"
   [ -f "$replacement" ] && [ ! -L "$replacement" ] || return "$TRELLIS_EX_CONFLICT"
@@ -797,12 +1126,14 @@ replace_owned_file() (
   CDPATH='' cd "$parent" || return "$TRELLIS_EX_CONFLICT"
   actual_parent="$(pwd -P)" || return "$TRELLIS_EX_CONFLICT"
   [ "$actual_parent" = "$parent" ] || return "$TRELLIS_EX_CONFLICT"
-  destination="./$base"
+  __rof_destination="./$base"
+  destination="$__rof_destination"
   [ -f "$destination" ] && [ ! -L "$destination" ] || return "$TRELLIS_EX_CONFLICT"
   _attachment_mode_matches "$destination" 600 || return "$TRELLIS_EX_CONFLICT"
   cmp -s "$expected" "$destination" || return "$TRELLIS_EX_CONFLICT"
-  destination_identity="$(_attachment_fs_identity "$destination")" || return "$TRELLIS_EX_UNAVAILABLE"
-  temporary="$(mktemp "./.${base}.release-adopt.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  __rof_destination_identity="$(_attachment_fs_identity "$destination")" || return "$TRELLIS_EX_UNAVAILABLE"
+  __rof_temporary="$(mktemp "./.${base}.release-adopt.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  temporary="$__rof_temporary"
   [ -f "$temporary" ] && [ ! -L "$temporary" ] || return "$TRELLIS_EX_CONFLICT"
   chmod 600 "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
   cat "$replacement" > "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
@@ -810,25 +1141,25 @@ replace_owned_file() (
   [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
     _attachment_mode_matches "$temporary" 600 &&
     cmp -s "$replacement" "$temporary" || return "$TRELLIS_EX_CONFLICT"
-  temporary_identity="$(_attachment_fs_identity "$temporary")" || return "$TRELLIS_EX_UNAVAILABLE"
+  __rof_temporary_identity="$(_attachment_fs_identity "$temporary")" || return "$TRELLIS_EX_UNAVAILABLE"
   [ -f "$destination" ] && [ ! -L "$destination" ] &&
-    _attachment_identity_matches "$destination" "$destination_identity" file &&
+    _attachment_identity_matches "$destination" "$__rof_destination_identity" file &&
     _attachment_mode_matches "$destination" 600 &&
     cmp -s "$expected" "$destination" || return "$TRELLIS_EX_CONFLICT"
   release_store_rename_swap "$temporary" "$destination"
   rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   if ! { [ -f "$temporary" ] && [ ! -L "$temporary" ] &&
-    _attachment_identity_matches "$temporary" "$destination_identity" file &&
+    _attachment_identity_matches "$temporary" "$__rof_destination_identity" file &&
     _attachment_mode_matches "$temporary" 600 &&
     cmp -s "$expected" "$temporary"; } ||
     ! { [ -f "$destination" ] && [ ! -L "$destination" ] &&
-    _attachment_identity_matches "$destination" "$temporary_identity" file &&
+    _attachment_identity_matches "$destination" "$__rof_temporary_identity" file &&
     _attachment_mode_matches "$destination" 600 &&
     cmp -s "$replacement" "$destination"; }; then
     return "$TRELLIS_EX_CONFLICT"
   fi
-  committed=true
+  __rof_committed=true
   return 0
 )
 
@@ -854,7 +1185,7 @@ hook_payload_matches() {
   [ -n "$post_checkout" ] && [ -n "$pre_push" ] || return "$TRELLIS_EX_CONFLICT"
   _attachment_hooks_file_matches "$managed/post-checkout" "$post_checkout" 700 || return "$TRELLIS_EX_CONFLICT"
   _attachment_hooks_file_matches "$managed/pre-push" "$pre_push" 700 || return "$TRELLIS_EX_CONFLICT"
-  _attachment_hooks_verify_passthrough_shims "$managed" "$root" "$previous" ||
+  _attachment_hooks_verify_passthrough_shims "$managed" "$root" "$previous" "$expected" ||
     return "$TRELLIS_EX_CONFLICT"
 }
 
@@ -867,40 +1198,44 @@ write_hook_state_file() {
 
 replace_hook_payload() (
   local managed="${1:-}" expected="${2:-}" replacement="${3:-}" root="${4:-}"
-  local hooks_root base temporary='' source previous manifest rc committed=false expected_shims shim_name shim_body post_checkout pre_push
+  local hooks_root base temporary='' source previous manifest rc expected_shims shim_name shim_body post_checkout pre_push memo_home
+  # The handler can run inside hook_payload_matches, which has locals named
+  # managed/expected/root. Keep transaction state under subshell-private names.
+  __rhp_managed="$managed" __rhp_expected="$expected" __rhp_replacement="$replacement" __rhp_root="$root"
+  __rhp_temporary='' __rhp_committed=false
 
   release_hook_transaction_cleanup() {
     local status="${1:-$?}" rollback=0 temporary_expected=''
-    trap - EXIT
     trap '' HUP INT TERM
+    trap - EXIT
 
     # An interruption can land while the kernel exchange is in flight, before
     # the shell observes its return. Determine the actual pair of states rather
     # than relying on a post-exchange flag: either state keeps $managed valid.
-    if [ "$committed" != true ] && [ -n "$temporary" ] &&
-      [ -d "$temporary" ] && [ ! -L "$temporary" ] &&
-      [ -d "$managed" ] && [ ! -L "$managed" ]; then
-      if hook_payload_matches "$managed" "$expected" "$root" &&
-        hook_payload_matches "$temporary" "$replacement" "$root"; then
+    if [ "$__rhp_committed" != true ] && [ -n "$__rhp_temporary" ] &&
+      [ -d "$__rhp_temporary" ] && [ ! -L "$__rhp_temporary" ] &&
+      [ -d "$__rhp_managed" ] && [ ! -L "$__rhp_managed" ]; then
+      if hook_payload_matches "$__rhp_managed" "$__rhp_expected" "$__rhp_root" &&
+        hook_payload_matches "$__rhp_temporary" "$__rhp_replacement" "$__rhp_root"; then
         :
-      elif hook_payload_matches "$managed" "$replacement" "$root" &&
-        hook_payload_matches "$temporary" "$expected" "$root"; then
-        release_store_rename_swap "$temporary" "$managed" || rollback=$?
+      elif hook_payload_matches "$__rhp_managed" "$__rhp_replacement" "$__rhp_root" &&
+        hook_payload_matches "$__rhp_temporary" "$__rhp_expected" "$__rhp_root"; then
+        release_store_rename_swap "$__rhp_temporary" "$__rhp_managed" || rollback=$?
       else
         rollback="$TRELLIS_EX_CONFLICT"
       fi
     fi
 
-    if [ "$committed" = true ]; then
-      temporary_expected="$expected"
+    if [ "$__rhp_committed" = true ]; then
+      temporary_expected="$__rhp_expected"
     else
-      temporary_expected="$replacement"
+      temporary_expected="$__rhp_replacement"
     fi
-    if [ -n "$temporary" ] && { [ -e "$temporary" ] || [ -L "$temporary" ]; }; then
+    if [ -n "$__rhp_temporary" ] && { [ -e "$__rhp_temporary" ] || [ -L "$__rhp_temporary" ]; }; then
       if [ "$rollback" -eq 0 ] &&
-        [ -d "$temporary" ] && [ ! -L "$temporary" ] &&
-        hook_payload_matches "$temporary" "$temporary_expected" "$root"; then
-        rm -rf "$temporary" || rollback="$TRELLIS_EX_UNAVAILABLE"
+        [ -d "$__rhp_temporary" ] && [ ! -L "$__rhp_temporary" ] &&
+        hook_payload_matches "$__rhp_temporary" "$temporary_expected" "$__rhp_root"; then
+        rm -rf "${__rhp_temporary:?}" || rollback="$TRELLIS_EX_UNAVAILABLE"
       else
         [ "$rollback" -ne 0 ] || rollback="$TRELLIS_EX_CONFLICT"
       fi
@@ -910,51 +1245,63 @@ replace_hook_payload() (
   }
 
   trap 'release_hook_transaction_cleanup "$?"' EXIT
-  trap 'exit "$TRELLIS_EX_STATE"' HUP INT TERM
+  # Run signal cleanup before Bash 3.2 unwinds the transaction's locals.
+  trap 'release_hook_transaction_cleanup "$TRELLIS_EX_STATE"' HUP INT TERM
 
+  # Returns from this subshell function retain its locals for the EXIT trap;
+  # explicit exits can discard them in Bash 3.2, leaving a staged transaction.
   [ "$#" -eq 4 ] && [ -n "$managed" ] && [ -n "$expected" ] && [ -n "$replacement" ] && [ -n "$root" ] ||
-    exit "$TRELLIS_EX_USAGE"
-  hook_payload_matches "$managed" "$expected" "$root" || exit "$?"
-  hooks_root="$(dirname "$managed")" || exit "$TRELLIS_EX_STATE"
-  base="$(basename "$managed")" || exit "$TRELLIS_EX_STATE"
-  [ -d "$hooks_root" ] && [ ! -L "$hooks_root" ] || exit "$TRELLIS_EX_CONFLICT"
-  source="$(_attachment_hooks_read_sidecar "$managed/pre-push-source")" || exit "$TRELLIS_EX_CONFLICT"
-  previous="$(_attachment_hooks_read_sidecar "$managed/previous-hooks-path" true)" || exit "$TRELLIS_EX_CONFLICT"
-  manifest="$(_attachment_hooks_release_manifest_sha256 "$replacement")" || exit "$TRELLIS_EX_STATE"
+    return "$TRELLIS_EX_USAGE"
+  hook_payload_matches "$managed" "$expected" "$root" || return "$?"
+  hooks_root="$(dirname "$managed")" || return "$TRELLIS_EX_STATE"
+  base="$(basename "$managed")" || return "$TRELLIS_EX_STATE"
+  [ -d "$hooks_root" ] && [ ! -L "$hooks_root" ] || return "$TRELLIS_EX_CONFLICT"
+  source="$(_attachment_hooks_read_sidecar "$managed/pre-push-source")" || return "$TRELLIS_EX_CONFLICT"
+  previous="$(_attachment_hooks_read_sidecar "$managed/previous-hooks-path" true)" || return "$TRELLIS_EX_CONFLICT"
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$replacement")" || return "$TRELLIS_EX_STATE"
   # Validate both replacement programs before allocating or exchanging state.
   if ! post_checkout="$(_attachment_hooks_post_checkout_dispatcher_body "$replacement" "$manifest")" ||
      ! pre_push="$(_attachment_hooks_pre_push_dispatcher_body "$replacement" "$source" "$manifest")" ||
      [ -z "$post_checkout" ] || [ -z "$pre_push" ]; then
     release_err "managed hook generation failed; current dispatcher was preserved"
-    exit "$TRELLIS_EX_STATE"
+    return "$TRELLIS_EX_STATE"
   fi
-  temporary="$(mktemp -d "$hooks_root/.${base}.release-adopt.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
-  chmod 700 "$temporary" || exit "$TRELLIS_EX_UNAVAILABLE"
+  __rhp_temporary="$(mktemp -d "$hooks_root/.${base}.release-adopt.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  temporary="$__rhp_temporary"
+  chmod 700 "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
   write_hook_state_file "$temporary/post-checkout" "$post_checkout" 700 ||
-    exit "$?"
+    return "$?"
   write_hook_state_file "$temporary/pre-push" "$pre_push" 700 ||
-    exit "$?"
-  write_hook_state_file "$temporary/previous-hooks-path" "$previous" 600 || exit "$?"
-  write_hook_state_file "$temporary/release-payload" "$replacement" 600 || exit "$?"
-  write_hook_state_file "$temporary/pre-push-source" "$source" 600 || exit "$?"
-  expected_shims=$(_attachment_hooks_expected_passthrough_names "$root" "$previous") || exit "$TRELLIS_EX_UNAVAILABLE"
+    return "$?"
+  write_hook_state_file "$temporary/previous-hooks-path" "$previous" 600 || return "$?"
+  write_hook_state_file "$temporary/release-payload" "$replacement" 600 || return "$?"
+  write_hook_state_file "$temporary/pre-push-source" "$source" 600 || return "$?"
+  expected_shims=$(_attachment_hooks_expected_passthrough_names "$root" "$previous" "$replacement") || return "$TRELLIS_EX_UNAVAILABLE"
   while IFS= read -r shim_name; do
     [ -n "$shim_name" ] || continue
-    shim_body=$(_attachment_hooks_passthrough_shim_body "$shim_name") || exit "$TRELLIS_EX_STATE"
-    write_hook_state_file "$temporary/$shim_name" "$shim_body" 700 || exit "$?"
+    shim_body=$(_attachment_hooks_shim_body_for "$shim_name" "$previous") || return "$TRELLIS_EX_STATE"
+    write_hook_state_file "$temporary/$shim_name" "$shim_body" 700 || return "$?"
   done <<<"$expected_shims"
 
   # Both paths are siblings under $hooks_root, so the release-store primitive
   # performs one same-filesystem exchange and never unlinks core.hooksPath.
   release_store_rename_swap "$temporary" "$managed"
   rc=$?
-  [ "$rc" -eq 0 ] || exit "$rc"
-  hook_payload_matches "$temporary" "$expected" "$root" || exit "$?"
-  hook_payload_matches "$managed" "$replacement" "$root" || exit "$?"
-  committed=true
-  rm -rf "$temporary" || exit "$TRELLIS_EX_UNAVAILABLE"
-  temporary=''
-  exit 0
+  [ "$rc" -eq 0 ] || return "$rc"
+  hook_payload_matches "$temporary" "$expected" "$root" || return "$?"
+  hook_payload_matches "$managed" "$replacement" "$root" || return "$?"
+  if [ -f "$expected/core-rules/native/artifacts.json" ] || [ -f "$replacement/core-rules/native/artifacts.json" ]; then
+    memo_home="${hooks_root%/state/git-hooks}"
+    [ "$hooks_root" = "$memo_home/state/git-hooks" ] || return "$TRELLIS_EX_STATE"
+    # Memos are shared content-addressed generator receipts, not installed-file
+    # snapshots. Retain both generations on rollback; restored owner/anchor/
+    # registry select the old key, whose bytes are never replaced by new data.
+    _attachment_hooks_digest_memo_write "$memo_home" "$replacement" "$manifest" "$source" || return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  __rhp_committed=true
+  rm -rf "${temporary:?}" || return "$TRELLIS_EX_UNAVAILABLE"
+  __rhp_temporary=''
+  return 0
 )
 
 adoption_render_owned_parents_valid() {
@@ -1044,6 +1391,8 @@ adoption_new_template_leaves() {
 
 adoption_snapshot_render() {
   local root="$1" render="$2" work="$3" number="$4" index="$5" new_payload="${6:-}"
+  local migrate="${7:-false}" context="${8:-}" template template_file merge_plan new_keys created after64
+  local before_file inverse_file before_exists before64 before_hash before_mode original_before_exists reconstructed reconstruction
   local relative destination after_mode keys path_identity source candidate source_identity source_hash source_mode
   local candidate_identity candidate_hash drift template_leaves template_dropped
   relative="$(printf '%s\n' "$render" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
@@ -1077,6 +1426,103 @@ adoption_snapshot_render() {
   adoption_render_live_matches "$destination" "$source" "$path_identity" "$source_hash" "$source_mode" ||
     return "$TRELLIS_EX_CONFLICT"
   drift="$(attach_detach_json_keys_detail "$source" "$keys")" || return "$TRELLIS_EX_CONFLICT"
+  if [ "$migrate" = true ]; then
+    # Migration removes only freshly proven old ownership; legacy add-only
+    # repair below intentionally retains its historical compatibility behavior.
+    [ "$(printf '%s\n' "$drift" | jq 'length')" -eq 0 ] || {
+      release_err "native render migration refuses changed old owned positions: $relative"
+      return "$TRELLIS_EX_CONFLICT"
+    }
+    template="$(jq -er --arg path "$relative" '
+      [.harnesses[]?.render[]? | select(.destination == $path and .merge == "explicit-json") | .template]
+      | unique | if length == 1 then .[0] else error("render template missing/ambiguous") end
+    ' "$new_payload/core-rules/inheritance-manifest.json")" || return "$TRELLIS_EX_STATE"
+    case "$template" in
+      /*|../*|*/../*|*/..|./*|*/./*|*//*|*$'\n'*|*$'\r'*|*$'\t'*) return "$TRELLIS_EX_STATE" ;;
+    esac
+    _attachment_canonical_file "$new_payload/$template" || return "$TRELLIS_EX_STATE"
+    template_file="$work/$number.render.$index.template"
+    attachment_contextual_template_select "$new_payload/$template" "$template" "$context" "$root" > "$template_file" || return "$?"
+    chmod 600 "$template_file" || return "$TRELLIS_EX_UNAVAILABLE"
+    created="$(printf '%s\n' "$render" | jq -c '.created_paths')" || return "$TRELLIS_EX_STATE"
+    merge_plan="$(settings_owned_json merge "$source" "$keys" "$template_file" '' "$created")" || return "$TRELLIS_EX_CONFLICT"
+    printf '%s\n' "$merge_plan" | jq -S '.after' > "$candidate" || return "$TRELLIS_EX_STATE"
+    new_keys="$(printf '%s\n' "$merge_plan" | jq -c '.owned_keys')" || return "$TRELLIS_EX_STATE"
+    created="$(printf '%s\n' "$merge_plan" | jq -c '.created_paths')" || return "$TRELLIS_EX_STATE"
+    chmod "${after_mode#0}" "$candidate" || return "$TRELLIS_EX_UNAVAILABLE"
+    candidate_identity="$(_attachment_fs_identity "$candidate")" || return "$TRELLIS_EX_UNAVAILABLE"
+    candidate_hash="$(_attachment_hash "$candidate")" || return "$TRELLIS_EX_UNAVAILABLE"
+    after64="$(base64 < "$candidate" | tr -d '\n')" || return "$TRELLIS_EX_UNAVAILABLE"
+    if [ "$source_hash" != "$(printf '%s\n' "$render" | jq -r '.after_sha256')" ]; then
+      # The new exact-after snapshot includes project edits made since attach.
+      # Its corresponding before snapshot must include those edits too, or the
+      # exact detach fast path would restore an older file and delete them.
+      before_file="$work/$number.render.$index.before"
+      inverse_file="$work/$number.render.$index.inverse"
+      original_before_exists="$(printf '%s\n' "$render" | jq -r '.before_exists')" || return 4
+      if [ "$original_before_exists" = true ]; then
+        attach_decode_base64 "$(printf '%s\n' "$render" | jq -r '.before_base64')" > "$before_file" || return 4
+        [ "$(_attachment_hash "$before_file")" = "$(printf '%s\n' "$render" | jq -r '.before_sha256')" ] || return 4
+      else
+        printf '{}\n' > "$before_file" || return 5
+      fi
+      settings_owned_json inverse "$source" "$keys" '' "$before_file" \
+        "$(printf '%s\n' "$render" | jq -c '.created_paths')" > "$inverse_file" || return 3
+      chmod 600 "$before_file" "$inverse_file" || return 5
+      if [ "$original_before_exists" = false ] && jq -e 'type == "object" and length == 0' "$inverse_file" >/dev/null; then
+        before_exists=false; before64=''; before_mode=null
+        before_hash=e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+      else
+        before_exists=true
+        before64="$(base64 < "$inverse_file" | tr -d '\n')" || return 5
+        before_hash="$(_attachment_hash "$inverse_file")" || return 5
+        before_mode="$(printf '%s\n' "$render" | jq -r --arg mode "$source_mode" '.before_mode // $mode')" || return 4
+      fi
+      render="$(printf '%s\n' "$render" | jq -c --argjson exists "$before_exists" --arg bytes "$before64" \
+        --arg hash "$before_hash" --argjson mode "$(if [ "$before_mode" = null ]; then printf null; else jq -cn --arg mode "$before_mode" '$mode'; fi)" \
+        '.before_exists=$exists | .before_base64=$bytes | .before_sha256=$hash | .before_mode=$mode')" || return 4
+    fi
+    # Derive created paths from the preserved project before-image, not from
+    # retired ownership. Reconstructing it with the selected template must be
+    # byte-exactly the same candidate before any publication is permitted.
+    before_file="$work/$number.render.$index.before"
+    if [ "$(printf '%s\n' "$render" | jq -r '.before_exists')" = true ]; then
+      attach_decode_base64 "$(printf '%s\n' "$render" | jq -r '.before_base64')" > "$before_file" || return 4
+      [ "$(_attachment_hash "$before_file")" = "$(printf '%s\n' "$render" | jq -r '.before_sha256')" ] || return 4
+    else
+      printf '{}\n' > "$before_file" || return 5
+    fi
+    chmod 600 "$before_file" || return 5
+    reconstruction="$(settings_owned_json reconstruct "$before_file" '[]' "$template_file")" || return 3
+    reconstructed="$work/$number.render.$index.reconstructed"
+    printf '%s\n' "$reconstruction" | jq -S '.after' > "$reconstructed" || return 4
+    chmod 600 "$reconstructed" || return 5
+    cmp -s "$candidate" "$reconstructed" || {
+      release_err "native render before-image reconstruction disagrees at $relative; preserve settings and owner evidence, restore a coherent owned-prefix snapshot, and retry adoption"
+      return "$TRELLIS_EX_STATE"
+    }
+    created="$(printf '%s\n' "$reconstruction" | jq -c '.created_paths')" || return 4
+    # Use the existing changed/missing publication predicate, including retired
+    # keys. No owner or private-journal schema field/type is introduced.
+    drift="$(attach_detach_json_keys_detail "$source" "$new_keys")" || return "$TRELLIS_EX_CONFLICT"
+    if [ "$candidate_hash" != "$source_hash" ] && [ "$(printf '%s\n' "$drift" | jq 'length')" -eq 0 ]; then
+      drift="$(printf '%s\n' "$keys" | jq -c '[.[] | {path:.path,state:"changed"}]')" || return "$TRELLIS_EX_STATE"
+      [ "$(printf '%s\n' "$drift" | jq 'length')" -gt 0 ] || drift='[{"path":["hooks"],"state":"changed"}]'
+    fi
+    render="$(printf '%s\n' "$render" | jq -c --argjson keys "$new_keys" --argjson created "$created" \
+      --arg after64 "$after64" --arg hash "$candidate_hash" \
+      '.owned_keys=$keys | .created_paths=$created | .after_base64=$after64 | .after_sha256=$hash')" || return "$TRELLIS_EX_STATE"
+    trellis_jq -cn --argjson render "$render" --arg path "$relative" --arg destination "$destination" \
+      --arg path_identity "$path_identity" --arg source "$source" --arg source_identity "$source_identity" \
+      --arg source_sha256 "$source_hash" --arg source_mode "$source_mode" \
+      --arg candidate "$candidate" --arg candidate_identity "$candidate_identity" \
+      --arg candidate_sha256 "$candidate_hash" --arg candidate_mode "$after_mode" --argjson drift "$drift" \
+      '{render:$render,path:$path,destination:$destination,path_identity:$path_identity,
+        source:$source,source_identity:$source_identity,source_sha256:$source_sha256,source_mode:$source_mode,
+        candidate:$candidate,candidate_identity:$candidate_identity,candidate_sha256:$candidate_sha256,
+        candidate_mode:$candidate_mode,drift:$drift,template_dropped:[]}'
+    return "$?"
+  fi
   # Owned keys the new template no longer carries are replayed back into the
   # candidate below (add-only by design); record them so the adoption summary
   # can say they were left in place instead of reporting silent no-drift.
@@ -1146,40 +1592,45 @@ adoption_render_plan_matches_source() {
 adoption_publish_render() (
   local planned="$1" direction="$2" destination expected expected_identity expected_file_identity expected_hash expected_mode
   local replacement replacement_file_identity replacement_hash replacement_mode parent base actual_parent temporary='' destination_identity=''
-  local temporary_identity='' committed=false rc
+  local rc
+  # These names cannot be shadowed by adoption_render_live_matches or its
+  # callees when a signal arrives mid-verification. They are subshell-scoped.
+  __apr_temporary='' __apr_temporary_identity='' __apr_committed=false
+  __apr_destination='' __apr_expected='' __apr_expected_identity='' __apr_expected_hash='' __apr_expected_mode=''
+  __apr_replacement='' __apr_replacement_hash='' __apr_replacement_mode=''
 
   adoption_publish_render_cleanup() {
     local status="${1:-$?}" rollback=0 cleanup_status=0
-    trap - EXIT
     trap '' HUP INT TERM
+    trap - EXIT
 
-    if [ -n "$temporary" ]; then
-      if [ "$committed" = true ]; then
-        if adoption_render_live_matches "$temporary" "$expected" "$expected_identity" "$expected_hash" "$expected_mode"; then
-          rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
-          [ "$cleanup_status" -eq 0 ] && temporary=''
+    if [ -n "$__apr_temporary" ]; then
+      if [ "$__apr_committed" = true ]; then
+        if adoption_render_live_matches "$__apr_temporary" "$__apr_expected" "$__apr_expected_identity" "$__apr_expected_hash" "$__apr_expected_mode"; then
+          rm "${__apr_temporary:?}" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+          [ "$cleanup_status" -eq 0 ] && __apr_temporary=''
         else
           cleanup_status="$TRELLIS_EX_CONFLICT"
         fi
-      elif adoption_render_live_matches "$destination" "$replacement" '' "$replacement_hash" "$replacement_mode" &&
-        _attachment_identity_matches "$destination" "$temporary_identity" file; then
-        release_store_rename_swap "$temporary" "$destination"
+      elif adoption_render_live_matches "$__apr_destination" "$__apr_replacement" '' "$__apr_replacement_hash" "$__apr_replacement_mode" &&
+        _attachment_identity_matches "$__apr_destination" "$__apr_temporary_identity" file; then
+        release_store_rename_swap "$__apr_temporary" "$__apr_destination"
         rollback=$?
         if [ "$rollback" -eq 0 ]; then
-          if _attachment_identity_matches "$temporary" "$temporary_identity" file &&
-            adoption_render_live_matches "$temporary" "$replacement" '' "$replacement_hash" "$replacement_mode"; then
-            rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
-            [ "$cleanup_status" -eq 0 ] && temporary=''
+          if _attachment_identity_matches "$__apr_temporary" "$__apr_temporary_identity" file &&
+            adoption_render_live_matches "$__apr_temporary" "$__apr_replacement" '' "$__apr_replacement_hash" "$__apr_replacement_mode"; then
+            rm "${__apr_temporary:?}" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+            [ "$cleanup_status" -eq 0 ] && __apr_temporary=''
           else
             cleanup_status="$TRELLIS_EX_CONFLICT"
           fi
         else
           cleanup_status="$(max_status "$cleanup_status" "$rollback")"
         fi
-      elif _attachment_identity_matches "$temporary" "$temporary_identity" file &&
-        adoption_render_live_matches "$temporary" "$replacement" '' "$replacement_hash" "$replacement_mode"; then
-        rm "$temporary" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
-        [ "$cleanup_status" -eq 0 ] && temporary=''
+      elif _attachment_identity_matches "$__apr_temporary" "$__apr_temporary_identity" file &&
+        adoption_render_live_matches "$__apr_temporary" "$__apr_replacement" '' "$__apr_replacement_hash" "$__apr_replacement_mode"; then
+        rm "${__apr_temporary:?}" || cleanup_status="$TRELLIS_EX_UNAVAILABLE"
+        [ "$cleanup_status" -eq 0 ] && __apr_temporary=''
       else
         cleanup_status="$TRELLIS_EX_CONFLICT"
       fi
@@ -1189,7 +1640,8 @@ adoption_publish_render() (
   }
 
   trap 'adoption_publish_render_cleanup "$?"' EXIT
-  trap 'exit "$TRELLIS_EX_UNAVAILABLE"' HUP INT TERM
+  # The handler must see the staged identities before Bash 3.2 unwinds locals.
+  trap 'adoption_publish_render_cleanup "$TRELLIS_EX_UNAVAILABLE"' HUP INT TERM
 
   case "$direction" in
     forward)
@@ -1232,31 +1684,36 @@ adoption_publish_render() (
   [ -n "$expected_identity" ] || expected_identity="$destination_identity"
   adoption_render_live_matches "$destination" "$expected" "$expected_identity" "$expected_hash" "$expected_mode" ||
     return "$TRELLIS_EX_CONFLICT"
-  temporary="$(mktemp "./.${base}.release-adopt-render.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  __apr_destination="$destination" __apr_expected="$expected" __apr_expected_identity="$expected_identity"
+  __apr_expected_hash="$expected_hash" __apr_expected_mode="$expected_mode"
+  __apr_replacement="$replacement" __apr_replacement_hash="$replacement_hash" __apr_replacement_mode="$replacement_mode"
+  __apr_temporary="$(mktemp "./.${base}.release-adopt-render.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  temporary="$__apr_temporary"
   [ -f "$temporary" ] && [ ! -L "$temporary" ] || return "$TRELLIS_EX_CONFLICT"
   cat "$replacement" > "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
   chmod "${replacement_mode#0}" "$temporary" || return "$TRELLIS_EX_UNAVAILABLE"
   adoption_render_live_matches "$temporary" "$replacement" '' "$replacement_hash" "$replacement_mode" ||
     return "$TRELLIS_EX_CONFLICT"
-  temporary_identity="$(_attachment_fs_identity "$temporary")" || return "$TRELLIS_EX_UNAVAILABLE"
+  __apr_temporary_identity="$(_attachment_fs_identity "$temporary")" || return "$TRELLIS_EX_UNAVAILABLE"
   adoption_render_live_matches "$destination" "$expected" "$expected_identity" "$expected_hash" "$expected_mode" ||
     return "$TRELLIS_EX_CONFLICT"
   release_store_rename_swap "$temporary" "$destination"
   rc=$?
   [ "$rc" -eq 0 ] || return "$rc"
   if ! adoption_render_live_matches "$temporary" "$expected" "$expected_identity" "$expected_hash" "$expected_mode" ||
-    ! { _attachment_identity_matches "$destination" "$temporary_identity" file &&
+    ! { _attachment_identity_matches "$destination" "$__apr_temporary_identity" file &&
     adoption_render_live_matches "$destination" "$replacement" '' "$replacement_hash" "$replacement_mode"; }; then
     return "$TRELLIS_EX_CONFLICT"
   fi
-  committed=true
+  __apr_committed=true
   return 0
 )
 
 preflight_target() {
+  # trellis-release-capability: native-render-migration
   local home="$1" new_version="$2" new_payload="$3" row="$4" work="$5" number="$6"
   local target binding identity root root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier hook_authority
-  local renders='[]' render render_plan index=0 retired pruned='[]'
+  local renders='[]' render render_plan index=0 retired pruned='[]' migrate=false context='null'
   local pi_hooks_required pi_hooks_owned checkout_root fleet recovery_roots recovery_root recovery_harnesses
 
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
@@ -1308,13 +1765,23 @@ preflight_target() {
     [ "$pi_hooks_required" = false ]; then
     pruned="$(adoption_pi_hooks_prune_plan "$root" "$retired" "$old_owner")" || return "$?"
   fi
-  owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" || return "$?"
+  if [ -f "$old_payload/core-rules/native/artifacts.json" ] || [ -f "$new_payload/core-rules/native/artifacts.json" ]; then
+    migrate=true
+    if [ "$(jq '(.renders // []) | length' "$old_owner")" -gt 0 ]; then
+      context="$(attachment_contextual_render_context "$home")" || return "$?"
+    fi
+  fi
   while IFS= read -r render; do
     index=$((index + 1))
-    render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index" "$new_payload")" || return "$?"
+    render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index" "$new_payload" "$migrate" "$context")" || return "$?"
     renders="$(trellis_jq -cn --argjson current "$renders" --argjson planned "$render_plan" '$current + [$planned]')" ||
       return "$TRELLIS_EX_STATE"
   done < <(jq -c '(.renders // [])[]' "$old_owner")
+  if [ "$migrate" = true ]; then
+    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" "$renders" "$context" || return "$?"
+  else
+    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" || return "$?"
+  fi
 
   hooks="$(jq -r '.git_hooks.enabled // false' "$owner")" || return "$TRELLIS_EX_STATE"
   managed=""
@@ -1723,7 +2190,7 @@ adoption_exclude_plan() {
   attach_shared_exclude_state "$home" "$checkout" "$common" "$work/exclude.old-block" \
     "$work/exclude.source" "$work/exclude.candidate" adoption >/dev/null || return "$?"
   mode="0$(_attachment_mode "$path")" || return "$TRELLIS_EX_UNAVAILABLE"
-  python3 - "$plans" "$home/state/attachments/$checkout" "$work" <<'PY'
+  python3 -I - "$plans" "$home/state/attachments/$checkout" "$work" <<'PY'
 import base64, hashlib, json, pathlib, sys
 plans_path, owners_dir, work = map(pathlib.Path, sys.argv[1:])
 plans = [json.loads(line) for line in plans_path.read_text().splitlines()]
@@ -1795,8 +2262,23 @@ adoption_exclude_rollback() {
 # naming the lock, only when the bounded wait runs out.
 adoption_checkout_lock_wait() {
   local common="$3" rc
-  attachment_checkout_lock_wait "$@" && return 0
-  rc=$?
+  __release_adoption_home='' __release_adoption_checkout='' __release_adoption_common=''
+  __release_adoption_link='' __release_adoption_holder='' __release_adoption_pid=''
+  __release_adoption_birth='' __release_adoption_holder_id='' __release_adoption_owner_id=''
+  if attachment_checkout_lock_wait "$@"; then
+    __release_adoption_home="$1" __release_adoption_checkout="$2" __release_adoption_common="$3"
+    __release_adoption_link="${_ATTACHMENT_CHECKOUT_LOCK_LINK:-}"
+    __release_adoption_holder="${_ATTACHMENT_CHECKOUT_LOCK_HOLDER:-}"
+    __release_adoption_pid="${_ATTACHMENT_PROCESS_PID:-}"
+    if [ -n "$__release_adoption_holder" ] && [ -n "$__release_adoption_pid" ]; then
+      __release_adoption_holder_id="$(_attachment_fs_identity "$__release_adoption_holder")" || __release_adoption_holder_id=''
+      __release_adoption_owner_id="$(_attachment_fs_identity "$__release_adoption_holder/owner.json")" || __release_adoption_owner_id=''
+      __release_adoption_birth="$(_attachment_process_birth "$__release_adoption_pid")" || __release_adoption_birth=''
+    fi
+    return 0
+  else
+    rc=$?
+  fi
   [ "$rc" -ne "$TRELLIS_EX_CONFLICT" ] ||
     release_err "another Trellis operation still holds the checkout lock for $common; retry adoption when it finishes"
   return "$rc"
@@ -1901,8 +2383,8 @@ adopt_group() (
 
   adopt_group_cleanup() {
     local status="${1:-$?}" cleanup_rc=0 one
-    trap - EXIT
     trap '' HUP INT TERM
+    trap - EXIT
     [ "$cleanup_started" = true ] && return "$status"
     cleanup_started=true
 
@@ -1969,7 +2451,12 @@ adopt_group() (
   # Count all owner records under the checkout lock, not just selected rows:
   # an unavailable sibling must not turn a real group into a singleton bypass.
   group_owners=("$home/state/attachments/$checkout"/*.json)
-  if [ "${#group_owners[@]}" -gt 1 ]; then
+  # Native-bearing generations always use a durable adoption journal, even
+  # for one owner whose shared exclude block does not otherwise change.
+  if [ "${#group_owners[@]}" -gt 1 ] ||
+    [ -f "$payload/core-rules/native/artifacts.json" ] ||
+    { [ -f "${group_owners[0]}" ] && _attachment_owner_json_valid "${group_owners[0]}" &&
+      [ -f "$home/releases/$(jq -r '.release' "${group_owners[0]}")/payload/core-rules/native/artifacts.json" ]; }; then
     replan=true
   elif [ -f "${group_owners[0]}" ]; then
     adoption_singleton_exclude_stale "${group_owners[0]}" "$payload" \
@@ -2091,6 +2578,11 @@ adopt_group() (
     fi
     printf 'adopted: %s\n' "$label"
   done < "$plans"
+  if [ "$durable" = true ]; then
+    release_adoption_reap_completed_stages "$plans" "$common/info/exclude"
+  else
+    release_adoption_reap_completed_stages "$plans" ''
+  fi
   adopt_group_cleanup 0
   return "$?"
 )
@@ -2240,6 +2732,545 @@ adopt_registry() (
   return "$rc"
 )
 
+# Does PATH lie inside VERSION's release directory, its removal STAGE (when one
+# is given), or one of its execution snapshots (releases/.exec/VERSION-<sha256>)?
+# Matched whole, so 1.0.0 never claims a 1.0.0-rc.1 snapshot. HOME is canonical.
+# Matched ignoring case: on a case-insensitive volume (the macOS default)
+# Releases/1.0.0 is the release, and a spelling must never rule a path out.
+remove_path_names_release() (
+  local home="$1" version="$2" path="$3" stage="${4:-}" rest
+  shopt -s nocasematch
+  if [ -n "$stage" ]; then
+    case "$path" in "$stage"|"$stage"/*) return 0 ;; esac
+  fi
+  case "$path" in
+    "$home/releases/$version"|"$home/releases/$version"/*) return 0 ;;
+    "$home/releases/.exec/$version"-*)
+      # Strip by length: prefix removal is case-sensitive even under nocasematch.
+      rest="$home/releases/.exec/$version-"
+      rest="${path:${#rest}}"
+      rest="${rest%%/*}"
+      case "$rest" in *[!0-9a-f]*) return 1 ;; esac
+      [ "${#rest}" -eq 64 ]
+      return
+      ;;
+  esac
+  return 1
+)
+
+# remove_same_version A B: are A and B one version, ignoring case? On a
+# case-insensitive volume releases/1.0.0-RC.1 is releases/1.0.0-rc.1.
+remove_same_version() (
+  shopt -s nocasematch
+  case "$1" in "$2") ;; *) false ;; esac
+)
+
+# Does link TARGET, read from a link in directory BASE, name VERSION? Both the
+# literal target and its realpath are matched. realpath resolves a relative
+# target, symlinked parents (/var -> /private/var), ".", "..", "//" and a
+# trailing slash, and still answers once the release has moved to its stage,
+# because a missing tail is kept as written.
+remove_target_names_release() {
+  local home="$1" version="$2" stage="$3" base="$4" target="$5" resolved
+  remove_path_names_release "$home" "$version" "$target" "$stage" && return 0
+  resolved="$(python3 -I - "$base" "$target" <<'PY'
+import os
+import stat
+import sys
+
+# Unlike realpath(strict=False), preserve only ENOENT tails, never permission,
+# I/O or symlink-loop errors. Missing tails are needed after staging a release.
+pending = os.path.join(*sys.argv[1:]).split("/")
+resolved = "/"
+links = 0
+try:
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            resolved = os.path.dirname(resolved)
+            continue
+        path = os.path.join(resolved, part)
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            resolved = path
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            links += 1
+            if links > 40:
+                raise OSError("too many symlinks: " + path)
+            link = os.readlink(path)
+            if os.path.isabs(link):
+                resolved = "/"
+            pending = link.split("/") + pending
+        else:
+            resolved = path
+except OSError as error:
+    sys.stderr.write("trellis release: cannot resolve reference: %s\n" % error)
+    raise SystemExit(2)
+print(resolved)
+PY
+  )" || return 2
+  remove_path_names_release "$home" "$version" "$resolved" "$stage"
+}
+
+# remove_json_reference HOME VERSION LABEL FILE prints a refusal row when FILE
+# (JSON, or JSON lines) names VERSION as a release, old_version or new_version,
+# or holds a path into its release or snapshots, ignoring ASCII case like
+# remove_path_names_release. A file that is not a regular file or does not
+# parse is a reference this command cannot rule out.
+remove_json_reference() {
+  local home="$1" version="$2" label="$3" file="$4" rc=0
+  if [ -L "$file" ] || [ ! -f "$file" ]; then
+    printf '4\t%s is not a regular file\t%s\n' "$label" "$file"
+    return 0
+  fi
+  jq -e -s --arg v "$version" --arg r "$home/releases" '
+    if length == 0 then error("empty") else . end
+    | ($v | ascii_downcase) as $v | ($r | ascii_downcase) as $r
+    | any(.. | objects | to_entries[];
+        (.key == "release" or .key == "old_version" or .key == "new_version")
+        and (.value | type) == "string" and (.value | ascii_downcase) == $v)
+      or any(.. | strings | ascii_downcase;
+        . == ($r + "/" + $v) or startswith($r + "/" + $v + "/")
+        or (startswith($r + "/.exec/" + $v + "-")
+          and (.[($r + "/.exec/" + $v + "-" | length):] | test("^[0-9a-f]{64}(/|$)"))))
+  ' "$file" >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) printf '3\t%s\t%s\n' "$label" "$file" ;;
+    1) ;;
+    *) printf '4\t%s is unreadable\t%s\n' "$label" "$file" ;;
+  esac
+}
+
+# An unavailable row's runtime anchor cannot be read, so the row is judged by
+# what it records: its checkout's registry release pin and its owner record.
+# It blocks VERSION when either names VERSION, and when it records no release
+# at all (unknown). Only a genuinely absent root may use this fallback; an
+# existing or inaccessible root whose identity cannot be checked refuses.
+remove_unavailable_row() {
+  local home="$1" version="$2" label="$3" root="$4" pin="$5" checkout="$6" worktree="$7" owner paths recorded=''
+  if [ "$root" != '(no recorded root)' ]; then
+    if ! paths="$(remove_reference_paths "$root" 0 '')" || [ -n "$paths" ]; then
+      printf '4\tunavailable registry row of %s cannot be inspected\t%s\n' "$label" "$root"
+      return 0
+    fi
+  fi
+  [ "$pin" = - ] || recorded="$pin"
+  owner="$home/state/attachments/$checkout/$worktree.json"
+  if [ "$checkout" != - ] && [ "$worktree" != - ]; then
+    if ! paths="$(remove_reference_paths "$owner" 0 '')"; then
+      printf '4\tunavailable registry row of %s has an unreadable owner record %s\t%s\n' "$label" "$owner" "$root"
+      return 0
+    fi
+  else
+    paths=''
+  fi
+  if [ -n "$paths" ]; then
+    if [ -L "$owner" ] || [ ! -f "$owner" ] || ! pin="$(jq -er '.release | strings' "$owner" 2>/dev/null)"; then
+      printf '4\tunavailable registry row of %s has an unreadable owner record %s\t%s\n' "$label" "$owner" "$root"
+      return 0
+    fi
+    recorded="$recorded $pin"
+  fi
+  case " $recorded " in
+    "  ") printf '3\tunavailable registry row of %s records no release, so it may still use it\t%s\n' "$label" "$root" ;;
+    *" $version "*) printf '3\tunavailable registry row of %s records this release\t%s\n' "$label" "$root" ;;
+  esac
+}
+
+# Checked optional lookup or namespace traversal. Only ENOENT is absence.
+# Buffer results until traversal succeeds so a partial listing is never usable.
+# On failure stdout is the offending path, status 4 (not an empty namespace).
+remove_reference_paths() {
+  python3 -I - "$@" <<'PY'
+import os
+import stat
+import sys
+
+path, depth, suffix = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+rows = []
+current = path
+
+
+def visit(path, depth, optional=True):
+    global current
+    current = path
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        if optional:
+            return
+        raise
+    if depth == 0:
+        rows.append(path)
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError("reference namespace is not a directory")
+    if not os.access(path, os.X_OK):
+        raise PermissionError("reference namespace is not searchable")
+    with os.scandir(path) as entries:
+        names = sorted(entry.name for entry in entries)
+    for name in names:
+        child = os.path.join(path, name)
+        if depth > 1 and suffix and not name.endswith(suffix):
+            # A stray file beside the record directories (.DS_Store) holds no
+            # record; anything else, or an entry lstat cannot read, is walked.
+            try:
+                if stat.S_ISREG(os.lstat(child).st_mode):
+                    continue
+            except OSError:
+                pass
+        if depth > 1 or not suffix or name.endswith(suffix):
+            visit(child, depth - 1, optional=False)
+
+
+try:
+    visit(path, depth)
+except OSError as error:
+    sys.stderr.write("trellis release: cannot inspect %s: %s\n" % (current, error))
+    print(current)
+    raise SystemExit(4)
+print("\n".join(rows), end="\n" if rows else "")
+PY
+}
+
+# remove_release_references HOME VERSION STAGE [HELD_PATH...] prints one
+# CLASS<TAB>REASON<TAB>PATH row for every reason VERSION must stay installed.
+# CLASS 3 is a reference and 4 is one this command cannot rule out: a probe
+# that cannot answer is reported, never skipped. A registry row that is not
+# available cannot have its runtime anchor read; remove_unavailable_row judges
+# it by what it records, and a row failing identity validation always refuses.
+# STAGE is the release's removal stage once it has been renamed, else empty.
+# HELD_PATHs are the directories no running process may be using.
+remove_release_references() {
+  local home="$1" version="$2" stage="$3" config active owner journal work inventory row label availability root anchor target file pin handles pid path checkout worktree sidecar rc namespace paths records pins
+  shift 3
+  config="$home/config.json"
+  if [ -f "$config" ] && [ ! -L "$config" ] &&
+    active="$(jq -ers 'if length == 1 and (.[0] | type) == "object" then .[0].active_cli_release | strings else error("not one object") end' "$config" 2>/dev/null)"; then
+    ! remove_same_version "$active" "$version" ||
+      printf '3\t%s\t%s\n' 'it is the active CLI release (active_cli_release)' "$config"
+  else
+    printf '4\t%s\t%s\n' 'the active CLI release is unreadable' "$config"
+  fi
+
+  for namespace in "$home/state/attachments" "$home/attachments"; do
+    if [ "$namespace" = "$home/state/attachments" ]; then
+      paths="$(remove_reference_paths "$namespace" 2 .json)"; rc=$?
+    else
+      paths="$(remove_reference_paths "$namespace" 1 .json)"; rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+      printf '4\t%s\t%s\n' 'reference namespace could not be checked' "${paths:-$namespace}"
+      continue
+    fi
+    while IFS= read -r owner; do
+      [ -n "$owner" ] || continue
+      remove_json_reference "$home" "$version" 'attachment owner record' "$owner"
+    done <<< "$paths"
+  done
+
+  # A managed Git hook runs the payload its release-payload sidecar names.
+  if paths="$(remove_reference_paths "$home/state/git-hooks" 2 release-payload)"; then
+  while IFS= read -r sidecar; do
+    [ -n "$sidecar" ] || continue
+    if [ -L "$sidecar" ] || [ ! -f "$sidecar" ] || [ ! -s "$sidecar" ]; then
+      printf '4\t%s\t%s\n' 'managed Git hook release-payload sidecar is not a non-empty regular file' "$sidecar"
+      continue
+    fi
+    if ! target="$(python3 -I -c 'import sys; print(open(sys.argv[1], encoding="utf-8").read(), end="")' "$sidecar")"; then
+      printf '4\t%s\t%s\n' 'managed Git hook release-payload sidecar is unreadable' "$sidecar"
+      continue
+    fi
+    while IFS= read -r path || [ -n "$path" ]; do
+      rc=0
+      remove_target_names_release "$home" "$version" "$stage" "${sidecar%/*}" "$path" || rc=$?
+      case "$rc" in
+        0) printf '3\t%s\t%s\n' 'managed Git hook release-payload sidecar' "$sidecar" ;;
+        1) ;;
+        *) printf '4\t%s\t%s\n' 'managed Git hook release-payload sidecar could not be resolved' "$sidecar" ;;
+      esac
+    done <<< "$target"
+  done <<< "$paths"
+  else
+    printf '4\t%s\t%s\n' 'reference namespace could not be checked' "${paths:-$home/state/git-hooks}"
+  fi
+
+  inventory="$(mktemp "${TMPDIR:-/tmp}/trellis.release.remove.XXXXXX")" || {
+    printf '4\t%s\t%s\n' 'the local registry could not be listed' "$home/registry.json"
+    return 0
+  }
+  if local_registry_list_json "$home" > "$inventory" 2>/dev/null; then
+    if pins="$(jq -r --arg v "$version" '
+      [.entries[]? | select((.release | strings | ascii_downcase) == ($v | ascii_downcase))
+        | "\(.fleet)/\(.project_id) checkout \(.checkout_id)"]
+      | unique[] | "3\tregistry release pin of \(.)"' "$inventory")" &&
+      records="$(jq -r '.entries[]? | ["\(.fleet)/\(.project_id)", .availability, (.root // "-"),
+      (.release // "-"), (.checkout_id // "-"), (.worktree_id // "-")] | @tsv' "$inventory")"; then
+    while IFS= read -r row; do
+      [ -z "$row" ] || printf '%s\t%s\n' "$row" "$home/registry.json"
+    done <<< "$pins"
+    while IFS=$'\t' read -r label availability root pin checkout worktree; do
+      [ -n "$label" ] || continue
+      [ "$root" != - ] || root=''
+      if [ "$availability" = identity_error ]; then
+        printf '4\tregistry row of %s failed identity validation\t%s\n' "$label" "${root:-(no recorded root)}"
+        continue
+      elif [ "$availability" != available ]; then
+        remove_unavailable_row "$home" "$version" "$label" "${root:-(no recorded root)}" "$pin" "$checkout" "$worktree"
+        continue
+      fi
+      [ -n "$root" ] || continue
+      anchor="$root/.trellis/runtime"
+      if ! paths="$(remove_reference_paths "$anchor" 0 '')"; then
+        printf '4\truntime anchor of %s is unreadable\t%s\n' "$label" "$anchor"
+      elif [ -z "$paths" ]; then
+        : # An absent anchor, not an inaccessible parent.
+      elif [ -L "$anchor" ]; then
+        rc=0
+        if target="$(readlink "$anchor")"; then
+          remove_target_names_release "$home" "$version" "$stage" "$root/.trellis" "$target" || rc=$?
+        else
+          rc=2
+        fi
+        case "$rc" in
+          0) printf '3\truntime anchor of %s\t%s\n' "$label" "$anchor" ;;
+          1) ;;
+          *) printf '4\truntime anchor of %s is unreadable\t%s\n' "$label" "$anchor" ;;
+        esac
+      else
+        printf '4\truntime anchor of %s is not a symlink\t%s\n' "$label" "$anchor"
+      fi
+      for file in "$root/.trellis.config.json" "$root/trellis.config.json"; do
+        if ! paths="$(remove_reference_paths "$file" 0 '')"; then
+          printf '4\tproject config of %s is unreadable\t%s\n' "$label" "$file"
+          continue
+        fi
+        [ -n "$paths" ] || continue
+        if [ -L "$file" ] || [ ! -f "$file" ]; then
+          printf '4\tproject config of %s is not a regular file\t%s\n' "$label" "$file"
+        elif pin="$(jq -e -r -s 'if length == 1 and (.[0] | type) == "object" then .[0] else error("not one object") end
+            | if has("trellis_version") then .trellis_version | strings else "" end' "$file" 2>/dev/null)"; then
+          ! remove_same_version "${pin#v}" "$version" ||
+            printf '3\tproject config trellis_version pin of %s\t%s\n' "$label" "$file"
+        else
+          printf '4\tproject config of %s is unreadable\t%s\n' "$label" "$file"
+        fi
+      done
+    done <<< "$records"
+    else
+      printf '4\t%s\t%s\n' 'the local registry could not be decoded' "$home/registry.json"
+    fi
+  else
+    printf '4\t%s\t%s\n' 'the local registry could not be listed' "$home/registry.json"
+  fi
+  rm -f "${inventory:?}"
+
+  for namespace in "$home/state/attachment-journals" "$home/state/user-attachment-journals"; do
+    if ! paths="$(remove_reference_paths "$namespace" 1 .json)"; then
+      printf '4\t%s\t%s\n' 'reference namespace could not be checked' "${paths:-$namespace}"
+      continue
+    fi
+    while IFS= read -r journal; do
+      [ -n "$journal" ] || continue
+      remove_json_reference "$home" "$version" 'pending attachment journal' "$journal"
+    done <<< "$paths"
+  done
+  if paths="$(remove_reference_paths "$home/state/release-adoptions" 1 '')"; then
+  while IFS= read -r work; do
+    [ -n "$work" ] || continue
+    if ! records="$(remove_reference_paths "$work" 1 '')"; then
+      printf '4\t%s\t%s\n' 'reference namespace could not be checked' "${records:-$work}"
+      continue
+    fi
+    if [ -L "$work" ] || [ ! -d "$work" ] || [ ! -f "$work/plans.jsonl" ]; then
+      printf '4\t%s\t%s\n' 'pending adoption journal has no readable plan' "$work"
+      continue
+    fi
+    remove_json_reference "$home" "$version" 'pending adoption journal' "$work/plans.jsonl"
+  done <<< "$paths"
+  else
+    printf '4\t%s\t%s\n' 'reference namespace could not be checked' "${paths:-$home/state/release-adoptions}"
+  fi
+
+  [ "$#" -gt 0 ] || return 0
+  if handles="$(release_store_live_handles "$@")"; then
+    printf '%s\n' "$handles" | while IFS=$'\t' read -r pid path; do
+      [ -z "$pid" ] || printf '3\trunning process %s uses it\t%s\n' "$pid" "$path"
+    done
+  else
+    printf '4\t%s\t%s\n' 'running processes could not be checked' "$1"
+  fi
+}
+
+remove_report_refusals() {
+  local version="$1" refusals="$2" class reason path rc=0
+  while IFS=$'\t' read -r class reason path; do
+    release_err "refusing to remove $version: $reason: $path"
+    rc="$(max_status "$rc" "$class")"
+  done < "$refusals"
+  printf 'remove: %s kept; nothing removed\n' "$version"
+  return "$rc"
+}
+
+remove_report_rows() {
+  local version="$1" rows="$2" verb="$3" kind path bytes total=0 count=0
+  while IFS=$'\t' read -r kind path bytes; do
+    printf 'remove: %s %s %s (%s)\n' "$verb" "$kind" "$path" "$(remove_size "$bytes")"
+    total=$((total + bytes))
+    count=$((count + 1))
+  done < "$rows"
+  printf 'remove: %s total entries=%s bytes=%s (%s)\n' "$version" "$count" "$total" "$(remove_size "$total")"
+}
+
+remove_size() {
+  awk -v bytes="$1" 'BEGIN { printf "%.1f MiB", bytes / 1048576 }'
+}
+
+# Is LOCK a removal lock (holding only remove.owner.json) whose owner exited?
+# An install lock is empty and is never stale here; anything that cannot be
+# read counts as live. A pid another user now owns cannot be our remover.
+remove_lock_is_stale() {
+  local lock="$1" owner="$1/remove.owner.json" pid birth now
+  [ -d "$lock" ] && [ ! -L "$lock" ] && [ -f "$owner" ] && [ ! -L "$owner" ] || return 1
+  [ "$(ls -A "$lock")" = remove.owner.json ] || return 1
+  pid="$(jq -er 'select(type == "object" and (keys | sort) == ["pid","process_birth","schema_version"]
+    and .schema_version == 1 and (.process_birth | type == "string")) | .pid | numbers' "$owner" 2>/dev/null)" || return 1
+  case "$pid" in ''|*[!0-9]*|0*) return 1 ;; esac
+  [ "${#pid}" -le 10 ] && [ "$pid" -le 2147483647 ] || return 1
+  birth="$(jq -r '.process_birth' "$owner" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" &&
+    [ -n "$birth" ] || return 1
+  kill -0 "$pid" 2>/dev/null || return 0
+  now="$(release_store_process_birth "$pid" 2>/dev/null | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')" &&
+    [ -n "$now" ] || return 1
+  [ "$now" != "$birth" ]
+}
+
+# `trellis release remove VERSION [--dry-run|--apply]`. Nothing is removed while
+# anything still references VERSION (remove_release_references). Apply holds
+# the release-store lock install uses, with an owner record so a later remove
+# can clear it once this process has died. It renames the release to a
+# `.tmp.remove.*` stage with an owner record, checks the references again against the staged
+# path (an adoption may have bound VERSION meanwhile, and puts the release back
+# if so), then hands the stage to release_store_remove_entries finish.
+remove_release() (
+  local home version="$2" mode="$3" releases lock='' lock_stage='' rows='' refusals='' stage='' how=created rc kind path bytes
+  local installed=false stale=false
+  local -a held=()
+  cleanup_remove() {
+    [ -z "${rows:-}" ] || rm -f "$rows"
+    [ -z "${refusals:-}" ] || rm -f "$refusals"
+    [ -z "${lock:-}" ] || { rm -f "$lock/remove.owner.json"; rmdir "$lock"; } 2>/dev/null
+    [ -z "${lock_stage:-}" ] || { rm -f "$lock_stage/remove.owner.json"; rmdir "$lock_stage"; } 2>/dev/null
+  }
+  trap cleanup_remove EXIT INT TERM
+  releases="$(release_store_canonical_releases_dir)" || return "$?"
+  # Every path comparison below is against the canonical home.
+  home="${releases%/releases}"
+  rows="$(mktemp "${TMPDIR:-/tmp}/trellis.release.remove.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  refusals="$(mktemp "${TMPDIR:-/tmp}/trellis.release.refusals.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  ! remove_lock_is_stale "$releases/$version.lock" || stale=true
+  if [ "$stale" = true ] && [ "$mode" = apply ]; then
+    release_err "clearing the removal lock a dead process left: $releases/$version.lock"
+    rm -f "$releases/$version.lock/remove.owner.json" && rmdir "$releases/$version.lock" ||
+      return "$TRELLIS_EX_UNAVAILABLE"
+  elif [ "$stale" = true ]; then
+    printf 'remove: --apply clears the removal lock a dead process left: %s\n' "$releases/$version.lock"
+  fi
+  rc=0
+  if [ "$mode" = apply ]; then
+    # Publish the lock whole: it appears already holding its owner record, so
+    # no crash leaves an empty lock that reads as an install's. An unpublished
+    # .tmp.lock.* stage is collected by reap-tmp.
+    lock_stage="$(release_store_mktemp_dir "$releases/.tmp.lock.$version.XXXXXX")" &&
+      release_store_write_snapshot_owner "$lock_stage/remove" || {
+      release_err "could not prepare the release store lock: $releases/$version.lock"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    }
+    release_store_rename_no_clobber "$lock_stage" "$releases/$version.lock" 2>/dev/null || rc=$?
+    case "$rc" in
+      0) lock="$releases/$version.lock"; lock_stage='' ;;
+      3) ;;
+      *)
+        release_err "could not create release store lock: $releases/$version.lock"
+        return "$TRELLIS_EX_UNAVAILABLE"
+        ;;
+    esac
+  fi
+  if { [ "$mode" = apply ] && [ -z "$lock" ]; } ||
+    { [ "$mode" != apply ] && [ "$stale" = false ] &&
+      { [ -e "$releases/$version.lock" ] || [ -L "$releases/$version.lock" ]; }; }; then
+    printf '3\t%s\t%s\n' 'the release store lock is held (an install or removal is in progress)' \
+      "$releases/$version.lock" > "$refusals"
+    remove_report_refusals "$version" "$refusals"
+    return "$?"
+  fi
+  release_store_remove_entries plan "$version" > "$rows" || return "$?"
+  [ -s "$rows" ] || {
+    release_err "release not installed: $version"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  while IFS=$'\t' read -r kind path bytes; do
+    case "$kind" in
+      release) installed=true; held[${#held[@]}]="$path" ;;
+      remove-stage) stage="$path"; how=resumed; held[${#held[@]}]="$path" ;;
+      exec-snapshot|exec-lock) held[${#held[@]}]="$path" ;;
+    esac
+  done < "$rows"
+  remove_release_references "$home" "$version" "$stage" ${held[@]+"${held[@]}"} > "$refusals"
+  if [ -s "$refusals" ]; then
+    remove_report_refusals "$version" "$refusals"
+    return "$?"
+  fi
+  if [ "$mode" = dry-run ]; then
+    remove_report_rows "$version" "$rows" 'would remove'
+    printf 'remove: dry-run: nothing removed; --apply removes these entries\n'
+    return 0
+  fi
+
+  if [ -z "$stage" ]; then
+    stage="$(mktemp -u "$releases/.tmp.remove.$version.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+    release_store_write_snapshot_owner "$stage" || return "$?"
+  fi
+  if [ "$installed" = true ]; then
+    release_store_rename_no_clobber "$releases/$version" "$stage" || {
+      rc=$?
+      rm -f "$stage.owner.json"
+      return "$rc"
+    }
+    how=staged
+    held[0]="$stage"
+    remove_release_references "$home" "$version" "$stage" "${held[@]}" > "$refusals"
+    if [ -s "$refusals" ]; then
+      if release_store_rename_no_clobber "$stage" "$releases/$version"; then
+        rm -f "$stage.owner.json"
+      else
+        release_err "could not restore $version from its removal stage $stage"
+      fi
+      remove_report_refusals "$version" "$refusals"
+      return "$?"
+    fi
+  elif [ "$how" = resumed ]; then
+    # A resumed stage may already be partly deleted: never publish it again.
+    remove_release_references "$home" "$version" "$stage" "${held[@]}" > "$refusals"
+    if [ -s "$refusals" ]; then
+      remove_report_refusals "$version" "$refusals"
+      return "$?"
+    fi
+  fi
+  release_store_remove_entries finish "$version" "${stage##*/}" "$how" > "$rows" || return "$?"
+  remove_report_rows "$version" "$rows" removed
+  { rm -f "$lock/remove.owner.json" && rmdir "$lock"; } || {
+    release_err "could not release the release store lock: $lock"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  }
+  lock=''
+)
+
+
 run_install() {
   local version='' remote='' remote_seen=false arg home
   [ "$#" -ge 1 ] || { usage_error 'install requires VERSION'; return $?; }
@@ -2315,6 +3346,27 @@ run_reap_tmp() {
   home="$(release_home)" || return "$?"
   export TRELLIS_HOME="$home"
   release_store_reap_tmp "$mode"
+}
+
+run_remove() {
+  local version='' mode='' arg home
+  [ "$#" -ge 1 ] || { usage_error 'remove requires VERSION'; return $?; }
+  version="$1"; shift
+  while [ "$#" -gt 0 ]; do
+    arg="$1"
+    case "$arg" in
+      --dry-run|--apply)
+        [ -z "$mode" ] || { usage_error 'remove accepts one of --dry-run or --apply'; return $?; }
+        mode="${arg#--}"
+        ;;
+      *) usage_error "unknown remove option: $arg"; return $? ;;
+    esac
+    shift
+  done
+  version="$(release_store_normalize_version "$version")" || return "$?"
+  home="$(release_home)" || return "$?"
+  export TRELLIS_HOME="$home"
+  remove_release "$home" "$version" "${mode:-dry-run}"
 }
 
 run_adopt() {
@@ -2421,6 +3473,7 @@ release_command_main() {
     locate) shift; run_locate "$@" ;;
     verify) shift; run_verify "$@" ;;
     reap-tmp) shift; run_reap_tmp "$@" ;;
+    remove) shift; run_remove "$@" ;;
     adopt) shift; run_adopt "$@" ;;
     help|--help|-h) usage ;;
     *) usage_error "unknown command: $1" ;;

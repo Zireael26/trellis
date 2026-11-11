@@ -167,6 +167,86 @@ materialize_task() {
 }
 
 
+@test "materializer TERM while waiting for a foreign lock leaves no stage or publication" {
+  local lock="$TRELLIS_HOME_FIX/locks/scheduled-tasks.lock"
+  local tasks="$TRELLIS_HOME_FIX/tasks/personal" stage='' runner worker rc i
+  local leaked=false published=false lock_kept=false orphan=false
+  mkdir -p "$TRELLIS_HOME_FIX/locks" "$SANDBOX/signal-bin"
+  mkdir -m 700 "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  chmod 600 "$lock/pid"
+  cat > "$SANDBOX/signal-bin/sleep" <<'SH'
+#!/bin/bash
+if [ -f "$B9_TEST_SLEEP_ENABLE" ]; then
+  printf '%s\n' "$PPID" > "$B9_TEST_SLEEP_READY.tmp"
+  mv "$B9_TEST_SLEEP_READY.tmp" "$B9_TEST_SLEEP_READY"
+  while [ ! -f "$B9_TEST_SLEEP_GO" ]; do /bin/sleep 0.05; done
+  exit 0
+fi
+exec /bin/sleep "$@"
+SH
+  chmod 700 "$SANDBOX/signal-bin/sleep"
+  env PATH="$SANDBOX/signal-bin:$PATH" TRELLIS_HOME="$TRELLIS_HOME_FIX" \
+    B9_TEST_SLEEP_ENABLE="$SANDBOX/sleep-enable" B9_TEST_SLEEP_READY="$SANDBOX/sleep-ready" \
+    B9_TEST_SLEEP_GO="$SANDBOX/sleep-go" \
+    "$MATERIALIZER" materialize --home "$TRELLIS_HOME_FIX" --fleet personal daily-project-digest \
+    > "$SANDBOX/materializer.out" 2> "$SANDBOX/materializer.err" &
+  runner=$!
+  shopt -s nullglob
+  for ((i=0; i<3600; i++)); do
+    local candidates=("$tasks"/.daily-project-digest.tmp.*)
+    if [ "${#candidates[@]}" -gt 0 ] && [ -f "${candidates[0]}/.planned-errors" ]; then
+      stage="${candidates[0]}"
+      : > "$SANDBOX/sleep-enable"
+      break
+    fi
+    kill -0 "$runner" 2>/dev/null || break
+    /bin/sleep 0.05
+  done
+  if [ -n "$stage" ]; then
+    for ((i=0; i<600; i++)); do
+      [ -f "$SANDBOX/sleep-ready" ] && break
+      kill -0 "$runner" 2>/dev/null || break
+      /bin/sleep 0.05
+    done
+  fi
+  if [ ! -f "$SANDBOX/sleep-ready" ]; then
+    pkill -TERM -P "$runner" 2>/dev/null || true
+    kill -TERM "$runner" 2>/dev/null || true
+    wait "$runner" 2>/dev/null || true
+    printf 'materializer did not reach the held task lock\n' >&2
+    cat "$SANDBOX/materializer.err" >&2
+    return 1
+  fi
+  worker="$(<"$SANDBOX/sleep-ready")"
+  case "$worker" in
+    ''|*[!0-9]*|0|1)
+      pkill -TERM -P "$runner" 2>/dev/null || true
+      kill -TERM "$runner" 2>/dev/null || true
+      wait "$runner" 2>/dev/null || true
+      echo 'invalid worker identity' >&2
+      return 1
+      ;;
+  esac
+  kill -TERM "$runner"
+  : > "$SANDBOX/sleep-go"
+  if wait "$runner"; then rc=0; else rc=$?; fi
+  [ ! -e "$stage" ] || leaked=true
+  [ ! -e "$tasks/daily-project-digest" ] || published=true
+  [ -f "$lock/pid" ] && [ "$(<"$lock/pid")" = "$$" ] && lock_kept=true
+  # The pre-fix subshell is orphaned when the parent dies. Stop only the
+  # test-owned shell recorded by the blocked sleep, before fixture teardown.
+  if [ "$worker" != "$runner" ] && kill -0 "$worker" 2>/dev/null; then
+    orphan=true
+    kill -KILL "$worker" 2>/dev/null || true
+  fi
+  [ "$rc" -eq 143 ] || { printf 'wrong signal status %s\n' "$rc" >&2; return 1; }
+  [ "$lock_kept" = true ] || { echo 'foreign task lock was removed' >&2; return 1; }
+  [ "$leaked" = false ] || { echo 'stage survived parent termination' >&2; return 1; }
+  [ "$orphan" = false ] || { echo 'materializer worker survived its parent' >&2; return 1; }
+  [ "$published" = false ] || { echo 'task published after parent termination' >&2; return 1; }
+}
+
 @test "materialize isolates personal and work task inputs" {
   local personal="$SANDBOX/personal/alpha checkout" work="$SANDBOX/work/beta checkout"
   make_repo "$personal" alpha
@@ -472,15 +552,32 @@ materialize_task() {
   [ "$(jq -r '.items[0].project_id' "$root/backlog.json")" = alpha ]
   printf '%s\n' '{"schema_version":1,"items":[{"id":"alpha-task","project_id":"alpha","command":"unsafe"}]}' > "$root/backlog.json"
   chmod 600 "$root/backlog.json"
+  local manifest_before backlog_before manifest_status_before tree_before
+  manifest_before="$(shasum -a 256 "$root/manifest.json" | awk '{print $1}')"
+  backlog_before="$(shasum -a 256 "$root/backlog.json" | awk '{print $1}')"
+  manifest_status_before="$(jq -r '.status // empty' "$root/manifest.json")"
+  tree_before="$(cd "$root" && find . -type f | LC_ALL=C sort)"
   materialize_task personal conductor
   [ "$status" -eq 4 ]
   [[ "$output" == *"invalid schema"* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$root/manifest.json" | awk '{print $1}')" = "$manifest_before" ]
+  [ "$(shasum -a 256 "$root/backlog.json" | awk '{print $1}')" = "$backlog_before" ]
+  [ "$(jq -r '.status // empty' "$root/manifest.json")" = "$manifest_status_before" ]
+  [ "$(cd "$root" && find . -type f | LC_ALL=C sort)" = "$tree_before" ]
 
   printf '%s\n' '{"schema_version":1,"items":[{"id":"unknown-task","project_id":"unknown"}]}' > "$root/backlog.json"
   chmod 600 "$root/backlog.json"
+  manifest_before="$(shasum -a 256 "$root/manifest.json" | awk '{print $1}')"
+  backlog_before="$(shasum -a 256 "$root/backlog.json" | awk '{print $1}')"
+  manifest_status_before="$(jq -r '.status // empty' "$root/manifest.json")"
+  tree_before="$(cd "$root" && find . -type f | LC_ALL=C sort)"
   materialize_task personal conductor
   [ "$status" -eq 4 ]
   [[ "$output" == *"without an active available snapshot root"* ]] || { echo "$output"; false; }
+  [ "$(shasum -a 256 "$root/manifest.json" | awk '{print $1}')" = "$manifest_before" ]
+  [ "$(shasum -a 256 "$root/backlog.json" | awk '{print $1}')" = "$backlog_before" ]
+  [ "$(jq -r '.status // empty' "$root/manifest.json")" = "$manifest_status_before" ]
+  [ "$(cd "$root" && find . -type f | LC_ALL=C sort)" = "$tree_before" ]
 }
 
 @test "tracked prompts retain portable loop safety and restored generic defaults" {
@@ -760,4 +857,22 @@ materialize_task() {
   [ "$output" = error ] || { echo "$output"; false; }
   run jq -r "$classifier" "$fixtures/bootstrap-retried.json"
   [ "$output" = error ] || { echo "$output"; false; }
+}
+
+@test "AEO URL parsing isolates its stdin python from modules in the caller cwd" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  local poison="$SANDBOX/poison-urllib" marker="$SANDBOX/urllib-marker"
+  mkdir -p "$poison/urllib"
+  cat > "$poison/urllib/__init__.py" <<'PY'
+import os
+open(os.environ["SHADOW_MARKER"], "w").write("shadowed\n")
+raise SystemExit(0)
+PY
+  run env SHADOW_MARKER="$marker" bash -c '
+    . "$1" help >/dev/null 2>&1 || exit 1
+    cd "$2" || exit 1
+    aeo_url_matches_target_parser "https://example.invalid/path"
+  ' _ "$MATERIALIZER" "$poison"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$marker" ] || { echo "cwd urllib executed"; false; }
 }

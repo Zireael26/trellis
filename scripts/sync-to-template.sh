@@ -520,9 +520,15 @@ template_dir="$(mirror_require_real_root "$template_dir")" || exit "$?"
   printf 'trellis mirror: template repository not found at %s\n' "$template_dir" >&2
   exit 5
 }
-if "$push" && [ -n "$(mirror_git -C "$template_dir" status --porcelain=v1 --untracked-files=all)" ]; then
-  printf 'trellis mirror: --push requires a clean template checkout before publication\n' >&2
-  exit 3
+if "$push"; then
+  if ! template_status="$(mirror_git -C "$template_dir" status --porcelain=v1 --untracked-files=all)"; then
+    printf 'trellis mirror: could not determine template checkout cleanliness\n' >&2
+    exit 5
+  fi
+  if [ -n "$template_status" ]; then
+    printf 'trellis mirror: --push requires a clean template checkout before publication\n' >&2
+    exit 3
+  fi
 fi
 
 # Positive publication allowlist. A payload path must be deliberately listed to
@@ -545,6 +551,8 @@ sync_paths=(
   'core-rules/AGENTS.md'
   'core-rules/agents/'
   'core-rules/VERSION'
+  'core-rules/native/'
+  'core-rules/legacy-hooks/'
   'core-rules/codex/'
   # The portable pi surface: extension, hook dispatcher, version-pinned patch
   # bundle and its tests. `core-rules/pi/agents` is carved back out below --
@@ -633,6 +641,13 @@ payload_no_publish=(
   # This test asserts the operator's live routes, like the withheld roster.
   # Keep provider IDs exact in the source; publish neither this leaf nor a stale copy.
   'scripts/tests/herdr-task-routing.bats'
+  # Spec 074 qualification oracles. The pinned fixtures are retained run records
+  # from this operator's host (fleet project names, provider routes), and both
+  # suites also read specs/ evidence, which never publishes. The checker itself
+  # under scripts/qualification/ still publishes as source.
+  'scripts/tests/fixtures/qualification'
+  'scripts/tests/qualification-check.bats'
+  'scripts/tests/qualification-record.bats'
 )
 
 # Paths removed from an existing mirror. These are public-tree relative and
@@ -645,6 +660,9 @@ payload_no_publish=(
 # mirror permanently unpublishable, and an entry here with no lint term deletes
 # silently instead of failing loudly.
 delist_prune=(
+  'scripts/tests/fixtures/qualification'
+  'scripts/tests/qualification-check.bats'
+  'scripts/tests/qualification-record.bats'
   'scripts/lib/usage_federation'
   'scripts/tests/usage-federation.bats'
   'core-rules/pi/extensions/tests'
@@ -858,9 +876,18 @@ mirror_install_file_in_parent() {
     return 1
   }
   temporary="$(mktemp ".trellis-mirror-file.XXXXXX")" || return 1
-  if ! cp -P "$source" "$temporary"; then
+  # mktemp creates 0600 and a plain cp leaves that mode on the published inode,
+  # turning every direct file entry into an owner-only file. The stage under the
+  # script's private umask also carries owner-only modes, so set the published
+  # mode explicitly from the staged execute bit (git records only that bit).
+  if ! cp -Pp "$source" "$temporary"; then
     rm -f "$temporary"
     return 1
+  fi
+  if [ -x "$source" ]; then
+    chmod 755 "$temporary" || { rm -f "$temporary"; return 1; }
+  else
+    chmod 644 "$temporary" || { rm -f "$temporary"; return 1; }
   fi
   [ ! -L "$leaf" ] || {
     rm -f "$temporary"
@@ -1043,8 +1070,11 @@ core_rules_private_ref() {
 ref_integrity_check() {
   local root="${1:-}" refs files path source file ref failed=0
   [ "$#" -eq 1 ] || return 2
-  refs="$(mktemp "${TMPDIR:-/tmp}/trellis-mirror-refs.XXXXXX")"
-  files="$(mktemp "${TMPDIR:-/tmp}/trellis-mirror-files.XXXXXX")"
+  refs="$(mktemp "${TMPDIR:-/tmp}/trellis-mirror-refs.XXXXXX")" || return 1
+  files="$(mktemp "${TMPDIR:-/tmp}/trellis-mirror-files.XXXXXX")" || {
+    rm -f "${refs:?}"
+    return 1
+  }
   for path in "${sync_paths[@]}"; do
     source="$root/${path%/}"
     if [ -f "$source" ]; then
@@ -1191,15 +1221,24 @@ mirror_pin_release_source() {
       "$tag" "$tag_commit" "$installed_commit" >&2
     return 4
   }
-  jq -cS '.tree | sort_by(.path) | .[]' "$RELEASE_SOURCE_WORK/release.json" > "$RELEASE_SOURCE_WORK/fetched.tree"
-  jq -cS '.tree | sort_by(.path) | .[]' "$release_json" > "$RELEASE_SOURCE_WORK/installed.tree"
+  jq -cS '.tree | sort_by(.path) | .[]' "$RELEASE_SOURCE_WORK/release.json" > "$RELEASE_SOURCE_WORK/fetched.tree" || return 5
+  jq -cS '.tree | sort_by(.path) | .[]' "$release_json" > "$RELEASE_SOURCE_WORK/installed.tree" || return 5
   cmp -s "$RELEASE_SOURCE_WORK/fetched.tree" "$RELEASE_SOURCE_WORK/installed.tree" || {
     printf 'trellis mirror: release identity mismatch: the tree of fetched %s differs from the installed release tree\n' "$tag" >&2
     diff "$RELEASE_SOURCE_WORK/fetched.tree" "$RELEASE_SOURCE_WORK/installed.tree" | sed -n '2,5p' >&2
     return 4
   }
 
-  if ! mirror_git -C "$repo" cat-file -e "$tag_commit:$RELEASE_EXCLUDE_LIST" 2>/dev/null; then
+  # The fetched and installed trees have just been compared. A failed Git
+  # object probe is not proof of absence; use that verified tree instead.
+  if jq -e --arg path "$RELEASE_EXCLUDE_LIST" 'any(.tree[]; .path == $path)' "$RELEASE_SOURCE_WORK/release.json" >/dev/null; then
+    :
+  else
+    local rc=$?
+    if [ "$rc" -ne 1 ]; then
+      printf 'trellis mirror: could not inspect the verified release tree\n' >&2
+      return 5
+    fi
     printf '==> %s is a legacy unfiltered release: staging from its payload alone, nothing restored\n' "$tag"
     return 0
   fi

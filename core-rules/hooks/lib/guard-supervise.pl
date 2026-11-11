@@ -1,13 +1,14 @@
 #!/usr/bin/perl
-# guard-supervise.pl <claude|codex|pi> <hook-name> <command> [args...]
+# guard-supervise.pl <claude|claude-expansion|codex|pi> <hook-name> <command> [args...]
 #
-# Supervisor for the bright-line PreToolUse guards. Claude Code cancels a
-# PreToolUse command hook at its registered `timeout` and lets the tool call
-# run, so a guard that stalls, crashes or prints garbage must never be what the
-# client sees. Registrations start this file through a POSIX sh entry (see the
-# templates) that clears PERL5OPT, PERL5LIB, PERLLIB, PERL5DB, ENV and
-# BASH_ENV, denies when perl or this file is missing, and denies on any exit
-# other than the codes below. The pi dispatcher calls it directly in pi mode.
+# Supervisor for the bright-line guards: the PreToolUse guards and Claude's
+# UserPromptExpansion skill-slash-guard. Claude Code cancels a command hook at
+# its registered `timeout` and lets the tool call or expansion run, so a guard
+# that stalls, crashes or prints garbage must never be what the client sees.
+# Registrations start this file through a POSIX sh entry (see the templates)
+# that clears PERL5OPT, PERL5LIB, PERLLIB, PERL5DB, ENV and BASH_ENV, denies
+# when perl or this file is missing, and denies on any exit other than the
+# codes below. The pi dispatcher calls it directly in pi mode.
 #
 #   - Budget: DEADLINE_SECS from this process's start ($^T, whole seconds,
 #     rounded down, so the budget never exceeds it). It covers reading the
@@ -16,14 +17,19 @@
 #     timeout is 30 s.
 #   - stdin: read here, under the deadline, and given to the guard from a spool
 #     file; the guard and its descendants never hold the client's stdin.
-#   - stdout/stderr: the guard writes to pipes owned here, drained together
-#     with no polling interval. If the guard exits with its stdout still open
+#   - stdout/stderr: the guard writes to pipes owned here, drained together;
+#     each wait is at most POLL_SECS, and the guard is reaped on every pass. If the guard exits with its stdout still open
 #     after a short drain, that is a refusal.
 #   - Deadline: kill the guard's process group, then refuse.
 #   - claude: no-op = exit 0 + empty stdout; decision = exactly one
 #     {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":
 #     "allow|deny|ask",...}}. Anything else, including the guard's own exit 2,
 #     becomes a deny document.
+#   - claude-expansion (UserPromptExpansion): no-op = exit 0 + empty stdout;
+#     block = exactly one {"decision":"block","reason":"..."}, passed through
+#     with client exit 0. Anything else, the guard's own exit 2 included, is
+#     refused as in codex mode: a block document, the reason on stderr and
+#     client exit 2.
 #   - codex: no-op = exit 0 + empty stdout; block = exactly one
 #     {"decision":"block","reason":"..."} (client exit 2). Anything else blocks.
 #   - pi: as codex, and an advisory {"hookSpecificOutput":{"additionalContext":
@@ -38,6 +44,7 @@ use strict;
 use warnings;
 
 my $DEADLINE_SECS = 20;
+my $POLL_SECS = 0.1;
 my $CAPTURE_MAX = 1 << 20;
 my $INPUT_MAX = 64 << 20;
 my $deadline = $^T + $DEADLINE_SECS;
@@ -116,12 +123,14 @@ sub valid_doc {
   my $block = ($doc->{decision} // '') eq 'block' && defined $doc->{reason} && !ref $doc->{reason};
   return $decision ? 'decision' : 0 if $harness eq 'claude';
   return $block ? 'block' : 0 if $harness eq 'codex';
+  # The guard's block passes through unchanged (client exit 0).
+  return $block ? 'decision' : 0 if $harness eq 'claude-expansion';
   my $advice = ref $h eq 'HASH' && defined $h->{additionalContext} && !ref $h->{additionalContext};
   return $block ? 'block' : ($decision || $advice) ? 'decision' : 0;
 }
 
 sub main {
-  refuse('supervisor called with an unknown harness') unless $harness =~ /\A(?:claude|codex|pi)\z/;
+  refuse('supervisor called with an unknown harness') unless $harness =~ /\A(?:claude|claude-expansion|codex|pi)\z/;
   refuse('supervisor called without a guard command') unless @cmd;
   my $input = read_input();
   open(my $spool, '+>', undef) or refuse('supervisor could not spool the input');
@@ -174,10 +183,16 @@ sub main {
     # Sleep until a pipe is readable, the guard exits, or the budget (or the
     # drain grace, once the guard is reaped) runs out. Both pipes are read as
     # they fill, so a guard writing more than a pipe buffer never blocks.
+    # Perl runs the SIGCHLD handler only between ops, so a SIGCHLD landing
+    # after the last check but before select() enters the kernel writes no
+    # byte in time: never sleep longer than one short poll, and reap above on
+    # every pass, so a lost wakeup costs at most $POLL_SECS.
     my $until = defined $status && $grace_until < $deadline ? $grace_until : $deadline;
+    my $wait = $until - $now;
+    $wait = $POLL_SECS if $wait > $POLL_SECS;
     my $rin = '';
     vec($rin, fileno($_), 1) = 1 for $chld_r, values %fh;
-    next unless select(my $rout = $rin, undef, undef, $until - $now) > 0;
+    next unless select(my $rout = $rin, undef, undef, $wait) > 0;
     sysread($chld_r, my $woke, 64) if vec($rout, fileno($chld_r), 1);
     for my $k (keys %fh) {
       next unless vec($rout, fileno($fh{$k}), 1);
@@ -214,7 +229,7 @@ sub main {
   $child_err = $buf{err};
   refuse("guard was killed by signal $signal") if $signal;
   refuse('guard could not be started') if $code == 125 || $code == 127;
-  if ($harness eq 'claude' && $code == 2) {
+  if ($harness =~ /\Aclaude/ && $code == 2) {
     (my $first = (split /\n/, $buf{err})[0] // '') =~ s/[^\x20-\x7e]//g;
     refuse('guard refused' . (length $first ? " ($first)" : '') . ' with exit 2');
   }

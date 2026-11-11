@@ -40,12 +40,16 @@ is_retired_registration_hook() {
   done < <(find "$ROOT/core-rules/hooks" -maxdepth 1 -type f -name '*.sh' | sort)
 }
 
+# T34: the production templates register the native entry; the legacy hook
+# wiring checked in this file is the pinned legacy surface the native-miss
+# fallback renders (core-rules/legacy-hooks).
+
 # spec 1.3.12 (E-15): these hooks keep their scripts but are no longer
 # registered in any manifest. Adding one back needs this list edited.
 @test "retired hook registrations are absent and the kept guards and tripwire remain" {
   local manifest name
-  for manifest in core-rules/templates/claude-settings.local.json core-rules/templates/claude-settings.json \
-    core-rules/templates/codex-hooks.local.json core-rules/codex/hooks.json; do
+  for manifest in core-rules/legacy-hooks/claude-settings.local.json core-rules/templates/claude-settings.json \
+    core-rules/legacy-hooks/codex-hooks.local.json core-rules/codex/hooks.json; do
     for name in skill-size-preflight truncation-check propose-rules primer-capture-nudge; do
       jq -e --arg name "$name" '
         [.hooks[][]?.hooks[]? | [.command] + (.args // []) | join(" ") | select(contains($name))] | length == 0
@@ -63,19 +67,19 @@ is_retired_registration_hook() {
       return 1
     }
   done <<'EOF'
-core-rules/templates/claude-settings.local.json|slop-tripwire
-core-rules/templates/claude-settings.local.json|pr-gate-shiftleft
-core-rules/templates/claude-settings.local.json|block-destructive
-core-rules/templates/claude-settings.local.json|reread-guard
-core-rules/templates/claude-settings.local.json|skill-preload-guard
-core-rules/templates/claude-settings.local.json|skill-slash-guard
+core-rules/legacy-hooks/claude-settings.local.json|slop-tripwire
+core-rules/legacy-hooks/claude-settings.local.json|pr-gate-shiftleft
+core-rules/legacy-hooks/claude-settings.local.json|block-destructive
+core-rules/legacy-hooks/claude-settings.local.json|reread-guard
+core-rules/legacy-hooks/claude-settings.local.json|skill-preload-guard
+core-rules/legacy-hooks/claude-settings.local.json|skill-slash-guard
 core-rules/templates/claude-settings.json|slop-tripwire
 core-rules/templates/claude-settings.json|pr-gate-shiftleft
 core-rules/templates/claude-settings.json|skill-preload-guard
-core-rules/templates/codex-hooks.local.json|slop-tripwire
-core-rules/templates/codex-hooks.local.json|pr-gate-shiftleft
-core-rules/templates/codex-hooks.local.json|block-destructive
-core-rules/templates/codex-hooks.local.json|reread-guard
+core-rules/legacy-hooks/codex-hooks.local.json|slop-tripwire
+core-rules/legacy-hooks/codex-hooks.local.json|pr-gate-shiftleft
+core-rules/legacy-hooks/codex-hooks.local.json|block-destructive
+core-rules/legacy-hooks/codex-hooks.local.json|reread-guard
 core-rules/codex/hooks.json|slop-tripwire
 core-rules/codex/hooks.json|pr-gate-shiftleft
 EOF
@@ -105,8 +109,8 @@ EOF
 
 @test "SessionStart context hooks run only through the session-start dispatcher" {
   local manifest name dispatcher
-  for manifest in core-rules/templates/claude-settings.local.json core-rules/templates/claude-settings.json \
-    core-rules/templates/codex-hooks.local.json; do
+  for manifest in core-rules/legacy-hooks/claude-settings.local.json core-rules/templates/claude-settings.json \
+    core-rules/legacy-hooks/codex-hooks.local.json; do
     jq -e '[.hooks.SessionStart[].hooks[].command | select(contains("session-start"))] | length == 1' \
       "$ROOT/$manifest" >/dev/null || { echo "session-start not wired exactly once in $manifest"; false; }
     for name in session-context post-compact-context inject-primer-index; do
@@ -143,7 +147,7 @@ _claude_template_hooks() {
 
 @test "the attach-rendered and legacy Claude templates register the same hooks but for the hook root" {
   local local_hooks legacy_hooks
-  local_hooks="$(_claude_template_hooks "$ROOT/core-rules/templates/claude-settings.local.json" "wiki-skill-suggest hookspath-guard")"
+  local_hooks="$(_claude_template_hooks "$ROOT/core-rules/legacy-hooks/claude-settings.local.json" "wiki-skill-suggest hookspath-guard")"
   legacy_hooks="$(_claude_template_hooks "$ROOT/core-rules/templates/claude-settings.json" "env-echo")"
   legacy_hooks="$(jq -cn --argjson l "$local_hooks" --argjson g "$legacy_hooks" \
     '[range(0; $g | length) as $i | $g[$i]
@@ -173,8 +177,8 @@ _claude_template_hooks() {
       return 1
     }
   done <<'EOF'
-core-rules/templates/claude-settings.local.json|core-rules/templates/claude-settings.json|core-rules/hooks/wiki-skill-suggest.sh
-core-rules/templates/codex-hooks.local.json|core-rules/codex/hooks.json|core-rules/codex/hooks/wiki-skill-suggest.sh
+core-rules/legacy-hooks/claude-settings.local.json|core-rules/templates/claude-settings.json|core-rules/hooks/wiki-skill-suggest.sh
+core-rules/legacy-hooks/codex-hooks.local.json|core-rules/codex/hooks.json|core-rules/codex/hooks/wiki-skill-suggest.sh
 EOF
 }
 
@@ -196,7 +200,7 @@ EOF
     jq -e '[.. | strings | select(contains("hookspath-guard"))] | length == 0' "$ROOT/$legacy" >/dev/null ||
       { echo "hookspath-guard leaked into legacy manifest $legacy"; false; }
   done <<'EOF'
-core-rules/templates/codex-hooks.local.json|core-rules/codex/hooks.json|core-rules/codex/hooks/hookspath-guard.sh|${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}
+core-rules/legacy-hooks/codex-hooks.local.json|core-rules/codex/hooks.json|core-rules/codex/hooks/hookspath-guard.sh|${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}
 EOF
   # Claude spawns the same missing-script guard in exec form: /bin/sh, not the
   # user's shell, with the script path and runtime as $1 and $2.
@@ -209,7 +213,7 @@ EOF
                 "${CLAUDE_PROJECT_DIR}/.trellis/runtime"],
          timeout: 10, statusMessage: "Checking git hooks path..."}]
     and ([.. | strings | select(contains("|| exit 0"))] | length == 1)
-  ' "$ROOT/core-rules/templates/claude-settings.local.json" >/dev/null
+  ' "$ROOT/core-rules/legacy-hooks/claude-settings.local.json" >/dev/null
   jq -e '[.. | strings | select(contains("hookspath-guard"))] | length == 0' \
     "$ROOT/core-rules/templates/claude-settings.json" >/dev/null
 }
@@ -276,6 +280,9 @@ _codex_hook_lib_refs() {
       -e '/^[[:space:]]*\. "[^"]*\/scripts\/lib\/trellis-python\.sh" 2>\/dev\/null ;;$/d' "$hook" |
       grep -oiE '(lib|lib_dir)/[A-Za-z0-9_.-]+\.(sh|py)' |
       sed 's|.*/||' | sort -u |
+      # trellis-python.sh is the scripts/lib interpreter helper, resolved
+      # through the hook's own installation, never a deployed hook lib.
+      grep -vx 'trellis-python\.sh' |
       while IFS= read -r lib; do printf '%s\t%s\n' "$base" "$lib"; done
   done
 }
@@ -450,7 +457,7 @@ _render_template() {
 
   for entry in claude-settings.local.json:18 codex-hooks.local.json:16; do
     name="${entry%%:*}" out="$tmp/rendered-$name"
-    _render_template "$ROOT/core-rules/templates/$name" "core-rules/templates/$name" > "$out"
+    _render_template "$ROOT/core-rules/legacy-hooks/$name" "core-rules/templates/$name" > "$out"
     count="$(_check_rendered_roots "$out" "$project")" || { echo "$name: $count"; false; }
     [ "$count" -eq "${entry##*:}" ] || { echo "$name: $count in-place commands"; false; }
 
@@ -463,7 +470,7 @@ _render_template() {
                   | select(getpath($a)[0] | startswith("TRELLIS_ROOT=")) | $a)) as $a
                | setpath($a; getpath($a)[1:])
           else setpath($p; getpath($p) | sub("^TRELLIS_ROOT=\"[^\"]+\" "; "")) end' \
-      "$ROOT/core-rules/templates/$name" > "$tmp/no-root-$name"
+      "$ROOT/core-rules/legacy-hooks/$name" > "$tmp/no-root-$name"
     _render_template "$tmp/no-root-$name" "core-rules/templates/$name" > "$out"
     if _check_rendered_roots "$out" "$project" >/dev/null; then echo "$name: mutated render accepted"; false; fi
 
@@ -476,7 +483,7 @@ _render_template() {
                   | select(getpath($a)[0] | startswith("TRELLIS_ROOT=")) | $a)) as $a
                | setpath($a + [0]; "TRELLIS_ROOT=" + $other)
           else setpath($p; getpath($p) | sub("^TRELLIS_ROOT=\"[^\"]+\""; "TRELLIS_ROOT=\"" + $other + "\"")) end' \
-      "$ROOT/core-rules/templates/$name" > "$tmp/wrong-project-$name"
+      "$ROOT/core-rules/legacy-hooks/$name" > "$tmp/wrong-project-$name"
     _render_template "$tmp/wrong-project-$name" "core-rules/templates/$name" > "$out"
     if _check_rendered_roots "$out" "$project" >/dev/null; then echo "$name: mutated render accepted"; false; fi
   done
@@ -496,16 +503,16 @@ _render_template() {
 
   for name in claude-settings.local.json codex-hooks.local.json; do
     routes="$(jq -r '.hooks.SessionStart[].hooks[].command
-      | capture("__TRELLIS_LAUNCHER__ hook (?<r>[a-z-]+) ").r' "$ROOT/core-rules/templates/$name" | tr '\n' ' ')"
+      | capture("__TRELLIS_LAUNCHER__ hook (?<r>[a-z-]+) ").r' "$ROOT/core-rules/legacy-hooks/$name" | tr '\n' ' ')"
     [ "$routes" = "session-start " ] || { echo "$name: $routes"; false; }
-    _render_template "$ROOT/core-rules/templates/$name" "core-rules/templates/$name" > "$tmp/ok-$name"
+    _render_template "$ROOT/core-rules/legacy-hooks/$name" "core-rules/templates/$name" > "$tmp/ok-$name"
     jq -e '[.. | strings | select(contains("__TRELLIS_"))] | length == 0' "$tmp/ok-$name" >/dev/null
 
     # A pre-1.3.12 template still carries skill-size-preflight; this release's
     # renderer must refuse it rather than render a route its dispatcher drops.
     jq '.hooks.SessionStart[0].hooks += [.hooks.SessionStart[0].hooks[0]
         | .command |= sub(" hook session-start "; " hook skill-size-preflight ")]' \
-      "$ROOT/core-rules/templates/$name" > "$tmp/retired-$name"
+      "$ROOT/core-rules/legacy-hooks/$name" > "$tmp/retired-$name"
     run _render_template "$tmp/retired-$name" "core-rules/templates/$name"
     [ "$status" -ne 0 ] || { echo "$name: retired fourth route rendered"; false; }
   done

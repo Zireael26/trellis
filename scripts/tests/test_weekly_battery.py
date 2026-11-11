@@ -62,6 +62,15 @@ class WeeklyTests(unittest.TestCase):
             self.assertFalse(report["p1_divergence"])
             self.assertFalse((self.state / "reuse-disabled.json").exists())
 
+    def test_runs_the_slow_tier_whatever_the_caller_set(self):
+        for inherited in (None, "0", ""):
+            overrides = {} if inherited is None else {"TRELLIS_SLOW_TESTS": inherited}
+            with self.subTest(inherited=inherited), mock.patch.dict(os.environ, overrides):
+                shutil.rmtree(self.state / "weekly-batteries", ignore_errors=True)
+                result, _, child, _ = self.run_weekly(0)
+                self.assertEqual(result, 0)
+                self.assertEqual(child.call_args.kwargs["env"]["TRELLIS_SLOW_TESTS"], "1")
+
     def test_failure_against_exact_green_disables_reuse_and_records_p1(self):
         result, report, _, stderr = self.run_weekly(7, {"id": "old-green"})
         self.assertEqual(result, 7)

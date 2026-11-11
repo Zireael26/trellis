@@ -62,6 +62,8 @@ deploy_hooks() {
   cp "$src/lib/deps.sh" "$deploy/lib/deps.sh"
   cp "$src/lib/pm.sh" "$deploy/lib/pm.sh"
   cp "$src/lib/autonomy.sh" "$deploy/lib/autonomy.sh"
+  # Spec 074 T14 (amended): Stop step 0 sources the attachment-verdict lib.
+  cp "$src/lib/attach-verdict.sh" "$deploy/lib/attach-verdict.sh"
   if [ "$with_lib" = 1 ]; then
     cp "$CORE_LIB" "$deploy/lib/verification-receipt.sh"
   fi
@@ -242,6 +244,20 @@ file_mode() { python3 -I -c 'import os, stat, sys; print(format(stat.S_IMODE(os.
   [ "$(jq -r '.command.form' "$r")" = "legacy-shell" ]
   [ "$(jq -r '.command.shell' "$r")" = "npm run test" ]
   [ "$(jq -r '.command.argv' "$r")" = "null" ]
+}
+
+@test "R2 H1: Codex JS test execution keeps the stable test receipt id" {
+  local hooks; hooks="$(deploy_hooks codex)"
+  seed_shell_check
+  fake_exit 0
+  fake_out ""
+  run_stop "$hooks/stop-verify.sh"
+  [ "$status" -eq 0 ]
+  [ "$(call_count)" -eq 1 ]
+  local r; r="$(one_receipt)"
+  [ "$(jq -r '.check_id' "$r")" = "test" ]
+  [ "$(jq -r '.harness' "$r")" = "codex" ]
+  [ "$(jq -r '.command.form' "$r")" = "legacy-shell" ]
 }
 
 @test "test slicing is unchanged: last 30 lines of real output" {

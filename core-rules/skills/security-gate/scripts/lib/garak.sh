@@ -14,8 +14,9 @@
 #   SECURITY_GATE_GARAK_TIMEOUT  per-probe timeout in seconds (default: 600)
 #
 # Garak install (optional): `pipx install garak`. If missing, the wrapper
-# warns and emits an empty findings stream — matches the semgrep/osv/gitleaks
-# convention.
+# emits an empty findings stream and exits 2 (incomplete) — matches the
+# semgrep/osv/gitleaks convention. Exit 0 needs a report in which every started
+# attempt was evaluated (status 2) and a completion record follows the last.
 
 # Inherited shell functions never answer for a tool. Every command name can be
 # shadowed, `builtin` included, but an assignment cannot: POSIXLY_CORRECT turns
@@ -35,15 +36,18 @@ set -euo pipefail
 OUT="${2:?out-jsonl required}"
 
 if [ -z "${SECURITY_GATE_GARAK_TARGET:-}" ]; then
-  echo "info: SECURITY_GATE_GARAK_TARGET unset — skipping LLM-app probe stage" >&2
+  echo "garak did not complete: SECURITY_GATE_GARAK_TARGET is not set, so no LLM endpoint was probed" >&2
   : > "$OUT"
   exit 2
 fi
 
-GARAK_BIN="$(builtin type -P garak)" || GARAK_BIN=""
-PYTHON3_BIN="$(builtin type -P python3)" || PYTHON3_BIN=""
+case "$0" in */*) _sg_lib_dir="${0%/*}" ;; *) _sg_lib_dir=. ;; esac
+builtin source "$_sg_lib_dir/engine.sh"
+GARAK_BIN="$(sg_resolve_engine garak "$1")" || GARAK_BIN=""
+# The real python3 behind any shim, never one the project picks (engine.sh).
+PYTHON3_BIN="$(sg_resolve_python "$1")" || PYTHON3_BIN=""
 if [ -z "$GARAK_BIN" ] || [ -z "$PYTHON3_BIN" ]; then
-  echo "warn: garak not installed (pipx install garak) — skipping LLM-app probe stage" >&2
+  echo "garak did not complete: garak or python3 unavailable or unsafe" >&2
   : > "$OUT"
   exit 2
 fi
@@ -56,15 +60,24 @@ MODEL_TYPE="${SECURITY_GATE_GARAK_TARGET%%:*}"
 MODEL_NAME="${SECURITY_GATE_GARAK_TARGET#*:}"
 
 RUNNER=()
-if TIMEOUT_BIN="$(builtin type -P timeout)"; then
-  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
-elif TIMEOUT_BIN="$(builtin type -P gtimeout)"; then
-  RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
-else
-  echo "warn: neither timeout nor gtimeout is available — refusing to invoke garak without a deadline" >&2
+TIMEOUT_RC=0
+TIMEOUT_BIN="$(sg_resolve_engine timeout "$1")" || TIMEOUT_RC=$?
+if [ "$TIMEOUT_RC" -eq 1 ]; then
+  TIMEOUT_RC=0
+  TIMEOUT_BIN="$(sg_resolve_engine gtimeout "$1")" || TIMEOUT_RC=$?
+fi
+if [ "$TIMEOUT_RC" -ne 0 ]; then
+  echo "garak did not complete: neither timeout nor gtimeout is available or trusted — refusing to invoke garak without a deadline" >&2
   : > "$OUT"
   exit 2
 fi
+RUNNER=("$TIMEOUT_BIN" --preserve-status "$TIMEOUT")
+if ! sg_path_sanitize "$1" || ! sg_vet_helpers "$1" bash mktemp mkdir cat rm mv; then
+  echo "garak did not complete: unsafe helper" >&2
+  : > "$OUT"
+  exit 2
+fi
+builtin unset BASH_ENV ENV PYTHONPATH PYTHONHOME
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -84,8 +97,8 @@ GARAK_RC=0
   >/dev/null 2>"$WORK/garak.err" || GARAK_RC=$?
 
 if [ "$GARAK_RC" -ne 0 ]; then
-  echo "warn: garak execution failed (rc=$GARAK_RC)" >&2
   if [ -s "$WORK/garak.err" ]; then cat "$WORK/garak.err" >&2; fi
+  echo "garak did not complete: garak execution failed (rc=$GARAK_RC)" >&2
   : > "$OUT"
   exit 2
 fi
@@ -95,28 +108,63 @@ REPORTS=("$REPORT_DIR"/garak.*.report.jsonl)
 shopt -u nullglob
 REPORT="${REPORTS[0]:-}"
 if [ -z "$REPORT" ] || [ ! -s "$REPORT" ]; then
-  echo "warn: garak produced no report" >&2
   if [ -s "$WORK/garak.err" ]; then cat "$WORK/garak.err" >&2; fi
+  echo "garak did not complete: garak produced no report" >&2
   : > "$OUT"
   exit 2
 fi
 
-# Normalize each failed attempt into our finding shape.
+# Normalize each detector hit into our finding shape. The report format is
+# garak's own (checked against garak 0.17.1): Attempt.as_dict() records with
+# status 1 (ATTEMPT_STARTED, written after generation, no scores yet) and
+# then status 2 (ATTEMPT_COMPLETE, rewritten by the harness after detection,
+# with detector_results {detector: [score per output, or null]}). Each UUID
+# must go started -> evaluated, once each, with the same identity, inside one
+# run envelope that completion closes. The status is progress, never pass/fail: like garak's default ThresholdEvaluator, a
+# score >= 0.5 is a hit (the probe succeeded), and this wrapper sets no
+# --eval_threshold. end_run() writes a "completion" record last.
 NORMALIZED="$WORK/normalized.jsonl"
 NORMALIZE_RC=0
 "$PYTHON3_BIN" -I - "$REPORT" >"$NORMALIZED" <<'PY' || NORMALIZE_RC=$?
 import json
+import math
 import sys
 
 report = sys.argv[1]
+THRESHOLD = 0.5  # garak's default run.eval_threshold
+# Fields Attempt.as_dict() writes that the harness does not change between an
+# attempt's status-1 and status-2 records: the same attempt, or a forgery.
+IDENTITY = ("seq", "probe_classname", "probe_params", "targets", "prompt", "outputs", "goal", "intent")
 counter = 0
+attempts = {}  # uuid -> ("started" | "evaluated", identity), in record order
+unscored = []  # evaluated attempts no detector scored
+run_id = None
+seen_init = False
+completed = False
+digest_seen = False
+
+
+def incomplete(detail, code=2):
+    print(f"garak did not complete: report {detail}", file=sys.stderr)
+    raise SystemExit(code)
 
 
 def invalid(line_number, detail):
-    print(f"warn: garak report {detail} at line {line_number}", file=sys.stderr)
-    raise SystemExit(2)
+    incomplete(f"{detail} at line {line_number}")
 
 
+def score(value):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(value)
+    return float(value)
+
+
+# One run per report, in garak's order: start_run setup (carrying
+# transient.run_id), init with that run, attempts and evaluations, then
+# end_run's completion naming the same run. Completion is terminal: only the
+# digest garak appends after it may follow.
 with open(report) as fh:
     for line_number, line in enumerate(fh, 1):
         line = line.strip()
@@ -129,21 +177,83 @@ with open(report) as fh:
             invalid(line_number, "contains malformed JSON")
         if not isinstance(record, dict):
             invalid(line_number, "contains a non-object record")
-        if record.get("entry_type") != "attempt":
+        kind = record.get("entry_type")
+        if completed:
+            if kind == "digest" and not digest_seen:
+                digest_seen = True
+                continue
+            invalid(line_number, f"has a {str(kind)[:40]!r} record after its completion record")
+        if run_id is None:
+            if kind != "start_run setup":
+                invalid(line_number, "does not open with a start_run setup record")
+            run_id = record.get("transient.run_id")
+            if not isinstance(run_id, str) or not run_id:
+                invalid(line_number, "has a start_run setup record with no run id")
             continue
+        if kind == "start_run setup":
+            invalid(line_number, "starts a second run")
+        if kind == "init":
+            if seen_init or record.get("run") != run_id:
+                invalid(line_number, "has an init record for another or a second run")
+            seen_init = True
+            continue
+        if kind == "completion":
+            if not seen_init or record.get("run") != run_id:
+                invalid(line_number, "has a completion record for another run")
+            completed = True
+            continue
+        if kind != "attempt":
+            continue
+        if not seen_init:
+            invalid(line_number, "has an attempt before its init record")
         if "status" not in record:
-            print(f"warn: garak report attempt at line {line_number} has no status", file=sys.stderr)
-            raise SystemExit(2)
+            incomplete(f"attempt at line {line_number} has no status")
         status = record["status"]
-        if isinstance(status, bool) or status not in (0, 1):
+        if isinstance(status, bool) or status not in (1, 2):
+            # 0 (ATTEMPT_NEW) is never written by a run; anything else is unknown.
             invalid(line_number, "contains an invalid attempt status")
-        # Garak per-attempt records: status 0 = pass, 1 = fail (probe succeeded).
-        if status == 0:
-            continue
-        probe = record.get("probe_classname") or record.get("probe") or "unknown"
-        detector = record.get("detector_results") or {}
-        if not isinstance(probe, str) or not isinstance(detector, dict):
+        uuid = record.get("uuid")
+        probe = record.get("probe_classname")
+        results = record.get("detector_results")
+        if not isinstance(uuid, str) or not uuid or not isinstance(probe, str) or not isinstance(results, dict):
             invalid(line_number, "contains an invalid attempt record")
+        identity = tuple(json.dumps(record.get(key), sort_keys=True) for key in IDENTITY)
+        shown = uuid[:64]
+        previous = attempts.get(uuid)
+        if status == 1:
+            # A UUID starts once: a second start, before or after its
+            # evaluation, is a reused or replayed attempt.
+            if previous is not None:
+                invalid(line_number, f"starts attempt {shown} a second time")
+            attempts[uuid] = ("started", identity)
+            continue
+        if previous is None:
+            invalid(line_number, f"evaluates attempt {shown}, which never started")
+        if previous[0] == "evaluated":
+            invalid(line_number, f"evaluates attempt {shown} a second time")
+        if previous[1] != identity:
+            invalid(line_number, f"evaluates attempt {shown} as a different attempt than it started")
+        attempts[uuid] = ("evaluated", identity)
+        hits = []
+        scored = False
+        for detector, scores in results.items():
+            if not isinstance(scores, list):
+                invalid(line_number, "contains invalid detector scores")
+            try:
+                values = [score(value) for value in scores]
+            except ValueError:
+                invalid(line_number, "contains invalid detector scores")
+            scored = scored or any(value is not None for value in values)
+            if any(value is not None and value >= THRESHOLD for value in values):
+                hits.append(detector)
+        # Status 2 is written whether or not a detector scored the attempt: a
+        # skipped detector leaves {} (harnesses/base.py) and a gracefully
+        # failed one [null] (detectors/base.py). Garak's evaluator counts
+        # neither as evaluated, and neither is coverage here.
+        if not scored:
+            unscored.append(shown)
+        if not hits:
+            continue
         # Severity heuristic: jailbreak / injection / leakage = high; others = medium.
         severity = "medium"
         for keyword, level in (("jailbreak", "high"), ("inject", "high"), ("leak", "high"), ("hijack", "high")):
@@ -158,12 +268,26 @@ with open(report) as fh:
             "severity": severity,
             "file": "(LLM endpoint)",
             "line": 0,
-            "message": f"Probe succeeded — {probe} ({list(detector.keys())[:3]})",
+            "message": f"Probe succeeded — {probe} ({sorted(hits)[:3]})",
         }, ensure_ascii=False))
+
+# Exit 3: every record parsed and every transition was legal, but the run did
+# not finish; the findings so far are real and are kept, as semgrep's are.
+unevaluated = [uuid for uuid, (state, _) in attempts.items() if state == "started"]
+if not attempts:
+    incomplete("has no attempt record", 3)
+if len(unevaluated) == len(attempts):
+    incomplete("has no evaluated (status 2) attempt record", 3)
+if unevaluated:
+    incomplete(f"has {len(unevaluated)} attempt(s) started but never evaluated", 3)
+if unscored:
+    incomplete(f"has {len(unscored)} evaluated attempt(s) with no detector score ({', '.join(unscored[:3])})", 3)
+if not completed:
+    incomplete("has no completion record after its last attempt", 3)
 PY
 
-if [ "$NORMALIZE_RC" -ne 0 ]; then
-  : > "$OUT"
-  exit 2
-fi
-mv "$NORMALIZED" "$OUT"
+case "$NORMALIZE_RC" in
+  0) mv "$NORMALIZED" "$OUT" ;;
+  3) mv "$NORMALIZED" "$OUT"; exit 2 ;;
+  *) : > "$OUT"; exit 2 ;;
+esac

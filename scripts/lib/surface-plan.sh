@@ -55,7 +55,7 @@ surface_plan_is_safe_destination() {
 }
 
 surface_plan_realpath() {
-  local candidate="${1:-}" parent base target hops=0
+  local candidate="${1:-}" parent base target hops=0 directory
 
   case "$candidate" in
     /*) ;;
@@ -68,14 +68,20 @@ surface_plan_realpath() {
     target="$(readlink "$candidate")" || return 1
     case "$target" in
       /*) candidate="$target" ;;
-      *) candidate="$(dirname "$candidate")/$target" ;;
+      *)
+        trellis_dirname_to directory "$candidate" || :
+        candidate="$directory/$target"
+        ;;
     esac
-    parent="$(cd -P "$(dirname "$candidate")" 2>/dev/null && pwd -P)" || return 1
-    candidate="$parent/$(basename "$candidate")"
+    trellis_dirname_to directory "$candidate" || :
+    parent="$(cd -P "$directory" 2>/dev/null && pwd -P)" || return 1
+    trellis_basename_to base "$candidate" || :
+    candidate="$parent/$base"
   done
 
-  parent="$(cd -P "$(dirname "$candidate")" 2>/dev/null && pwd -P)" || return 1
-  base="$(basename "$candidate")"
+  trellis_dirname_to directory "$candidate" || :
+  parent="$(cd -P "$directory" 2>/dev/null && pwd -P)" || return 1
+  trellis_basename_to base "$candidate" || :
   [ -e "$parent/$base" ] || return 1
   printf '%s/%s\n' "$parent" "$base"
 }
@@ -330,7 +336,7 @@ surface_plan_path_has_excluded_component() {
 surface_plan_runtime_target() {
   local destination="$1" source="$2" parent remaining component up=""
 
-  parent="$(dirname -- "$destination")"
+  trellis_dirname_to parent -- "$destination"
   if [ "$parent" = "." ]; then
     printf '.trellis/runtime/%s\n' "$source"
     return 0
@@ -535,7 +541,7 @@ surface_plan_emit_children_link() {
   local temporary candidate child_relative source_relative destination unsorted_file sorted_file
   local -a excluded_dirs=()
   local -a candidates=()
-  local sorted_candidate
+  local sorted_candidate candidate_base
 
   # Exclusions are validated single components, so slash is an exact separator.
   if [ -n "$exclusions" ]; then
@@ -571,7 +577,8 @@ surface_plan_emit_children_link() {
         fi
         ;;
       file)
-        case "$(basename "$candidate")" in
+        trellis_basename_to candidate_base "$candidate" || :
+        case "$candidate_base" in
           *"$suffix")
             if [ -f "$candidate" ] && [ ! -L "$candidate" ]; then
               candidates+=("$candidate")
@@ -960,6 +967,121 @@ surface_plan_validate_manifest() {
   return 0
 }
 
+# Expand only skill-root entries in an isolated planner. The virtual HOME keeps
+# cross-harness validation independent of the operator's selected harness and
+# filesystem; actual user planning still validates the real HOME separately.
+surface_plan_skill_records() (
+  local payload="$1" manifest="$2" harness="$3"
+  _SURFACE_PLAN_DESTINATIONS=()
+  _SURFACE_PLAN_RECORDS=()
+  _SURFACE_PLAN_OPTIONAL_MISSING=()
+  _SURFACE_PLAN_TEMP_FILES=()
+  trap 'surface_plan_cleanup' EXIT
+  surface_plan_prepare_user_home() { _SURFACE_PLAN_CANONICAL_HOME=/__trellis_surface_home__; }
+  surface_plan_resolve_home_destination() { printf '%s/%s\n' "$_SURFACE_PLAN_CANONICAL_HOME" "$1"; }
+  surface_plan_emit_harness "$payload" "$manifest" "$harness" || return "$?"
+  surface_plan_json_array "${_SURFACE_PLAN_RECORDS[@]+"${_SURFACE_PLAN_RECORDS[@]}"}"
+)
+
+# The manifest-only SC2/SC3 checks above predate source_children and renders in
+# the user surface. Check their actual emitted destinations, including renders,
+# without treating an absent optional render as an exposed skill.
+surface_plan_validate_expanded_skills() {
+  local payload="$1" manifest="$2" shared pi codex claude filtered user project records harness violation rc enforce_shadow=true
+  if jq -e '.harnesses | has("user")' "$manifest" >/dev/null 2>&1; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] && return 0
+    surface_plan_err "could not inspect user harness: $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  shared="$(skill_roots_for_harnesses codex pi)" || return "$?"
+  pi="$(skill_roots_for_harnesses pi)" || return "$?"
+  codex="$(skill_roots_for_harnesses codex)" || return "$?"
+  claude="$(skill_roots_for_harnesses claude)" || return "$?"
+
+  # Avoid re-expanding the common direct-link-only manifest: the existing
+  # manifest checks already cover it unless a skill-root render is present.
+  if jq -e --arg shared "$shared" --arg pi "$pi" --arg codex "$codex" --arg claude "$claude" '
+    [$shared, $pi, $codex, $claude] as $roots
+    | def relevant: . as $d | any($roots[]; . as $r | $d == $r or ($d | startswith($r + "/")));
+    any(.harnesses.user.links[]?; has("source_children") and (.destination_dir | relevant))
+    or any(.harnesses[].render[]?; .destination | relevant)
+  ' "$manifest" >/dev/null 2>&1; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 1 ] && return 0
+    surface_plan_err "could not inspect skill destinations: $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+
+  surface_plan_make_tempfile || return "$?"
+  filtered="$_SURFACE_PLAN_LAST_TMP"
+  if ! jq --arg shared "$shared" --arg pi "$pi" --arg codex "$codex" --arg claude "$claude" '
+    [$shared, $pi, $codex, $claude] as $roots
+    | def relevant: . as $d | any($roots[]; . as $r | $d == $r or ($d | startswith($r + "/")));
+    .harnesses |= with_entries(
+      .value.links |= map(select((.destination // .destination_dir) | relevant))
+      | .value.render |= map(select(.destination | relevant)))
+  ' "$manifest" > "$filtered"; then
+    surface_plan_err "could not select skill destinations: $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  user="$(surface_plan_skill_records "$payload" "$filtered" user)" || return "$?"
+  project='[]'
+  # Legacy manifests with no exclude_dirs predate project-shadow enforcement.
+  if jq -e '[.. | objects | select(has("exclude_dirs"))] | length == 0' "$manifest" >/dev/null 2>&1; then
+    enforce_shadow=false
+  else
+    rc=$?
+    if [ "$rc" -ne 1 ]; then
+      surface_plan_err "could not inspect project shadow contract: $manifest"
+      return "$TRELLIS_EX_STATE"
+    fi
+    for harness in claude codex pi shared_agents; do
+      if jq -e --arg harness "$harness" '.harnesses | has($harness)' "$filtered" >/dev/null 2>&1; then
+        :
+      else
+        rc=$?
+        [ "$rc" -eq 1 ] && continue
+        surface_plan_err "could not inspect project harness: $manifest"
+        return "$TRELLIS_EX_STATE"
+      fi
+      records="$(surface_plan_skill_records "$payload" "$filtered" "$harness")" || return "$?"
+      project="$(jq -cn --argjson a "$project" --argjson b "$records" '$a + $b')" || return "$TRELLIS_EX_STATE"
+    done
+  fi
+  if ! violation="$(jq -nr --argjson user "$user" --argjson project "$project" --argjson shadow "$enforce_shadow" \
+      --arg shared "$shared" --arg pi "$pi" --arg codex "$codex" --arg claude "$claude" '
+    def names($root): [.[] | .destination | select(startswith($root + "/"))
+      | ltrimstr($root + "/") | split("/")[0]] | unique;
+    ($user | map(.destination |= ltrimstr("/__trellis_surface_home__/"))) as $u
+    | ($u | names($shared)) as $shared_names
+    | ($u | names($pi)) as $pi_names
+    | ($u | names($codex)) as $codex_names
+    | ([ $shared_names[] as $n
+         | if ($pi_names | index($n)) != null then "duplicate\t\($n)\t\($shared)\t\($pi)"
+           elif ($codex_names | index($n)) != null then "duplicate\t\($n)\t\($shared)\t\($codex)"
+           else empty end ]
+       + (if $shadow then
+           [[$claude, $shared, $pi, $codex][] as $root
+            | ($u | names($root))[] as $n
+            | select(($project | names($root) | index($n)) != null)
+            | "shadow\t\($n)\t\($root)"]
+          else [] end)) | first // empty
+  ')"; then
+    surface_plan_err "could not compare expanded skill destinations: $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  if [ -n "$violation" ]; then
+    surface_plan_err "conflicting expanded skill exposure: $violation: $manifest"
+    return "$TRELLIS_EX_STATE"
+  fi
+  return 0
+}
+
 surface_plan_normalize_harnesses() {
   local requested canonical present
   _SURFACE_PLAN_HARNESSES=()
@@ -1062,6 +1184,7 @@ surface_plan_emit() {
     surface_plan_require_source "$payload_root" "core-rules/inheritance-manifest.json" file || return "$?"
     manifest="$payload_root/core-rules/inheritance-manifest.json"
     surface_plan_validate_manifest "$manifest" || return "$?"
+    surface_plan_validate_expanded_skills "$payload_root" "$manifest" || return "$?"
 
     if [ "$(jq -r '.schema_version' "$manifest")" = 2 ]; then
       for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do

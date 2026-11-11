@@ -24,9 +24,35 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
+# sol_hits <repo>: tracked live lines naming the retired Sol model. A
+# qualification run.json records a historical tree inventory, research paths
+# included, so it is a record like research/ itself, never a live pin.
+sol_hits() {
+  git -C "$1" grep -n "$(printf '%s%s' 'gpt-6' '-sol')" -- ':!specs' ':!docs/adr' ':!research' ':!CHANGELOG.md' \
+    ':!scripts/tests/fixtures/qualification/*/run.json'
+}
+
 @test "live tracked files contain no retired Sol reference" {
-  run git -C "$ROOT" grep -n "$(printf '%s%s' 'gpt-6' '-sol')" -- ':!specs' ':!docs/adr' ':!research' ':!CHANGELOG.md'
+  run sol_hits "$ROOT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
+}
+
+@test "a recorded tree inventory is not a live Sol reference, and a live pin still is" {
+  local repo="$BATS_TEST_TMPDIR/repo" sol
+  sol="$(printf '%s%s' 'gpt-6' '-sol')"
+  git init -q "$repo"
+  mkdir -p "$repo/scripts/tests/fixtures/qualification/pinned-before" "$repo/core-rules/pi/agents"
+  printf '{"path": "research/reports/%s.md"}\n' "$sol" > "$repo/scripts/tests/fixtures/qualification/pinned-before/run.json"
+  printf 'model: openai-codex/gpt-6.1-sol\n' > "$repo/core-rules/pi/agents/sol-ro.md"
+  git -C "$repo" add -A
+  run sol_hits "$repo"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+
+  printf 'model: openai-codex/%s\n' "$sol" > "$repo/core-rules/pi/agents/sol-ro.md"
+  git -C "$repo" add -A
+  run sol_hits "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "core-rules/pi/agents/sol-ro.md:1:model: openai-codex/$sol" ] || { echo "$output"; false; }
 }
 
 @test "Sol catalog and shipped pi agents pin GPT-6.1 at their existing efforts" {

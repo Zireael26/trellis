@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # wiki-skill-suggest.sh — Codex PostToolUse advisory for canonical-root gotchas.md.
 #
 # Twin of core-rules/hooks/wiki-skill-suggest.sh. Path decisions and advisory

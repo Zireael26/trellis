@@ -371,3 +371,70 @@ setup() {
   [ "$(grep -cF 'skipping checkout inventory row' <<<"$output")" -eq 0 ]
   [ ! -e "$empty/.trellis/runtime" ]
 }
+
+# Shared scaffold sections below; existing tests above remain unchanged.
+# BEGIN LANE A0
+# END LANE A0
+
+# BEGIN LANE A1
+# END LANE A1
+
+# BEGIN LANE A2
+# END LANE A2
+
+# BEGIN LANE A3
+# END LANE A3
+
+# BEGIN LANE A4
+# END LANE A4
+
+# BEGIN LANE B1
+# END LANE B1
+
+# BEGIN LANE B2
+# END LANE B2
+
+# BEGIN LANE B3
+# END LANE B3
+
+# BEGIN LANE B4
+# END LANE B4
+
+# BEGIN LANE B5
+# END LANE B5
+
+# BEGIN LANE B6
+# END LANE B6
+
+# BEGIN LANE B7
+# END LANE B7
+
+# BEGIN LANE B8
+# END LANE B8
+
+# BEGIN LANE B9
+# END LANE B9
+
+# BEGIN LANE B10
+# END LANE B10
+
+# BEGIN LANE B11
+# END LANE B11
+
+# BEGIN LANE C0
+# END LANE C0
+
+# BEGIN LANE C1
+# END LANE C1
+
+# BEGIN LANE C2
+# END LANE C2
+
+# BEGIN LANE C3
+# END LANE C3
+
+# BEGIN LANE C4
+# END LANE C4
+
+# BEGIN LANE serial-tail
+# END LANE serial-tail

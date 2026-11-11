@@ -451,3 +451,10 @@ evil_extension() {
   [ "$status" -eq 1 ]
   [ ! -e "$WORK/fake-jq-ran" ]
 }
+
+@test "F6: XDG_CONFIG_HOME inside the worktree refuses" {
+  mkdir -p "$WT/.pi"
+  XDG_CONFIG_HOME="$WT/cfg" run "$VALIDATOR" "$WT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"XDG_CONFIG_HOME"* ]]
+}

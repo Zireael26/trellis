@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # wiki-skill-suggest.sh — PostToolUse advisory for canonical-root gotchas.md.
 #
 # Reads one tool event from stdin and accepts tool_input.file_path or

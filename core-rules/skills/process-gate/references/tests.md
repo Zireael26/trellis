@@ -39,6 +39,8 @@ Python projects auto-detect in this order: `uv.lock` â†’ `uv run`, `pdm.lock` â†
 
 For other non-Node, non-Python stacks the commands are project-supplied: `cargo check && cargo clippy && cargo test`, `go vet && go test ./...`, etc.
 
+Automatic detection chooses one test command, not a polyglot dispatcher. When it detects suites in more than one language and omits any, the row warns, names the omitted suites and reports `Tests: partial` if a test command ran (`not run` if none ran). Declare a project-wide `PROCESS_GATE_TEST_CMD` in the base-side `process-gate-local/local.config.sh` to make the project dispatcher authoritative. A declared command is not second-guessed.
+
 ## Posture
 
 | Result | Posture |

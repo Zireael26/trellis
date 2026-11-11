@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # UserPromptExpansion(slash_command): deny oversized Skills before expansion.
 
 set -u
@@ -9,9 +10,10 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/skill-preload.sh disable=SC1091
 . "$HOOK_DIR/lib/skill-preload.sh"
 
+# Exit 2 is Claude's blocking code; exit 1 would let the expansion run.
 if ! command -v jq >/dev/null 2>&1; then
-  printf '%s\n' 'skill-slash-guard: jq required but not found' >&2
-  exit 1
+  printf '%s\n' 'skill-slash-guard: jq required but not found; refusing' >&2
+  exit 2
 fi
 if ! printf '%s' "$INPUT" | jq -e '
   .hook_event_name == "UserPromptExpansion"
@@ -25,7 +27,6 @@ fi
 SKILL_NAME=$(printf '%s' "$INPUT" | jq -r '.command_name')
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 USER_HOME="${HOME:-}"
-[ -d "$PROJECT_DIR" ] && [ -d "$USER_HOME" ] || exit 0
 
 REASON=$(skill_preload_check "$SKILL_NAME" "$PROJECT_DIR" "$USER_HOME")
 STATUS=$?

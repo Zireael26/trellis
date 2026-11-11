@@ -64,6 +64,53 @@ teardown() {
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
 }
 
+@test "journal append failure stops the current step and all later entries" {
+  alpha
+  local repo="$HOME/projects/alpha" common first second target1 target2
+  first="$HOME/projects/alpha-wt/journal-first"
+  second="$HOME/projects/alpha-wt/journal-second"
+  target1="$SANDBOX/target-first"
+  target2="$SANDBOX/target-second"
+  wm_wt "$repo" journal-first "$first"
+  wm_wt "$repo" journal-second "$second"
+  common="$(git -C "$repo" rev-parse --absolute-git-dir)"
+  mkdir "$SANDBOX/work"
+  jq -nc --arg p "$first" --arg t "$target1" --arg c "$common" \
+    '{path:$p,target:$t,common:$c,class:"move",moved_to:null,release:null,after:[],dehydrate:[]}' > "$SANDBOX/rows"
+  jq -nc --arg p "$second" --arg t "$target2" --arg c "$common" \
+    '{path:$p,target:$t,common:$c,class:"move",moved_to:null,release:null,after:[],dehydrate:[]}' >> "$SANDBOX/rows"
+  run bash -c '
+    . "$1"
+    WM_TEST_SANDBOX="$2"
+    wm_git() { printf "%s\n" "$*" >> "$WM_TEST_SANDBOX/git-calls"; command git "$@"; }
+    wm_canonical_move_target() { printf "%s\n" "$1"; }
+    wm_apply_entry() { wm_move_steps "$1" "$2" move "$3" start; }
+    wm_deregister() { printf "unexpected deregister\n" >> "$WM_TEST_SANDBOX/deregister-called"; }
+    wm_apply "$2/work" "$2/rows" "$2/no-such-directory/journal"
+  ' _ "$LIB" "$SANDBOX"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  # The existing journal schema records completion, not write-ahead intent;
+  # the first move may already have happened, but repair and entry two must not.
+  [ -d "$first" ] || [ -d "$target1" ]
+  [ -d "$second" ] && [ ! -e "$target2" ]
+  [ ! -e "$SANDBOX/deregister-called" ]
+  ! grep -q 'worktree repair' "$SANDBOX/git-calls"
+  [ ! -e "$SANDBOX/no-such-directory/journal" ]
+}
+
+@test "preserve stops before moving if its journal append fails" {
+  mkdir "$SANDBOX/work"
+  run bash -c '
+    . "$1"; . "$2"
+    WM_TEST_SANDBOX="$3"
+    wm_revalidate() { printf "%s\n" '\''{"path":"/fixture","branch":"work","head":"abc","preserve_branch":"work","push":false,"modified":0,"untracked":0,"ignored_kept":[]}'\''; }
+    wm_move_steps() { printf moved > "$WM_TEST_SANDBOX/preserve-moved"; }
+    wm_apply_preserve "$3/work" "$3/no-such-directory/journal" '\''{"path":"/fixture"}'\''
+  ' _ "$APPLY_LIB" "$REPO_ROOT/scripts/lib/worktree-migrate-preserve.sh" "$SANDBOX"
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  [ ! -e "$SANDBOX/preserve-moved" ]
+}
+
 @test "apply without --yes on a non-terminal stdin changes nothing" {
   alpha
   wm_wt "$HOME/projects/alpha" gone "$HOME/projects/alpha-wt/gone"
@@ -79,7 +126,7 @@ teardown() {
   alpha
   wm_wt "$HOME/projects/alpha" gone "$HOME/projects/alpha-wt/gone"
   rm -rf "$HOME/projects/alpha-wt/gone"
-  migrate --apply --yes
+  migrate --apply --yes --prune-recent
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   ! git -C "$HOME/projects/alpha" worktree list --porcelain | grep -q 'alpha-wt/gone'
   local mode
@@ -101,11 +148,72 @@ teardown() {
   printf '%s\n' "$(jq -nc --arg c "$common" --arg p "$HOME/projects/alpha-wt/a" '{class:"prune", common:$c, path:$p}')" > "$SANDBOX/rows"
   rm -rf "$HOME/projects/alpha-wt/b"
   mkdir -p "$SANDBOX/work"
+  : > "$SANDBOX/work/links.jsonl"
   run bash -c '. "$1/scripts/lib/hygiene-common.sh"; . "$1/scripts/lib/disk-janitor-lib.sh"; . "$2"
-    WM_LOG="$3/work/log"; wm_apply_prune "$3/work" "$3/journal" "$3/rows" "$4"' _ "$REPO_ROOT" "$LIB" "$SANDBOX" "$common"
+    WM_LOG="$3/work/log"; WM_PRUNE_RECENT=1; wm_apply_prune "$3/work" "$3/journal" "$3/rows" "$4"' _ "$REPO_ROOT" "$LIB" "$SANDBOX" "$common"
   [ "$status" -eq 1 ] || { echo "$output"; return 1; }
   [ "$(git -C "$HOME/projects/alpha" worktree list --porcelain | grep -c '^prunable')" -eq 2 ]
   jq -e '.step == "failed" and (.error | test("changed since the plan"))' "$SANDBOX/journal"
+}
+
+@test "prune refuses an unlisted live admin that Git would also remove" {
+  alpha
+  local repo="$HOME/projects/alpha" missing="$HOME/projects/alpha-wt/missing"
+  local live="$HOME/projects/alpha-wt/live" missing_admin live_admin
+  wm_wt "$repo" missing "$missing"
+  wm_wt "$repo" live "$live"
+  missing_admin="$(git -C "$missing" rev-parse --absolute-git-dir)"
+  live_admin="$(git -C "$live" rev-parse --absolute-git-dir)"
+  printf 'staged operator data\n' > "$live/staged.txt"
+  git -C "$live" add staged.txt
+  rm -rf "${missing:?}"
+  python3 -I -c 'import os,sys,time;t=time.time()-120*86400;[os.utime(p,(t,t)) for p in sys.argv[1:]]' \
+    "$missing_admin" "$missing_admin/gitdir" "$missing_admin/index"
+  rm -f "${live_admin:?}/gitdir"
+  migrate --apply --yes --only "$missing"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *'unplanned worktree admin'* ]] || { echo "$output"; false; }
+  [ -d "$missing_admin" ] && [ -d "$live_admin" ] && [ -f "$live/staged.txt" ]
+
+  # Once the live admin's backlink is repaired, the expired missing worktree
+  # is the only Git dry-run removal and remains safe to prune.
+  printf '%s/.git\n' "$live" > "$live_admin/gitdir"
+  migrate --apply --yes --only "$missing"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$missing_admin" ] && [ -d "$live_admin" ]
+  [ "$(git -C "$live" diff --cached --name-only)" = staged.txt ]
+}
+
+@test "prune revalidation refuses a corrupt owner record created after planning" {
+  alpha
+  local wt="$HOME/projects/alpha-wt/gone" common admin
+  wm_wt "$HOME/projects/alpha" gone "$wt"
+  admin="$(git -C "$wt" rev-parse --absolute-git-dir)"
+  common="$(cd "$HOME/projects/alpha/.git" && pwd -P)"
+  rm -rf "${wt:?}"
+  jq -nc --arg c "$common" --arg p "$wt" '{class:"prune", common:$c, path:$p}' > "$SANDBOX/rows"
+  mkdir -p "$TRELLIS_HOME/state/attachments/fixture-checkout" "$SANDBOX/work"
+  printf '{"worktree_root":' > "$TRELLIS_HOME/state/attachments/fixture-checkout/corrupt.json"
+  run bash -c '. "$1/scripts/lib/hygiene-common.sh"; . "$1/scripts/lib/disk-janitor-lib.sh"; . "$2"
+    WM_LOG="$3/work/log"; WM_PRUNE_RECENT=1; wm_apply_prune "$3/work" "$3/journal" "$3/rows" "$4"' _ "$REPO_ROOT" "$LIB" "$SANDBOX" "$common"
+  [ "$status" -ne 0 ] && [ -d "$admin" ] || { echo "$output"; false; }
+}
+
+@test "prune revalidation refuses a missing or corrupt backlink inventory" {
+  alpha
+  local wt="$HOME/projects/alpha-wt/gone" common admin
+  wm_wt "$HOME/projects/alpha" gone "$wt"
+  admin="$(git -C "$wt" rev-parse --absolute-git-dir)"
+  common="$(cd "$HOME/projects/alpha/.git" && pwd -P)"
+  rm -rf "${wt:?}"
+  jq -nc --arg c "$common" --arg p "$wt" '{class:"prune", common:$c, path:$p}' > "$SANDBOX/rows"
+  mkdir -p "$SANDBOX/work"
+  for state in missing corrupt; do
+    if [ "$state" = corrupt ]; then printf '{' > "$SANDBOX/work/links.jsonl"; fi
+    run bash -c '. "$1/scripts/lib/hygiene-common.sh"; . "$1/scripts/lib/disk-janitor-lib.sh"; . "$2"
+      WM_LOG="$3/work/log"; WM_PRUNE_RECENT=1; wm_apply_prune "$3/work" "$3/journal" "$3/rows" "$4"' _ "$REPO_ROOT" "$LIB" "$SANDBOX" "$common"
+    [ "$status" -ne 0 ] && [ -d "$admin" ] || { echo "$output"; false; }
+  done
 }
 
 @test "a live lock refuses a second apply; a dead holder's lock is taken over" {
@@ -440,4 +548,36 @@ layout() {
   # The next plan sees the worktree where it now is.
   migrate --json
   row "$HOME/projects/alpha-wt/moved" | jq -e '.class == "preserve"'
+}
+
+@test "apply --only still scopes the plan after a resume reports status 4" {
+  alpha
+  local unnamed="$HOME/projects/alpha-wt/unnamed" outer="$HOME/projects/alpha-wt/outer"
+  local missing="$SANDBOX/nowhere-old" missing_new="$SANDBOX/nowhere-new"
+  local journal="$SANDBOX/resume-failed.jsonl"
+  wm_wt "$HOME/projects/alpha" unnamed "$unnamed"
+  wm_wt "$HOME/projects/alpha" outer "$outer"
+  jq -nc --arg old "$missing" --arg new "$missing_new" \
+    '{id:"fixture-missing",action:"move",old:$old,new:$new,step:"moved"}' > "$journal"
+
+  migrate --apply --yes --resume "$journal" --only "$missing"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [ -d "$unnamed" ] || { echo "unnamed worktree was acted on"; false; }
+  [ -d "$outer" ] || { echo "unnamed worktree was acted on"; false; }
+}
+
+@test "apply --resume honours --only instead of replaying other journal entries" {
+  alpha
+  local a="$HOME/projects/alpha-wt/a" b="$HOME/projects/alpha-wt/b" j
+  wm_wt "$HOME/projects/alpha" a "$a"
+  WM_FAULT_STEP=moved run bash "$SCRIPT" migrate --apply --yes
+  [ "$status" -eq 99 ] || { echo "$output"; false; }
+  j="$(journal)"
+  wm_wt "$HOME/projects/alpha" b "$b"
+
+  migrate --apply --yes --resume "$j" --only "$b"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -se --arg p "$a" '[.[] | select(.old == $p) | .step] == ["moved"]' "$j" ||
+    { echo "resume replayed the unselected entry"; false; }
+  [ -d "$WT_ROOT/alpha/b" ] || { echo "selected worktree did not move"; false; }
 }

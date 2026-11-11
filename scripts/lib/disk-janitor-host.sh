@@ -156,14 +156,15 @@ EOF
 # RELEASE_STAGING_RECLAIMED_BYTES. Respects confirm_category and --yes via
 # the caller's ASSUME_YES.
 dj_host_release_apply() {
-  local out rc line
+  local out rc line word value="" summary_count=0 value_count=0
+  local -a fields=()
   scope_enabled releases || return 0
   [ "${RELEASE_STAGING_DELETE_COUNT:-0}" -gt 0 ] || return 0
   if ! confirm_category "these orphaned release staging snapshots (via reap-tmp)"; then
     return 0
   fi
   if out="$(release_store_reap_tmp fix 2>&1)"; then rc=0; else rc=$?; fi
-  printf '%s\n' "$out" | while IFS= read -r line; do
+  while IFS= read -r line; do
     case "$line" in
       "reap-tmp: removed "*)
         printf '  removed (reap-tmp): %s\n' "${line#reap-tmp: removed }"
@@ -171,12 +172,33 @@ dj_host_release_apply() {
       "reap-tmp: kept "*"(changed since scan)"*)
         printf '  skipped (plan changed): %s\n' "${line#reap-tmp: }"
         ;;
+      "reap-tmp: total "*)
+        summary_count=$((summary_count + 1))
+        read -r -a fields <<< "$line"
+        for word in "${fields[@]}"; do
+          case "$word" in
+            removed_bytes=*) value="${word#removed_bytes=}"; value_count=$((value_count + 1)) ;;
+          esac
+        done
+        ;;
     esac
-  done
-  # shellcheck disable=SC2034  # read by the orchestrator's reclaimed summary.
-  RELEASE_STAGING_RECLAIMED_BYTES="${RELEASE_STAGING_DELETE_BYTES:-0}"
-  if [ "$rc" -ne 0 ] && [ "$rc" -ne 4 ]; then
-    # shellcheck disable=SC2034  # EXIT_STATUS is the orchestrator's accumulator.
+  done <<EOF
+$out
+EOF
+  # Only the reap-tmp receipt reports actual removals; planned bytes may have
+  # been kept or the operation may have refused before opening the store.
+  RELEASE_STAGING_RECLAIMED_BYTES=0
+  RELEASE_STAGING_RECLAIMED_KNOWN=0
+  if [ "$summary_count" -eq 1 ] && [ "$value_count" -eq 1 ] && dj_host_is_uint "$value"; then
+    # shellcheck disable=SC2034  # consumed by the orchestrator's summary
+    RELEASE_STAGING_RECLAIMED_BYTES="$value"
+    RELEASE_STAGING_RECLAIMED_KNOWN=1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    printf '  release reap-tmp failed (exit %s); inspect trellis release reap-tmp --dry-run\n' "$rc" >&2
+    EXIT_STATUS=1
+  elif [ "$RELEASE_STAGING_RECLAIMED_KNOWN" -ne 1 ]; then
+    echo '  release reap-tmp returned no valid removal receipt' >&2
     EXIT_STATUS=1
   fi
 }
@@ -382,13 +404,14 @@ dj_host_store_apply() {
 }
 
 # dj_host_worktree_dirty WORKTREE — return 0 iff WORKTREE holds dirty or
-# untracked files per `git status --porcelain --untracked-files=all`. Fail
+# untracked or ignored files per `git status --porcelain --ignored
+# --untracked-files=all`. Git worktree removal deletes ignored data too. Fail
 # closed: any git error (unreadable worktree) counts as dirty (held).
 # Return 1 iff the tree is clean.
 dj_host_worktree_dirty() {
   local wt="${1:-}" status rc
   [ -n "$wt" ] || return 0
-  status="$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null)"; rc=$?
+  status="$(git -C "$wt" status --porcelain --ignored --untracked-files=all 2>/dev/null)"; rc=$?
   [ "$rc" -eq 0 ] || return 0
   [ -n "$status" ]
 }
@@ -520,7 +543,7 @@ dj_host_tmp_root() {
 # and skip rows (young/in-use). Never follows symlinks, maxdepth 1. Refuses
 # with a skip reason when the root is unsafe.
 dj_host_tmp_scan() {
-  local tmpdir ttl entry bytes reason
+  local tmpdir ttl entry bytes reason fresh_rc
   scope_enabled tmp || return 0
   if ! tmpdir="$(dj_host_tmp_root 2>/dev/null)"; then
     plan_row tmp skip tmp "-" 0 "-" "tmp scope refused: per-user temp dir unresolvable or unsafe (HOME, /, or under HOME); nothing scanned"
@@ -538,10 +561,12 @@ dj_host_tmp_scan() {
       plan_row tmp skip tmp "$entry" 0 "$tmpdir" "symlink; never listed for deletion"
       continue
     fi
-    if dj_pi_entry_fresh "$entry" "$ttl"; then
-      plan_row tmp skip tmp "$entry" "$(dj_dir_bytes "$entry")" "$tmpdir" "younger than ${ttl}d; left intact"
-      continue
-    fi
+    fresh_rc=0
+    dj_pi_entry_fresh "$entry" "$ttl" || fresh_rc=$?
+    case "$fresh_rc" in
+      0) plan_row tmp skip tmp "$entry" "$(dj_dir_bytes "$entry")" "$tmpdir" "younger than ${ttl}d; left intact"; continue ;;
+      2) plan_row tmp skip tmp "$entry" "$(dj_dir_bytes "$entry")" "$tmpdir" "age unknown (unreadable content); left intact"; continue ;;
+    esac
     if reason="$(dj_worktree_in_use "$entry" "$LSOF_SNAPSHOT_TMP")"; then
       plan_row tmp candidate tmp "$entry" "$(dj_dir_bytes "$entry")" "$tmpdir" "candidate (in use: $reason)"
       continue
@@ -560,7 +585,7 @@ dj_host_tmp_scan() {
 # never rm -rf on a re-derived absolute string without re-validation.
 # shellcheck disable=SC2034  # EXIT_STATUS assignments below accumulate into the orchestrator's exit class.
 dj_host_tmp_apply() {
-  local scope verdict kind path bytes repo detail reason tmpdir dir dir_real base ttl
+  local scope verdict kind path bytes repo detail reason tmpdir dir dir_real base ttl fresh_rc
   scope_enabled tmp || return 0
   [ "$(awk -F'\t' '$1=="tmp" && $2=="delete" {n++} END {print n+0}' "$PLAN_TMP")" -gt 0 ] || return 0
   if ! confirm_category "tmp scratch (bats-run-*, rv-* older than TTL with no open handle)"; then return 0; fi
@@ -581,7 +606,12 @@ dj_host_tmp_apply() {
     dir_real="$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path parent unresolvable"; continue; }
     [ "$dir_real" = "$tmpdir" ] || { echo "  skipped (plan changed): $path outside tmp root"; continue; }
     if ! dj_host_is_uint "$bytes"; then echo "  skipped: malformed plan bytes for $path"; continue; fi
-    if dj_pi_entry_fresh "$tmpdir/$base" "$ttl"; then echo "  skipped (plan changed): $path is fresh"; continue; fi
+    fresh_rc=0
+    dj_pi_entry_fresh "$tmpdir/$base" "$ttl" || fresh_rc=$?
+    case "$fresh_rc" in
+      0) echo "  skipped (plan changed): $path is fresh"; continue ;;
+      2) echo "  skipped (plan changed): $path age unknown (unreadable content)"; continue ;;
+    esac
     if reason="$(dj_worktree_in_use "$tmpdir/$base" "$LSOF_SNAPSHOT_TMP")"; then echo "  skipped (plan changed): $path in use ($reason)"; continue; fi
     if (
       cd -P -- "$tmpdir" 2>/dev/null || exit 1
@@ -714,11 +744,11 @@ dj_host_pi_spill_apply() {
 
 # dj_host_pi_worktree_apply — A9: remove orphan pi-agent-* worktrees verdict=delete
 # via `git worktree remove` (no --force), revalidating age (TTL), cleanliness
-# (no dirty/untracked), uniqueness (no unique commits) and liveness just
+# (no dirty/untracked/ignored content), uniqueness (no unique commits) and liveness just
 # before acting. Respects pi_apply:false.
 # shellcheck disable=SC2034  # EXIT_STATUS assignments below accumulate into the orchestrator's exit class.
 dj_host_pi_worktree_apply() {
-  local scope verdict kind path bytes repo detail gitfile gitdir parent_gitdir parent_main reason
+  local scope verdict kind path bytes repo detail gitfile gitdir parent_gitdir parent_main reason fresh_rc
   scope_enabled pi || return 0
   [ "${PI_APPLY:-true}" = "true" ] || return 0
   [ "$(awk -F'\t' '$1=="pi" && $2=="delete" && $3=="pi-worktree" {n++} END {print n+0}' "$PLAN_TMP")" -gt 0 ] || return 0
@@ -732,8 +762,13 @@ dj_host_pi_worktree_apply() {
     if [ -L "$path" ] || [ ! -d "$path" ]; then echo "  skipped (plan changed): $path gone or symlinked"; continue; fi
     case "$(basename "$path")" in pi-agent-*) ;; *) echo "  skipped (plan changed): $path is not pi-agent-*"; continue ;; esac
     if ! dj_host_is_uint "$bytes"; then echo "  skipped (plan changed): malformed plan bytes for $path"; continue; fi
-    if dj_pi_entry_fresh "$path" "${PI_WORKTREE_TTL_DAYS:-7}"; then echo "  skipped (plan changed): $path is fresh"; continue; fi
-    if dj_host_worktree_dirty "$path"; then echo "  skipped (plan changed): $path dirty or untracked files"; continue; fi
+    fresh_rc=0
+    dj_pi_entry_fresh "$path" "${PI_WORKTREE_TTL_DAYS:-7}" || fresh_rc=$?
+    case "$fresh_rc" in
+      0) echo "  skipped (plan changed): $path is fresh"; continue ;;
+      2) echo "  skipped (plan changed): $path age unknown (unreadable content)"; continue ;;
+    esac
+    if dj_host_worktree_dirty "$path"; then echo "  skipped (plan changed): $path dirty, untracked or ignored files"; continue; fi
     if ! dj_host_pi_no_unique_commits "$path"; then echo "  skipped (plan changed): $path holds unique commits"; continue; fi
     if reason="$(dj_worktree_in_use "$path" "$LSOF_SNAPSHOT_TMP")"; then echo "  skipped (plan changed): $path in use ($reason)"; continue; fi
     if [ ! -f "$path/.git" ] || [ -L "$path/.git" ]; then echo "  skipped (plan changed): $path .git unreadable"; continue; fi

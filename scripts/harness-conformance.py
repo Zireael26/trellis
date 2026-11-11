@@ -28,6 +28,7 @@ CASE_IDS = [
 ]
 INPUT_ROOTS = ['core-rules/hooks', 'core-rules/codex/hooks', 'core-rules/pi',
                'core-rules/templates/claude-settings.local.json',
+               'core-rules/legacy-hooks/claude-settings.local.json',
                'scripts/harness-conformance.py']
 PATCH = ('*** Begin Patch\n*** Add File: new.py\n+x = 1\n'
          '*** Update File: existing.py\n@@\n-x = 0\n+x = 1\n'
@@ -234,7 +235,9 @@ class Corpus:
             assert helper['assertion'] == 'pass' and result[0] == 0, helper['reason']
             return
         if ident == 'claude.failed-read-registration':
-            name = 'core-rules/templates/claude-settings.local.json'
+            # Since T34 the production template registers the native launcher;
+            # the shell tracker's registration lives in the legacy provider.
+            name = 'core-rules/legacy-hooks/claude-settings.local.json'
             path = self.source / name
             hooks = json.loads(path.read_text())['hooks']
             registrations = [{'event': event, 'matcher': group.get('matcher'), 'hook': hook}

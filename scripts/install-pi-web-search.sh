@@ -175,9 +175,15 @@ case "$command" in
     snapshot="$snapdir/$name"
     cp "$src" "$snapshot"
     vetted="$(sha256 "$snapshot")"
-    if awk '!/^#/ && NF { print tolower($1) }' "$blocked_list" | grep -qxF "$vetted"; then
+    if ! awk '!/^#/ && NF { print tolower($1) }' "$blocked_list" > "$snapdir/blocked-digests"; then
+      refuse "cannot read block list: $blocked_list"
+    fi
+    if grep -qxF "$vetted" "$snapdir/blocked-digests"; then
       echo "install-pi-web-search: refused: $src is a blocked build (sha256 $vetted)" >&2
       exit 3
+    else
+      rc=$?
+      [ "$rc" -eq 1 ] || refuse "cannot inspect block list: $blocked_list"
     fi
     [ -L "$extensions" ] && refuse "$extensions is a symlink"
     mkdir -p "$extensions"
@@ -197,7 +203,41 @@ case "$command" in
     ;;
   remove)
     [ $# -eq 1 ] || usage
-    [ -e "$extensions" ] || [ -L "$extensions" ] || { echo "before: none $extensions/$name"; echo "after: none (search extension removed)"; exit 0; }
+    if [ ! -e "$extensions" ] && [ ! -L "$extensions" ]; then
+      # A failed shell stat also looks absent on EACCES or EIO. Only ENOENT
+      # proves there is no extensions directory to remove from.
+      python_helper="$repo/scripts/lib/trellis-python.sh"
+      # Strip imported shell functions before sourcing or calling the helper;
+      # the resolver and the actual lstat both run inside the clean child.
+      if /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc -c '
+        helper=$1
+        [ -f "$helper" ] && [ ! -L "$helper" ] || exit 40
+        . "$helper" && declare -F trellis_python_trusted >/dev/null || exit 40
+        trellis_python_trusted || exit 41
+        "$TRELLIS_PYTHON" -I - "$2" <<'"'"'PY'"'"'
+import os
+import sys
+
+try:
+    os.lstat(sys.argv[1])
+except FileNotFoundError:
+    sys.exit(0)
+except OSError:
+    sys.exit(1)
+sys.exit(1)
+PY
+      ' _ "$python_helper" "$extensions"; then
+        echo "before: none $extensions/$name"
+        echo "after: none (search extension removed)"
+        exit 0
+      else
+        case "$?" in
+          40) refuse "trusted python3 interpreter resolver unavailable; cannot classify $extensions" ;;
+          41) refuse "trusted python3 interpreter unavailable; cannot classify $extensions" ;;
+          *) refuse "cannot inspect extensions directory: $extensions" ;;
+        esac
+      fi
+    fi
     vet_layout
     move_live_aside
     echo "after: none (search extension removed)"

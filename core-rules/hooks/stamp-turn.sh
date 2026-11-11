@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # stamp-turn.sh — Claude Stop hook, single purpose.
 # Source: Trellis / core-rules / hooks. Phase 5a (E2 re-read-before-edit guard).
 #

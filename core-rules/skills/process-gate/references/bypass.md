@@ -19,13 +19,9 @@ It is not a defence against a deliberately malicious same-user project. The atta
 
 ### Commit-time bypass
 
-| Marker | What it means | Posture |
-|---|---|---|
-| `--no-verify` in `git commit` invocation history (reflog within range) | Skipped Tier-3 hooks | **fail** |
-| `git commit --no-gpg-sign` (when project requires signing) | Bypass signing policy | **fail** |
-| Commits with no Conventional Commit prefix when `commit-msg` hook is in tree | Hook didn't run | **fail** (gates the diff) |
+Git reflog records commit subjects, not invocation flags. `check-bypass.sh` cannot detect a commit's `--no-verify` flag or establish post-hoc that its hooks ran. A subject containing those words is not evidence of a bypass. Both the checker and the aggregate verdict print this coverage limitation; a passing bypass row does not attest hook execution. Authenticated hook-run receipts would be needed for that enforcement and are future work.
 
-Detection: `check-bypass.sh` parses `git log --format=%h%n%P%n%s%n%b` for the range and cross-references against the local reflog where available.
+One-shot signing overrides such as `--no-gpg-sign` are likewise not recorded as invocation flags. `check-pr.sh` fails non-Conventional Commit subjects, but a valid subject does not prove that the `commit-msg` hook ran.
 
 ### Push-time bypass
 
@@ -47,6 +43,8 @@ Detection: `check-bypass.sh` parses `git log --format=%h%n%P%n%s%n%b` for the ra
 | Neither settings file present at all, when the local owner declares Claude attached | Deleted the registration outright | **fail** |
 | Owner-recorded `.trellis/runtime` missing, replaced or retargeted for any attached harness | Hooks resolve through a stale or different runtime | **fail** |
 | Supplied root differs from the owner-recorded worktree path, including a nested Git toplevel | Attachment identity drift | **fail** |
+
+Husky short-circuit detection is a **heuristic**, not a shell interpreter or proof that a hook ran. It skips leading comments, blank lines and bare `true`/`:` no-ops, then checks the first remaining command for an unconditional `exit 0`; a hook containing only no-ops is also flagged. It does not cover every shell form, such as bare `exit` or `exit 0 && ...`, and does not infer execution from conditionals or function bodies. The checker and aggregate verdict state this limitation.
 
 ## Allowed overrides
 

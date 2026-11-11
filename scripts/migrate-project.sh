@@ -556,7 +556,8 @@ migrate_publish_file_exclusive() (
   local parent stage="" stage_identity source_sha rc stage_owned=false
   migrate_publish_cleanup() {
     local status="${1:-$?}"
-    trap - EXIT HUP INT TERM
+    trap '' HUP INT TERM
+    trap - EXIT
     if [ "$stage_owned" = true ] && [ -n "$stage" ] &&
       [ -f "$stage" ] && [ ! -L "$stage" ] &&
       [ "$(migrate_file_link_count "$stage")" = 1 ] &&
@@ -566,9 +567,10 @@ migrate_publish_file_exclusive() (
     exit "$status"
   }
   trap 'migrate_publish_cleanup "$?"' EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  # Clean while the stage identity is still in scope on Bash 3.2.
+  trap 'migrate_publish_cleanup 129' HUP
+  trap 'migrate_publish_cleanup 130' INT
+  trap 'migrate_publish_cleanup 143' TERM
   [ -f "$source" ] && [ ! -L "$source" ] || return "$TRELLIS_EX_STATE"
   parent="$(dirname "$destination")" || return "$TRELLIS_EX_STATE"
   stage="$(mktemp "$parent/.trellis-migrate-publish.XXXXXX")" ||
@@ -664,6 +666,34 @@ migrate_entry_matches_state() {
     *) return 1 ;;
   esac
 }
+
+# A private, pre-action copy is independently verified against the snapshot.
+# Rollback prefers it, so every file about to be replaced or removed keeps a
+# recoverable copy even when forward migration stops part-way through.
+migrate_backup_forward_file() (
+  local path="$1" snapshot="$2" entry="$3" file expected actual dir tmp="" rc
+  file="$(printf '%s\n' "$entry" | jq -r '.file')" || return "$TRELLIS_EX_STATE"
+  case "$file" in [0-9][0-9][0-9][0-9]) ;; *) return "$TRELLIS_EX_STATE" ;; esac
+  expected="$(printf '%s\n' "$entry" | jq -r '.sha256')" || return "$TRELLIS_EX_STATE"
+  dir="$snapshot/forward-backups"
+  if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+    mkdir -m 700 "$dir" || return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return "$TRELLIS_EX_STATE"
+  tmp="$(mktemp "$dir/.backup.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  trap '[ -z "${tmp:-}" ] || rm -f "${tmp:?}"' EXIT
+  cp "$path" "$tmp" && chmod 600 "$tmp" || return "$TRELLIS_EX_UNAVAILABLE"
+  actual="$(migrate_sha256_file "$tmp")" || return "$TRELLIS_EX_STATE"
+  if [ "$actual" != "$expected" ] || ! migrate_entry_matches_state "$path" "$entry" pre; then
+    migrate_err "project file changed while preparing forward backup: $path"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  release_store_rename_no_clobber "$tmp" "$dir/$file"
+  rc=$?
+  [ "$rc" -eq 0 ] || return "$rc"
+  tmp=""
+  trap - EXIT
+)
 
 migrate_snapshot_create() {
   local home="$1" root="$2" project_id="$3" actions_file="$4" candidate="$5" transforms="$6"
@@ -804,7 +834,7 @@ migrate_snapshot_create() {
 
 migrate_prepare() (
   local home_opt="" project_id_opt="" legacy_root_opt="" root_opt="" home root manifest legacy existing_id project_id candidate work actions transforms
-  local snapshot rel path mode rule_targets import_targets import_lines canonical_roots legacy_root="" rc
+  local snapshot rel path mode entry type rule_targets import_targets import_lines canonical_roots legacy_root="" rc
   local legacy_source="" legacy_source_sha="" legacy_source_identity="" legacy_claim="" machine_local_source=""
   local legacy_claim_identity="" legacy_claim_sha="" legacy_claim_acquired=false legacy_claim_pinned=false
   local -a owned_paths=(
@@ -869,8 +899,8 @@ migrate_prepare() (
   work="$(mktemp -d "${TMPDIR:-/tmp}/trellis-migrate.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   migrate_prepare_cleanup() {
     local status="${1:-$?}" cleanup_status=0
-    trap - EXIT
     trap '' HUP INT TERM
+    trap - EXIT
     if [ "$legacy_claim_acquired" = true ] && [ -n "$legacy_claim" ] &&
       { [ -e "$legacy_claim" ] || [ -L "$legacy_claim" ]; }; then
       if [ ! -f "$legacy_claim" ] || [ -L "$legacy_claim" ]; then
@@ -893,9 +923,10 @@ migrate_prepare() (
     exit "$status"
   }
   trap 'migrate_prepare_cleanup "$?"' EXIT
-  trap 'exit 129' HUP
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
+  # Preserve the claim and work identities until the interrupted rollback runs.
+  trap 'migrate_prepare_cleanup 129' HUP
+  trap 'migrate_prepare_cleanup 130' INT
+  trap 'migrate_prepare_cleanup 143' TERM
   candidate="$work/manifest.json"
   actions="$work/actions"
   transforms="$work/transforms"
@@ -1056,14 +1087,36 @@ migrate_prepare() (
       migrate_err 'legacy policy changed after snapshot; preserving the captured file'
       return "$TRELLIS_EX_CONFLICT"
     fi
+    entry="$(jq -ce '[.entries[] | select(.path == ".trellis.config.json")] | if length == 1 then .[0] else error("invalid snapshot entry") end' "$snapshot/manifest.json")" || return "$TRELLIS_EX_STATE"
+    migrate_backup_forward_file "$legacy_claim" "$snapshot" "$entry" || return "$?"
   fi
+  # Check the whole remaining plan before the first forward action, then
+  # recheck each entry immediately before touching it. The legacy policy was
+  # already claimed and independently checked above.
   while IFS= read -r rel; do
-    [ -n "$rel" ] || continue
+    [ -n "$rel" ] && [ "$rel" != '.trellis.config.json' ] || continue
+    migrate_parent_safe "$root" "$rel" || return "$TRELLIS_EX_CONFLICT"
+    entry="$(jq -ce --arg p "$rel" '[.entries[] | select(.path == $p)] | if length == 1 then .[0] else error("invalid snapshot entry") end' "$snapshot/manifest.json")" || return "$TRELLIS_EX_STATE"
+    if ! migrate_entry_matches_state "$root/$rel" "$entry" pre; then
+      migrate_err "project path changed after snapshot: $rel"
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+  done < "$actions"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] && [ "$rel" != '.trellis.config.json' ] || continue
     migrate_parent_safe "$root" "$rel" || return "$TRELLIS_EX_CONFLICT"
     path="$root/$rel"
+    entry="$(jq -ce --arg p "$rel" '[.entries[] | select(.path == $p)] | if length == 1 then .[0] else error("invalid snapshot entry") end' "$snapshot/manifest.json")" || return "$TRELLIS_EX_STATE"
+    if ! migrate_entry_matches_state "$path" "$entry" pre; then
+      migrate_err "project path changed after snapshot: $rel"
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+    type="$(printf '%s\n' "$entry" | jq -r '.type')" || return "$TRELLIS_EX_STATE"
+    if [ "$type" = file ]; then
+      migrate_backup_forward_file "$path" "$snapshot" "$entry" || return "$?"
+    fi
     case "$rel" in
-      .trellis.json) migrate_publish_file "$candidate" "$path" 644 || return "$?" ;;
-      .trellis.config.json) continue ;;
+      .trellis.json) migrate_publish_file_exclusive "$candidate" "$path" 644 || return "$?" ;;
       CLAUDE.md)
         mode="$(migrate_file_mode "$path")" || return "$TRELLIS_EX_STATE"
         migrate_publish_file "$transforms/CLAUDE.md" "$path" "$mode" || return "$?" ;;
@@ -1110,7 +1163,7 @@ migrate_prepare() (
 
 migrate_rollback() (
   local snapshot="${1:-}" original_snapshot manifest plan home snapshot_root root identity checkout worktree
-  local entry rel type post_type path file mode target current_head current_index actual expected rc preserve_legacy=false
+  local entry rel type post_type path file source_file mode target current_head current_index actual expected rc preserve_legacy=false
   local legacy_rollback_state="" preserve_legacy_identity="" preserve_legacy_sha=""
   [ -n "$snapshot" ] || { migrate_usage_error 'rollback requires SNAPSHOT'; return $?; }
   [ "$#" -eq 1 ] || { migrate_usage_error 'rollback accepts one SNAPSHOT'; return $?; }
@@ -1161,14 +1214,23 @@ migrate_rollback() (
     )
   ' "$manifest" >/dev/null 2>&1 || { migrate_err 'snapshot manifest is corrupt'; return "$TRELLIS_EX_STATE"; }
   mkdir -m 700 "$plan/files" || return "$TRELLIS_EX_UNAVAILABLE"
+  if [ -L "$snapshot/forward-backups" ] ||
+    { [ -e "$snapshot/forward-backups" ] && [ ! -d "$snapshot/forward-backups" ]; }; then
+    migrate_err 'forward backup directory is unsafe'
+    return "$TRELLIS_EX_STATE"
+  fi
   while IFS= read -r entry; do
     [ "$(printf '%s\n' "$entry" | jq -r '.type')" = file ] || continue
     file="$(printf '%s\n' "$entry" | jq -r '.file')"
-    [ -f "$snapshot/files/$file" ] && [ ! -L "$snapshot/files/$file" ] || {
+    source_file="$snapshot/files/$file"
+    if [ -e "$snapshot/forward-backups/$file" ] || [ -L "$snapshot/forward-backups/$file" ]; then
+      source_file="$snapshot/forward-backups/$file"
+    fi
+    [ -f "$source_file" ] && [ ! -L "$source_file" ] || {
       migrate_err "snapshot payload is missing or unsafe: $file"
       return "$TRELLIS_EX_STATE"
     }
-    cp "$snapshot/files/$file" "$plan/files/$file" || return "$TRELLIS_EX_UNAVAILABLE"
+    cp "$source_file" "$plan/files/$file" || return "$TRELLIS_EX_UNAVAILABLE"
     chmod 400 "$plan/files/$file" || return "$TRELLIS_EX_UNAVAILABLE"
     actual="$(migrate_sha256_file "$plan/files/$file")" || return "$TRELLIS_EX_STATE"
     expected="$(printf '%s\n' "$entry" | jq -r '.sha256')"

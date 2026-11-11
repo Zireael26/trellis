@@ -43,8 +43,11 @@ _trellis_task_context_lib_dir() {
 
 _trellis_task_context_render_source() {
   cat <<'TRELLIS_TASK_CONTEXT_RENDER'
+from contextlib import redirect_stdout
+import io
 import json
 import re
+import runpy
 import sys
 
 CAP = 512
@@ -71,12 +74,17 @@ def header(status, why, documents, foreign, checked, pending):
                documents, foreign, checked, pending))
 
 
-def emit(lines, code):
+def prepare(lines, code):
     data = ("\n".join(lines) + "\n").encode("utf-8")
     if len(data) > CAP:
         # Never truncate: fall back to the fixed advisory rather than cut bytes.
         data = (header("unavailable", "render_bound", 0, 0, 0, 0) + "\n" + NOTE + "\n").encode("utf-8")
         code = 1
+    return data, code
+
+
+def emit(lines, code):
+    data, code = prepare(lines, code)
     sys.stdout.buffer.write(data)
     sys.stdout.buffer.flush()
     return code
@@ -141,22 +149,8 @@ def analyse(result, cli_exit):
     return status, entries, foreign, checked, pending, why
 
 
-def main():
-    if len(sys.argv) != 2 or not re.fullmatch(r"-?[0-9]{1,5}", sys.argv[1]):
-        return fail("invalid_invocation")
-    cli_exit = int(sys.argv[1])
-    raw = sys.stdin.buffer.read(PROTOCOL_CAP + 1)
-    if not raw:
-        return fail("empty_protocol_output")
-    if len(raw) > PROTOCOL_CAP:
-        return fail("protocol_bound")
-    try:
-        result = json.loads(raw.decode("utf-8"))
-        status, entries, foreign, checked, pending, why = analyse(result, cli_exit)
-    except Malformed as exc:
-        return fail(str(exc))
-    except (ValueError, TypeError, KeyError, RecursionError, UnicodeDecodeError, OverflowError):
-        return fail("malformed_protocol")
+def render(result, cli_exit):
+    status, entries, foreign, checked, pending, why = analyse(result, cli_exit)
     head = header(status, why, len(entries), foreign, checked, pending)
     detail = []
     for path, state, counts in entries:
@@ -169,7 +163,99 @@ def main():
     body = [head, NOTE] + detail
     if len(("\n".join(body) + "\n").encode("utf-8")) > CAP:
         body = [head, NOTE, OMIT]
-    return emit(body, code)
+    return prepare(body, code)
+
+
+class ProtocolBytes(io.BytesIO):
+    def write(self, value):
+        if self.tell() + len(value) > PROTOCOL_CAP:
+            raise Malformed("protocol_bound")
+        return super().write(value)
+
+
+class ProtocolOutput(io.TextIOBase):
+    """Bound text and binary helper stdout before interpreting its protocol."""
+    def __init__(self):
+        self.buffer = ProtocolBytes()
+
+    def write(self, value):
+        self.buffer.write(value.encode("utf-8"))
+        return len(value)
+
+    def getvalue(self):
+        return self.buffer.getvalue().decode("utf-8")
+
+
+def unique_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise Malformed("malformed_protocol")
+        result[key] = value
+    return result
+
+
+def main():
+    if len(sys.argv) != 3:
+        return fail("invalid_invocation")
+    helper, cwd = sys.argv[1:]
+    sys.argv = [helper, "read", "--cwd", cwd]
+    captured = ProtocolOutput()
+    publishing = False
+    try:
+        # Loading as a library avoids the CLI's __main__ call. Real task-state
+        # reads feed validated objects directly to the renderer, with no full
+        # protocol serialization, pipe, second interpreter, or second alarm.
+        with redirect_stdout(captured):
+            try:
+                namespace = runpy.run_path(helper, run_name="trellis_task_context")
+            except SystemExit as exc:
+                namespace = {}
+                cli_exit = exc.code if type(exc.code) is int else int(exc.code is not None)
+            else:
+                cli_exit = 0
+        if callable(namespace.get("main")):
+            if captured.getvalue():
+                raise Malformed("malformed_protocol")
+
+            def publish_context(result):
+                nonlocal publishing
+                try:
+                    if captured.getvalue():
+                        raise Malformed("malformed_protocol")
+                    data, code = render(result, int(result.get("status") == "unavailable"))
+                except (ValueError, TypeError, KeyError, RecursionError, OverflowError) as exc:
+                    why = str(exc) if isinstance(exc, Malformed) else "malformed_protocol"
+                    data, code = prepare([header("unavailable", why, 0, 0, 0, 0), NOTE], 1)
+                # Use the primitive's existing nonblocking writer, still under
+                # its original deadline. Never expose raw JSON on output failure.
+                failure, _ = prepare([header("unavailable", "output_or_budget_failure", 0, 0, 0, 0), NOTE], 1)
+                publishing = True
+                return namespace["publish"]({"status": "unavailable" if code else "available"},
+                                            payload=data, failure_payload=failure)
+
+            with redirect_stdout(captured):
+                code = namespace["main"](publisher=publish_context)
+            if captured.getvalue() or type(code) is not int or code not in (0, 1):
+                # Bytes may already be in the shell's private capture. Exit 2
+                # tells it to discard them, never append a second advisory.
+                return 2
+            return code
+        # A helper emitting the CLI protocol instead is still strictly checked.
+        # This also makes truncated, silent and status-mismatched helpers
+        # explicitly unavailable; it never causes another invocation or read.
+        raw = captured.getvalue()
+        if not raw:
+            return fail("empty_protocol_output")
+        result = json.loads(raw, object_pairs_hook=unique_object)
+        data, code = render(result, cli_exit)
+        sys.stdout.buffer.write(data)
+        sys.stdout.buffer.flush()
+        return code
+    except Malformed as exc:
+        return 2 if publishing else fail(str(exc))
+    except (OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError):
+        return 2 if publishing else fail("malformed_protocol")
 
 
 sys.exit(main())
@@ -177,7 +263,7 @@ TRELLIS_TASK_CONTEXT_RENDER
 }
 
 trellis_task_context() {
-  local cwd lib helper python code out rendered cli_exit render_exit
+  local cwd lib helper python code rendered render_exit
 
   if [ "$#" -ne 1 ] || [ -z "${1:-}" ]; then
     _trellis_task_context_advisory "missing_cwd_argument"
@@ -215,21 +301,24 @@ trellis_task_context() {
     return 1
   fi
 
-  # No outer alarm: the primitive owns its own 30-second budget and cleanup.
-  out="$("$python" -I "$helper" read --cwd "$cwd" 2>/dev/null)"
-  cli_exit=$?
-  if [ -z "$out" ]; then
-    # Empty stdout is never success, whatever the exit status was.
-    _trellis_task_context_advisory "empty_protocol_output"
-    return 1
-  fi
-
+  # No outer alarm: read, validation, rendering and publication share the
+  # primitive's original 30-second budget in this single interpreter.
   code="$(_trellis_task_context_render_source)"
-  rendered="$(printf '%s' "$out" | "$python" -I -c "$code" "$cli_exit" 2>/dev/null)"
+  rendered="$("$python" -I -c "$code" "$helper" "$cwd" 2>/dev/null)"
   render_exit=$?
   if [ -z "$rendered" ] || { [ "$render_exit" -ne 0 ] && [ "$render_exit" -ne 1 ]; }; then
     _trellis_task_context_advisory "render_unavailable"
     return 1
+  fi
+  if [ "$render_exit" -eq 1 ]; then
+    case "$rendered" in
+      'task-context v1: status=unavailable '*) ;;
+      *)
+        # Publication can fail its final deadline check AFTER writing bytes.
+        # An available-looking partial/successful write is never clean context.
+        _trellis_task_context_advisory "render_unavailable"
+        return 1 ;;
+    esac
   fi
   printf '%s\n' "$rendered"
   return "$render_exit"

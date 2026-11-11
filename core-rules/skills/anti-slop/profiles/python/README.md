@@ -118,6 +118,10 @@ source of truth.
 
 ## Known gaps
 
+- A module-level bare `# type: ignore` (for example, the first line before
+  `x: int = "wrong"`) skips the whole file silently in mypy. The gate's
+  category-level native coverage map therefore does not report this shape when
+  mypy is active; pattern fallback reports it when that native lane degrades.
 - **Nested `Any` is invisible to both fragments.** `dict[str, Any]` is measured as
   reporting nothing from `ANN401` — the rule inspects the annotation itself, not its
   parameters. Closing it means `disallow_any_explicit`, which double-reports every
@@ -127,8 +131,8 @@ source of truth.
 - **`cast()` without a `# SAFETY:` comment and `mock.patch("dotted.module")` have no
   ruff or mypy rule.** Neither tool expresses "this needs a stated invariant" or
   "prefer a real seam". Both are pattern-layer findings, owned by
-  `core-rules/hooks/lib/slop-patterns.sh` and reported by the tripwire, audit, and gate scripts.
-  `fixtures/red.py` includes both so the fixture stays honest about what the profile
+  `core-rules/hooks/lib/slop-patterns.sh` and reported by the tripwire, audit, and gate scripts,
+  including when ruff and mypy are active. `fixtures/red.py` includes both so the fixture stays honest about what the profile
   does and does not catch on its own.
 
 ## Self-test

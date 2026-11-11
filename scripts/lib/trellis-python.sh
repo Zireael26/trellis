@@ -4,6 +4,8 @@
 # Public function:
 #   trellis_python   sets and exports TRELLIS_PYTHON to an absolute python3;
 #                    returns 1 when no candidate runs
+#   trellis_python_trusted  selects only a trusted fixed-system candidate,
+#                    ignoring inherited overrides, cache and PATH python3
 #
 # A version-manager shim (pyenv, asdf and mise put python3 in a shims/
 # directory) re-resolves the version in bash on every call: about 0.4 s against
@@ -82,6 +84,19 @@ _trellis_python_trusted() {
     exit 1 unless -f _ && -x _ && ($t[4] == 0 || $t[4] == $uid) && !($t[2] & 022);
     exit 0;
   ' "$@" 2>/dev/null
+}
+
+# For fail-closed filesystem probes, do not let a caller's PATH or inherited
+# TRELLIS_PYTHON choose the interpreter that decides whether a path is absent.
+# Reuse the existing ownership/mode check and version probe, without a cache
+# write or a PATH/shim fallback. The selected absolute path is exported.
+trellis_python_trusted() {
+  local candidate
+  for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    [ -f "$candidate" ] && _trellis_python_trusted "" "$candidate" || continue
+    _trellis_python_take "$candidate" "" && return 0
+  done
+  return 1
 }
 
 trellis_python() {

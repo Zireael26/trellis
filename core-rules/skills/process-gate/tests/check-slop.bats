@@ -114,6 +114,45 @@ CLEAN_TS=$'export const two: number = 2;\n'
   [[ "$output" == *"src/slop.ts:1 — ts-as-any"* ]] || { echo "$output"; false; }
 }
 
+@test "enforced TypeScript signatures: wrapped any parameter is reported without flagging object properties" {
+  posture enforced
+  commit_and_check "src/signatures.ts" $'export function apply(\n  input: any,\n): void {}\ntype Model = {\n  value: any,\n};\nexport function safe(\n  input: unknown,\n): void {}\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"src/signatures.ts:2 — ts-any-signature"* ]]
+  [[ "$output" != *"src/signatures.ts:5 — ts-any-signature"* ]]
+  [[ "$output" != *"src/signatures.ts:8 — ts-any-signature"* ]]
+}
+
+@test "enforced TypeScript signatures: diff gaps cannot join unrelated added lines" {
+  posture enforced
+  (
+    cd "$PROJECT_DIR" || exit 1
+    printf 'function oldName(\n  input: unknown,\n): void {}\ntype Model = {\n};\n' > src/gaps.ts
+    git add src/gaps.ts && git commit -q -m baseline
+    printf 'function newName(\n  input: unknown,\n): void {}\ntype Model = {\n  value: any,\n};\n' > src/gaps.ts
+    git add src/gaps.ts && git commit -q -m change
+  )
+  run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"ts-any-signature"* ]]
+}
+
+@test "enforced Python annotations: a trailing comment cannot hide a wrapped Any parameter" {
+  posture enforced
+  commit_and_check "src/annotations.py" $'def f(\n    payload: Any,  # untyped on purpose\n) -> Widget:\n    return payload\ntimeout: Any = load()  # assignment\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"src/annotations.py:2 — py-any-annotation"* ]]
+  [[ "$output" != *"src/annotations.py:5 — py-any-annotation"* ]]
+}
+
+@test "enforced Go assertions: a previous checked assertion cannot suppress the next unchecked one" {
+  posture enforced
+  commit_and_check "src/assertions.go" $'package p\nfunc f() {\n  widget, ok := raw.(Widget)\n  name := payload.(Widget).Name\n}\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"src/assertions.go:4 — go-unchecked-assert"* ]]
+  [[ "$output" != *"src/assertions.go:3 — go-unchecked-assert"* ]]
+}
+
 @test "posture enforced + clean added lines: passes with rc 0 (rc 1 is the finding, not the posture)" {
   posture enforced
   commit_and_check "src/clean.ts" "$CLEAN_TS"
@@ -409,6 +448,69 @@ EOF
   rm -rf "$FAKEBIN"
 }
 
+seed_failing_native_parser() {
+  FAKEBIN="$BATS_TEST_TMPDIR/parser-bin"
+  mkdir -p "$FAKEBIN"
+  REAL_AWK="$(command -v awk)"
+  export REAL_AWK FAIL_TOKEN FAKE_PARSE_PARTIAL
+  cat > "$FAKEBIN/awk" <<'EOF'
+#!/usr/bin/env bash
+for arg in "$@"; do
+  case "$arg" in "$FAIL_TOKEN"*) printf '%b' "${FAKE_PARSE_PARTIAL:-}"; exit 2 ;; esac
+done
+exec "$REAL_AWK" "$@"
+EOF
+  chmod +x "$FAKEBIN/awk"
+}
+
+@test "oxlint parser failure restores native-covered patterns" {
+  posture enforced
+  FAIL_TOKEN='keep='
+  FAKE_PARSE_PARTIAL=$'src/native.ts\t1\tpartial-native\n'
+  seed_failing_native_parser
+  printf 'anti-slop\n' > "$PROJECT_DIR/.oxlintrc.json"
+  mkdir -p "$PROJECT_DIR/node_modules/.bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$PROJECT_DIR/node_modules/.bin/oxlint"
+  chmod +x "$PROJECT_DIR/node_modules/.bin/oxlint"
+  PATH="$FAKEBIN:$PATH" commit_and_check src/native.ts $'const value = input as any;\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'src/native.ts:1 — ts-as-any'* && "$output" == *'oxlint-parse(rc=2)'* && "$output" == *'ts=patterns'* && "$output" != *'partial-native'* ]] || { echo "$output"; false; }
+  PATH="$FAKEBIN:$PATH" commit_and_check src/native.ts $'const value: number = 1;\n'
+  [ "$status" -eq 0 ] && [[ "$output" == warn* ]] || { echo "$output"; false; }
+}
+
+@test "ruff parser failure restores native-covered patterns" {
+  posture enforced
+  FAIL_TOKEN='keep='
+  FAKE_PARSE_PARTIAL=$'app/client.py\t1\tpartial-native\n'
+  seed_failing_native_parser
+  printf 'ANN401\n' > "$PROJECT_DIR/ruff.toml"
+  mkdir -p "$PROJECT_DIR/.venv/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$PROJECT_DIR/.venv/bin/ruff"
+  chmod +x "$PROJECT_DIR/.venv/bin/ruff"
+  PATH="$FAKEBIN:$PATH" commit_and_check app/client.py $'def apply(value: Any) -> None: pass\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'app/client.py:1 — py-any-annotation'* && "$output" == *'ruff-parse(rc=2)'* && "$output" == *'py=patterns'* && "$output" != *'partial-native'* ]] || { echo "$output"; false; }
+  PATH="$FAKEBIN:$PATH" commit_and_check app/client.py $'def apply(value: int) -> None: pass\n'
+  [ "$status" -eq 0 ] && [[ "$output" == warn* ]] || { echo "$output"; false; }
+}
+
+@test "mypy parser failure restores native-covered patterns" {
+  posture enforced
+  FAIL_TOKEN='codes='
+  FAKE_PARSE_PARTIAL=$'app/client.py\t1\tpartial-native\n'
+  seed_failing_native_parser
+  printf 'ignore-without-code\n' > "$PROJECT_DIR/mypy.ini"
+  mkdir -p "$PROJECT_DIR/.venv/bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$PROJECT_DIR/.venv/bin/mypy"
+  chmod +x "$PROJECT_DIR/.venv/bin/mypy"
+  PATH="$FAKEBIN:$PATH" commit_and_check app/client.py $'value = 1  # type: ignore\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'app/client.py:1 — py-bare-type-ignore'* && "$output" == *'mypy-parse(rc=2)'* && "$output" == *'py=patterns'* && "$output" != *'partial-native'* ]] || { echo "$output"; false; }
+  PATH="$FAKEBIN:$PATH" commit_and_check app/client.py $'value = 1  # type: ignore[assignment]\n'
+  [ "$status" -eq 0 ] && [[ "$output" == warn* ]] || { echo "$output"; false; }
+}
+
 @test "degradation: a ratchet/sort failure is reported, not swallowed" {
   # A real slop finding is in the range, but `sort` (candidate listing and the
   # ratchet alike) fails, so both stages come back empty. Empty must degrade,
@@ -490,6 +592,44 @@ EOF
   [[ "$output" != *"[name-defined]"* ]] || { echo "$output"; false; }
 }
 
+@test "mypy strict reports unused bare ignores without flagging coded ignores" {
+  command -v mypy >/dev/null 2>&1 || skip "mypy not installed"
+  local setting value=1 red green
+  posture enforced
+  for setting in 'warn_unused_ignores = True' 'strict = True'; do
+    printf '[mypy]\nenable_error_code = ignore-without-code\n%s\n' "$setting" > "$PROJECT_DIR/mypy.ini"
+    printf -v red 'a: int = %s  # type: ignore\nb: int = 2  # type: ignore[assignment]\nc: int = 2  # type: ignore [assignment]\n' "$value"
+    commit_and_check app/ignore.py "$red"
+    [ "$status" -eq 1 ] || { echo "$setting: $output"; false; }
+    [[ "$output" == *'app/ignore.py:1'*'[unused-ignore]'* ]] || { echo "$output"; false; }
+    [[ "$output" != *'app/ignore.py:2'* && "$output" != *'app/ignore.py:3'* ]] || { echo "$output"; false; }
+
+    # Coded ignores are outside this rule, including whitespace before brackets.
+    printf -v green 'a: int = %s  # type: ignore\nb: int = 3  # type: ignore[assignment]\nc: int = 3  # type: ignore [assignment]\n' "$value"
+    commit_and_check app/ignore.py "$green"
+    [ "$status" -eq 0 ] || { echo "$setting: $output"; false; }
+    [[ "$output" == pass* ]] || { echo "$output"; false; }
+    value=$((value + 1))
+  done
+  printf '[mypy]\nenable_error_code = ignore-without-code\nwarn_unused_ignores = False\n' > "$PROJECT_DIR/mypy.ini"
+  commit_and_check app/ignore.py $'a: int = "wrong"  # type: ignore\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'[ignore-without-code]'* && "$output" != *'py-bare-type-ignore'* ]] || { echo "$output"; false; }
+}
+
+@test "mypy module-level bare ignore gap is disclosed next to the coverage map" {
+  grep -Fq 'module-level bare # type: ignore skips the whole file' "$SCRIPT"
+  grep -Fq 'module-level bare `# type: ignore` skips the whole file' \
+    "$SKILL/references/anti-slop-gate.md"
+
+  command -v mypy >/dev/null 2>&1 || skip "mypy not installed"
+  printf '[mypy]\nstrict = True\nenable_error_code = ignore-without-code\n' > "$PROJECT_DIR/mypy.ini"
+  printf '# type: ignore\nvalue: int = "wrong"\n' > "$PROJECT_DIR/src/module.py"
+  run bash -c 'cd "$1" && mypy --no-incremental --cache-dir=/dev/null src/module.py' fixture "$PROJECT_DIR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'Success: no issues found'* ]] || { echo "$output"; false; }
+}
+
 @test "ladder: an oxlint config WITHOUT the profile marker is not the native lane" {
   posture enforced
   # A plain oxlint config plus a stub oxlint that reports a generic style rule.
@@ -543,6 +683,41 @@ EOF
   commit_and_check "src/naïve.ts" "$SLOP_TS"
   [ "$status" -eq 1 ]
   [[ "$output" == *"naïve.ts:1 — ts-as-any"* ]] || { echo "$output"; false; }
+}
+
+@test "diff parsing ignores user no-prefix and external-diff configuration" {
+  local mode
+  posture enforced
+  for mode in noprefix external; do
+    if [ "$mode" = noprefix ]; then
+      git -C "$PROJECT_DIR" config diff.noprefix true
+    else
+      git -C "$PROJECT_DIR" config --unset diff.noprefix
+      printf '#!/usr/bin/env bash\nexit 0\n' > "$PROJECT_DIR/external-diff"
+      chmod +x "$PROJECT_DIR/external-diff"
+      git -C "$PROJECT_DIR" config diff.external "$PROJECT_DIR/external-diff"
+    fi
+    commit_and_check "src/$mode.ts" "$SLOP_TS"
+    [ "$status" -eq 1 ] || { echo "$mode hid slop: $output"; false; }
+    [[ "$output" == *"src/$mode.ts:1 — ts-as-any"* ]] || { echo "$output"; false; }
+    commit_and_check "src/$mode.ts" "$CLEAN_TS"
+    [ "$status" -eq 0 ] || { echo "$mode rejected clean code: $output"; false; }
+  done
+}
+
+@test "a SAFETY comment across unchanged lines cannot suppress a later hunk" {
+  posture enforced
+  (
+    cd "$PROJECT_DIR" || exit 1
+    printf 'fn run() {\n    let value = 1;\n    println!("{}", value);\n}\n' > src/work.rs
+    git add src/work.rs
+    git commit -q -m 'base rust'
+  )
+  commit_and_check src/work.rs $'fn run() {\n    // SAFETY: unrelated operation\n    let value = 1;\n    println!("{}", value);\n    unsafe { operation(); }\n}\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'src/work.rs:5 — rs-unsafe-block'* ]] || { echo "$output"; false; }
+  commit_and_check src/work.rs $'fn run() {\n    let value = 1;\n    println!("{}", value);\n    // SAFETY: the caller validates the invariant\n    unsafe { another_operation(); }\n}\n'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 # --- posture is resolved BEFORE the pattern lib ----------------------------
@@ -692,6 +867,73 @@ run_all() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   rm -rf "$STUB"
+}
+
+seed_clean_python_engines() {
+  printf 'ANN401\n' > "$PROJECT_DIR/ruff.toml"
+  printf 'ignore-without-code\n' > "$PROJECT_DIR/mypy.ini"
+  mkdir -p "$PROJECT_DIR/.venv/bin"
+  for engine in ruff mypy; do
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$PROJECT_DIR/.venv/bin/$engine"
+    chmod +x "$PROJECT_DIR/.venv/bin/$engine"
+  done
+}
+
+@test "native Python engines still scan uncovered casts and module patches" {
+  posture enforced
+  seed_clean_python_engines
+  commit_and_check app/client.py $'value = cast(int, source)\nmock.patch("app.client")\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'app/client.py:1 — py-unjustified-cast'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'app/client.py:2 — py-module-patch'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'py=ruff+mypy'* ]] || { echo "$output"; false; }
+  commit_and_check app/client.py $'# SAFETY: validated at the boundary\nvalue = cast(float, source)\nresult = source\n'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == pass* ]] || { echo "$output"; false; }
+}
+
+@test "native oxlint still scans uncovered any signatures but permits typed signatures" {
+  posture enforced
+  printf 'anti-slop\n' > "$PROJECT_DIR/.oxlintrc.json"
+  mkdir -p "$PROJECT_DIR/node_modules/.bin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$PROJECT_DIR/node_modules/.bin/oxlint"
+  chmod +x "$PROJECT_DIR/node_modules/.bin/oxlint"
+  commit_and_check src/native.ts $'function apply(input: any): void {}\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'src/native.ts:1 — ts-any-signature'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'ts=oxlint'* ]] || { echo "$output"; false; }
+  commit_and_check src/native.ts $'function apply(input: string): void {}\n'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == pass* ]] || { echo "$output"; false; }
+}
+
+@test "a missing Python engine restores the full pattern lane" {
+  posture enforced
+  seed_clean_python_engines
+  rm -f "${PROJECT_DIR:?}/.venv/bin/mypy"
+  local tools
+  tools="$(linter_free_path)"
+  (
+    cd "$PROJECT_DIR" || exit 1
+    mkdir -p app
+    printf 'def apply(value: Any) -> None: pass\n' > app/client.py
+    git add app/client.py
+    git commit -q -m 'add annotation'
+  )
+  run bash -c "cd '$PROJECT_DIR' && PATH='$tools' '$SCRIPT' --range=HEAD~1..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'app/client.py:1 — py-any-annotation'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'py=patterns'* ]] || { echo "$output"; false; }
+}
+
+@test "a native-covered Python pattern is reported only by its native engine" {
+  posture enforced
+  seed_clean_python_engines
+  printf '#!/usr/bin/env bash\necho "app/client.py:1:5: ANN401 native annotation"\nexit 1\n' > "$PROJECT_DIR/.venv/bin/ruff"
+  commit_and_check app/client.py $'def apply(value: Any) -> None: pass\n'
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'app/client.py:1 — ANN401 native annotation'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'py-any-annotation'* ]] || { echo "$output"; false; }
 }
 
 @test "run-all: undeclared posture renders the row as n/a and leaves the verdict MERGEABLE" {

@@ -44,6 +44,72 @@ reconcile-journal recovery retain full group verification. Concurrent attaches
 wait up to 15 minutes for the checkout lock, longer than the observed 9–12 minute
 large-group attach; unsafe locks and expired waits still refuse.
 
+## Trellis homes containing `=`
+
+Before upgrading to the 1.5.0 native-hook release, check the resolved
+`TRELLIS_HOME` (or `$HOME/.trellis` when `TRELLIS_HOME` is unset). Its path
+must not contain `=`. This restriction applies machine-wide, including legacy
+commands and rollback, not only to native hooks. A user HOME containing `=` is
+acceptable only if an explicit, independently valid `TRELLIS_HOME` does not.
+
+If the existing Trellis home contains `=`, do not upgrade that installation
+until you have a reviewed migration to a safe home. Keep the prior working
+release, launcher and home available. Affected-release commands, including
+rollback, can refuse before they run; simply setting a different `TRELLIS_HOME`
+or renaming the directory does not migrate persisted paths or attachments.
+Preserve the old state and obtain migration or recovery help rather than editing
+it by hand.
+
+## 1.5.0 metadata-only configuration ceiling
+
+The installed launcher's `--version`, `help` (including `-h`, `--help` and no
+arguments), `heavy --check` and `heavy --status` routes accept machine configs
+up to **32 KiB (32,768 bytes)**. The limit counts UTF-8 bytes, not characters.
+Exactly 32,768 bytes remains eligible for ordinary validation; larger files
+refuse with exit **4**, before JSON decoding. The launcher reads at most 32,769
+bytes for these routes. Its diagnostic names the limit, the actual byte count
+of the held config file and its path, and states that command execution is
+unaffected.
+
+This is a metadata-only, fail-closed product limit, not a new limit on canonical
+machine-config authority or executable commands. A large otherwise-valid config
+can still run commands through their normal verification path; metadata refusal
+does not mean that the configured release is absent or unverified. Do not
+truncate or hand-edit persisted state just to bypass the limit. Review the
+configuration's size and unnecessary optional data through the supported
+configuration workflow; support for streaming metadata from larger configs is
+not part of 1.5.0.
+
+Malformed, non-private, invalid-UTF-8 and other refused configs still fail their
+existing checks. Metadata does not acquire a native-companion or jq dependency;
+it uses the closed-environment Perl parser. JSON::PP is needed on every metadata
+route. Encode is needed only for non-ASCII config bytes, which retain the strict
+UTF-8/noncharacter check; ASCII still receives every JSON and field check.
+Fcntl and MIME::Base64 are needed only for the heavy metadata routes. A missing
+needed module is exit 5; an unused missing module does not block the route.
+
+## Native asset source checks (release maintainers)
+
+Before approving native assets for a release, run the source-checkout tool
+against the frozen integrated checkout and the candidate asset directory:
+
+```sh
+bash scripts/build-native-hooks.sh verify --source /absolute/checkout /absolute/assets
+```
+
+Omitting the asset directory selects the tool checkout's `core-rules/native/`.
+This checks asset integrity plus the exact build-input path set and digests
+against the supplied checkout's clean, unflagged index/worktree and HEAD blobs.
+Unrelated and asset-only commits are allowed; `source_commit` need not equal HEAD.
+Git replacement objects are disabled and inherited `GIT_*` variables are
+scrubbed, so checks use the named checkout and literal commit objects. Git still
+honors that checkout's local configuration, including configured filters or
+filesystem monitors; this is not a sandbox for an untrusted Git repository.
+Without `--source`, `verify` remains self-contained and accepts an older,
+self-consistent asset set without inspecting any checkout. Neither mode replaces
+native-host rebuild/digest equality, release-version binding or execution tests.
+Packaged releases omit build sources, so their verification stays asset-only.
+
 ## What an upgrade changes
 
 An upgrade has four distinct operations:
@@ -513,6 +579,69 @@ local lifecycle recovery prescribed by [AGENT_SETUP.md](../AGENT_SETUP.md):
 artifacts manually. `trellis relink` repairs an already-owned anchor; it is not
 a release upgrade command and cannot choose a different version.
 
+### Finishing an interrupted detach
+
+A detach killed part-way (a timeout, SIGKILL, a closed pane) leaves
+`~/.trellis/state/attachment-journals/detach-<attachment-uuid>.json`. Finish it
+with `trellis recover <worktree>`, or rerun `trellis detach <worktree>`; both
+resume from the journal's recorded phase and end where a clean detach ends. Do
+not move or delete the journal: it is the only record of what is left to undo.
+
+Through 1.4.1 both commands exited `3` with no output when another Trellis
+process held the checkout lock, as a busy checkout's post-attach jobs and
+`seed-inheritance-symlinks` runs often do. They now wait up to 900 s
+for it, as attach and adoption already did, and name the lock if it is still
+held. Do not wrap them in a short timeout: a kill during the wait is harmless,
+but it leaves the journal where it was.
+
+When recovery cannot finish, these named refusals keep the journal (other
+command-level failures can use `trellis attach:` and need not carry a code):
+
+| Refusal | Meaning | Remedy |
+|---|---|---|
+| `another Trellis operation still holds the checkout lock for <git dir>` | the 900 s wait ran out | let the other operation finish, then rerun |
+| `attachment-lock-held` | another live Trellis process holds this worktree's lock | wait for the named pid to exit, then rerun |
+| `attachment-lock-unreadable` | the lock link is not a Trellis lock | inspect it; remove it only when no Trellis process runs |
+| `artifact-changed` | a leaf still to be removed no longer matches its record | move the changed path aside, then rerun |
+| `render-conflict`, `render-missing`, `render-reverted` | a rendered file changed since attach | restore the rendered bytes (journal `external.renders[].after_base64`), then rerun |
+| `owner-changed` | the worktree has an owner record the journal did not write, e.g. it was attached again after the detach committed | do not finish the journal: it would undo the new attachment. If it is superseded, archive it as below |
+| `journal-invalid`, `journal-phase-conflict` | the journal no longer matches the state it records | keep it and run `trellis doctor` |
+| `core.hooksPath has more than one value` | multiple local hook paths prevent safe restoration | keep the intended one with `git config --local core.hooksPath`, then rerun |
+| `refusing to remove managed hooks: ... no longer matches the recorded dispatcher` | the managed hooks directory or dispatcher has changed, including an unrecognised entry | inspect the directory; move foreign entries aside or run `trellis doctor --fix`, then rerun |
+| `managed exclude block is tampered or duplicated during recover` | the exclude block differs from the recorded block or is duplicated | restore exactly one copy of the block identified by the printed SHA-256, then rerun |
+
+An **unparseable** detach journal blocks detach and recover for every checkout,
+not just its own: Trellis cannot determine which checkout it belongs to. Stop
+other Trellis operations and preserve the named journal in a private backup.
+If a trusted, intact copy of that journal exists, restore it at the named path
+and run `trellis recover` for its worktree. Otherwise, identify the affected
+worktree from independent owner, registry and backup evidence and manually
+reconcile its remaining attachment artifacts; involve an operator if the
+identity or state cannot be established. Only after that reconciliation, move
+the damaged journal to the private backup outside `state/attachment-journals`
+and retry recovery or detach. Do not discard it merely to unblock a different
+checkout.
+
+`trellis recover` now prints the library's `trellis recover: refused (<code>):
+<path>` lines as detach does; before 1.5.0 it printed none of those library
+refusals. The uncoded command-level messages above retain their existing form.
+
+A committed full-detach journal whose worktree was attached again before the
+journal finished is superseded: recovery refuses at `owner-changed` before
+changing the new attachment's hooks. The registry clear is keyed to the old ID
+and rejects a different binding. Archive it with
+
+```sh
+trellis recover --discard-superseded-journal <journal-attachment-uuid> <worktree>
+```
+
+It moves only the journal, to `~/.trellis/backups/discarded-journals-<day>/`,
+and only when the journal's owner commit happened, it is a full detach (no
+remaining harnesses), a different attachment owns the worktree and is the one
+the registry binds there, the journal's own ID is bound nowhere, it has no
+progress log, and no live process holds the worktree lock. Anything else is
+refused by name with the journal kept.
+
 ### Reinstalling the launcher
 
 Caller-PATH forwarding (the operator's toolchain reaching `attach`, `onboard`,
@@ -567,13 +696,76 @@ command begins with an install, and the prior version is already installed.
 
 For a fleet or reviewed all-fleet rollback, use the same selector forms from
 Step 4 with `ROLLBACK_RELEASE`. Keep the original target release installed for
-forensic verification; installed versions are immutable and are not a cleanup
-candidate merely because a project rolled back.
+forensic verification: rolling a project back does not make the newer version
+a cleanup candidate. Installed versions are immutable, and the only supported
+way to delete one is `release remove`, below, once nothing references it.
 
 A release rollback changes local runtime state only. If the release required a
 tracked project migration, revert that project change independently through its
 normal reviewed PR, or restore the exact migration snapshot as documented in
 [MIGRATING-LOCAL-FLEETS.md](MIGRATING-LOCAL-FLEETS.md).
+
+## Remove an installed release
+
+From 1.5.0, `trellis release remove VERSION` deletes an installed version that
+nothing uses any more. It runs from the active CLI release, so it exists once
+`active_cli_release` is 1.5.0 or later. Never delete anything under
+`TRELLIS_HOME/releases` or `TRELLIS_HOME/state` by hand.
+
+```sh
+"$TRELLIS" release remove "$OLD_RELEASE"            # dry-run: what would go, with sizes
+"$TRELLIS" release remove "$OLD_RELEASE" --apply
+```
+
+Dry-run is the default and writes nothing. It lists the release directory, its
+launcher execution snapshots (`releases/.exec/VERSION-<sha256>`) and their
+flock files, and its release and exec stamps, each with its allocated size, and
+a total. `--apply` deletes exactly those entries.
+
+The command refuses, naming the reason and the path, while anything still
+references the version:
+
+| Reference | Where it is read |
+|---|---|
+| the active CLI release | `config.json` `active_cli_release` |
+| an attachment owner record | `state/attachments/*/*.json` and `attachments/user.json`, any `release` |
+| a registry release pin | `registry.json`, a checkout's `release` |
+| a runtime anchor | `<root>/.trellis/runtime` of every registry row, by its literal and its resolved target |
+| a managed Git hook | `state/git-hooks/*/release-payload` |
+| a registry row that is not available | an inaccessible or still-existing root refuses with exit `4`; a genuinely absent root is judged by its registry pin and owner record, refusing when either names the version or when it records no release at all |
+| a registry row that fails identity validation | always (exit `4`) |
+| a project config pin | `<root>/.trellis.config.json` or `trellis.config.json` `trellis_version` (a leading `v` is ignored); a symlinked, empty or malformed config refuses |
+| a pending attachment journal | `state/attachment-journals/*.json`, `state/user-attachment-journals/*.json` |
+| a pending adoption journal | `state/release-adoptions/*/plans.jsonl` |
+| a running process | a cwd, open file or mapping inside the release or a snapshot (`lsof` on macOS, `/proc` on Linux), in the invoking user's inspectable processes only; other users' processes, root's included, are skipped and counted on stderr, and so are your own processes the kernel will not let you inspect (EACCES or EPERM, such as `systemd --user` or ssh-agent), listed by pid and name. Such a process can still use the release unseen |
+| the release-store lock | `releases/VERSION.lock`, held by an install or a live removal; a dead remover's lock is reported by the dry-run and cleared by `--apply` |
+
+A probe that cannot answer, such as an unreadable record or a failed process
+check, refuses too (exit `4`); a reference exits `3`. An unavailable row with a
+genuinely absent root that records only other versions does not block. For one that blocks, restore its
+root, or deregister it with
+`trellis registry deregister --fleet NAME --worktree-root PATH`, then run the
+dry-run again. To free a version a project still pins, adopt that project
+onto another release first.
+
+`--apply` takes the release-store lock (published whole, already holding its
+owner record), renames the release to a
+`releases/.tmp.remove.VERSION.*` stage with an owner record, checks every
+reference again (and renames the release back if one appeared meanwhile), then
+deletes the stage, the snapshots, their locks and the stamps. It never follows a
+link: a symlinked release, snapshot or stamp is refused, and a link inside the
+release is deleted as a link. If the process dies part-way, rerun
+`trellis release remove VERSION --apply`: it clears the dead remover's lock
+and immediately finishes a single stage with a private, valid owner record
+belonging to the current user and a provably dead PID, even if no installed
+release, snapshots or stamps remain. Dry-run lists that stage without changing
+it. Recovery checks references against both the original release and the stage,
+revalidates ownership before deletion, and never republishes a partially deleted
+release. A live owner refuses with exit `3`; an unreadable, missing or malformed
+owner, multiple stages, or a stage beside an installed release refuses with exit
+`4`. No age bypass is applied to unknown ownership. The general fallback is
+`trellis release reap-tmp --fix`, which collects a dead-owner stage after an hour
+(or unowned scratch after its longer safety window).
 
 ## The one-release compatibility window
 
@@ -831,6 +1023,172 @@ trellis doctor
 ```
 
 Restart running pi sessions so they load the fixed extension. Roll back with `trellis release adopt 1.4.0 --all`; that brings the regression back for pi lanes.
+
+## `1.4.x` → `1.5.0` native bootstrap
+
+1.5.0 moves most hook work into one prebuilt native program, `trellis-hooks`.
+It ships inside the sealed payload. **You do not need Rust, a compiler or any
+host tuning**, and nothing is downloaded or built when a hook runs. The summary
+for users is in the 1.5.0 CHANGELOG entry. This section covers the steps.
+
+Do not use a source checkout, or run a binary to verify itself. Before adopting
+the release, check the [Trellis homes containing `=`](#trellis-homes-containing-)
+restriction. The first hop needs **two configure calls**, because the installed
+1.4.x upgrade/configure code cannot stage a native companion.
+
+1. Set `TARGET_RELEASE=1.5.0`. The installed 1.4.x launcher runs
+   `trellis release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"`, then
+   `trellis release verify "$TARGET_RELEASE"`. Its existing trusted verifier
+   checks the entire installed payload, including native bytes, without
+   executing them.
+2. Use [Reinstalling the launcher](#reinstalling-the-launcher), keeping the
+   moved-aside 1.4.x launcher. Pass the **installed, verified**
+   `$TRELLIS_HOME/releases/1.5.0/payload/scripts/trellis-launcher.sh` as
+   `--launcher-template`; never pass a checkout template. The old configure
+   copies that unpinned launcher verbatim and selects active release 1.5.0.
+3. At this interruption point the new unpinned launcher still enforces the full
+   legacy route. It does not discover a companion through PATH, the project or
+   `.trellis/runtime`; an unpinned native request cannot authorize an action.
+4. Through the **new launcher**, run configure a second time:
+
+   ```sh
+   "$HOME/.local/bin/trellis" configure --release 1.5.0 \
+     --launcher-template "$TRELLIS_HOME/releases/1.5.0/payload/scripts/trellis-launcher.sh"
+   ```
+
+   This executes configure from the launcher's verified execution snapshot,
+   never directly from the release directory. The trusted verifier checks the
+   bytes; configure creates a fresh mode-0500 companion under private
+   `bin/native/<version>/<target>/<sha256>/`, checks its bytes/signature/identity,
+   and publishes a new-inode launcher pinned to it **last**. Repeating this
+   command is idempotent. Existing executable inodes are never rewritten;
+   retained pairs remain available to running readers and rollback. A changed
+   custom launcher or changed immutable companion refuses publication.
+5. With the new launcher, run `trellis release adopt 1.5.0` with the reviewed
+   `--project`, `--fleet` or `--all` selector, then doctor/show-config. Only the
+   qualified release cutover supplies native registrations. Recheck user-level
+   surfaces too; do not edit settings arrays manually.
+
+The older one-command `trellis upgrade 1.5.0 ...` cannot perform this bootstrap:
+its 1.4.x release body remains legacy. From a native-capable active release,
+upgrade's verified in-memory bundle stages/publishes the target pair before
+adoption and restores the prior launcher if adoption fails. Upgrade retains
+its historical project-policy scope; it does not silently change
+`active_cli_release` or the user-global attachment. For explicit bootstrap
+rollback, configure the retained verified prior release and its launcher, then
+adopt that release with the same scope. Keep the retained entries until all
+readers and rollback checks finish. Each project's registrations remain bound
+to its own verified release and retained digest companion; repinning the global
+management launcher does not implicitly migrate other projects' policy.
+
+### Platforms
+
+| Platform | 1.5.0 hook route |
+|---|---|
+| arm64 (Apple silicon) macOS 13 or later | native. The binary is an ad-hoc signed Mach-O, digest-pinned in `core-rules/native/artifacts.json`. |
+| x86_64 Linux | native. The binary is a static musl ELF, so it does not depend on the host's glibc. |
+| x86_64 (Intel) macOS | the complete legacy shell hooks. No asset ships for it; attach labels the fallback on stderr. It is not hardware-qualified in 1.5.0: the legacy route is tested on arm64 with the native target removed. |
+| aarch64 Linux | the complete legacy shell hooks, labelled as fallback. It is not qualified in 1.5.0. |
+
+The legacy route runs every check that the native route runs, so falling back
+never skips a check. The only differences are speed and one known residual:
+the shell re-read guard compares override paths lexically.
+
+### HFS+ and other non-APFS volumes
+
+Nothing to configure.
+- **Attach:** on a volume that cannot hard-link a symlink (HFS+ returns
+  ENOTSUP), attach publishes through an exclusive, inode-keeping rename
+  instead. Before 1.5.0, attach failed on these volumes.
+- **Release stamps:** if a filesystem's timestamps are too coarse for the
+  stamp's ctime calibration, the launcher runs the full release verify instead
+  of using a stamp hit. That is slower, but the checks are the same. Do not
+  move `TRELLIS_HOME` to work around this.
+
+### What changes for agents
+
+- **Worktree create returns once the worktree is attached.** The post-attach
+  checks job keeps running in the background, and the next Stop or `git push`
+  waits on it:
+  - It refuses until the job's verdict passes. A pending, missing or failed
+    verdict blocks with one labelled line (`trellis Stop: …` or
+    `trellis pre-push: …`); it is never just a warning.
+  - A pending verdict waits up to 60 s, then refuses.
+  - A missing or stale verdict, as on worktrees attached before 1.5.0, runs the
+    checks synchronously once, so older worktrees stay pushable.
+  - A toolchain-only failure blocks only the push.
+  - The remedy for a failed job is `trellis doctor --fix`.
+- **Project tools come from the caller's `PATH`, after the system directories.**
+  Claude PostToolUse and Stop pass the harness `PATH` along as data. If a
+  project tool such as `eslint` or `ruff` is missing, you get one labelled
+  advisory line where 1.4.x skipped the check silently. `git` and `jq` always
+  come from the system directories.
+- **Re-read override.** Run `trellis reread override --session <id> --reason
+  "<why>"`. It writes a private record that lasts 600 s, logs a breadcrumb, and
+  covers only that session. Agents cannot write the record directly.
+  `TRELLIS_REREAD_OVERRIDE` still works on the legacy shell route only.
+- **Deadlines.** Stop and Pi completion get 300 s, PostToolUse 120 s, and
+  everything else 20 s. The harness timeout is the deadline plus 10 s.
+- **Restart running sessions.** After adoption, restart Claude Code, Codex and
+  Pi sessions so they load the new registrations.
+- **Worktree remove** is not faster in 1.5.0. The single-process detach comes
+  in 1.5.1.
+
+### Roll back from 1.5.0
+
+Keep the prior 1.4.x release and its moved-aside launcher installed until the
+rollback checks pass. Roll back the same way you upgraded, in reverse order:
+
+```sh
+: "${ROLLBACK_RELEASE:?Set the retained 1.4.x release, for example 1.4.1}"
+"$TRELLIS" release verify "$ROLLBACK_RELEASE"
+# Reinstall that release's own launcher (see "Reinstalling the launcher"),
+# naming $TRELLIS_HOME/releases/$ROLLBACK_RELEASE/payload/scripts/trellis-launcher.sh
+# as --launcher-template, then:
+"$TRELLIS" configure --release "$ROLLBACK_RELEASE" \
+  --launcher-template "$TRELLIS_HOME/releases/$ROLLBACK_RELEASE/payload/scripts/trellis-launcher.sh"
+"$TRELLIS" release adopt "$ROLLBACK_RELEASE" --all   # or the --project/--fleet scope you adopted
+"$TRELLIS" doctor
+```
+
+Adopting 1.4.x renders the legacy registrations again. Retained native
+companions under `TRELLIS_HOME/bin/native/` are left in place for running
+readers. Remove 1.5.0 only afterwards, with `trellis release remove 1.5.0`,
+once nothing references it.
+
+### Relinking adopted-identical settings
+
+`attach --user --adopt-identical` transfers the byte-identical canonical hook
+prefix and matching non-hook keys into Trellis ownership. A later relink replaces
+those owned values even when the new template keeps one hook and adds another,
+or replaces legacy callbacks with native registrations. Project hooks appended
+after the owned prefix remain project-owned and are kept exactly once.
+
+After a template changes an adopted owned value, the new restoration snapshot
+contains only its project residual, not the retired canonical value. **Detach
+therefore no longer restores the original hand-placed bytes for that changed
+value**, which were identical to the previous canonical template. Unchanged
+adopted values, unrelated project content and recorded file modes retain their
+normal restoration behavior. Keep an independent backup if historical formatting
+or the retired hand-placed canonical values are needed; do not preserve them by
+registering both the old and new callbacks.
+
+### Resolving a new-event collision
+
+Migration refuses with `project key collision` if the new release first takes
+ownership of an event array that already contains project-authored hooks. No
+settings or ownership publication should occur on this refusal. Preserve the
+settings and owner record; do not delete the project hooks or forge ownership.
+In an isolated copy, detach with the currently installed generation, back up
+and temporarily remove only the conflicting project event array, attach/adopt
+the reviewed target, then append the saved project blocks **after** its canonical
+owned event prefix. Verify that each project hook remains exactly once and run
+strict doctor/show-config before using the result. If a saved project hook is
+byte-identical to a new canonical hook, choose one explicitly instead of
+creating duplicate execution. Do not reorder or edit the canonical prefix.
+Keep the original backup until adoption and rollback are verified. If that
+sequence cannot be proved against the project's attachment, stop rather than
+removing the event or weakening the guard.
 
 ## `1.3.21` → `1.4.0` adoption
 
@@ -1487,6 +1845,8 @@ On every machine, in this order:
 5. `trellis worktree root-init` once (creates `~/projects/worktrees` with the Spotlight/Time Machine exclusions).
 6. `trellis launchd --with-pi-watchdog` for the report agent plus the truncate-only watchdog. Do NOT enable nightly `--with-apply`; that stays an owner decision.
 7. Run `trellis worktree migrate` (dry run) and review the plan. Do not `--apply` machine-wide without owner review (`--only <path>` limits apply to one path; remove/move/preserve wait for review of the dry run).
+
+Missing worktrees younger than the repository's `gc.worktreePruneExpire` (three months by default) are held as `missing-recent`. If a checkout was moved by hand, run `git worktree repair` from the moved checkout. Only after confirming it is gone, opt in to immediate pruning with `trellis worktree migrate --prune-recent` and review the plan before adding `--apply`. Git cannot discover a moved checkout outside the scanned roots; one left un-repaired beyond the expiry can still be pruned.
 
 ## `1.3.11` → `1.3.12` adoption
 

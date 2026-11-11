@@ -197,6 +197,21 @@ adoption_publish_render() {
   fi
 }
 
+# Test-only barrier in a partially written hook stage. The real transaction
+# receives TERM; no production fault switch or replacement cleanup is used.
+eval "$(declare -f write_hook_state_file | /usr/bin/sed '1s/^write_hook_state_file /release_fixture_original_write_hook_state_file /')"
+write_hook_state_file() {
+  case "${1:-}" in
+    "$release_fixture_hooks_root"/.*.release-adopt.*/post-checkout)
+      if [ -f "$release_fixture_hook_barrier/partial-write" ]; then
+        printf 'partial staged hook\n' > "$1" && chmod "$3" "$1" || return 5
+        printf '%s\n' "$(release_fixture_self_pid)" > "$release_fixture_hook_barrier/partial-hook-write.pid" || return 5
+        release_fixture_wait "$release_fixture_hook_barrier" partial-hook-write || return "$?"
+      fi ;;
+  esac
+  release_fixture_original_write_hook_state_file "$@"
+}
+
 eval "$(declare -f release_store_rename_swap | /usr/bin/sed '1s/^release_store_rename_swap /release_fixture_original_rename_swap /')"
 release_store_rename_swap() {
   local rc destination="${2:-}" ticks=0
@@ -270,6 +285,11 @@ EOF
   cp "$REPO_ROOT/scripts/release.sh" "$repo/scripts/release.sh"
   cp "$REPO_ROOT/scripts/attach-project.sh" "$repo/scripts/attach-project.sh"
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$repo/scripts/trellis-launcher.sh"
+  if [ "${RELEASE_FIXTURE_UPGRADE:-false}" = true ]; then
+    cp "$REPO_ROOT/scripts/upgrade.sh" "$repo/scripts/upgrade.sh" || return 1
+    mkdir -p "$repo/core-rules/husky" || return 1
+    cp "$REPO_ROOT/core-rules/husky/pre-push" "$repo/core-rules/husky/pre-push" || return 1
+  fi
   cp -R "$REPO_ROOT/scripts/lib" "$repo/scripts/lib"
   fixture="${4:-}"
   case "$fixture" in
@@ -463,7 +483,8 @@ install_adoption_releases() {
 build_explicit_json_release_repo() {
   local version="$1" effort="$2" repo manifest tmp
   repo="$(build_release_repo "$version")" || return 1
-  mkdir -p "$repo/core-rules/templates" || return 1
+  mkdir -p "$repo/core-rules/templates" "$repo/core-rules/legacy-hooks" || return 1
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/" || return 1
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" "$repo/core-rules/templates/claude-settings.local.json" || return 1
   jq --arg effort "$effort" '.effortLevel = $effort' "$repo/core-rules/templates/claude-settings.local.json" > "$repo/core-rules/templates/claude-settings.local.json.next" || return 1
   mv "$repo/core-rules/templates/claude-settings.local.json.next" "$repo/core-rules/templates/claude-settings.local.json" || return 1

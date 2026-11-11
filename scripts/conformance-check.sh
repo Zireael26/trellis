@@ -123,11 +123,29 @@ clean_path() {
 miss_count=0
 ref_count=0
 checked_files=0
+scan_errors=0
 
 for doc in "${SPEC_DOCS[@]}"; do
   [ -f "$doc" ] || continue
   checked_files=$((checked_files + 1))
   rel_doc="${doc#"$ROOT"/}"
+  doc_dir="$(dirname "$doc")"
+
+  # A failed read or NUL-bearing/UTF-16 document cannot certify an empty scan.
+  if [ ! -r "$doc" ] || ! (LC_ALL=C tr -d '\000' < "$doc" | cmp -s "$doc" -); then
+    printf 'conformance-check: could not read or non-text document: %s\n' "$rel_doc" >&2
+    scan_errors=$((scan_errors + 1))
+    continue
+  fi
+  lines_tmp="$(mktemp)"
+  grep_rc=0
+  LC_ALL=C grep -an '`' "$doc" > "$lines_tmp" || grep_rc=$?
+  if [ "$grep_rc" -gt 1 ]; then
+    printf 'conformance-check: could not read document: %s\n' "$rel_doc" >&2
+    scan_errors=$((scan_errors + 1))
+    rm -f "${lines_tmp:?}"
+    continue
+  fi
 
   # Extract `inline-code` spans, one per line. Match content between
   # backticks. Then for each, decide if it's a path we want to check.
@@ -153,18 +171,37 @@ for doc in "${SPEC_DOCS[@]}"; do
       }
     ' > "$spans_tmp"
     while IFS= read -r span; do
-      # All references are repo-relative. Hard-coded operator checkout prefixes
-      # are invalid published documentation, not a portability compatibility
-      # feature, and must therefore remain visible to the checker.
+      # Absolute operator checkout paths are not portable repo references.
+      # Only inspect paths containing one of our root prefixes; generic home
+      # examples and unrelated absolute system paths remain out of scope.
+      case "$span" in
+        /Users/*|/home/*)
+          home_tail="${span#/Users/}"
+          home_tail="${home_tail#/home/}"
+          case "${home_tail%%/*}" in me|example|user|you) continue ;; esac
+          absolute_path="${span%%[[:space:]]*}"
+          for prefix in "${PREFIXES[@]}"; do
+            case "$absolute_path" in
+              *"/$prefix"*)
+                echo "MISS: $rel_doc:$line_num — \`$absolute_path\` (absolute checkout path)"
+                ref_count=$((ref_count + 1))
+                miss_count=$((miss_count + 1))
+                continue 2 ;;
+            esac
+          done
+          continue ;;
+      esac
       span="${span#./}"
-      # Skip if not ours
+      # Preserve real filenames with spaces; otherwise inspect the command's
+      # first token rather than dropping path-bearing commands wholesale.
+      if [ ! -e "$ROOT/$span" ] && [ ! -e "$doc_dir/$span" ]; then
+        span="${span%%[[:space:]]*}"
+      fi
       is_ours "$span" || continue
       # Clean path
       cleaned=$(clean_path "$span") || continue
       [ -z "$cleaned" ] && continue
-      # Skip pure command lines (contain spaces) — only file paths
-      case "$cleaned" in *\ *) continue ;; esac
-      # Skip obvious commands like `npx eslint`
+      # Skip directory-only patterns.
       case "$cleaned" in
         */) continue ;;  # trailing slash patterns are often globs
       esac
@@ -194,20 +231,20 @@ for doc in "${SPEC_DOCS[@]}"; do
       if [ -e "$ROOT/$cleaned" ]; then
         continue
       fi
-      doc_dir="$(dirname "$doc")"
       if [ -e "$doc_dir/$cleaned" ]; then
         continue
       fi
       echo "MISS: $rel_doc:$line_num — \`$cleaned\`"
       miss_count=$((miss_count + 1))
     done < "$spans_tmp"
-    rm -f "$spans_tmp"
-  done < <(grep -n '`' "$doc" 2>/dev/null || true)
+    rm -f "${spans_tmp:?}"
+  done < "$lines_tmp"
+  rm -f "${lines_tmp:?}"
 done
 
-if [ "$miss_count" -gt 0 ]; then
+if [ "$miss_count" -gt 0 ] || [ "$scan_errors" -gt 0 ]; then
   echo
-  echo "conformance-check: $miss_count missing references across $checked_files spec docs ($ref_count refs scanned)" >&2
+  echo "conformance-check: $miss_count missing references, $scan_errors unreadable/non-text docs across $checked_files spec docs ($ref_count refs scanned)" >&2
   exit 1
 fi
 

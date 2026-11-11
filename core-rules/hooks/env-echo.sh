@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # env-echo.sh — one-line environment echo probe. Prints "<NAME>=<value>" for
 # each variable name passed as an argument, one per line, exit 0. Used by
 # attach/sync probes to prove that named variables reach canonical script

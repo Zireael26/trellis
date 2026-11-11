@@ -248,6 +248,65 @@ _gr_now() {
   esac
 }
 
+# Reread override records (decision 3, option c). `trellis reread override
+# --session <id> --reason <why>` writes $TRELLIS_HOME/state/reread-overrides/<key>
+# as one line "<expires>\t<created>\t<reason>"; <key> is _se_state_key of the
+# session. The record is honoured only while unexpired and never for longer
+# than GR_REREAD_OVERRIDE_TTL from now, so a hand-written far-future expiry
+# buys nothing. The native evaluator (read_state.rs) applies the same reading.
+GR_REREAD_OVERRIDE_TTL=600
+
+# _gr_trellis_home — GR_TRELLIS_HOME = $TRELLIS_HOME, else $HOME/.trellis, else empty.
+_gr_trellis_home() {
+  GR_TRELLIS_HOME=${TRELLIS_HOME:-}
+  [ -n "$GR_TRELLIS_HOME" ] || { [ -z "${HOME:-}" ] || GR_TRELLIS_HOME=${HOME%/}/.trellis; }
+}
+
+# _gr_reread_override_active <state-key> — succeeds when an unexpired override
+# record exists for that key. The record must be exactly the CLI's one row:
+# "<expires>\t<created>\t<reason>\n", decimal fields without leading zeros,
+# expires = created + GR_REREAD_OVERRIDE_TTL, a nonempty reason of at most 2000
+# bytes without control characters, and nothing after the row. Any doubt
+# (missing, symlinked, malformed, extra data, expired, over-long) is "no
+# override": the guard then runs as usual. read_state.rs applies the same rules.
+_gr_reread_override_active() {
+  local key=$1 file line extra="" expires created reason rest field LC_ALL=C
+  case $key in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#key}" -eq 16 ] || return 1
+  _gr_trellis_home
+  [ -n "$GR_TRELLIS_HOME" ] || return 1
+  file=$GR_TRELLIS_HOME/state/reread-overrides/$key
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  { IFS= read -r line && ! IFS= read -r extra; } < "$file" 2>/dev/null || return 1
+  [ -z "$extra" ] && [ "${#line}" -le 4095 ] || return 1
+  case $line in *$'\t'*$'\t'*) ;; *) return 1 ;; esac
+  expires=${line%%$'\t'*} rest=${line#*$'\t'}
+  created=${rest%%$'\t'*} reason=${rest#*$'\t'}
+  for field in "$expires" "$created"; do
+    case $field in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#field}" -le 12 ] || return 1
+  done
+  case $reason in ''|*[[:cntrl:]]*) return 1 ;; esac
+  [ "${#reason}" -le 2000 ] || return 1
+  [ $((created + GR_REREAD_OVERRIDE_TTL)) -eq "$expires" ] || return 1
+  _gr_now
+  case $GR_NOW in ''|*[!0-9]*) return 1 ;; esac
+  [ "$expires" -gt "$GR_NOW" ] && [ $((expires - GR_NOW)) -le "$GR_REREAD_OVERRIDE_TTL" ]
+}
+
+# _gr_reread_override_path <normalized-path> — succeeds when the path is an
+# override record or its directory, in any letter case (macOS volumes usually
+# fold case). Edits there are refused: only the CLI writes overrides.
+_gr_reread_override_path() {
+  local folded=0 rc=1
+  shopt -q nocasematch && folded=1 || shopt -s nocasematch
+  case $1 in
+    */state/reread-overrides|*/state/reread-overrides/*) rc=0 ;;
+  esac
+  [ "$folded" -eq 1 ] || shopt -u nocasematch
+  return "$rc"
+}
+
 # --- rules/destructive.json --------------------------------------------------
 
 # _gr_destructive <claude|codex> <command>
@@ -262,14 +321,14 @@ _gr_destructive() {
 _gr_destructive_rules() {
   _gr_lines_of "$2"
   # rm-outside-cwd
-  if _gr_m $'rm[ \t\n\v\f\r]+(-[a-zA-Z]*f[a-zA-Z]*[ \t\n\v\f\r]+|(-[a-zA-Z]+[ \t\n\v\f\r]+)*)["]?((/|~|\\$HOME)[^ \t\n\v\f\r]*|\\.\\.(/[^ \t\n\v\f\r]*)?)([ \t\n\v\f\r]|$)' $'rm[ \t\n\v\f\r]+(-[a-zA-Z]*f[a-zA-Z]*[ \t\n\v\f\r]+|(-[a-zA-Z]+[ \t\n\v\f\r]+)*)["]?((/|~|\\$HOME)[^ \t\n\v\f\r]*|\\.\\.(/[^ \t\n\v\f\r]*)?)([ \t\n\v\f\r]|(\n|$))'; then
+  if _gr_m $'rm[ \t\n\v\f\r]+([^;&|<>]*[ \t\n\v\f\r])?[\'"]?\\\\*((/|~|\\$HOME|\\$\\{HOME[}])[^ \t\n\v\f\r]*|(\\./)*\\.\\.(/[^ \t\n\v\f\r]*)?)([ \t\n\v\f\r]|$)' $'rm[ \t\n\v\f\r]+([^;&|<>]*[ \t\n\v\f\r])?[\'"]?\\\\*((/|~|\\$HOME|\\$\\{HOME[}])[^ \t\n\v\f\r]*|(\\./)*\\.\\.(/[^ \t\n\v\f\r]*)?)([ \t\n\v\f\r]|(\n|$))'; then
     GR_DENY_ID=rm-outside-cwd
     GR_DENY_REASON=$'Blocked destructive rm targeting absolute path, ~, $HOME, or .. — run manually if intentional.'
     GR_DENY_JSON=$'"Blocked destructive rm targeting absolute path, ~, $HOME, or .. — run manually if intentional."'
     return 0
   fi
   # git-force-push
-  if _gr_m $'git[ \t\n\v\f\r]+push([ \t\n\v\f\r]+[^ \t\n\v\f\r]+)*[ \t\n\v\f\r]+(--force(-with-lease)?(=[^ \t\n\v\f\r]+)?|-f)([ \t\n\v\f\r]|$)' $'git[ \t\n\v\f\r]+push([ \t\n\v\f\r]+[^ \t\n\v\f\r]+)*[ \t\n\v\f\r]+(--force(-with-lease)?(=[^ \t\n\v\f\r]+)?|-f)([ \t\n\v\f\r]|(\n|$))'; then
+  if _gr_m $'git[ \t\n\v\f\r]+(-C[ \t\n\v\f\r]+[^ \t\n\v\f\r]+[ \t\n\v\f\r]+)*push([ \t\n\v\f\r]+[^ \t\n\v\f\r;&|]+)*[ \t\n\v\f\r]+(--force(-with-lease)?(=[^ \t\n\v\f\r]+)?|-[a-zA-Z]*f[a-zA-Z]*|\\+[^ \t\n\v\f\r]+)([ \t\n\v\f\r]|$)' $'git[ \t\n\v\f\r]+(-C[ \t\n\v\f\r]+[^ \t\n\v\f\r]+[ \t\n\v\f\r]+)*push([ \t\n\v\f\r]+[^ \t\n\v\f\r;&|]+)*[ \t\n\v\f\r]+(--force(-with-lease)?(=[^ \t\n\v\f\r]+)?|-[a-zA-Z]*f[a-zA-Z]*|\\+[^ \t\n\v\f\r]+)([ \t\n\v\f\r]|(\n|$))'; then
     GR_DENY_ID=git-force-push
     GR_DENY_REASON=$'Blocked force push — run manually if intentional.'
     GR_DENY_JSON=$'"Blocked force push — run manually if intentional."'
@@ -283,18 +342,25 @@ _gr_destructive_rules() {
     return 0
   fi
   # codex-sandboxless-max-effort
-  if _gr_m $'codex[ \t\n\v\f\r]([^|;&]*)?(--dangerously-bypass-approvals-and-sandbox|-s[ \t\n\v\f\r]+danger-full-access|--sandbox[ \t\n\v\f\r]+danger-full-access)' $'codex[ \t\n\v\f\r]([^|;&]*)?(--dangerously-bypass-approvals-and-sandbox|-s[ \t\n\v\f\r]+danger-full-access|--sandbox[ \t\n\v\f\r]+danger-full-access)' && _gr_m $'model_reasoning_effort["\'= \t\n\v\f\r]*(max|ultra)' $'model_reasoning_effort["\'= \t\n\v\f\r]*(max|ultra)'; then
+  if _gr_m $'codex[ \t\n\v\f\r]([^|;&]*)?(--dangerously-bypass-approvals-and-sandbox|(-s|--sandbox)[ \t\n\v\f\r]*=?[ \t\n\v\f\r]*danger-full-access|sandbox_mode[ \t\n\v\f\r]*=[ \t\n\v\f\r]*danger-full-access)' $'codex[ \t\n\v\f\r]([^|;&]*)?(--dangerously-bypass-approvals-and-sandbox|(-s|--sandbox)[ \t\n\v\f\r]*=?[ \t\n\v\f\r]*danger-full-access|sandbox_mode[ \t\n\v\f\r]*=[ \t\n\v\f\r]*danger-full-access)' && _gr_m $'model_reasoning_effort["\'= \t\n\v\f\r]*(max|ultra)' $'model_reasoning_effort["\'= \t\n\v\f\r]*(max|ultra)'; then
     GR_DENY_ID=codex-sandboxless-max-effort
     GR_DENY_REASON=$'Blocked max/ultra effort on the sandboxless codex hatch — forbidden compound (docs/codex-routing.md §3); run at xhigh or restore the sandbox.'
     GR_DENY_JSON=$'"Blocked max/ultra effort on the sandboxless codex hatch — forbidden compound (docs/codex-routing.md §3); run at xhigh or restore the sandbox."'
     return 0
   fi
-  # sql-drop-truncate
+  # sql-drop
   _gr_icase 1
-  if _gr_m $'DROP[ \t\n\v\f\r]+(TABLE|DATABASE)|TRUNCATE[ \t\n\v\f\r]+TABLE' $'DROP[ \t\n\v\f\r]+(TABLE|DATABASE)|TRUNCATE[ \t\n\v\f\r]+TABLE'; then
-    GR_DENY_ID=sql-drop-truncate
-    GR_DENY_REASON=$'Blocked destructive SQL (DROP/TRUNCATE) — run manually if intentional.'
-    GR_DENY_JSON=$'"Blocked destructive SQL (DROP/TRUNCATE) — run manually if intentional."'
+  if _gr_m $'DROP[ \t\n\v\f\r]+(TABLE|DATABASE)' $'DROP[ \t\n\v\f\r]+(TABLE|DATABASE)'; then
+    GR_DENY_ID=sql-drop
+    GR_DENY_REASON=$'Blocked destructive SQL DROP (TABLE/DATABASE) — run manually if intentional.'
+    GR_DENY_JSON=$'"Blocked destructive SQL DROP (TABLE/DATABASE) — run manually if intentional."'
+    return 0
+  fi
+  # sql-truncate
+  if _gr_m $'((psql|mysql|sqlite3|duckdb|clickhouse)[ \t\n\v\f\r][^;&|]*(-c|--command|-e|--execute|--query|<<)|[^|][|][ \t\n\v\f\r]*([^ \t\n\v\f\r|;&]*/)?(psql|mysql|sqlite3|duckdb|clickhouse)([ \t\n\v\f\r]|$))' $'((psql|mysql|sqlite3|duckdb|clickhouse)[ \t\n\v\f\r][^;&|]*(-c|--command|-e|--execute|--query|<<)|[^|][|][ \t\n\v\f\r]*([^ \t\n\v\f\r|;&]*/)?(psql|mysql|sqlite3|duckdb|clickhouse)([ \t\n\v\f\r]|(\n|$)))' && _gr_m $'TRUNCATE[ \t\n\v\f\r]+(TABLE[ \t\n\v\f\r]+)?\\\\?["`]?[a-zA-Z_]' $'TRUNCATE[ \t\n\v\f\r]+(TABLE[ \t\n\v\f\r]+)?\\\\?["`]?[a-zA-Z_]'; then
+    GR_DENY_ID=sql-truncate
+    GR_DENY_REASON=$'Blocked destructive SQL TRUNCATE in a client invocation — run manually if intentional.'
+    GR_DENY_JSON=$'"Blocked destructive SQL TRUNCATE in a client invocation — run manually if intentional."'
     return 0
   fi
   # sql-delete-without-where
@@ -314,21 +380,21 @@ _gr_destructive_rules() {
     fi
   fi
   # exfil-pipe
-  if _gr_m $'(cat|less|head|tail|more|source|grep|sed|awk|bat)[ \t\n\v\f\r]+[^|]*(\\.env([^A-Za-z0-9/]|$)|/secrets/)[^\n]*[|][ \t\n\v\f\r]*(curl|wget|nc|netcat|ncat|xargs|ssh|scp|rsync|base64|openssl|sh|bash)([ \t\n\v\f\r]|$)' $'(cat|less|head|tail|more|source|grep|sed|awk|bat)[ \t\n\v\f\r]+[^|]*(\\.env([^A-Za-z0-9/]|(\n|$))|/secrets/)[^\n]*[|][ \t\n\v\f\r]*(curl|wget|nc|netcat|ncat|xargs|ssh|scp|rsync|base64|openssl|sh|bash)([ \t\n\v\f\r]|(\n|$))'; then
+  if _gr_m $'(cat|less|head|tail|more|source|grep|sed|awk|bat)[ \t\n\v\f\r]+([^|]*\\.env([^A-Za-z0-9/]|$)|(([^|]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|$)))[^\n]*[|][ \t\n\v\f\r]*(curl|wget|nc|netcat|ncat|xargs|ssh|scp|rsync|base64|openssl|sh|bash)([ \t\n\v\f\r]|$)' $'(cat|less|head|tail|more|source|grep|sed|awk|bat)[ \t\n\v\f\r]+([^|]*\\.env([^A-Za-z0-9/]|(\n|$))|(([^|]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|(\n|$))))[^\n]*[|][ \t\n\v\f\r]*(curl|wget|nc|netcat|ncat|xargs|ssh|scp|rsync|base64|openssl|sh|bash)([ \t\n\v\f\r]|(\n|$))'; then
     GR_DENY_ID=exfil-pipe
     GR_DENY_REASON=$'Blocked piping sensitive file (.env or /secrets/) into network tool — prompt-injection exfil vector.'
     GR_DENY_JSON=$'"Blocked piping sensitive file (.env or /secrets/) into network tool — prompt-injection exfil vector."'
     return 0
   fi
   # exfil-upload
-  if _gr_m $'(curl|wget)[ \t\n\v\f\r][^;&|]*(--data|--data-raw|--data-binary|--data-urlencode|--data-ascii|--form|-F[ \t\n\v\f\r]|-d[ \t\n\v\f\r]|--post-file|--upload-file|-T[ \t\n\v\f\r])[ \t\n\v\f\r=]*@?[^ \t\n\v\f\r]*(\\.env([^A-Za-z0-9/]|$)|/secrets/)' $'(curl|wget)[ \t\n\v\f\r][^;&|]*(--data|--data-raw|--data-binary|--data-urlencode|--data-ascii|--form|-F[ \t\n\v\f\r]|-d[ \t\n\v\f\r]|--post-file|--upload-file|-T[ \t\n\v\f\r])[ \t\n\v\f\r=]*@?[^ \t\n\v\f\r]*(\\.env([^A-Za-z0-9/]|(\n|$))|/secrets/)'; then
+  if _gr_m $'(curl|wget)[ \t\n\v\f\r][^;&|]*(--data|--data-raw|--data-binary|--data-urlencode|--data-ascii|--form|-[A-Za-z]*F([ \t\n\v\f\r=/]|@|$)|-[A-Za-z]*d([ \t\n\v\f\r=/]|@|$)|--post-file|--upload-file|-[A-Za-z]*T([ \t\n\v\f\r=/]|@|$))[ \t\n\v\f\r=]*@?([^ \t\n\v\f\r]*\\.env([^A-Za-z0-9/]|$)|(([^ \t\n\v\f\r]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|$)))' $'(curl|wget)[ \t\n\v\f\r][^;&|]*(--data|--data-raw|--data-binary|--data-urlencode|--data-ascii|--form|-[A-Za-z]*F([ \t\n\v\f\r=/]|@|(\n|$))|-[A-Za-z]*d([ \t\n\v\f\r=/]|@|(\n|$))|--post-file|--upload-file|-[A-Za-z]*T([ \t\n\v\f\r=/]|@|(\n|$)))[ \t\n\v\f\r=]*@?([^ \t\n\v\f\r]*\\.env([^A-Za-z0-9/]|(\n|$))|(([^ \t\n\v\f\r]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|(\n|$))))'; then
     GR_DENY_ID=exfil-upload
     GR_DENY_REASON=$'Blocked curl/wget uploading sensitive file (.env or /secrets/) as body — prompt-injection exfil vector.'
     GR_DENY_JSON=$'"Blocked curl/wget uploading sensitive file (.env or /secrets/) as body — prompt-injection exfil vector."'
     return 0
   fi
   # exfil-command-substitution
-  if _gr_m $'(curl|wget)[ \t\n\v\f\r][^;&|]*([$]\\(|`)[ \t\n\v\f\r]*(cat|less|head|tail|more|grep|sed|awk|bat)[ \t\n\v\f\r]+[^)`]*(\\.env|/secrets/)' $'(curl|wget)[ \t\n\v\f\r][^;&|]*([$]\\(|`)[ \t\n\v\f\r]*(cat|less|head|tail|more|grep|sed|awk|bat)[ \t\n\v\f\r]+[^)`]*(\\.env|/secrets/)'; then
+  if _gr_m $'(curl|wget)[ \t\n\v\f\r][^;&|]*([$]\\(|`)[ \t\n\v\f\r]*(cat|less|head|tail|more|grep|sed|awk|bat)[ \t\n\v\f\r]+[^)`]*((([^)`]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|$))|\\.env)' $'(curl|wget)[ \t\n\v\f\r][^;&|]*([$]\\(|`)[ \t\n\v\f\r]*(cat|less|head|tail|more|grep|sed|awk|bat)[ \t\n\v\f\r]+[^)`]*((([^)`]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|(\n|$)))|\\.env)'; then
     GR_DENY_ID=exfil-command-substitution
     GR_DENY_REASON=$'Blocked curl/wget with command-substituted sensitive file in body — prompt-injection exfil vector.'
     GR_DENY_JSON=$'"Blocked curl/wget with command-substituted sensitive file in body — prompt-injection exfil vector."'
@@ -340,10 +406,19 @@ _gr_destructive_rules() {
       ';&|()`' '([^A-Za-z0-9_./~-])((projects|namespaces)/[A-Za-z0-9_-][A-Za-z0-9_.-]*/secrets/)' '<exempt-identifier>' \
       '-f'
   fi
-  if _gr_m $'(^|[ \t\n\v\f\r|;&(`])([^ \t\n\v\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\v\f\r]+[^|;&]*/secrets/' $'((^|\n)|[ \t\n\v\f\r|;&(`])([^ \t\n\v\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\v\f\r]+[^|;&]*/secrets/'; then
+  if _gr_m $'(^|[ \t\n\v\f\r|;&(`])([^ \t\n\v\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\v\f\r]+(([^|;&]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|$))' $'((^|\n)|[ \t\n\v\f\r|;&(`])([^ \t\n\v\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\v\f\r]+(([^|;&]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|(\n|$)))'; then
     GR_DENY_ID=secrets-read
     GR_DENY_REASON=$'Blocked read under **/secrets/** — credentials must not be exposed to the agent.'
     GR_DENY_JSON=$'"Blocked read under **/secrets/** — credentials must not be exposed to the agent."'
+    return 0
+  fi
+  _gr_lines_of "$2"
+  # reread-override-direct-write
+  _gr_icase 1
+  if _gr_m 'state/reread-overrides' 'state/reread-overrides' && _gr_m $'(^|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))|(^|[ \t\n\v\f\r|;&(`])(tee|cp|mv|ln|install|touch|dd|rsync|mkdir|chmod|truncate|perl|python[0-9]*|ruby|node|osascript)([ \t\n\v\f\r]|$)|sed[^|;&]*[ \t\n\v\f\r]-i' $'((^|\n)|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))|((^|\n)|[ \t\n\v\f\r|;&(`])(tee|cp|mv|ln|install|touch|dd|rsync|mkdir|chmod|truncate|perl|python[0-9]*|ruby|node|osascript)([ \t\n\v\f\r]|(\n|$))|sed[^|;&]*[ \t\n\v\f\r]-i'; then
+    GR_DENY_ID=reread-override-direct-write
+    GR_DENY_REASON=$'Blocked direct write to a reread override record — only `trellis reread override --session <id> --reason <why>` writes these, with a logged breadcrumb.'
+    GR_DENY_JSON=$'"Blocked direct write to a reread override record — only `trellis reread override --session <id> --reason <why>` writes these, with a logged breadcrumb."'
     return 0
   fi
   return 1
@@ -361,12 +436,12 @@ _gr_reread_budget() {
 
 # _gr_reread_warn_msg <path> <count> <budget> — GR_MSG = the warn advisory.
 _gr_reread_warn_msg() {
-  GR_MSG='reread-guard: about to edit '"$1"' not Read this turn (warn '"$2"'/'"$3"'). Read it first, or export TRELLIS_REREAD_OVERRIDE=1. Repeated FAILED stale edits will BLOCK.'
+  GR_MSG='reread-guard: about to edit '"$1"' not Read this turn (warn '"$2"'/'"$3"'). Read it first, or have the operator run trellis reread override --session <id> --reason <why> (legacy shell hooks also accept TRELLIS_REREAD_OVERRIDE=1). Repeated FAILED stale edits will BLOCK.'
 }
 
 # _gr_reread_block_msg <path> — GR_MSG = the block reason.
 _gr_reread_block_msg() {
-  GR_MSG='reread-guard: BLOCKED edit of '"$1"$' — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or export TRELLIS_REREAD_OVERRIDE=1 to override.'
+  GR_MSG='reread-guard: BLOCKED edit of '"$1"$' — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or have the operator run trellis reread override --session <id> --reason <why> (legacy shell hooks also accept TRELLIS_REREAD_OVERRIDE=1).'
 }
 
 # Edit-family error-string markers. The Codex guards hand these to jq's

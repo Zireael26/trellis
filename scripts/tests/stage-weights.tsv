@@ -160,6 +160,7 @@ bats scripts/tests/harness-conformance.bats	20
 bats scripts/tests/heavy-slot-gate.bats	89
 bats scripts/tests/herdr-task-routing.bats	13
 bats scripts/tests/historical-releases.bats	5
+bats scripts/tests/hook-default-predecessor.bats	60
 bats scripts/tests/hook-inventory.bats	23
 bats scripts/tests/hook-parity.bats	3
 bats scripts/tests/hook-passthrough-shims.bats	19
@@ -271,6 +272,7 @@ bats scripts/tests/wiki-skill-promotion.bats	49
 bats scripts/tests/wiki-skill-suggest.bats	16
 bats scripts/tests/workflow-stage-integrity.bats	3
 bats scripts/tests/worktree-wrapper.bats	180
+cargo unit-tests native/trellis-hooks (lib + bins)	150
 conformance-check	52
 recipe routing lint	0
 shellcheck (CI scope, severity=warning)	88

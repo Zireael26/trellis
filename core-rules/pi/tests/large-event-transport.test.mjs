@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import extension from '../extensions/trellis.ts';
+import { realDispatchExec, mockDispatchExec } from './dispatch-test-transport.mjs';
 
 const dispatcher = new URL('../hooks/dispatch.sh', import.meta.url);
 const supervisor = new URL('../../hooks/lib/guard-supervise.pl', import.meta.url);
@@ -28,9 +29,13 @@ function fixture(t) {
   const calls = [], handlers = new Map();
   const pi = {
     on: (name, handler) => handlers.set(name, handler),
-    getAllTools: () => [],
+    // Pi 0.85 builtin metadata: the extension refuses read/edit/write/bash
+    // whose provenance is not a single builtin (ccbe6a0c7).
+    getAllTools: () => ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'].map(name => ({
+      name, sourceInfo: { path: `<builtin:${name}>`, source: 'builtin', scope: 'temporary', origin: 'top-level', baseDir: undefined },
+    })),
     sendMessage: () => {},
-    exec: async (command, args, options) => {
+    exec: realDispatchExec(async (command, args, options) => {
       let summary, fileMode, directoryMode;
       if (args[0] === '--event-file') {
         const event = JSON.parse(readFileSync(args[1], 'utf8'));
@@ -43,13 +48,13 @@ function fixture(t) {
         };
       }
       const result = spawnSync('bash', [command, ...args], {
-        cwd: options.cwd, env: process.env, encoding: 'utf8', timeout: 30_000,
+        cwd: options.cwd, env: { ...process.env, ...options.env }, encoding: 'utf8', timeout: 30_000,
       });
       calls.push({ command, argCount: args.length, mode: args[0], file: args[0] === '--event-file' ? args[1] : undefined,
         options, error: result.error?.code, status: result.status, fileMode, directoryMode, summary });
       if (result.error) throw result.error;
       return { stdout: result.stdout, stderr: result.stderr, code: result.status, killed: false };
-    },
+    }),
   };
   extension(pi);
   const ctx = {
@@ -61,22 +66,26 @@ function fixture(t) {
   return { cwd, script, calls, handlers, pi, ctx };
 }
 
-test('large pre-action input and image-sized shell result cross the process boundary without argv payload', async t => {
+test('large PR pre-action uses private transport; image-sized shell result stays local and byte-exact', async t => {
   const f = fixture(t);
   const largeInput = 'gh pr create --title ' + 'x'.repeat(2 * 1024 * 1024);
-  const pre = await f.handlers.get('tool_call')({
-    toolCallId: 'large-input', toolName: 'bash', input: { command: largeInput },
-  }, f.ctx);
-  const post = await f.handlers.get('tool_result')({
-    toolCallId: 'large-result', toolName: 'bash', input: { command: 'printf image' },
-    content: [{ type: 'image', data: 'A'.repeat(2 * 1024 * 1024), mimeType: 'image/png' }], isError: false,
-  }, f.ctx);
-  // Exercise both real spawns before asserting: historical red must prove
-  // E2BIG for the image result too, not stop after the pre-action failure.
-  assert.deepEqual(f.calls.map(call => call.error), [undefined, undefined]);
+  const event = { toolCallId: 'large-input', toolName: 'bash', input: { command: largeInput } };
+  const pre = await f.handlers.get('tool_call')(event, f.ctx);
+  const content = [
+    { type: 'text', text: 'native\r\n\u0000é e\u0301\t  \n' },
+    { type: 'image', data: 'A'.repeat(2 * 1024 * 1024), mimeType: 'image/png' },
+  ];
+  const bytes = Buffer.from(JSON.stringify(content));
+  const result = { ...event, content, details: { retained: true }, isError: false };
+  const post = await f.handlers.get('tool_result')(result, f.ctx);
+  assert.deepEqual(f.calls.map(call => call.error), [undefined]);
   assert.equal(pre, undefined);
   assert.equal(post, undefined);
-  assert.equal(f.calls.length, 2);
+  assert.strictEqual(result.content, content);
+  assert.deepEqual(Buffer.from(JSON.stringify(result.content)), bytes);
+  assert.deepEqual(result.details, { retained: true });
+  assert.equal(result.isError, false);
+  assert.equal(f.calls.length, 1, 'native content arrays must not dispatch a post-action no-op');
   for (const call of f.calls) {
     assert.equal(call.mode, '--event-file');
     assert.equal(call.argCount, 2);
@@ -88,8 +97,9 @@ test('large pre-action input and image-sized shell result cross the process boun
     assert.equal(existsSync(call.file), false, 'event leaf should be removed after dispatch');
     assert.equal(existsSync(dirname(call.file)), false, 'owned private directory should be removed after dispatch');
   }
+  assert.equal(f.calls[0].summary.phase, 'pre_action');
+  assert.equal(f.calls[0].status, 0);
   assert.equal(f.calls[0].summary.inputCommandLength, largeInput.length);
-  assert.equal(f.calls[1].summary.imageDataLength, 2 * 1024 * 1024);
 });
 
 test('dispatcher rejects non-private, linked, and oversized event files without echoing data', t => {
@@ -159,12 +169,12 @@ test('temporary event transport cleans up after spawn failure/cancellation and r
   for (const failure of [new Error('spawn failure sentinel'), Object.assign(new Error('cancel sentinel'), { name: 'AbortError' })]) {
     const f = fixture(t);
     let eventFile;
-    f.pi.exec = async (_command, args, options) => {
+    f.pi.exec = mockDispatchExec(async (_command, args, options) => {
       assert.equal(args[0], '--event-file');
       assert.equal(options.signal, f.ctx.signal);
       eventFile = args[1];
       throw failure;
-    };
+    });
     const blocked = await f.handlers.get('tool_call')({
       toolCallId: failure.name, toolName: 'bash', input: { command: 'gh pr create' },
     }, f.ctx);
@@ -176,12 +186,12 @@ test('temporary event transport cleans up after spawn failure/cancellation and r
 
   const f = fixture(t);
   let eventFile, leftover;
-  f.pi.exec = async (_command, args) => {
+  f.pi.exec = mockDispatchExec(async (_command, args) => {
     eventFile = args[1];
     leftover = resolve(dirname(eventFile), 'unowned-sentinel');
     writeFileSync(leftover, 'preserve');
     return { stdout: JSON.stringify({ schema_version: 1, capability_status: 'enforced', decision: 'allow' }), stderr: '', code: 0, killed: false };
-  };
+  });
   const directory = () => dirname(eventFile);
   t.after(() => { if (eventFile) rmSync(directory(), { recursive: true, force: true }); });
   const blocked = await f.handlers.get('tool_call')({

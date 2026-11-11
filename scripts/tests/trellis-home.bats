@@ -406,6 +406,39 @@ teardown() {
   th_contains 'contains terminal control characters' "$output"
 }
 
+@test "absolute-path diagnostics precede assignment checks without relaxing refusals" {
+  local shell label path
+  for shell in /bin/bash "$(command -v bash)"; do
+    for label in TRELLIS_HOME 'native companion'; do
+      for path in relative/path relative=assignment; do
+        run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" "$label" "$path"
+        [ "$status" -eq 2 ] || { echo "$shell $label $path: $output"; return 1; }
+        th_contains 'must be an absolute path' "$output"
+      done
+      run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" "$label" "$SANDBOX/has=equals"
+      [ "$status" -eq 2 ]
+      th_contains 'must not contain an env assignment operand (=)' "$output"
+      run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" "$label" "$SANDBOX/control"$'\t'"path"
+      [ "$status" -eq 2 ]
+      th_contains 'contains terminal control characters' "$output"
+      run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" "$label" '//ambiguous/path'
+      [ "$status" -eq 2 ]
+      th_contains 'ambiguous double-slash path' "$output"
+      run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" "$label" "$SANDBOX/parent/../path"
+      [ "$status" -eq 2 ]
+      th_contains 'must not contain . or .. path components' "$output"
+      run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" "$label" /
+      [ "$status" -eq 2 ]
+      th_contains 'must not be the filesystem root' "$output"
+      run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" "$label" "$SANDBOX/good path"
+      [ "$status" -eq 0 ] || { echo "$shell $label valid: $output"; return 1; }
+    done
+    # Equals is permitted for labels that are not env command operands.
+    run "$shell" -c '. "$1"; trellis_home_require_absolute_safe_path "$2" "$3"' _ "$HOME_LIB" 'source root' "$SANDBOX/has=equals"
+    [ "$status" -eq 0 ] || { echo "$shell source root: $output"; return 1; }
+  done
+}
+
 # GAP: every existing home-permission case ran under a space-free path, and no
 # case covered trellis_home_atomic_write_json at all.
 @test "a space-bearing home is prepared 0700 and its machine config is written 0600, sorted, and idempotently" {
@@ -492,6 +525,33 @@ teardown() {
   th_lib trellis_home_atomic_write_json "$config" "$VALID_MACHINE_B"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
   [ "$(jq -r '.default_fleet' "$config")" = work ]
+}
+
+@test "machine config rejects multiple JSON documents before resolving fleet or publishing" {
+  local config="$SANDBOX/config.json" proposal="$SANDBOX/proposal.json" before
+  th_write_config "$config"
+  before="$(th_sha256 "$config")"
+  # Whitespace around one document is harmless.
+  { printf '\n  '; jq . "$VALID_MACHINE_A"; printf '\n'; } > "$proposal"
+  th_lib trellis_home_validate_config "$proposal"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+
+  # The invalid first value must not be masked by the valid second value.
+  jq '.default_fleet = "x/../y"' "$VALID_MACHINE_A" > "$proposal"
+  jq . "$VALID_MACHINE_A" >> "$proposal"
+  th_lib trellis_home_validate_config "$proposal"
+  [ "$status" -eq 4 ] || { printf '%s\n' "$output"; false; }
+  th_lib trellis_home_resolve_fleet "" "$proposal"
+  [ "$status" -eq 4 ] || { printf '%s\n' "$output"; false; }
+  th_lib trellis_home_atomic_write_json "$config" "$proposal"
+  [ "$status" -eq 4 ] || { printf '%s\n' "$output"; false; }
+  [ "$(th_sha256 "$config")" = "$before" ]
+
+  # Even two otherwise valid documents are not one machine config.
+  jq . "$VALID_MACHINE_A" > "$proposal"
+  jq . "$VALID_MACHINE_B" >> "$proposal"
+  th_lib trellis_home_validate_config "$proposal"
+  [ "$status" -eq 4 ] || { printf '%s\n' "$output"; false; }
 }
 
 # GAP: hostile local state at the home level (a file where the home belongs, a

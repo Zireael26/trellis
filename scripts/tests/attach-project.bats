@@ -226,6 +226,8 @@ make_contextual_release() {
     "$repo/core-rules/husky" \
     "$repo/core-rules/githooks" \
     "$repo/scripts"
+  mkdir -p "$repo/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$repo/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
@@ -588,7 +590,7 @@ SH
 }
 
 @test "contextual renderer rejects malformed placeholders and unsafe stable launchers" {
-  local payload root template record context launcher target alias
+  local payload root template record context launcher target alias real_launcher rendered unsafe foreign
   export HOME="$SANDBOX/render-account"
   export TRELLIS_HOME="$SANDBOX/render-machine"
   mkdir -p "$HOME/.local/bin" "$TRELLIS_HOME"
@@ -602,13 +604,14 @@ SH
   payload="$SANDBOX/render-payload"
   root="$SANDBOX/render-project"
   template="$payload/core-rules/templates/claude-settings.local.json"
-  mkdir -p "$(dirname "$template")" "$root"
+  mkdir -p "$(dirname "$template")" "$payload/core-rules/legacy-hooks" "$root"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$payload/core-rules/legacy-hooks/"
   record="$(jq -cn \
     --arg template "core-rules/templates/claude-settings.local.json" \
     --arg destination ".claude/settings.local.json" \
     '{template:$template,destination:$destination,mode:"0600"}')"
 
-  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" "$template"
+  cp "$REPO_ROOT/core-rules/legacy-hooks/claude-settings.local.json" "$template"
   run attach_json_render_plan "$root" "$payload" "$record" "$context"
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | jq -e '
@@ -621,13 +624,13 @@ SH
   run attach_json_render_plan "$root" "$payload" "$record" "$context"
   [ "$status" -eq 4 ]
 
-  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" "$template"
+  cp "$REPO_ROOT/core-rules/legacy-hooks/claude-settings.local.json" "$template"
   jq '.hooks.SessionStart[0].hooks[0].command += " __TRELLIS_HOME__"' "$template" > "$template.tmp"
   mv "$template.tmp" "$template"
   run attach_json_render_plan "$root" "$payload" "$record" "$context"
   [ "$status" -eq 4 ]
 
-  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" "$template"
+  cp "$REPO_ROOT/core-rules/legacy-hooks/claude-settings.local.json" "$template"
   jq '.unexpected_placeholder = "__TRELLIS_LAUNCHER__"' "$template" > "$template.tmp"
   mv "$template.tmp" "$template"
   run attach_json_render_plan "$root" "$payload" "$record" "$context"
@@ -653,10 +656,72 @@ SH
   [ "$status" -eq 4 ]
   chmod 755 "$launcher"
 
+  # A symlinked ~/.local (dotfile managers, home-manager) is a trusted root
+  # when its real target is safe. The launcher is pinned by its resolved real
+  # path, so retargeting the link later cannot redirect rendered commands.
   mv "$HOME/.local" "$SANDBOX/real-local"
+  chmod 700 "$SANDBOX/real-local"
+  chmod 755 "$SANDBOX/real-local/bin"
   ln -s "$SANDBOX/real-local" "$HOME/.local"
   run attach_contextual_render_context "$TRELLIS_HOME"
-  [ "$status" -eq 4 ]
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  context="$output"
+  real_launcher="$(CDPATH='' cd "$SANDBOX/real-local/bin" && pwd -P)/trellis"
+  [ "$(jq -r '.launcher' <<<"$context")" = "$real_launcher" ]
+  cp "$REPO_ROOT/core-rules/legacy-hooks/claude-settings.local.json" "$template"
+  run attach_json_render_plan "$root" "$payload" "$record" "$context"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  rendered="$(printf '%s\n' "$output" | jq -r '.artifact.content_base64' | base64 --decode)"
+  grep -qF "$real_launcher" <<<"$rendered" || { echo "$rendered"; false; }
+  ! grep -qF "$HOME/.local" <<<"$rendered" || { echo "$rendered"; false; }
+
+  # An unsafe real target is refused: the launcher directory or any ancestor
+  # group- or world-writable, a writable non-sticky parent, or a foreign owner.
+  for unsafe in "$SANDBOX/real-local/bin:775" "$SANDBOX/real-local/bin:757" \
+    "$SANDBOX/real-local:770" "$SANDBOX/real-local:707"; do
+    chmod "${unsafe##*:}" "${unsafe%:*}"
+    run attach_contextual_render_context "$TRELLIS_HOME"
+    [ "$status" -eq 4 ] || { echo "$unsafe: $output"; false; }
+    [[ "$output" == *"is not owned by you or root, or is writable by others"* ]] || { echo "$unsafe: $output"; false; }
+  done
+  chmod 755 "$SANDBOX/real-local/bin"
+  chmod 700 "$SANDBOX/real-local"
+  rm "${HOME:?}/.local"
+  mkdir "$SANDBOX/shared"
+  mv "$SANDBOX/real-local" "$SANDBOX/shared/real-local"
+  ln -s "$SANDBOX/shared/real-local" "$HOME/.local"
+  chmod 777 "$SANDBOX/shared"
+  run attach_contextual_render_context "$TRELLIS_HOME"
+  [ "$status" -eq 4 ] || { echo "writable parent: $output"; false; }
+  # Others can add to a sticky parent such as /tmp but not rename our entries.
+  chmod 1777 "$SANDBOX/shared"
+  run attach_contextual_render_context "$TRELLIS_HOME"
+  [ "$status" -eq 0 ] || { echo "sticky parent: $output"; false; }
+  chmod 700 "$SANDBOX/shared"
+  # A directory owned by another (non-root) user is refused by the same check
+  # the renderer runs; it cannot hold our launcher, so probe the check itself.
+  foreign="$(python3 -I -c '
+import os, sys
+me = os.geteuid()
+for top in ("/var", "/private/var", "/usr", "/opt", "/run"):
+    for base, dirs, _ in os.walk(top):
+        if base.count("/") > 3:
+            dirs[:] = []
+            continue
+        try:
+            info = os.lstat(base)
+        except OSError:
+            continue
+        if info.st_uid not in (me, 0) and not os.path.islink(base):
+            print(base)
+            sys.exit(0)
+')" || true
+  if [ -n "$foreign" ] && [ "$(id -u)" -ne 0 ]; then
+    run _attachment_launcher_dir_trusted "$foreign"
+    [ "$status" -ne 0 ] || { echo "foreign-owned $foreign accepted"; false; }
+  fi
+  run _attachment_launcher_dir_trusted "$(CDPATH='' cd "$SANDBOX/shared/real-local/bin" && pwd -P)"
+  [ "$status" -eq 0 ]
 
   ln -s "$TRELLIS_HOME" "$SANDBOX/render-machine-alias"
   alias="$SANDBOX/render-machine-alias"
@@ -760,7 +825,7 @@ reconcile_counted_registry() {
 }
 
 @test "attach over N>=3 sibling owners verifies the sealed release at most once" {
-  local idx sibling real_git trace_bin body_log hash_log
+  local idx sibling real_git real_python trace_bin body_log hash_log
   run_attach
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   for idx in 1 2 3; do
@@ -783,12 +848,24 @@ fi
 exec "$real_git" "\$@"
 EOF
   chmod 755 "$trace_bin/git"
+  # The content pass is release_verify.py when it reaches a verdict (spec 074
+  # T5) and the shell pass's one hash-object otherwise; either counts once.
+  real_python="$(command -v python3)"
+  cat > "$trace_bin/python3" <<EOF
+#!/usr/bin/env bash
+case " \$* " in
+  *"/release_verify.py "*" 0 "|*"/release_verify.py "*" 1 ")
+    [ -z "\${VERIFY_HASH_LOG:-}" ] || printf 'hash\n' >> "\$VERIFY_HASH_LOG" ;;
+esac
+exec "$real_python" "\$@"
+EOF
+  chmod 755 "$trace_bin/python3"
 
   body_log="$SANDBOX/verify-body.log"
   hash_log="$SANDBOX/verify-hash.log"
   : > "$body_log"
   : > "$hash_log"
-  run env PATH="$trace_bin:$PATH" VERIFY_BODY_LOG="$body_log" VERIFY_HASH_LOG="$hash_log" bash -c '
+  run env PATH="$trace_bin:$PATH" TRELLIS_PYTHON="$trace_bin/python3" VERIFY_BODY_LOG="$body_log" VERIFY_HASH_LOG="$hash_log" bash -c '
     . "$1"
     definition="$(declare -f release_store_verify_path_body)"
     eval "${definition/release_store_verify_path_body /real_release_store_verify_path_body }"
@@ -815,7 +892,7 @@ run_inherited_verify_memo() {
       release_store_verify 1.2.3 || exit 91
     else
       key="$(release_store_verify_memo_key "$2/releases/1.2.3" 1.2.3)" || exit 92
-      _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${key}"$'"'"'\n'"'"'
+      _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${key}"$'"'"'\tfull\n'"'"'
     fi
     export _TRELLIS_RELEASE_STORE_VERIFY_MEMO
     [ -n "$_TRELLIS_RELEASE_STORE_VERIFY_MEMO" ] || exit 93
@@ -1388,7 +1465,7 @@ reconcile_inventory_check() {
   mkdir -p "$python_dir"
   cat > "$python_dir/python3" <<'SH'
 #!/bin/sh
-if [ "$#" -eq 8 ] && [ "$2" = "$T14_PINNED_RUNTIME_ROOT" ]; then
+if [ "$#" -eq 9 ] && [ "$1" = -I ] && [ "$2" = - ] && [ "$3" = "$T14_PINNED_RUNTIME_ROOT" ]; then
   : > "$T14_PINNED_RUNTIME_BARRIER"
   while [ ! -e "$T14_PINNED_RUNTIME_CONTINUE" ]; do
     /bin/sleep 0.01
@@ -1840,12 +1917,20 @@ SH
   managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
   [ ! -e "$managed" ]
   [ ! -L "$managed" ]
+  [ ! -e "$PROJECT/.trellis/runtime" ]
+  [ ! -L "$PROJECT/.trellis/runtime" ]
+
+  ATTACHMENT_FAULT_PHASE=hooks-staged run_attach
+  [ "$status" -eq 5 ]
+  [ ! -e "$PROJECT/.trellis/runtime" ]
+  [ ! -L "$PROJECT/.trellis/runtime" ]
 
   run_attach
 
   [ "$status" -eq 0 ]
   [ -x "$managed/pre-push" ]
   [ -f "$managed/pre-push-source" ]
+  [ "$(readlink "$PROJECT/.trellis/runtime")" = "$TRELLIS_HOME/releases/1.2.3/payload" ]
 }
 
 @test "managed pre-push replays refs and preserves prior hook failure precedence" {

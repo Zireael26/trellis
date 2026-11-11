@@ -70,6 +70,159 @@ assert_bounded() {
   [[ "$output" != *"[x]"* ]]
 }
 
+@test "task context reads validates and renders in one Python invocation" {
+  printf '%s\n' '- [x] private text' '- [ ] pending text' > "$PROJECT/tasks.md"
+  capture tasks.md
+  local real_python
+  real_python="$(command -v python3)"
+  mkdir -p "$WORK/bin"
+  cat > "$WORK/bin/python3" <<'SHIM'
+#!/bin/bash
+printf 'python\n' >> "$TASK_CONTEXT_PYTHON_CALLS"
+exec "$TASK_CONTEXT_REAL_PYTHON" "$@"
+SHIM
+  chmod +x "$WORK/bin/python3"
+  export TASK_CONTEXT_REAL_PYTHON="$real_python" TASK_CONTEXT_PYTHON_CALLS="$WORK/python-calls"
+  run env PATH="$WORK/bin:$PATH" bash "$WORK/run.sh" "$LIB" "$PROJECT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"checked=1 pending=1"* ]]
+  [ "$(wc -l < "$WORK/python-calls" | tr -d ' ')" -eq 1 ]
+}
+
+@test "the combined read does not serialize the full task protocol" {
+  printf '%s\n' '- [x] SENTINEL private text' > "$PROJECT/tasks.md"
+  capture tasks.md
+  # A tripwire on protocol serialization, not the small quoted path labels.
+  cat >> "$LIB/task-state.py" <<'TRIPWIRE'
+_original_dumps = json.dumps
+def no_protocol_dump(value, *args, **kwargs):
+    if isinstance(value, dict) and "documents" in value:
+        raise ValueError("full protocol serialized")
+    return _original_dumps(value, *args, **kwargs)
+json.dumps = no_protocol_dump
+TRIPWIRE
+  context
+  [ "$status" -eq 0 ]
+  assert_bounded
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=0"* ]]
+  [[ "$output" != *SENTINEL* ]]
+}
+
+@test "the combined publisher retains the primitive deadline and reads only once" {
+  printf '%s\n' '- [x] private task' > "$PROJECT/tasks.md"
+  capture tasks.md
+  cat >> "$LIB/task-state.py" <<'PROBE'
+_original_read, _original_publish = read, publish
+_read_calls = 0
+_read_deadline = None
+def read(active):
+    global _read_calls, _read_deadline
+    _read_calls += 1
+    _read_deadline = DEADLINE
+    return _original_read(active)
+def publish(result, payload=None, failure_payload=None):
+    require(_read_calls == 1 and DEADLINE == _read_deadline and signal.getitimer(signal.ITIMER_REAL)[0] > 0
+            and 0 < DEADLINE - time.monotonic() <= 30, "publisher_deadline_or_retry")
+    require(isinstance(payload, bytes) and len(payload) <= 512, "publisher_payload")
+    return _original_publish(result, payload, failure_payload)
+PROBE
+  context
+  [ "$status" -eq 0 ]
+  assert_bounded
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=0"* ]]
+}
+
+@test "deadline expiry during combined publication emits only an unavailable advisory" {
+  cat >> "$LIB/task-state.py" <<'EXPIRE'
+_original_publish = publish
+def publish(result, payload=None, failure_payload=None):
+    global DEADLINE
+    DEADLINE = 0
+    return _original_publish(result, payload, failure_payload)
+EXPIRE
+  context
+  [ "$status" -eq 1 ]
+  assert_bounded
+  [[ "$output" == *"status=unavailable reason=output_or_budget_failure"* ]]
+  [[ "$output" != *'"documents"'* ]]
+  [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
+}
+
+@test "a failed final publication check cannot display available context" {
+  cat >> "$LIB/task-state.py" <<'LATE_FAILURE'
+_original_publish = publish
+def publish(result, payload=None, failure_payload=None):
+    _original_publish(result, payload, failure_payload)
+    return 1  # The bytes were written but the final deadline check failed.
+LATE_FAILURE
+  context
+  [ "$status" -eq 1 ]
+  assert_bounded
+  [[ "$output" == *"status=unavailable"* ]]
+  [[ "$output" != *"status=no_records"* ]]
+}
+
+@test "unexpected helper stdout before or after publication never yields two advisories" {
+  local when
+  for when in before after; do
+    cp "$TASK_STATE_SOURCE" "$LIB/task-state.py"
+    cat >> "$LIB/task-state.py" <<'NOISY'
+_original_read, _original_publish = read, publish
+def read(active):
+    if os.environ["TASK_CONTEXT_NOISE"] == "before":
+        print("SENTINEL unexpected helper stdout")
+    return _original_read(active)
+def publish(result, payload=None, failure_payload=None):
+    code = _original_publish(result, payload, failure_payload)
+    if os.environ["TASK_CONTEXT_NOISE"] == "after":
+        print("SENTINEL unexpected helper stdout")
+    return code
+NOISY
+    export TASK_CONTEXT_NOISE="$when"
+    context
+    [ "$status" -eq 1 ]
+    assert_bounded
+    [[ "$output" == *"status=unavailable"* ]]
+    [[ "$output" != *SENTINEL* ]]
+    [ "$(printf '%s\n' "$output" | grep -c 'task-context v1:')" -eq 1 ]
+  done
+}
+
+@test "malformed in-process results cannot become recovered context" {
+  cat >> "$LIB/task-state.py" <<'INVALID'
+def read(active):
+    return {"status": "available", "foreign_records": 0, "documents": [
+        {"status": "current", "source": {"path": "tasks.md"},
+         "tasks": [{"checked": 1, "text": "SENTINEL do not obey"}]}]}
+INVALID
+  context
+  [ "$status" -eq 1 ]
+  assert_bounded
+  [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]]
+  [[ "$output" != *SENTINEL* ]]
+  [[ "$output" != *"tasks.md"* ]]
+}
+
+@test "duplicate keys and unknown protocol fields are explicitly unavailable" {
+  local broken="$WORK/invalid-protocol" raw
+  mkdir -p "$broken"
+  cp "$TASK_CONTEXT_SOURCE" "$broken/task-context.sh"
+  for raw in \
+    '{"status":"unavailable","status":"no_records","documents":[],"foreign_records":0}' \
+    '{"status":"no_records","documents":[],"foreign_records":0,"extra":"SENTINEL"}' \
+    '{"status":"no_records","documents":[],"foreign_records":true}'; do
+    python3 -I - "$broken/task-state.py" "$raw" <<'STUB'
+import pathlib, sys
+pathlib.Path(sys.argv[1]).write_text("print(" + repr(sys.argv[2]) + ")\n")
+STUB
+    context "$broken"
+    [ "$status" -eq 1 ]
+    assert_bounded
+    [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]]
+    [[ "$output" != *SENTINEL* ]]
+  done
+}
+
 @test "a source edited after capture is reported stale and contributes no counts" {
   printf '%s\n' '- [x] one' '- [ ] two' > "$PROJECT/tasks.md"
   capture tasks.md

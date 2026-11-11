@@ -85,8 +85,12 @@ function_is_called() {
 }
 
 teardown() {
-  # The copier regression deliberately produces immutable directories.
+  # These fixtures deliberately produce immutable directories.
   [ ! -d "$BATS_TEST_TMPDIR/copier" ] || chmod -R u+w "$BATS_TEST_TMPDIR/copier"
+  local bundle
+  for bundle in "$BATS_TEST_TMPDIR"/bundle-*; do
+    [ ! -d "$bundle" ] || chmod -R u+w "$bundle"
+  done
 }
 
 copy_and_check_snapshot() {
@@ -150,6 +154,175 @@ PY
 @test "launcher copier seals every entry after inspecting an empty destination" {
   run copy_and_check_snapshot launcher
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+# Poison a module in the invocation directory: an isolated interpreter must
+# use its standard library and must not execute this file, even on success.
+write_import_poison() {
+  local cwd="$1" module="$2"
+  mkdir -p "$cwd"
+  printf '%s\n' 'open("poison-executed", "w").write("executed")' \
+    'raise RuntimeError("untrusted cwd import")' > "$cwd/$module.py"
+}
+
+load_launcher_functions() {
+  local function launcher="$REPO_ROOT/scripts/trellis-launcher.sh"
+  TRELLIS_EX_USAGE=2
+  TRELLIS_EX_UNAVAILABLE=5
+  for function in "$@"; do
+    eval "$function() { $(extract_function_body "$launcher" "$function")
+}" || return 1
+  done
+}
+
+poisoned_digest() (
+  local implementation="$1" root="$BATS_TEST_TMPDIR/digest-$1" actual expected
+  mkdir -p "$root/releases/1.2.3"
+  printf 'fixture record\n' > "$root/releases/1.2.3/release.json"
+  expected="$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' \
+    "$root/releases/1.2.3/release.json")" || return 1
+  write_import_poison "$root/cwd" hashlib
+  cd "$root/cwd" || return 1
+  if [ "$implementation" = release-store ]; then
+    . "$REPO_ROOT/scripts/lib/release-store.sh"
+    actual="$(release_store_release_json_sha256_no_follow "$root/releases" 1.2.3)" || return 1
+  else
+    load_launcher_functions launcher_absolute_path_is_clean launcher_error launcher_release_json_sha256_no_follow || return 1
+    actual="$(launcher_release_json_sha256_no_follow "$root/releases" 1.2.3)" || return 1
+  fi
+  [ "$actual" = "$expected" ] && [ ! -e poison-executed ]
+)
+
+poisoned_copy() (
+  local cwd="$BATS_TEST_TMPDIR/copy-cwd"
+  write_import_poison "$cwd" hashlib
+  cd "$cwd" || return 1
+  copy_and_check_snapshot "$1" || return 1
+  [ ! -e poison-executed ]
+)
+
+poisoned_bundle() (
+  local implementation="$1" module="$2" root="$BATS_TEST_TMPDIR/bundle-$1-$2"
+  local home="$root/home" releases="$root/home/releases" snapshot payload digest file
+  snapshot="$releases/.tmp.1.2.3.exec.Ab3xY9"
+  payload="$snapshot/payload"
+  mkdir -p "$payload/scripts/lib"
+  for file in semver trellis-home skill-roots release-store local-registry settings-hooks-merge attachment surface-plan; do
+    printf '# verified source %s\n' "$file" > "$payload/scripts/lib/$file.sh"
+  done
+  for file in trellis release.sh attach-project.sh; do
+    printf '# verified source %s\n' "$file" > "$payload/scripts/$file"
+  done
+  python3 -I "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$payload" > "$root/tree.jsonl" || return 1
+  jq -s '{tree:.}' "$root/tree.jsonl" > "$snapshot/release.json" || return 1
+  digest="$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$snapshot/release.json")" || return 1
+  find "$snapshot" -type f -exec chmod 400 {} +
+  find "$snapshot" -type d -exec chmod 500 {} +
+  write_import_poison "$root/cwd" "$module"
+  cd "$root/cwd" || return 1
+  export TRELLIS_HOME="$home"
+  if [ "$implementation" = release-store ]; then
+    . "$REPO_ROOT/scripts/lib/release-store.sh"
+    release_store_emit_verified_attachment_bundle "$snapshot" "$digest" 1.2.3 || return 1
+  else
+    load_launcher_functions launcher_absolute_path_is_clean launcher_error launcher_snapshot_payload_matches \
+      launcher_snapshot_name_is_safe launcher_emit_verified_command_bundle || return 1
+    launcher_emit_verified_command_bundle "$snapshot" "$digest" release 1.2.3 || return 1
+  fi
+  [ ! -e poison-executed ]
+)
+
+@test "release-store record digest ignores a poisoned working directory" {
+  run poisoned_digest release-store
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "launcher record digest ignores a poisoned working directory" {
+  run poisoned_digest launcher
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "release-store snapshot copier ignores a poisoned working directory" {
+  run poisoned_copy release-store
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "launcher snapshot copier ignores a poisoned working directory" {
+  run poisoned_copy launcher
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "release-store verified bundle ignores poisoned hashlib and json modules" {
+  local module
+  for module in hashlib json; do
+    run poisoned_bundle release-store "$module"
+    [ "$status" -eq 0 ] && [[ "$output" == *'# verified source attach-project.sh'* ]] || { printf '%s\n' "$output"; false; }
+  done
+}
+
+@test "launcher verified command bundle ignores poisoned hashlib and json modules" {
+  local module
+  for module in hashlib json; do
+    run poisoned_bundle launcher "$module"
+    [ "$status" -eq 0 ] && [[ "$output" == *'# verified source release.sh'* ]] || { printf '%s\n' "$output"; false; }
+  done
+}
+
+@test "every release control Python heredoc uses isolated mode" {
+  run python3 -I - "$REPO_ROOT" <<'PY'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+# Discover every payload file post-checkout executes or sources: the
+# trellis_verify_release_executed paths array in attachment.sh (plus its
+# conditional release_verify.py), unioned with the release-control files
+# that emit verified bundles. A hand-kept list would drift again.
+attachment = (root / "scripts/lib/attachment.sh").read_text()
+block = re.search(r"local -a paths=\(\n(.*?)\n  \)", attachment, re.S).group(1)
+executed = [line.strip() for line in block.splitlines() if line.strip()]
+if "paths+=(scripts/lib/release_verify.py)" in attachment:
+    executed.append("scripts/lib/release_verify.py")
+files = sorted(set(executed + [
+    "scripts/lib/release-store.sh",
+    "scripts/trellis-launcher.sh",
+    "scripts/release.sh",
+    "scripts/lib/health-checks.sh",
+    "scripts/lib/trellis-home.sh",
+    "scripts/sync-to-template.sh",
+]))
+pattern = re.compile(r'(?:\bpython3\b|"\$python_bin"|"\$\{python_bin\}"|\$python_bin|\$\{python_bin\})((?:\s+-[A-Za-z]*)+)')
+violations = []
+for rel in files:
+    path = root / rel
+    if not path.is_file():
+        violations.append(f"{rel}: missing")
+        continue
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for match in pattern.finditer(line):
+            flags = match.group(1).split()
+            if "-I" not in flags and not any(flag.startswith("-I") and len(flag) > 2 for flag in flags):
+                violations.append(f"{rel}:{number}:{line.strip()}")
+if violations:
+    print("\n".join(violations))
+    sys.exit(1)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "attach exclude diagnostic ignores a json.py shadowing the stdlib in the cwd" {
+  local root="$BATS_TEST_TMPDIR/shadow-json"
+  mkdir -p "$root/home/state/attachments/checkout" "$root/common/info" "$root/cwd"
+  printf 'desired\n' > "$root/desired"
+  printf '%s\n' '# --- Trellis local attachment exclude block ---' 'x' '# --- end Trellis local attachment exclude block ---' > "$root/common/info/exclude"
+  printf '%s\n' 'open("poison-executed", "w").write("executed")' 'raise RuntimeError("untrusted cwd import")' > "$root/cwd/json.py"
+  run bash -c '
+    cd "$1" || exit 1
+    . "$2/scripts/attach-project.sh"
+    attach_exclude_diagnostic "$3" checkout "$4" "$5" 1.2.3 "$6"
+  ' _ "$root/cwd" "$REPO_ROOT" "$root/home" "$root/common" "$root/desired" "$root/project"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$root/cwd/poison-executed" ]
 }
 
 @test "the seven snapshot-payload predicates are one definition" {

@@ -232,3 +232,27 @@ wip_wt() {
   mode="$(stat -f %Lp "$archive" 2>/dev/null)" || mode="$(stat -c %a "$archive")"
   [ "$mode" = 700 ]
 }
+
+@test "secret scan catches an added line whose content begins with two plus signs" {
+  alpha
+  local wt="$HOME/projects/alpha-wt/plus"
+  wm_wt "$HOME/projects/alpha" feat/plus "$wt"
+  printf '++ client_secret = "fixture-only"\n' > "$wt/creds.txt"
+  git -C "$wt" add creds.txt
+  run bash -c '. "$1/scripts/lib/worktree-migrate.sh"; wm_secret_files "$2"' _ "$REPO_ROOT" "$wt"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "creds.txt" ] || { echo "secret line was skipped: $output"; false; }
+}
+
+@test "secret scan pins diff prefixes against a user noprefix setting" {
+  alpha
+  local wt="$HOME/projects/alpha-wt/noprefix"
+  wm_wt "$HOME/projects/alpha" feat/noprefix "$wt"
+  git -C "$wt" config diff.noprefix true
+  mkdir -p "$wt/docs"
+  printf 'rotate yearly\n' > "$wt/docs/client_secret-rotation.md"
+  git -C "$wt" add docs/client_secret-rotation.md
+  run bash -c '. "$1/scripts/lib/worktree-migrate.sh"; wm_secret_files "$2"' _ "$REPO_ROOT" "$wt"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "file path matched as content: $output"; false; }
+}

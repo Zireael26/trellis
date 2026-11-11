@@ -268,7 +268,7 @@ skills_same_dir() {
 
 skills_list_contains() {
   local list="$1" item="$2"
-  case "$(printf '\n%s\n' "$list")" in
+  case $'\n'"$list"$'\n' in
     *"
 $item
 "*) return 0 ;;
@@ -467,7 +467,7 @@ skills_cmd_list() {
 # definition unrecorded, so any existing desired path is unowned).
 skills_import_check_one() {
   local store="$1" user_home="$2" release_names="$3" all_roots="$4" canon="$5"
-  local name rel
+  local name rel roots
   name="${canon##*/}"
   if [ -e "$store/$name" ] || [ -L "$store/$name" ]; then
     skills_err "skill name is already in the store: $name"
@@ -477,6 +477,7 @@ skills_import_check_one() {
     skills_err "skill name collides with a release user skill: $name"
     return "$TRELLIS_EX_CONFLICT"
   fi
+  roots="$(skills_skill_roots "$canon" "$name")" || return "$?"
   while IFS= read -r rel; do
     [ -n "$rel" ] || continue
     if skills_same_dir "$user_home/$rel/$name" "$canon"; then
@@ -501,7 +502,7 @@ skills_import_check_one() {
       skills_err "refusing unowned path (never replaced or deleted): $user_home/$rel/$name"
       return "$TRELLIS_EX_CONFLICT"
     fi
-  done <<< "$(skills_skill_roots "$canon" "$name")"
+  done <<< "$roots"
 }
 
 skills_cmd_import() {
@@ -650,7 +651,7 @@ skills_cmd_unlink() {
     skills_usage >&2
     return "$TRELLIS_EX_USAGE"
   }
-  local name="$1" store="$home/skills" state entries entry entry_path entry_target current
+  local name="$1" store="$home/skills" state entries entry entry_path entry_target current roots rel
   skills_valid_name "$name" || {
     skills_err "invalid skill name: $name"
     return "$TRELLIS_EX_USAGE"
@@ -667,15 +668,45 @@ skills_cmd_unlink() {
   fi
   entries="$(printf '%s' "$state" | jq -c --arg skill "$name" '
     .links[] | select(.skill == $skill)')" || return "$TRELLIS_EX_STATE"
+  # Refuse drift and unrecorded exposures before deleting any owned links.
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     entry_path="$(printf '%s' "$entry" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
     entry_target="$(printf '%s' "$entry" | jq -r '.target')" || return "$TRELLIS_EX_STATE"
     if [ -L "$entry_path" ]; then
       current="$(readlink "$entry_path")" || return "$TRELLIS_EX_UNAVAILABLE"
-      if [ "$current" = "$entry_target" ]; then
-        rm -f -- "$entry_path" || return "$TRELLIS_EX_UNAVAILABLE"
+      if [ "$current" != "$entry_target" ]; then
+        skills_err "recorded skill link changed: $entry_path"
+        return "$TRELLIS_EX_CONFLICT"
       fi
+    elif [ -e "$entry_path" ]; then
+      skills_err "recorded skill link changed: $entry_path"
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+  done <<< "$entries"
+  roots="$(skills_all_skill_roots)" || return "$?"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    entry_path="$user_home/$rel/$name"
+    if [ -L "$entry_path" ] && skills_same_dir "$entry_path" "$store/$name"; then
+      current="$(readlink "$entry_path")" || return "$TRELLIS_EX_UNAVAILABLE"
+      if ! printf '%s' "$state" | jq -e --arg skill "$name" --arg path "$entry_path" --arg target "$current" '
+        any(.links[]; .skill == $skill and .path == $path and .target == $target)' >/dev/null; then
+        skills_err "unrecorded skill link still exposes $name: $entry_path"
+        return "$TRELLIS_EX_CONFLICT"
+      fi
+    fi
+  done <<< "$roots"
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    entry_path="$(printf '%s' "$entry" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+    entry_target="$(printf '%s' "$entry" | jq -r '.target')" || return "$TRELLIS_EX_STATE"
+    if [ -L "$entry_path" ]; then
+      current="$(readlink "$entry_path")" || return "$TRELLIS_EX_UNAVAILABLE"
+      [ "$current" = "$entry_target" ] || return "$TRELLIS_EX_CONFLICT"
+      rm -f -- "$entry_path" || return "$TRELLIS_EX_UNAVAILABLE"
+    elif [ -e "$entry_path" ]; then
+      return "$TRELLIS_EX_CONFLICT"
     fi
   done <<< "$entries"
   state="$(printf '%s' "$state" | jq -cS --arg skill "$name" '

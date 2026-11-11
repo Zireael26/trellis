@@ -95,7 +95,13 @@ while [ "$#" -gt 0 ]; do
         printf '%s: accepts at most one PROJECT_ID\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
         exit "$TRELLIS_EX_USAGE"
       }
-      if [ "$#" -eq 1 ]; then ONLY_PROJECT="$1"; fi
+      if [ "$#" -eq 1 ]; then
+        [ -n "$1" ] || {
+          printf '%s: PROJECT_ID must not be empty\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+          exit "$TRELLIS_EX_USAGE"
+        }
+        ONLY_PROJECT="$1"
+      fi
       break
       ;;
     -*)
@@ -106,6 +112,10 @@ while [ "$#" -gt 0 ]; do
     *)
       [ -z "$ONLY_PROJECT" ] || {
         printf '%s: accepts at most one PROJECT_ID\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
+        exit "$TRELLIS_EX_USAGE"
+      }
+      [ -n "$1" ] || {
+        printf '%s: PROJECT_ID must not be empty\n' "$(diagnostic_escape "$SYNC_NAME")" >&2
         exit "$TRELLIS_EX_USAGE"
       }
       ONLY_PROJECT="$1"
@@ -481,6 +491,7 @@ relink_one() {
           "TEMP=$SYNC_TMPDIR" \
           "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
           "LC_ALL=C" \
+          "TRELLIS_VERIFIED_PAYLOAD=$ACTIVE_REPAIR_SNAPSHOT/payload" \
           "TRELLIS_LIBS_PRELOADED=1" \
           /bin/bash --noprofile --norc -s -- relink --home "$HOME_PATH" --fleet "$fleet" \
             "${binding_args[@]}" "$root"

@@ -27,14 +27,22 @@ pg_load_config "$@" || exit 2  # this gate never exits 1; run-all blocks on conf
 RANGE="$(pg_parse_range "$@")"
 PROJECT_DIR="$(pg_project_dir)"
 
-# Touched spec dirs (unique). grep no-match (rc 1) is fine: `|| true` keeps it
-# from tripping anything, and an empty list means no spec touched -> pass.
-SPEC_DIRS="$(git -C "$PROJECT_DIR" diff --name-only "$RANGE" 2>/dev/null \
-  | grep -E '^specs/[0-9][^/]*/' \
-  | sed -E 's#^(specs/[0-9][^/]*)/.*#\1#' \
-  | sort -u || true)"
+# Git's NUL framing preserves quoted, non-ASCII and newline-containing paths.
+# Keep the directory names in an array rather than splitting them on lines.
+SPEC_DIRS=()
+specs_found=false
+while IFS= read -r -d '' path; do
+  case "$path" in specs/[0-9]*/*) ;; *) continue ;; esac
+  rest="${path#specs/}"
+  dir="specs/${rest%%/*}"
+  duplicate=false
+  for seen in ${SPEC_DIRS[@]+"${SPEC_DIRS[@]}"}; do
+    if [ "$seen" = "$dir" ]; then duplicate=true; break; fi
+  done
+  if ! $duplicate; then SPEC_DIRS+=("$dir"); specs_found=true; fi
+done < <(git -C "$PROJECT_DIR" diff --name-only -z "$RANGE" 2>/dev/null)
 
-if [ -z "$SPEC_DIRS" ]; then
+if ! $specs_found; then
   pg_log pass "Analyze: no spec dir touched (range=$RANGE)"
   exit 0
 fi
@@ -84,8 +92,7 @@ resolve_analyze_report() {
 worst="pass"
 findings=()
 passes=()
-while IFS= read -r dir; do
-  [ -z "$dir" ] && continue
+for dir in ${SPEC_DIRS[@]+"${SPEC_DIRS[@]}"}; do
   analyze="$(resolve_analyze_report "$PROJECT_DIR/$dir")"
   if [ -z "$analyze" ]; then
     findings+=("analyze not run for $dir (analyze.md missing)")
@@ -109,9 +116,7 @@ while IFS= read -r dir; do
       findings+=("$dir: $analyze_name has no recognizable '## Verdict:' line")
       worst="warn" ;;
   esac
-done <<EOF
-$SPEC_DIRS
-EOF
+done
 
 # bash 3.2 + `set -u` treats "${arr[@]}" on an EMPTY array as an unbound
 # variable and aborts with exit 1 — which would BLOCK a merge and break this

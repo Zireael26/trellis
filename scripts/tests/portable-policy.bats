@@ -19,23 +19,62 @@ AJV_VALIDATE_ARGS=(validate --spec=draft2020 --strict=false)
 AJV_COMMAND=()
 
 _require_ajv2020() {
-  if command -v ajv >/dev/null 2>&1 \
-    && ajv "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$POLICY" >/dev/null 2>&1; then
-    AJV_COMMAND=(ajv)
-    return 0
-  fi
-
-  if command -v npx >/dev/null 2>&1 \
-    && npx --no-install --offline --no-update-notifier ajv "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$POLICY" >/dev/null 2>&1; then
+  # Probe AJV with a fixed known-good fixture, never with the tracked
+  # policy: if AJV is usable but rejects the tracked policy, the tests
+  # must fail, not silently fall back to the narrower jq validator.
+  local known_good="$SANDBOX/known-good.json"
+  printf '%s\n' '{"schema_version":2,"maintainer_name":"fixture","github_user":"fixture","harnesses":["claude"]}' > "$known_good"
+  if command -v ajv >/dev/null 2>&1; then
+    if ajv "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$known_good" >/dev/null 2>&1; then
+      AJV_COMMAND=(ajv)
+    else
+      echo 'ajv is installed but rejects the fixed known-good probe fixture; update the fixture or schema, do not silently drop AJV'
+      false
+    fi
+  elif command -v npx >/dev/null 2>&1 \
+    && npx --no-install --offline --no-update-notifier ajv "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$known_good" >/dev/null 2>&1; then
     AJV_COMMAND=(npx --no-install --offline --no-update-notifier ajv)
-    return 0
+  else
+    AJV_COMMAND=()
+  fi
+  if [ "${TRELLIS_REQUIRE_AJV:-}" = 1 ] && [ "${#AJV_COMMAND[@]}" -eq 0 ]; then
+    echo 'TRELLIS_REQUIRE_AJV=1 but no usable AJV was found'
+    false
   fi
 
-  skip "requires AJV CLI with JSON Schema draft 2020-12 support"
+  # Always extract the jq fallback validator (sourcing config-load.sh
+  # would run its machine-load main body), so it runs in every test
+  # alongside AJV when AJV is present, and alone when it is not.
+  local fallback_fn
+  fallback_fn="$(awk '/^_pgcfg_validate_policy_fallback\(\) \{/,/^}/' "$ROOT/scripts/lib/config-load.sh")"
+  [ -n "$fallback_fn" ] || { echo 'fallback validator not found in config-load.sh'; false; }
+  eval "$fallback_fn"
+  return 0
 }
 
 _validate_policy() {
-  "${AJV_COMMAND[@]}" "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$1"
+  local rc=0
+  if [ "${#AJV_COMMAND[@]}" -gt 0 ]; then
+    "${AJV_COMMAND[@]}" "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$1" || rc=$?
+  fi
+  _pgcfg_validate_policy_fallback "$1" "$SCHEMA" || rc=$?
+  return "$rc"
+}
+
+# Reject helper: succeeds only when AJV (when present) and the fallback
+# each reject on their own, so a regression in either validator fails.
+_validate_policy_rejects() {
+  if [ "${#AJV_COMMAND[@]}" -gt 0 ]; then
+    if "${AJV_COMMAND[@]}" "${AJV_VALIDATE_ARGS[@]}" -s "$SCHEMA" -d "$1" >/dev/null 2>&1; then
+      echo "AJV unexpectedly validated $1"
+      return 1
+    fi
+  fi
+  if _pgcfg_validate_policy_fallback "$1" "$SCHEMA" >/dev/null 2>&1; then
+    echo "jq fallback unexpectedly validated $1"
+    return 1
+  fi
+  return 0
 }
 
 @test "current tracked policy validates as portable schema v2" {
@@ -67,8 +106,8 @@ _validate_policy() {
 
     policy="$SANDBOX/$key.json"
     jq --arg key "$key" '. + {($key): "legacy-machine-value"}' "$POLICY" > "$policy"
-    run _validate_policy "$policy"
-    [ "$status" -ne 0 ] || { echo "$key unexpectedly validated"; false; }
+    run _validate_policy_rejects "$policy"
+    [ "$status" -eq 0 ] || { echo "$key unexpectedly validated"; false; }
   done
 }
 
@@ -84,8 +123,8 @@ _validate_policy() {
   jq '.schema_version = "2"' "$POLICY" > "$wrong_type"
 
   for policy in "$missing" "$wrong_integer" "$wrong_type"; do
-    run _validate_policy "$policy"
-    [ "$status" -ne 0 ] || { echo "$policy unexpectedly validated"; false; }
+    run _validate_policy_rejects "$policy"
+    [ "$status" -eq 0 ] || { echo "$policy unexpectedly validated"; false; }
   done
 }
 
@@ -168,8 +207,8 @@ _validate_policy() {
       }
     ' "$POLICY" > "$policy"
 
-    run _validate_policy "$policy"
-    [ "$status" -ne 0 ] || { echo "$baseline unexpectedly validated"; false; }
+    run _validate_policy_rejects "$policy"
+    [ "$status" -eq 0 ] || { echo "$baseline unexpectedly validated"; false; }
   done
 }
 
@@ -180,19 +219,19 @@ _validate_policy() {
 
   policy="$SANDBOX/option-remote.json"
   jq '.template.remote = "--upload-pack=/tmp/attacker"' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "option-like remote unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "option-like remote unexpectedly validated"; false; }
 
   policy="$SANDBOX/option-branch.json"
   jq '.template.branch = "--mirror"' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "option-like branch unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "option-like branch unexpectedly validated"; false; }
 
   control_remote=$'git@github.com:example/trellis.git\n--upload-pack=/tmp/attacker'
   policy="$SANDBOX/control-remote.json"
   jq --arg remote "$control_remote" '.template.remote = $remote' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "control-bearing remote unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "control-bearing remote unexpectedly validated"; false; }
 }
 
 @test "schema rejects nonportable and ambiguous template remotes" {
@@ -207,8 +246,8 @@ _validate_policy() {
     "git@github.com:owner:trellis.git"; do
     policy="$SANDBOX/nonportable-remote.json"
     jq --arg remote "$remote" '.template.remote = $remote' "$POLICY" > "$policy"
-    run _validate_policy "$policy"
-    [ "$status" -ne 0 ] || { echo "$remote unexpectedly validated"; false; }
+    run _validate_policy_rejects "$policy"
+    [ "$status" -eq 0 ] || { echo "$remote unexpectedly validated"; false; }
   done
 }
 
@@ -235,8 +274,8 @@ _validate_policy() {
     "feature~main"; do
     policy="$SANDBOX/invalid-branch.json"
     jq --arg branch "$branch" '.template.branch = $branch' "$POLICY" > "$policy"
-    run _validate_policy "$policy"
-    [ "$status" -ne 0 ] || { echo "$branch unexpectedly validated"; false; }
+    run _validate_policy_rejects "$policy"
+    [ "$status" -eq 0 ] || { echo "$branch unexpectedly validated"; false; }
   done
 }
 
@@ -247,32 +286,53 @@ _validate_policy() {
 
   policy="$SANDBOX/traversal-redact-path.json"
   jq '.template.redact_paths = ["../audits"]' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "traversal redact path unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "traversal redact path unexpectedly validated"; false; }
 
   policy="$SANDBOX/absolute-redact-path.json"
   jq '.template.redact_paths = ["/audits"]' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "absolute redact path unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "absolute redact path unexpectedly validated"; false; }
 
   policy="$SANDBOX/traversal-marker-path.json"
   jq '.aeo_gate.marker_file = "src/../page.ts"' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "traversal marker path unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "traversal marker path unexpectedly validated"; false; }
 
   policy="$SANDBOX/absolute-marker-path.json"
   jq '.aeo_gate.marker_file = "/private/page.ts"' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "absolute marker path unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "absolute marker path unexpectedly validated"; false; }
 
   policy="$SANDBOX/traversal-baseline-path.json"
   jq '.aeo_gate.baseline = "../audits/baseline.json"' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "traversal baseline path unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "traversal baseline path unexpectedly validated"; false; }
 
   policy="$SANDBOX/windows-baseline-path.json"
   jq --arg baseline 'C:\Trellis\audits\baseline.json' \
     '.aeo_gate.baseline = $baseline' "$POLICY" > "$policy"
-  run _validate_policy "$policy"
-  [ "$status" -ne 0 ] || { echo "Windows baseline path unexpectedly validated"; false; }
+  run _validate_policy_rejects "$policy"
+  [ "$status" -eq 0 ] || { echo "Windows baseline path unexpectedly validated"; false; }
+}
+
+@test "jq fallback alone rejects branch refspecs and traversal paths" {
+  # Always run the fallback directly, even when AJV is present, so a
+  # fallback regression cannot hide behind AJV rejecting the same input.
+  _require_ajv2020
+  local branch policy
+  for branch in "feature..main" "feature/../main" "feature//main" "feature@{1}"; do
+    policy="$SANDBOX/fallback-branch.json"
+    jq --arg branch "$branch" '.template.branch = $branch' "$POLICY" > "$policy"
+    run _pgcfg_validate_policy_fallback "$policy" "$SCHEMA"
+    [ "$status" -ne 0 ] || { echo "fallback unexpectedly validated branch $branch"; false; }
+  done
+  policy="$SANDBOX/fallback-traversal.json"
+  jq '.template.redact_paths = ["../audits"]' "$POLICY" > "$policy"
+  run _pgcfg_validate_policy_fallback "$policy" "$SCHEMA"
+  [ "$status" -ne 0 ] || { echo "fallback unexpectedly validated traversal redact path"; false; }
+  policy="$SANDBOX/fallback-baseline.json"
+  jq '.aeo_gate.baseline = "../audits/baseline.json"' "$POLICY" > "$policy"
+  run _pgcfg_validate_policy_fallback "$policy" "$SCHEMA"
+  [ "$status" -ne 0 ] || { echo "fallback unexpectedly validated traversal baseline"; false; }
 }

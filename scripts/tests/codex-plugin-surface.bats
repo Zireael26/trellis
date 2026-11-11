@@ -158,3 +158,18 @@ PY
   [[ "$output" == *"no node outside"* ]]
   [ ! -e "$ACCOUNT/.local" ]
 }
+
+@test "python modules cannot be shadowed from the caller cwd" {
+  command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+  local poison="$SANDBOX/poison" marker="$SANDBOX/shadow-marker"
+  mkdir -p "$poison"
+  cat > "$poison/json.py" <<'PY'
+import os
+open(os.environ["SHADOW_MARKER"], "w").write("shadowed\n")
+raise SystemExit(0)
+PY
+  run env HOME="$ACCOUNT" PATH="$BIN:$PATH" SHADOW_MARKER="$marker" \
+    bash -c 'cd "$1" && exec bash "$2"' _ "$poison" "$CHECKER"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$marker" ] || { echo "cwd json.py executed"; false; }
+}

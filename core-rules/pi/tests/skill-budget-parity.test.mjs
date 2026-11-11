@@ -5,6 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { deliveredFixture } from './delivered-fixture.mjs';
+import { mockDispatchExec } from './dispatch-test-transport.mjs';
 
 function shell(f, command, ...args) {
   const result = spawnSync('bash', ['--noprofile', '--norc', '-c', `source "$1" && ${command}`, 'skill-budget-parity',
@@ -38,7 +39,7 @@ test('M1 shell skill budget matches native read and slash boundaries', async t =
 
 test('L1 native edit success prefix containing not found grants read credit', async t => {
   const f = await deliveredFixture(t);
-  f.pi.exec = async () => ({ stdout: '{"schema_version":1,"capability_status":"enforced","decision":"allow"}', stderr: '', code: 0 });
+  f.pi.exec = mockDispatchExec(async () => ({ stdout: '{"schema_version":1,"capability_status":"enforced","decision":"allow"}', stderr: '', code: 0 }));
   writeFileSync(resolve(f.cwd, 'file'), 'not found');
   const edit = f.call('edit', { path: 'file' });
   assert.equal(await f.fire('tool_call', edit), undefined);

@@ -16,6 +16,9 @@ group_plan_build_release_repo() {
       cp "$REPO_ROOT/scripts/$file" "$repo/scripts/$file" || return 1
     done
     printf '%s\n' "$version" > "$repo/core-rules/VERSION"
+    # T34: HEAD carries the 1.5.0 native manifest; 1.3.10 never shipped
+    # native, and without its companion the templates render legacy.
+    rm -rf "${repo:?}/core-rules/native" || return 1
   fi
   payload_fixture_git -C "$repo" init -q || return 1
   payload_fixture_git -C "$repo" add -A || return 1

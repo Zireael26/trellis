@@ -21,6 +21,7 @@ const files = [
 	"dist/bundle/chunks/chunk-JVUZSMYM.js",
 ];
 const bundlePreimage = 'if(response.stopReason==="length")return`${label} failed: generation hit the token cap and the summary is incomplete`}';
+const bundlePreimageTruncate = 'return`${text.slice(0,maxChars)}\\n\\n[... ${truncatedChars} more characters truncated]`}';
 
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, { encoding: "utf8", ...options });
@@ -52,6 +53,7 @@ function fixture(t) {
 	}
 	assert.equal(JSON.parse(readFileSync(join(root, "package.json"))).version, "0.85.1");
 	assert.equal(readFileSync(join(root, files[3]), "utf8").split(bundlePreimage).length, 2);
+	assert.equal(readFileSync(join(root, files[3]), "utf8").split(bundlePreimageTruncate).length, 2);
 	assert.equal(patch(root, ["--dry-run"]).status, 0);
 	return root;
 }
@@ -64,6 +66,7 @@ function assertApplied(root) {
 	assert.equal(patch(root, ["-R", "--dry-run"]).status, 0);
 	const bundle = readFileSync(join(root, files[3]), "utf8");
 	assert.equal(bundle.includes(bundlePreimage), false);
+	assert.equal(bundle.includes(bundlePreimageTruncate), false);
 	assert.equal(bundle.includes("generation was aborted"), true);
 	assert.equal(bundle.includes("middle characters truncated"), true);
 }

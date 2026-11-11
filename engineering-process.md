@@ -545,6 +545,17 @@ of a project commit. Before committing a migration, review the project diff and
 stage only deliberate tracked changes such as `.trellis.json` and removal of
 legacy Trellis-generated tracked behavior.
 
+The process-gate PR-size check warns above 600 countable added and deleted
+lines and fails above 1200 unless a newly added size ADR qualifies. Project
+config can override either threshold. Test, fixture, generated and lockfile
+lines are reported separately and excluded from the budget; both sides of a
+rename or modification must qualify for the same exclusion. Attributes come
+from the range base, and marker-only additions or binary code changes above the
+warn limit also require reviewer acknowledgement. Bare CR counts as a line break.
+The exact path, marker, binary and attribute rules are in
+[`pr-hygiene.md`](core-rules/skills/process-gate/references/pr-hygiene.md#pr-size).
+This budget is separate from the mandatory feature-pipeline size floor.
+
 Trellis's own branch-push Tests gate is diff-aware. The base-side
 `PROCESS_GATE_TEST_MAP` opts into `scripts/lib/push-test-map.py`: audited leaf
 entrypoints map to covering Bats files, and existing top-level Bats edits run

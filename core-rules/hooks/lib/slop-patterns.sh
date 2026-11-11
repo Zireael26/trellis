@@ -18,8 +18,9 @@
 #   slop_patterns_for_lang <lang> -> TSV rows: <id> <match-ERE> <suppress-ERE|->
 #   slop_carve_out_globs          -> one glob per line
 #   slop_path_carved_out <path>   -> status 0 when the path is carved out
-#   slop_scan_text <lang>         -> scans stdin, prints <line> <id> <text>,
-#                                    grep-like status (0 = matched, 1 = clean)
+#   slop_scan_text <lang> [--numbered] -> scans stdin, prints <input-index> <id> <text>,
+#                                    grep-like status (0 = matched, 1 = clean).
+#                                    --numbered input is <file-line> TAB <text>.
 #
 # `slop_path_carved_out` takes a REPO-RELATIVE path. It has to: the globs match
 # directory names anywhere in the path, so handing it an absolute path lets a
@@ -32,8 +33,8 @@
 # A row's suppress-ERE is tested against the matched line, the line before it,
 # and the contiguous run of comment lines above it — that is how the uniform
 # `SAFETY:` escape-hatch convention is honored even when the invariant wraps
-# over several comment lines, and how a same-line `satisfies` / `, ok :=` idiom
-# stays quiet.
+# over several comment lines. Go's `, ok :=` idiom is same-line only: a prior
+# checked assertion cannot justify a different assertion on the next line.
 #
 # Bash only, deliberately: `slop_path_carved_out` needs a variable in a `case`
 # pattern to glob, which zsh does not do without GLOB_SUBST. Test consumers in
@@ -119,7 +120,7 @@ slop_patterns_for_lang() {
       # (`cfg: Any = load()`) out; a bare `field: Any` in a class body is an
       # escape hatch in a contract and reports on purpose.
       printf '%s\t%s\t%s\n' \
-        'py-any-annotation' '(^[[:space:]]*(async[[:space:]]+)?def[[:space:]].*(:|->)[[:space:]]*Any([^A-Za-z0-9_]|$)|^[[:space:]]*\*{0,2}[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*Any[[:space:]]*,?[[:space:]]*$|^[[:space:]]*\)[[:space:]]*->[[:space:]]*Any([^A-Za-z0-9_]|$))' '-' \
+        'py-any-annotation' '(^[[:space:]]*(async[[:space:]]+)?def[[:space:]].*(:|->)[[:space:]]*Any([^A-Za-z0-9_]|$)|^[[:space:]]*\*{0,2}[A-Za-z_][A-Za-z0-9_]*[[:space:]]*:[[:space:]]*Any[[:space:]]*,?[[:space:]]*(#.*)?$|^[[:space:]]*\)[[:space:]]*->[[:space:]]*Any([^A-Za-z0-9_]|$))' '-' \
         'py-unjustified-cast' '(^|[^A-Za-z0-9_.])cast\(' 'SAFETY:' \
         'py-bare-type-ignore' '#[[:space:]]*type:[[:space:]]*ignore([^[]|$)' '-'
       # The module-patch row carries a quote class, so it needs double quotes.
@@ -254,7 +255,7 @@ EOF
 slop_scan_text() {
   local lang="${1:-}"
   [ -n "$lang" ] || return 1
-  awk '
+  awk -v numbered="${2:-}" '
     BEGIN { FS = "\t" }
     NR == FNR {
       if ($0 ~ /^[[:space:]]*(#|$)/) next
@@ -265,12 +266,30 @@ slop_scan_text() {
       next
     }
     {
+      if (numbered == "--numbered") {
+        tab = index($0, "\t")
+        line = substr($0, 1, tab - 1)
+        if (!tab || line !~ /^[1-9][0-9]*$/) { scan_error = 1; exit }
+        if (last_line && line != last_line + 1) ts_params = 0
+        last_line = line
+        $0 = substr($0, tab + 1)
+      }
+      # Only follow an unambiguous named function declaration and simple
+      # parameter lines. Object type members are not signature parameters.
+      wrapped_any = ts_params && $0 ~ /^[[:space:]]*(\.\.\.)?[$A-Za-z_][$A-Za-z0-9_]*\??[[:space:]]*:[[:space:]]*any[[:space:]]*,?[[:space:]]*(\/\/.*)?$/
       for (i = 1; i <= rows; i++) {
-        if ($0 !~ match_re[i]) continue
+        if ($0 !~ match_re[i] && !(id[i] == "ts-any-signature" && wrapped_any)) continue
         if (suppress_re[i] != "-" \
-            && ($0 ~ suppress_re[i] || prev ~ suppress_re[i] || cmt ~ suppress_re[i])) continue
+            && ($0 ~ suppress_re[i] || (id[i] != "go-unchecked-assert" \
+                && (prev ~ suppress_re[i] || cmt ~ suppress_re[i])))) continue
         printf "%d\t%s\t%s\n", FNR, id[i], $0
         hits++
+      }
+      if ($0 ~ /^[[:space:]]*(export[[:space:]]+)?(default[[:space:]]+)?(declare[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]+[$A-Za-z_][$A-Za-z0-9_]*[[:space:]]*\([[:space:]]*$/) {
+        ts_params = 1
+      } else if (ts_params && $0 !~ /^[[:space:]]*(\/\/.*)?$/ && \
+                 $0 !~ /^[[:space:]]*(\.\.\.)?[$A-Za-z_][$A-Za-z0-9_]*\??[[:space:]]*:[[:space:]]*[^{}()]+$/) {
+        ts_params = 0
       }
       prev = $0
       # `cmt` accumulates the contiguous run of comment lines immediately above
@@ -279,7 +298,7 @@ slop_scan_text() {
       # escape hatch has to sit ON the construct it justifies.
       if ($0 ~ /^[[:space:]]*(#|\/\/|\/\*|\*)/) { cmt = cmt " " $0 } else { cmt = "" }
     }
-    END { exit (hits > 0 ? 0 : 1) }
+    END { exit (scan_error ? 2 : (hits > 0 ? 0 : 1)) }
   ' <(slop_patterns_for_lang "$lang") -
 }
 

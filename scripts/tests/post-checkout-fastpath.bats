@@ -148,6 +148,17 @@ reset_witness() {
   assert_fast
 }
 
+@test "a predecessor that changes the manifest invalidates the subsequent current proof" {
+  cat > "$T14_PROJECT/.git/hooks/post-checkout" <<EOF
+#!/usr/bin/env bash
+printf '%s\\n' "\$@" > "$MARKER"
+printf '%s\\n' '{"schema_version":1,"project_id":"fixture-project","changed_by_prior":true}' > .trellis.json
+EOF
+  chmod +x "$T14_PROJECT/.git/hooks/post-checkout"
+  switch_to other
+  assert_full
+}
+
 @test "a branch switch that changes the project manifest or an owned path takes the full reconcile" {
   switch_to manifest
   assert_full

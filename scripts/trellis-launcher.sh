@@ -16,11 +16,11 @@
 # each prologue as `sh` to keep that guarantee, since this line removes it here.
 launcher_ssh_auth_sock=${SSH_AUTH_SOCK-}
 launcher_attach_caller_path=
-# Every operator route that can attach a worktree forwards the caller PATH, so
-# its recorded toolchain is the operator's, never the sanitized control PATH.
-# `bench` forwards it too: it times hooks under the toolchain agents really use.
+# Worktree renderers, doctor and show-config use the caller's toolchain, not
+# the sanitized control PATH. `bench` times hooks under that same toolchain.
+# Hook and session-start routes do not forward it or run a version probe.
 case "${1-}" in
-  attach|onboard|worktree|doctor|bench) launcher_attach_caller_path=${PATH-} ;;
+  attach|onboard|worktree|doctor|show-config|bench) launcher_attach_caller_path=${PATH-} ;;
 esac
 # `trellis heavy` wraps an arbitrary workload that must see the caller's whole
 # environment. Carry it as data, never as shell text: the launcher only relays
@@ -59,6 +59,30 @@ eval "$launcher_body"
 # This file is copied verbatim to a user-owned executable (normally
 # ~/.local/bin/trellis). It intentionally contains its release verification
 # logic so installed launchers never depend on a mutable source checkout.
+
+# BEGIN B1 companion pin (T55). Configure renders only these literal values.
+# An unpinned launcher is deliberately a complete legacy launcher; it never
+# searches PATH, a project, or .trellis/runtime for a native bootstrap.
+launcher_native_entry=''
+launcher_native_sha256=''
+launcher_native_version=''
+launcher_native_companion_path() {
+  local home="$1"
+  [ -n "$launcher_native_entry" ] && [ -n "$launcher_native_version" ] || return 10
+  case "$launcher_native_sha256" in ''|*[!0-9a-f]*) return 4 ;; esac
+  [ "${#launcher_native_sha256}" -eq 64 ] || return 4
+  # Selection is not authorization, but even a selected pin must have one
+  # version component and exactly one known target, never traversal segments.
+  case "$launcher_native_version" in ''|*[!0-9A-Za-z.+-]*|.*) return 4 ;; esac
+  case "$launcher_native_entry" in
+    "$home/bin/native/$launcher_native_version/aarch64-apple-darwin/$launcher_native_sha256/trellis-hooks"|\
+    "$home/bin/native/$launcher_native_version/x86_64-unknown-linux-musl/$launcher_native_sha256/trellis-hooks"|\
+    "$home/bin/native/$launcher_native_version/aarch64-unknown-linux-musl/$launcher_native_sha256/trellis-hooks") ;;
+    *) return 4 ;;
+  esac
+  printf '%s\n' "$launcher_native_entry"
+}
+# END B1 companion pin (T55).
 
 # Capture the caller's REAL PATH here: this line runs before the hardening
 # below replaces PATH with the system set, so this is the only point at which
@@ -157,10 +181,11 @@ launcher_safe_relative_path() {
 }
 
 launcher_safe_symlink_target() {
-  local link_path="$1" target="$2" parent="" rest component resolved=""
+  local link_path="$1" target="$2" root="${3:-}" parent="" rest component resolved=""
+  local candidate followed=0
 
   launcher_safe_relative_path "$link_path" || return 1
-  [ -n "$target" ] || return 1
+  [ -n "$root" ] && [ -d "$root" ] && [ -n "$target" ] || return 1
   case "$target" in
     /*|*'//'*) return 1 ;;
     *$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
@@ -188,10 +213,19 @@ launcher_safe_symlink_target() {
         esac
         ;;
       *)
-        if [ -n "$resolved" ]; then
-          resolved="$resolved/$component"
+        candidate="${resolved:+$resolved/}$component"
+        if [ -L "$root/$candidate" ]; then
+          followed=$((followed + 1))
+          [ "$followed" -le 40 ] || return 1
+          target="$(readlink "$root/$candidate")" || return 1
+          [ -n "$target" ] || return 1
+          case "$target" in
+            /*|*'//'*|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
+          esac
+          # Expand the link at its parent before the remaining components.
+          rest="$target${rest:+/$rest}"
         else
-          resolved="$component"
+          resolved="$candidate"
         fi
         ;;
     esac
@@ -205,6 +239,18 @@ launcher_real_directory() {
   (CDPATH='' cd "$path" && pwd -P)
 }
 
+# Darwin's xattr marker hides the ACL marker in ls -l. Inspect ACL entries
+# explicitly, and fail closed if the release tree cannot be enumerated.
+launcher_release_has_no_acl() {
+  local release_dir="$1" listing
+  case "$(uname -s)" in
+    Darwin) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -lde {} + 2>/dev/null)" || return 1 ;;
+    *) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -ld {} + 2>/dev/null)" || return 1 ;;
+  esac
+  printf '%s\n' "$listing" |
+    /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }'
+}
+
 launcher_not_writable() {
   local path="$1" permissions write_bits
   permissions="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
@@ -213,21 +259,46 @@ launcher_not_writable() {
   [ "$write_bits" = "---" ]
 }
 
+# Print the ls permission field of $1, or fail when it carries an ACL. Darwin's
+# ls prints an xattr's "@" in place of an ACL's "+", so list the ACL entries
+# with -e: any line after the first is one. Where ls has no -e (GNU) the "+" is
+# reliable. A Darwin -e failure refuses rather than retrying ACL-blind.
+launcher_acl_free_permissions() {
+  local path="$1" listing
+  # OSTYPE is initialized by the clean Bash, never an inherited selector.
+  case "$OSTYPE" in
+    darwin*) listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1 ;;
+    linux*) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
+    *)
+      listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || {
+        [ "$(/usr/bin/uname -s 2>/dev/null)" != Darwin ] || return 1
+        listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1
+      }
+      ;;
+  esac
+  case "$listing" in *"
+"*) return 1 ;; esac
+  listing="${listing%% *}"
+  case "$listing" in ''|*+*) return 1 ;; esac
+  printf '%s\n' "$listing"
+}
+
 launcher_private_config() {
   local path="$1" permissions private_bits
   [ ! -L "$path" ] && [ -f "$path" ] || return 1
-  permissions="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
-  case "$permissions" in *+*) return 1 ;; esac
-  private_bits="$(/usr/bin/printf '%s' "$permissions" | /usr/bin/awk '{p=substr($0, 1, 10); print substr(p, 5, 6)}')"
+  permissions="$(launcher_acl_free_permissions "$path")" || return 1
+  # Setuid shows as s/S in the owner execute slot. Setgid and sticky land in
+  # the group and other slots, which the private check below requires empty.
+  case "$permissions" in ???[sS]*) return 1 ;; esac
+  private_bits="${permissions:4:6}"
   [ "$private_bits" = "------" ]
 }
 
 launcher_private_directory() {
   local path="$1" permissions private_bits
   [ ! -L "$path" ] && [ -d "$path" ] || return 1
-  permissions="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
-  case "$permissions" in *+*) return 1 ;; esac
-  private_bits="$(/usr/bin/printf '%s' "$permissions" | /usr/bin/awk '{p=substr($0, 1, 10); print substr(p, 5, 6)}')"
+  permissions="$(launcher_acl_free_permissions "$path")" || return 1
+  private_bits="${permissions:4:6}"
   [ "$private_bits" = "------" ]
 }
 
@@ -389,62 +460,292 @@ launcher_validate_payload_parent() {
   done
 }
 
-# Successful verification is memoized for the shell process that performed it
-# and its subshells (call sites capture through `$(...)`, which is why the
-# value is exported rather than plain). Every key is prefixed with that
-# shell's `$$`, so a value inherited by an exec'd child -- which would carry
-# an arbitrarily old success verdict across a fresh process boundary -- can
-# never match and the child re-verifies. Failure is never recorded.
-# Key: canonical release dir, sha256(release.json) from
-# launcher_release_json_sha256_no_follow, and expected_version.
-# TOCTOU: equivalent to the existing verify-then-use window. The launcher already
-# verifies and then snapshots/executes; a same-process tamper after a successful
-# verify was already outside that check. The memo is not shared across processes,
-# so a cross-process tamper is still refused on the next invocation.
-: "${_TRELLIS_LAUNCHER_VERIFY_MEMO:=}"
-
-launcher_verify_release_memo_key() {
-  local release_dir="${1-}" version="${2-}" canon parent base digest
-  [ -n "$release_dir" ] || return 1
-  [ ! -L "$release_dir" ] && [ -d "$release_dir" ] || return 1
-  canon="$(CDPATH='' cd "$release_dir" && pwd -P)" || return 1
-  parent="$(dirname "$canon")"
-  base="$(basename "$canon")"
-  [ -n "$parent" ] && [ -n "$base" ] || return 1
-  digest="$(launcher_release_json_sha256_no_follow "$parent" "$base" 2>/dev/null)" || return 1
-  case "$digest" in
-    *[!0-9a-f]*) return 1 ;;
-  esac
-  [ "${#digest}" -eq 64 ] || return 1
-  printf '%s\n' "$$"$'\t'"$canon"$'\t'"$digest"$'\t'"$version"
+# BEGIN T11 STAMP-STAT CORE — pinned verbatim in scripts/trellis-launcher.sh
+# Normalise seconds and exactly nine fractional digits to integer nanoseconds.
+# The caller owns the dynamically scoped _release_ns variable. Refuse extreme
+# or unsupported representations instead of overflowing Bash's signed int.
+_release_stamp_ns() {
+  local seconds="$1" fraction="$2" digits="${1#-}"
+  case "$digits" in ''|*[!0-9]*) return 1 ;; esac
+  case "$fraction" in *[!0-9]*|'') return 1 ;; esac
+  [ "${#fraction}" -eq 9 ] && [ "${#digits}" -le 10 ] || return 1
+  [ "$seconds" -ge -9223372035 ] && [ "$seconds" -le 9223372035 ] || return 1
+  _release_ns=$((seconds * 1000000000 + 10#$fraction))
 }
 
-launcher_verify_release_memo_hit() {
-  local key="${1-}" line
-  [ -n "$key" ] || return 1
-  while IFS= read -r line; do
-    [ "$line" = "$key" ] && return 0
-  done <<EOF
-${_TRELLIS_LAUNCHER_VERIFY_MEMO}
+# Check the captured list, never discover new names. Directory ctime detects
+# membership changes. Ancestors outside the release are identity anchors only.
+#
+# The first proof is one os.lstat per row in one isolated Python process:
+# device and metadata come from one observation per row, and the program
+# prints each row in the record's own format, so the comparison is a single
+# string test. It takes ~40 ms for a 2,364-entry release where Darwin's stat
+# spends ~0.4 ms per printed %d on a device-name lookup (~1.1 s a recheck).
+# The interpreter is an absolute, executable TRELLIS_PYTHON, else the
+# python3 the launcher's control PATH resolves, by absolute path; never a
+# PATH lookup. It runs with -I -S in a clean environment. If no interpreter
+# runs the program, the stat sweep below decides, as it always did.
+#
+# That sweep's stat process is absolute, its environment is clean, and
+# argument chunks are bounded below ARG_MAX. An unavailable or malformed stat
+# is always a miss. Every row's device comes from the same stat line as its
+# other fields: a parent directory's device seen by a later stat proves
+# nothing about a file seen earlier, since a mount can come and go in between.
+# Every call stats every entry afresh. A sweep whose stat output and captured
+# lists both equal those of a sweep that passed the row comparison earlier in
+# this shell has the same result; anything else is compared row by row.
+_release_stamp_matches() {
+  local os stat_bin argmax budget index=0 used next rows line_no count expected
+  local dev ino size mt ct mode msec csec mhuman chuman _release_ns mns cns actual
+  local key sweep pos slot=0 batch_no=0
+  local -a batch outputs sizes
+  count="${#_TRELLIS_RELEASE_STAMP_PATHS[@]}"
+  [ "$count" -gt 0 ] || return 1
+  if [ "${#_TRELLIS_RELEASE_STAMP_KINDS[@]}" -eq "$count" ] &&
+     [ "${#_TRELLIS_RELEASE_STAMP_ROWS[@]}" -eq "$count" ] &&
+     rows="$(_release_stamp_lstat_rows)"; then
+    case "$rows" in
+      "ok $count"$'\n'*)
+        printf -v expected '%s\n' "${_TRELLIS_RELEASE_STAMP_ROWS[@]}"
+        if [ "${rows#*$'\n'}"$'\n' = "$expected" ]; then return 0; fi
+        return 1
+        ;;
+    esac
+  fi
+  os="$(/usr/bin/uname -s 2>/dev/null)" || return 1
+  case "$os" in Darwin|Linux) ;; *) return 1 ;; esac
+  if [ -x /usr/bin/stat ]; then stat_bin=/usr/bin/stat
+  elif [ -x /bin/stat ]; then stat_bin=/bin/stat
+  else return 1
+  fi
+  argmax="$(/usr/bin/getconf ARG_MAX 2>/dev/null)" || return 1
+  case "$argmax" in ''|*[!0-9]*) return 1 ;; esac
+  budget=$((argmax / 4))
+  [ "$budget" -le 262144 ] || budget=262144
+  [ "$budget" -ge 1024 ] || return 1
+  while [ "$index" -lt "$count" ]; do
+    batch=() used=0 pos="$index"
+    while [ "$pos" -lt "$count" ]; do
+      next="${_TRELLIS_RELEASE_STAMP_PATHS[$pos]}"
+      # Account for bytes and argv pointers, and leave fixed-format overhead.
+      used=$((used + ${#next} * 4 + 16))
+      if [ "$used" -gt "$budget" ]; then
+        [ "${#batch[@]}" -gt 0 ] || return 1
+        break
+      fi
+      batch+=("$next")
+      pos=$((pos + 1))
+    done
+    rows="$(_release_stamp_stat "$os" "$stat_bin" "${batch[@]}")" || return 1
+    outputs+=("$rows")
+    sizes+=("${#batch[@]}")
+    index="$pos"
+  done
+  # %q keeps the key injective whatever the lists contain.
+  printf -v key '%q\n' "$count" "${#_TRELLIS_RELEASE_STAMP_KINDS[@]}" "${#_TRELLIS_RELEASE_STAMP_ROWS[@]}" \
+    "${_TRELLIS_RELEASE_STAMP_PATHS[@]}" \
+    "${_TRELLIS_RELEASE_STAMP_KINDS[@]+"${_TRELLIS_RELEASE_STAMP_KINDS[@]}"}" \
+    "${_TRELLIS_RELEASE_STAMP_ROWS[@]+"${_TRELLIS_RELEASE_STAMP_ROWS[@]}"}"
+  printf -v sweep '%s\n' "${outputs[@]}"
+  while [ "$slot" -lt "${#_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[@]}" ]; do
+    if [ "$key" = "${_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[$slot]}" ] &&
+       [ "$sweep" = "${_TRELLIS_RELEASE_STAMP_SWEEPS[$slot]-}" ]; then
+      return 0
+    fi
+    slot=$((slot + 1))
+  done
+  index=0
+  while [ "$batch_no" -lt "${#sizes[@]}" ]; do
+    rows="${outputs[$batch_no]}"
+    line_no=0
+    while IFS=$'\t' read -r dev ino size mt ct mode mhuman chuman; do
+      [ "$line_no" -lt "${sizes[$batch_no]}" ] || return 1
+      if [ "$os" = Darwin ]; then
+        msec="${mt%%.*}"; mhuman="${mt#*.}"
+        csec="${ct%%.*}"; chuman="${ct#*.}"
+        case "$mode" in ''|*[!0-7]*) return 1 ;; esac
+        mode=$((8#$mode))
+      else
+        # GNU fields: seconds, human fractional mtime, seconds, human ctime.
+        msec="$mt"; csec="$mode"; mode="$chuman"; chuman="$mhuman"; mhuman="$ct"
+        mhuman="${mhuman#*.}"; mhuman="${mhuman%% *}"
+        chuman="${chuman#*.}"; chuman="${chuman%% *}"
+        case "$mode" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+        mode=$((16#$mode))
+      fi
+      _release_stamp_ns "$msec" "$mhuman" || return 1; mns="$_release_ns"
+      _release_stamp_ns "$csec" "$chuman" || return 1; cns="$_release_ns"
+      if [ "${_TRELLIS_RELEASE_STAMP_KINDS[$index]}" = A ]; then
+        actual="$dev $ino $mode"
+      else
+        [ "$((cns % 1000000))" -ne 0 ] || return 1
+        actual="$dev $ino $size $mns $cns $mode"
+      fi
+      [ "$actual" = "${_TRELLIS_RELEASE_STAMP_ROWS[$index]}" ] || return 1
+      index=$((index + 1)); line_no=$((line_no + 1))
+    done <<EOF
+$rows
 EOF
-  return 1
+    [ "$line_no" -eq "${sizes[$batch_no]}" ] || return 1
+    batch_no=$((batch_no + 1))
+  done
+  if [ "${#_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[@]}" -gt 0 ]; then
+    _TRELLIS_RELEASE_STAMP_SWEEP_KEYS=("$key" "${_TRELLIS_RELEASE_STAMP_SWEEP_KEYS[0]}")
+    _TRELLIS_RELEASE_STAMP_SWEEPS=("$sweep" "${_TRELLIS_RELEASE_STAMP_SWEEPS[0]-}")
+  else
+    _TRELLIS_RELEASE_STAMP_SWEEP_KEYS=("$key")
+    _TRELLIS_RELEASE_STAMP_SWEEPS=("$sweep")
+  fi
+  export -n _TRELLIS_RELEASE_STAMP_SWEEP_KEYS _TRELLIS_RELEASE_STAMP_SWEEPS
 }
+
+# One absolute stat process in a clean environment over one batch.
+_release_stamp_stat() {
+  local os="$1" stat_bin="$2"
+  shift 2
+  if [ "$os" = Darwin ]; then
+    /usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" -f $'%d\t%i\t%z\t%Fm\t%Fc\t%p' -- "$@" 2>/dev/null
+  else
+    /usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" --printf='%d\t%i\t%s\t%Y\t%y\t%Z\t%z\t%f\n' -- "$@" 2>/dev/null
+  fi
+}
+
+# The rows of the record, from one os.lstat per path: "dev ino mode" for an
+# anchor (A), else "dev ino size mtime_ns ctime_ns mode", or "coarse" for a
+# ctime without sub-millisecond digits. Kinds then paths arrive NUL-separated
+# on stdin; a header names the count. Quote-free so it can sit in quotes.
+# The double quotes are Python source, passed only as one quoted -c argument.
+# shellcheck disable=SC2089
+_RELEASE_STAMP_LSTAT_PROGRAM='import os, sys
+n = int(sys.argv[1])
+fields = sys.stdin.buffer.read().split(b"\0")
+if n <= 0 or len(fields) != 2 * n + 1 or fields[-1]:
+    sys.exit(2)
+out = ["ok %d" % n]
+for kind, path in zip(fields[:n], fields[n:2 * n]):
+    s = os.lstat(path)
+    if kind == b"A":
+        out.append("%d %d %d" % (s.st_dev, s.st_ino, s.st_mode))
+    elif s.st_ctime_ns % 1000000:
+        out.append("%d %d %d %d %d %d" % (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns, s.st_mode))
+    else:
+        out.append("coarse")
+sys.stdout.write("\n".join(out) + "\n")
+'
+# shellcheck disable=SC2090
+export -n _RELEASE_STAMP_LSTAT_PROGRAM
+
+_release_stamp_lstat_rows() {
+  local python_bin="${TRELLIS_PYTHON:-}"
+  case "$python_bin" in /*) [ -x "$python_bin" ] || python_bin="" ;; *) python_bin="" ;; esac
+  if [ -z "$python_bin" ]; then
+    if [ -x /usr/bin/python3 ]; then python_bin=/usr/bin/python3
+    elif [ -x /bin/python3 ]; then python_bin=/bin/python3
+    else return 1
+    fi
+  fi
+  printf '%s\0' "${_TRELLIS_RELEASE_STAMP_KINDS[@]}" "${_TRELLIS_RELEASE_STAMP_PATHS[@]}" |
+    /usr/bin/env -i LC_ALL=C "$python_bin" -I -S -c "$_RELEASE_STAMP_LSTAT_PROGRAM" \
+      "${#_TRELLIS_RELEASE_STAMP_PATHS[@]}" 2>/dev/null
+}
+
+# Populate only from the result of a successful, fine-ctime-qualified check.
+# This only records the lists; nothing may rely on them until
+# _release_stamp_matches has compared them with a fresh stat sweep.
+_release_stamp_capture() {
+  local output="$1" header body count kind path dev ino size mt ct mode n=0
+  local -a paths kinds recorded
+  paths=(); kinds=(); recorded=()
+  header="${output%%$'\n'*}"
+  case "$header" in $'hit\t'*) count="${header#*$'\t'}" ;; *) return 1 ;; esac
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$count" -gt 0 ] && [ "$count" -le 1000000 ] || return 1
+  # Bash 3.2 does not interpret $'\n' inside this here-doc expansion.
+  body="${output#*$'\n'}"
+  while IFS=$'\t' read -r kind path dev ino size mt ct mode; do
+    case "$kind" in E|A) ;; *) return 1 ;; esac
+    case "$path" in /*) ;; *) return 1 ;; esac
+    case "$dev:$ino:$size:$mt:$ct:$mode" in *[!0-9:-]*) return 1 ;; esac
+    paths+=("$path")
+    kinds+=("$kind")
+    if [ "$kind" = A ]; then
+      recorded+=("$dev $ino $mode")
+    else
+      recorded+=("$dev $ino $size $mt $ct $mode")
+    fi
+    n=$((n + 1))
+  done <<EOF
+$body
+EOF
+  [ "$n" -eq "$count" ] || return 1
+  _TRELLIS_RELEASE_STAMP_PATHS=("${paths[@]}")
+  _TRELLIS_RELEASE_STAMP_KINDS=("${kinds[@]}")
+  _TRELLIS_RELEASE_STAMP_ROWS=("${recorded[@]}")
+  export -n _TRELLIS_RELEASE_STAMP_PATHS _TRELLIS_RELEASE_STAMP_KINDS _TRELLIS_RELEASE_STAMP_ROWS
+}
+# END T11 STAMP-STAT CORE
+
+# The clean launcher retains one successful full proof in this shell only.
+# Its pre-verify snapshot and post-verify stat comparison bind every entry;
+# a later call must re-stat that exact snapshot before reusing it. A coarse or
+# unavailable token leaves full verification callable but disables reuse.
+# No verdict or token is exported across an exec boundary.
+unset _TRELLIS_LAUNCHER_VERIFY_MEMO _TRELLIS_RELEASE_STAMP_PATHS \
+  _TRELLIS_RELEASE_STAMP_KINDS _TRELLIS_RELEASE_STAMP_ROWS \
+  _TRELLIS_RELEASE_STAMP_SWEEP_KEYS _TRELLIS_RELEASE_STAMP_SWEEPS
+_TRELLIS_LAUNCHER_VERIFY_MEMO=""
+_LAUNCHER_VERIFIED_CLI=""
+_TRELLIS_RELEASE_STAMP_PATHS=()
+_TRELLIS_RELEASE_STAMP_KINDS=()
+_TRELLIS_RELEASE_STAMP_ROWS=()
+_TRELLIS_RELEASE_STAMP_SWEEP_KEYS=()
+_TRELLIS_RELEASE_STAMP_SWEEPS=()
 
 launcher_verify_release() {
-  local release_dir="${1-}" version="${2-}" key="" rc=0 cli=""
-  key="$(launcher_verify_release_memo_key "$release_dir" "$version")" || key=""
-  if [ -n "$key" ] && launcher_verify_release_memo_hit "$key"; then
-    printf '%s\n' "$release_dir/payload/scripts/trellis"
+  local release_dir="${1-}" version="${2-}" key="" rc=0 cli="" token=""
+  _LAUNCHER_VERIFIED_CLI=""
+  export -n _LAUNCHER_VERIFIED_CLI
+  case "$release_dir$version" in
+    *$'\t'*|*$'\n'*|*$'\r'*) ;;
+    *) key="$release_dir"$'\t'"$version" ;;
+  esac
+  if [ -n "$key" ] && [ "$key" = "$_TRELLIS_LAUNCHER_VERIFY_MEMO" ] && _release_stamp_matches; then
+    _LAUNCHER_VERIFIED_CLI="$release_dir/payload/scripts/trellis"
+    export -n _LAUNCHER_VERIFIED_CLI
+    printf '%s\n' "$_LAUNCHER_VERIFIED_CLI"
     return 0
   fi
+  _TRELLIS_LAUNCHER_VERIFY_MEMO=""
+  export -n _TRELLIS_LAUNCHER_VERIFY_MEMO
+  # A token is optional: if unavailable or coarse, the full verifier remains
+  # authoritative but its result cannot be reused by a later call.
+  if [ -n "$key" ]; then
+    token="$(launcher_exec_stamp audit-token "$release_dir" "$version")" || token=""
+  fi
+  # The body's ls -ld mode check cannot see an ACL a Darwin xattr marker hides.
+  # A memo hit needs no rescan: it is bound to this pass's pre-verify stat
+  # token, and adding an ACL moves ctime.
+  launcher_release_has_no_acl "$release_dir" || {
+    launcher_error "configured release carries an ACL or cannot be inspected: $release_dir"
+    return "$TRELLIS_EX_STATE"
+  }
   cli="$(launcher_verify_release_body "$release_dir" "$version")" || rc=$?
-  if [ "$rc" -eq 0 ] && [ -n "$key" ] && [ -n "$cli" ]; then
-    _TRELLIS_LAUNCHER_VERIFY_MEMO="${_TRELLIS_LAUNCHER_VERIFY_MEMO}${key}"$'\n'
-    export _TRELLIS_LAUNCHER_VERIFY_MEMO
-    printf '%s\n' "$cli"
-    return 0
+  [ "$rc" -eq 0 ] || return "$rc"
+  [ -n "$cli" ] || return "$TRELLIS_EX_STATE"
+  if [ -n "$token" ]; then
+    if _release_stamp_capture "$token" && _release_stamp_matches; then
+      _TRELLIS_LAUNCHER_VERIFY_MEMO="$key"
+      export -n _TRELLIS_LAUNCHER_VERIFY_MEMO
+    else
+      # A changed or uninspectable token cannot authorize reuse. Re-run the
+      # full verifier instead; a missing stat implementation is not a finding.
+      cli="$(launcher_verify_release_body "$release_dir" "$version")" || return $?
+      [ -n "$cli" ] || return "$TRELLIS_EX_STATE"
+    fi
   fi
-  return "$rc"
+  _LAUNCHER_VERIFIED_CLI="$cli"
+  export -n _LAUNCHER_VERIFIED_CLI
+  printf '%s\n' "$cli"
 }
 
 launcher_verify_release_body() (
@@ -634,7 +935,7 @@ launcher_verify_release_body() (
         launcher_error "could not read configured release symlink: $path"
         return "$TRELLIS_EX_STATE"
       fi
-      launcher_safe_relative_path "$path" && launcher_safe_symlink_target "$path" "$target" || {
+      launcher_safe_relative_path "$path" && launcher_safe_symlink_target "$path" "$target" "$payload" || {
         exec 3<&-
         launcher_error "configured release contains an unsafe symlink: $path"
         return "$TRELLIS_EX_STATE"
@@ -860,7 +1161,7 @@ launcher_atomic_publish_no_replace() {
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$source" "$destination" <<'PY'
+  "$python_bin" -I - "$source" "$destination" <<'PY'
 import ctypes
 import errno
 import os
@@ -1256,7 +1557,7 @@ launcher_release_json_sha256_no_follow() {
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$releases" "$entry" <<'PY'
+  "$python_bin" -I - "$releases" "$entry" <<'PY'
 import hashlib
 import os
 import stat
@@ -1595,7 +1896,7 @@ launcher_write_snapshot_owner() {
     return "$TRELLIS_EX_UNAVAILABLE"
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
-  if ! "$python_bin" - "$owner" "$owner_json" 2>/dev/null <<'PY'
+  if ! "$python_bin" -I - "$owner" "$owner_json" 2>/dev/null <<'PY'
 import os
 import sys
 
@@ -1703,7 +2004,7 @@ launcher_copy_snapshot_no_follow() {
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$releases" "$version" "$snapshot_base" "$digest" "$store" <<'PY'
+  "$python_bin" -I - "$releases" "$version" "$snapshot_base" "$digest" "$store" <<'PY'
 import hashlib
 import os
 import stat
@@ -2067,7 +2368,7 @@ launcher_remove_snapshot() {
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$parent" "$base" "${base}.owner.json" <<'PY'
+  "$python_bin" -I - "$parent" "$base" "${base}.owner.json" <<'PY'
 import errno
 import os
 import stat
@@ -2472,7 +2773,51 @@ def private_directory(path, create):
         os.chmod(path, 0o700)
 
 
-def check(home, release_dir):
+def memo_rows(release_dir, directory, name, entries, directory_info, stamp_info):
+    """Known paths and fingerprints from a verified check, for one shell only.
+
+    Ancestor anchors are checked for directory identity, not child membership;
+    release-tree and stamp entries retain their full schema-2 fingerprints.
+    Unsafe line-protocol names merely disable reuse, never the stamp check.
+    """
+    rows = []
+    seen = set()
+
+    def add(path, info, anchor=False):
+        if any(c in path for c in "\t\r\n"):
+            raise Refuse()
+        if path in seen:
+            return
+        seen.add(path)
+        if anchor:
+            if not stat.S_ISDIR(info.st_mode):
+                raise Refuse()
+            rows.append(("A", path, info.st_dev, info.st_ino, 0, 0, 0, info.st_mode))
+        else:
+            kind, mode, size, mtime, ctime, ino, dev = describe(info)
+            rows.append(("E", path, dev, ino, size, mtime, ctime, mode))
+
+    for rel in sorted(entries):
+        kind, mode, size, mtime, ctime, ino, dev = entries[rel]
+        path = release_dir if rel == "." else release_dir + "/" + rel
+        if any(c in path for c in "\t\r\n"):
+            raise Refuse()
+        seen.add(path)
+        rows.append(("E", path, dev, ino, size, mtime, ctime, mode))
+    if directory is not None:
+        add(directory, directory_info)
+        add(directory + "/" + name, stamp_info)
+    for path in (release_dir,) if directory is None else (release_dir, directory):
+        parent = os.path.dirname(path)
+        while parent not in seen:
+            add(parent, os.lstat(parent), anchor=True)
+            if parent == "/":
+                break
+            parent = os.path.dirname(parent)
+    return rows
+
+
+def check(home, release_dir, memo=False):
     directory, name, raw, entries = locate(home, release_dir)
     if not fine_ctime(entries):
         return 1
@@ -2481,11 +2826,23 @@ def check(home, release_dir):
         private_directory(directory, False)
         fd = open_directory(directory)
         try:
+            directory_info = os.fstat(fd)
             info, recorded = read_regular(name, fd, STAMP_LIMIT)
         finally:
             os.close(fd)
         if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600 and recorded == expected:
-            print("hit")
+            rows = None
+            if memo:
+                try:
+                    rows = memo_rows(release_dir, directory, name, entries, directory_info, info)
+                except (OSError, Refuse):
+                    pass
+            if rows is None:
+                print("hit")
+            else:
+                print("hit\t%d" % len(rows))
+                for row in rows:
+                    print("\t".join(str(part) for part in row))
             return 0
     except (OSError, Refuse):
         pass
@@ -2576,10 +2933,16 @@ def write(home, release_dir, token):
 
 
 def main(argv):
-    if len(argv) == 3 and argv[0] == "check":
-        return check(argv[1], argv[2])
-    if len(argv) == 4 and argv[0] == "write":
-        return write(argv[1], argv[2], argv[3])
+    if len(argv) == 3 and argv[0] in ("check", "check-memo"):
+        return check(argv[1], argv[2], memo=argv[0] == "check-memo")
+    if len(argv) == 4 and argv[0] in ("write", "write-memo"):
+        result = write(argv[1], argv[2], argv[3])
+        if result == 0 and argv[0] == "write-memo":
+            try:
+                check(argv[1], argv[2], memo=True)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, Refuse):
+                pass
+        return result
     return 2
 
 
@@ -2755,6 +3118,15 @@ def main(argv):
     if len(argv) < 3:
         return 2
     command, home, version = argv[:3]
+    if command == "audit-token" and len(argv) == 3:
+        raw, entries = read_tree(home)
+        if not EXEC["fine_ctime"](entries):
+            refuse()
+        rows = EXEC["memo_rows"](home, None, None, entries, None, None)
+        print("hit\t%d" % len(rows))
+        for row in rows:
+            print("\t".join(str(part) for part in row))
+        return 0
     if command == "fast" and len(argv) == 3:
         release_dir = home + "/releases/" + version
         fd = SOURCE["open_directory"](release_dir)
@@ -2852,7 +3224,8 @@ launcher_is_sha256() {
 # DIGEST, exactly as the installed release is verified.
 launcher_verify_snapshot() {
   local exec_store="${1:-}" name="${2:-}" version="${3:-}" digest="${4:-}" cli
-  cli="$(launcher_verify_release "$exec_store/$name" "$version")" || return $?
+  launcher_verify_release "$exec_store/$name" "$version" >/dev/null || return $?
+  cli="$_LAUNCHER_VERIFIED_CLI"
   [ "$cli" = "$exec_store/$name/payload/scripts/trellis" ] || {
     launcher_error "verified release snapshot has an invalid payload path"
     return "$TRELLIS_EX_STATE"
@@ -2983,7 +3356,8 @@ launcher_snapshot_verified_release() (
       return "$TRELLIS_EX_UNAVAILABLE"
     }
     launcher_copy_snapshot_no_follow "$releases" "$version" "${legacy##*/}" "$digest" || return $?
-    cli="$(launcher_verify_release "$legacy" "$version")" || return $?
+    launcher_verify_release "$legacy" "$version" >/dev/null || return $?
+    cli="$_LAUNCHER_VERIFIED_CLI"
     [ "$cli" = "$legacy/payload/scripts/trellis" ] || {
       launcher_error "verified release snapshot has an invalid payload path"
       return "$TRELLIS_EX_STATE"
@@ -3160,7 +3534,7 @@ launcher_emit_verified_command_bundle() {
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
 
-  "$python_bin" - "$releases" "$base" "$expected_digest" "$command" "$version" <<'PY'
+  "$python_bin" -I - "$releases" "$base" "$expected_digest" "$command" "$version" <<'PY'
 import hashlib
 import json
 import os
@@ -3180,6 +3554,7 @@ LIBRARIES = (
     "scripts/lib/skill-roots.sh",
     "scripts/lib/release-store.sh",
     "scripts/lib/local-registry.sh",
+    "scripts/lib/settings-hooks-merge.sh",
     "scripts/lib/attachment.sh",
 )
 # The current CLI's optional attach surface supplies the group-exclude planner.
@@ -3985,6 +4360,7 @@ Existing commands:
   skills        Manage Trellis-owned user skills (list, import, link, unlink)
   worktree      Create/repair a worktree with Trellis inheritance seeded
   usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
+  reread        Write a short-lived, logged reread-guard override (reread override --session ID --reason WHY)
   heavy         Run a test command in one of the machine's heavy (or --light) slots (--check, --status)
   bench         Measure Trellis hook, lifecycle and gate latency in a sandbox (--suite hooks|lifecycle|gate, --n N)
 EOF
@@ -4046,10 +4422,18 @@ my %POOL = (
 # (absent means 4), each a JSON integer >= 1. Re-read on every poll. Returns
 # ({heavy => N, light => L}) or (undef, one-line reason).
 sub read_slots {
+  # Only the embedded launcher metadata program defines this lexical cache
+  # accessor. The standalone supervisor still reads afresh on every poll.
+  return launcher_metadata_config() if defined &launcher_metadata_config;
   open(my $fh, '<', $config) or return (undef, "cannot read machine config $config: $!");
   my $text = do { local $/; <$fh> };
   close $fh;
   my $data = eval { JSON::PP->new->decode($text) };
+  return slot_counts($data);
+}
+
+sub slot_counts {
+  my ($data) = @_;
   return (undef, "machine config is not a JSON object: $config") unless ref $data eq 'HASH';
   my %n;
   for my $p (qw(heavy light)) {
@@ -4193,24 +4577,257 @@ exit 2;
 TRELLIS_HEAVY_METADATA_PL
 }
 
-launcher_heavy_metadata() {
-  local home="${1:-}" mode="${2:-}" perl_bin program
+# One closed-environment Perl operation validates config for every metadata
+# route. The appended pinned supervisor helpers reuse this lexical object.
+launcher_metadata_perl() {
+  cat <<'TRELLIS_METADATA_PL'
+use strict;
+use warnings;
+BEGIN {
+  eval {
+    require JSON::PP;
+    if (($ARGV[0] // '') eq 'check' || ($ARGV[0] // '') eq 'status') {
+      require Fcntl; require MIME::Base64;
+    }
+    1;
+  } or do { print STDERR "trellis: metadata Perl modules are unavailable\n"; exit 5; };
+}
+my $metadata_mode = shift @ARGV // '';
+my $metadata_argc = shift @ARGV // 0;
+my $metadata_home = $ENV{TRELLIS_HOME} // '';
+my $metadata_path = "$metadata_home/config.json";
+my $metadata_legacy_json = 1;
+my $metadata_schema_literal;
+sub metadata_error { print STDERR "trellis: $_[0]\n"; exit 4; }
+
+# JSON::PP owns grammar/value decoding. Express jq's legacy token spellings
+# in standard JSON and bound its object-key/array stack before one decode.
+sub metadata_json_text {
+  my ($raw) = @_;
+  if ($raw =~ s/^\xEF\xBB\xBF//) { $metadata_legacy_json = 0; }
+  my $nul = index($raw, "\0");
+  return undef if $nul >= 0; # NUL is malformed on every host (jq1.7/1.8 differ).
+  my $text = $raw;
+  # ASCII cannot contain malformed UTF8 or Unicode noncharacters. Keep every
+  # JSON/field check, but load the strict decoder only when raw bytes need it.
+  if ($raw =~ /[\x80-\xff]/) {
+    eval { require Encode; 1 }
+      or do { print STDERR "trellis: metadata Perl modules are unavailable\n"; exit 5; };
+    $text = eval { Encode::decode('UTF-8', $raw, Encode::FB_CROAK()) };
+    return undef unless defined $text;
+    # Constant-time byte offsets, including on Linux Perl5.44.
+    utf8::encode($text);
+  }
+  my ($out, $i, $depth, $top_key) = ('', 0, 0, '');
+  while ($i < length $text) {
+    my $c = substr($text, $i, 1);
+    if ($c eq '"') {
+      my $string_start = $i;
+      $out .= $c; ++$i;
+      my $closed = 0;
+      while ($i < length $text) {
+        $c = substr($text, $i++, 1);
+        if ($c eq '"') { $out .= $c; $closed = 1; last; }
+        if ($c eq '\\') {
+          my $escape = substr($text, $i++, 1);
+          if ($escape eq 'u') {
+            my $hex = substr($text, $i, 4);
+            return undef unless $hex =~ /\A[0-9a-fA-F]{4}\z/;
+            $i += 4;
+            my $code = hex $hex;
+            if ($code >= 0xd800 && $code <= 0xdbff) {
+              my $pair = substr($text, $i, 6);
+              return undef unless $pair =~ /\A\\u([0-9a-fA-F]{4})\z/ && hex($1) >= 0xdc00 && hex($1) <= 0xdfff;
+              $out .= '\\u'.$hex.$pair; $i += 6;
+            } elsif ($code >= 0xdc00 && $code <= 0xdfff) {
+              $out .= '\\ufffd'; $metadata_legacy_json = 0;
+            } else { $out .= '\\u'.$hex; }
+          } else { $out .= '\\'.$escape; }
+        } else { $out .= $c; }
+      }
+      return undef unless $closed;
+      if ($depth == 2) {
+        # Anchored lookahead never copies the unconsumed file for each key.
+        pos($text) = $i;
+        if ($text =~ /\G[ \t\r\n]*:/gc) {
+          $top_key = eval { JSON::PP->new->utf8->decode(substr($text, $string_start, $i-$string_start)) } // '';
+        } elsif ($top_key eq 'schema_version') {
+          $metadata_schema_literal = 'not-a-number';
+        }
+      }
+      next;
+    }
+    if ($c =~ /[\{\[]/) {
+      $metadata_schema_literal = 'not-a-number' if $depth == 2 && $top_key eq 'schema_version';
+      $depth += $c eq '{' ? 2 : 1;
+      return undef if $depth > 256;
+      $out .= $c; ++$i; next;
+    }
+    if ($c =~ /[\}\]]/) { $depth -= $c eq '}' ? 2 : 1; $out .= $c; ++$i; next; }
+    if ($c =~ /[\s,:]/) { $out .= $c; ++$i; next; }
+    my $start = $i;
+    ++$i while $i < length($text) && substr($text, $i, 1) !~ /[\s\[\]\{\},:"]/;
+    return undef if $i == $start;
+    my $token = substr($text, $start, $i-$start);
+    my $output_start = length $out;
+    if ($token =~ /[eE][+-]?([0-9]+)\z/ && length($1) > 6) {
+      return undef; # bounded literal work; never expand arbitrary exponents
+    }
+    if ($token =~ /\A[+-]?nan\z/i) { $out .= 'null'; $metadata_legacy_json = 0; }
+    elsif ($token =~ /\A([+-]?)inf(?:inity)?\z/i) { $out .= ($1 eq '-' ? '-' : '').'1.7976931348623157e308'; $metadata_legacy_json = 0; }
+    elsif ($token =~ /\A([+-]?)([0-9]*)(?:\.([0-9]*))?([eE][+-]?[0-9]+)?\z/ && length(($2 // '').($3 // ''))) {
+      my ($sign,$int,$frac,$exp) = ($1,$2,$3,$4 // '');
+      $metadata_legacy_json = 0 unless $token =~ /\A-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?\z/;
+      $int =~ s/^0+(?=[0-9])//; $int = '0' unless length $int;
+      $out .= ($sign eq '-' ? '-' : '').$int.(defined($frac) ? '.'.(length($frac) ? $frac : '0') : '').$exp;
+    } else { $out .= $token; }
+    $metadata_schema_literal = substr($out, $output_start) if $depth == 2 && $top_key eq 'schema_version';
+  }
+  return $out;
+}
+sub metadata_encoded { JSON::PP->new->allow_nonref->canonical->encode($_[0]); }
+sub metadata_string { defined($_[0]) && !ref($_[0]) && metadata_encoded($_[0]) =~ /\A"/; }
+sub metadata_clean { metadata_string($_[0]) && $_[0] !~ /[\x00\x09\x0a\x0d]/; }
+sub metadata_absolute { metadata_clean($_[0]) && $_[0] =~ m{\A/[^/]} && $_[0] !~ m{(?:\A|/)\.\.?(?:/|\z)}; }
+sub metadata_closed {
+  my ($v,$required,$optional) = @_;
+  return 0 unless ref($v) eq 'HASH';
+  my %allowed = map { $_ => 1 } (@$required,@$optional);
+  return 0 if grep { !exists $allowed{$_} } keys %$v;
+  return 0 if grep { !exists $v->{$_} } @$required;
+  return 1;
+}
+sub metadata_fleet_name { metadata_clean($_[0]) && $_[0] =~ /\A[a-z0-9][a-z0-9._-]{0,63}\z/; }
+sub metadata_fleet {
+  my ($v) = @_;
+  return 0 unless metadata_closed($v,['discovery_roots'],['shared_infra_root']);
+  my $roots = $v->{discovery_roots};
+  return 0 unless ref($roots) eq 'ARRAY' && @$roots;
+  my %seen;
+  for (@$roots) { return 0 unless metadata_absolute($_) && !$seen{$_}++; }
+  return !exists($v->{shared_infra_root}) || metadata_absolute($v->{shared_infra_root});
+}
+sub metadata_one {
+  my ($number) = @_;
+  return 0 unless defined($number) && $number =~ /\A([0-9]+)(?:\.([0-9]+))?(?:[eE]([+-]?[0-9]+))?\z/;
+  my ($int,$frac,$exp) = ($1,$2 // '',$3 // '0');
+  my $significand = $int.$frac; $significand =~ s/^0+//; $significand =~ s/0+\z//;
+  return 0 unless $significand eq '1';
+  my $all = $int.$frac; $all =~ /(0*)\z/;
+  my $needed = length($frac)-length($1);
+  $exp =~ s/^\+//; $exp =~ s/^(-?)0+(?=[0-9])/$1/; $exp = '0' if $exp eq '-0';
+  return $exp eq "$needed";
+}
+sub metadata_valid {
+  my ($v) = @_;
+  return 0 unless metadata_closed($v,[qw(schema_version source_root release_remote active_cli_release default_fleet fleets)],['$schema',qw(heavy_slots heavy_light_slots projects)]);
+  return 0 if exists($v->{'$schema'}) && !(metadata_clean($v->{'$schema'}) && length($v->{'$schema'}));
+  return 0 unless metadata_one($metadata_schema_literal);
+  return 0 unless metadata_absolute($v->{source_root}) && metadata_clean($v->{release_remote}) && length($v->{release_remote});
+  return 0 unless metadata_clean($v->{active_cli_release}) && $v->{active_cli_release} =~ /\A[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\z/;
+  return 0 unless metadata_fleet_name($v->{default_fleet});
+  my $fleets = $v->{fleets};
+  return 0 unless ref($fleets) eq 'HASH' && keys(%$fleets) && defined($fleets->{$v->{default_fleet}});
+  for (keys %$fleets) { return 0 unless metadata_fleet_name($_) && metadata_fleet($fleets->{$_}); }
+  return 1;
+}
+open(my $metadata_fh, '<', $metadata_path) or metadata_error("machine config failed validation: $metadata_path");
+# Metadata alone has a byte budget; executable/canonical authority is unchanged.
+my $metadata_limit = 32768;
+my $metadata_raw = '';
+while (length($metadata_raw) <= $metadata_limit) {
+  my $n = read($metadata_fh, $metadata_raw, $metadata_limit+1-length($metadata_raw), length($metadata_raw));
+  metadata_error("machine config failed validation: $metadata_path") unless defined $n;
+  last if $n == 0;
+}
+my @metadata_stat = stat($metadata_fh); close $metadata_fh;
+metadata_error("machine config failed validation: $metadata_path") unless @metadata_stat;
+my $metadata_bytes = $metadata_stat[7];
+if ($metadata_bytes > $metadata_limit || length($metadata_raw) > $metadata_limit) {
+  metadata_error("metadata configuration exceeds $metadata_limit-byte limit (actual $metadata_bytes bytes): $metadata_path; command execution is unaffected");
+}
+metadata_error("machine config failed validation: $metadata_path") if $metadata_bytes != length($metadata_raw);
+my $metadata_normal = metadata_json_text($metadata_raw);
+my $metadata_data = eval { defined($metadata_normal) ? JSON::PP->new->utf8->max_depth(512)->decode($metadata_normal) : undef };
+metadata_error("machine config failed validation: $metadata_path") unless metadata_valid($metadata_data);
+if ($metadata_mode eq 'version') {
+  if ($metadata_argc != 1) { print STDERR "trellis: --version takes no arguments\n"; exit 2; }
+  print "trellis $metadata_data->{active_cli_release} (configured; not verified)\n"; exit 0;
+}
+if ($metadata_mode eq 'help') { exit 0; }
+# Exists only in this trusted program: no environment or serialized cache.
+sub launcher_metadata_config {
+  return (undef,"machine config is not a JSON object: $metadata_path") unless $metadata_legacy_json;
+  return slot_counts($metadata_data);
+}
+unshift @ARGV, $metadata_mode;
+TRELLIS_METADATA_PL
+  case "${1:-}" in
+    check|status) launcher_heavy_metadata_perl ;;
+  esac
+}
+
+launcher_metadata() {
+  local home="$1" mode="$2" argc="$3" perl_bin program status
   perl_bin="$(command -v perl)" || {
-    printf '%s\n' 'trellis heavy: perl is required' >&2
+    printf '%s\n' 'trellis: perl is required to read machine configuration' >&2
     return "$TRELLIS_EX_UNAVAILABLE"
   }
-  program="$(launcher_heavy_metadata_perl)" || return "$TRELLIS_EX_UNAVAILABLE"
-  /usr/bin/env -i \
-    "HOME=$HOME" "TRELLIS_HOME=$home" \
+  program="$(launcher_metadata_perl "$mode")" || return "$TRELLIS_EX_UNAVAILABLE"
+  /usr/bin/env -i "HOME=${HOME-}" "TRELLIS_HOME=$home" \
     "TRELLIS_HEAVY_CALLER_ENV=$launcher_heavy_caller_env" \
-    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$perl_bin" -e "$program" "$mode"
+    'PATH=/usr/bin:/bin:/usr/sbin:/sbin' "$perl_bin" -e "$program" "$mode" "$argc"
+  status=$?
+  if [ "$status" -eq 0 ] && [ "$mode" = help ]; then launcher_usage; fi
+  return "$status"
 }
 
 trap 'launcher_cleanup' EXIT
 trap 'launcher_cleanup; exit 129' HUP
 trap 'launcher_cleanup; exit 130' INT
 trap 'launcher_cleanup; exit 143' TERM
+# Select only the T55-published immutable companion under the once-resolved
+# home. Old scaffolds and an intentionally unpaired launcher keep the complete
+# legacy verifier. Metadata/heavy remain there until T59/T60 qualify them.
+launcher_native_run_if_available() {
+  local home="$1" native rc
+  shift
+  case "${1:-}" in
+    ''|help|-h|--help|--version) return 10 ;;
+    heavy)
+      if [ "$#" -eq 2 ]; then
+        case "$2" in --check|--status) return 10 ;; esac
+      fi
+      ;;
+  esac
+  native="$(launcher_native_companion_path "$home")"
+  rc=$?
+  case "$rc" in
+    0) ;;
+    10) return 10 ;;
+    *) launcher_die "$TRELLIS_EX_STATE" "installed launcher companion pin is invalid" ;;
+  esac
+  [ -f "$native" ] && [ ! -L "$native" ] && [ -x "$native" ] ||
+    launcher_die "$TRELLIS_EX_STATE" "installed launcher companion is unavailable: $native"
+  "$native" launcher protocol-v1 >/dev/null 2>&1
+  rc=$?
+  case "$rc" in
+    0) ;;
+    5) return 10 ;; # verified T70 scaffold: legacy enforcement, never an allow
+    *) launcher_die "$TRELLIS_EX_UNAVAILABLE" "installed launcher companion protocol is unavailable" ;;
+  esac
+  # T55 verifies these private immutable bytes at publication; doctor rehashes
+  # them. The pinned companion is installed-launcher trust root, not a target
+  # payload and not rehashed on every call. It proves the selected payload
+  # before execution and retains its proof through child completion.
+  exec /usr/bin/env -i \
+    "HOME=${HOME-}" "TRELLIS_HOME=$home" "SSH_AUTH_SOCK=${SSH_AUTH_SOCK-}" \
+    "TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path" \
+    "TRELLIS_HEAVY_CALLER_ENV=$launcher_heavy_caller_env" \
+    'PATH=/usr/bin:/bin:/usr/sbin:/sbin' \
+    "$native" launcher run-v1 -- "$@"
+}
+
 launcher_main() {
   local home_candidate home user_home config releases release_dir version cli payload snapshot snapshot_info release_json_sha256 ssh_auth_sock child_status cleanup_status command_scratch
   local -a attach_environment
@@ -4246,9 +4863,26 @@ launcher_main() {
   home="$(launcher_real_directory "$home_candidate")" ||
     launcher_die "$TRELLIS_EX_STATE" "could not canonicalize Trellis home: $home_candidate"
 
+  TRELLIS_HOME="$home"
+  export TRELLIS_HOME
+  launcher_native_run_if_available "$home" "$@"
+
   config="$home/config.json"
   launcher_private_config "$config" ||
     launcher_die "$TRELLIS_EX_STATE" "machine config is missing, not private, or not a regular file: $config"
+  # Metadata never needs the native companion, jq, a release or command
+  # scratch. Its single closed-environment Perl operation owns admission.
+  case "${1:-}" in
+    --version) launcher_metadata "$home" version "$#"; return $? ;;
+    ''|help|-h|--help) launcher_metadata "$home" help "$#"; return $? ;;
+    heavy)
+      if [ "$#" -eq 2 ]; then
+        case "$2" in
+          --check|--status) launcher_metadata "$home" "${2#--}" "$#"; return $? ;;
+        esac
+      fi
+      ;;
+  esac
   command -v jq >/dev/null 2>&1 ||
     launcher_die "$TRELLIS_EX_UNAVAILABLE" "jq is required to read machine configuration"
   TRELLIS_HOME="$home"
@@ -4258,32 +4892,6 @@ launcher_main() {
   version="$(jq -r '.active_cli_release' "$config")" ||
     launcher_die "$TRELLIS_EX_STATE" "could not read active_cli_release from $config"
 
-  # Metadata only: name the configured selection, never claim it is verified.
-  # No Git, scratch directory, release traversal, or execution snapshot is
-  # needed. All executable routes retain the full preflight below.
-  if [ "${1:-}" = --version ]; then
-    [ "$#" -eq 1 ] || launcher_die "$TRELLIS_EX_USAGE" "--version takes no arguments"
-    printf 'trellis %s (configured; not verified)\n' "$version"
-    return 0
-  fi
-  # The dispatcher answers help for an empty or absent first word and ignores
-  # what follows; heavy takes --check and --status alone.
-  case "${1:-}" in
-    ''|help|-h|--help)
-      launcher_usage
-      return 0
-      ;;
-    heavy)
-      if [ "$#" -eq 2 ]; then
-        case "$2" in
-          --check|--status)
-            launcher_heavy_metadata "$home" "${2#--}"
-            return $?
-            ;;
-        esac
-      fi
-      ;;
-  esac
   command -v git >/dev/null 2>&1 ||
     launcher_die "$TRELLIS_EX_UNAVAILABLE" "git is required to verify immutable releases"
 
@@ -4368,7 +4976,7 @@ launcher_main() {
   ssh_auth_sock="$(launcher_verified_ssh_auth_sock)"
   attach_environment=("PATH=/usr/bin:/bin:/usr/sbin:/sbin")
   case "${1:-}" in
-    attach|onboard|worktree|doctor|bench)
+    attach|onboard|worktree|doctor|show-config|bench)
       attach_environment+=("TRELLIS_ATTACH_CALLER_PATH=$launcher_attach_caller_path")
       ;;
   esac

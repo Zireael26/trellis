@@ -76,7 +76,8 @@ record_links_for() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   contains "$output" "imported skill: greet"
 
-  [ ! -e "$SANDBOX/inbox/greet" ] && [ ! -L "$SANDBOX/inbox/greet" ]
+  [ ! -e "$SANDBOX/inbox/greet" ]
+  [ ! -L "$SANDBOX/inbox/greet" ]
   [ -f "$STORE/greet/SKILL.md" ]
   [ "$(cat "$STORE/greet/SKILL.md")" = "$(printf -- '---\nname: greet\ndescription: fixture skill\n---\n\nfixture body\n')" ]
 
@@ -112,7 +113,8 @@ record_links_for() {
   [ -f "$STORE/focused/SKILL.md" ]
   [ -L "$HOME/.claude/skills/focused" ]
   [ "$(link_target "$HOME/.claude/skills/focused")" = "$STORE/focused" ]
-  [ ! -e "$HOME/.agents/skills/focused" ] && [ ! -L "$HOME/.agents/skills/focused" ]
+  [ ! -e "$HOME/.agents/skills/focused" ]
+  [ ! -L "$HOME/.agents/skills/focused" ]
 
   run "$SKILLS" list
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -135,12 +137,16 @@ record_links_for() {
   # Everything intact: source, both copies, no store entry, no record.
   [ -f "$SANDBOX/inbox/drift/SKILL.md" ]
   [ "$before_src" = "$(shasum -a 256 "$SANDBOX/inbox/drift/SKILL.md" | cut -d ' ' -f 1)" ]
-  [ -d "$HOME/.claude/skills/drift" ] && [ ! -L "$HOME/.claude/skills/drift" ]
+  [ -d "$HOME/.claude/skills/drift" ]
+  [ ! -L "$HOME/.claude/skills/drift" ]
   [ "$before_same" = "$(shasum -a 256 "$HOME/.claude/skills/drift/SKILL.md" | cut -d ' ' -f 1)" ]
-  [ -d "$HOME/.agents/skills/drift" ] && [ ! -L "$HOME/.agents/skills/drift" ]
+  [ -d "$HOME/.agents/skills/drift" ]
+  [ ! -L "$HOME/.agents/skills/drift" ]
   [ "$before_divergent" = "$(shasum -a 256 "$HOME/.agents/skills/drift/SKILL.md" | cut -d ' ' -f 1)" ]
-  [ ! -e "$STORE/drift" ] && [ ! -L "$STORE/drift" ]
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ ! -e "$STORE/drift" ]
+  [ ! -L "$STORE/drift" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "import refuses a name that collides with a release user skill" {
@@ -159,8 +165,10 @@ record_links_for() {
   contains "$output" "herdr-foreman"
 
   [ -f "$SANDBOX/inbox/herdr-foreman/SKILL.md" ]
-  [ ! -e "$STORE/herdr-foreman" ] && [ ! -L "$STORE/herdr-foreman" ]
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ ! -e "$STORE/herdr-foreman" ]
+  [ ! -L "$STORE/herdr-foreman" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "import refuses a name already in the store" {
@@ -207,8 +215,10 @@ record_links_for() {
   run "$SKILLS" link narrow
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  [ ! -e "$HOME/.claude/skills/narrow" ] && [ ! -L "$HOME/.claude/skills/narrow" ]
-  [ ! -e "$HOME/.agents/skills/narrow" ] && [ ! -L "$HOME/.agents/skills/narrow" ]
+  [ ! -e "$HOME/.claude/skills/narrow" ]
+  [ ! -L "$HOME/.claude/skills/narrow" ]
+  [ ! -e "$HOME/.agents/skills/narrow" ]
+  [ ! -L "$HOME/.agents/skills/narrow" ]
   [ -L "$HOME/.pi/agent/skills/narrow" ]
   [ "$(link_target "$HOME/.pi/agent/skills/narrow")" = "$STORE/narrow" ]
   [ -f "$STORE/narrow/SKILL.md" ]
@@ -231,9 +241,11 @@ record_links_for() {
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   contains "$output" "$HOME/.claude/skills/plain"
 
-  [ -d "$HOME/.claude/skills/plain" ] && [ ! -L "$HOME/.claude/skills/plain" ]
+  [ -d "$HOME/.claude/skills/plain" ]
+  [ ! -L "$HOME/.claude/skills/plain" ]
   [ "$before" = "$(shasum -a 256 "$HOME/.claude/skills/plain/SKILL.md" | cut -d ' ' -f 1)" ]
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "unlink removes owned links only and leaves the store" {
@@ -245,8 +257,10 @@ record_links_for() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   contains "$output" "unlinked skill: bye"
 
-  [ ! -e "$HOME/.claude/skills/bye" ] && [ ! -L "$HOME/.claude/skills/bye" ]
-  [ ! -e "$HOME/.agents/skills/bye" ] && [ ! -L "$HOME/.agents/skills/bye" ]
+  [ ! -e "$HOME/.claude/skills/bye" ]
+  [ ! -L "$HOME/.claude/skills/bye" ]
+  [ ! -e "$HOME/.agents/skills/bye" ]
+  [ ! -L "$HOME/.agents/skills/bye" ]
   [ -f "$STORE/bye/SKILL.md" ]
   [ "$(jq -r '.links | length' "$RECORD")" -eq 0 ]
 
@@ -263,7 +277,8 @@ record_links_for() {
   run "$SKILLS" link weird
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   contains "$output" "weird"
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "link refuses an empty harnesses list with exit 2" {
@@ -287,7 +302,8 @@ record_links_for() {
   run "$SKILLS" import "$SANDBOX/inbox/noskill"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [ -f "$SANDBOX/inbox/noskill/notes.txt" ]
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "trellis dispatcher routes the skills subcommand" {
@@ -311,10 +327,13 @@ record_links_for() {
   contains "$output" "$HOME/.agents/skills/gated"
 
   [ -f "$SANDBOX/inbox/gated/SKILL.md" ]
-  [ ! -e "$STORE/gated" ] && [ ! -L "$STORE/gated" ]
-  [ -f "$HOME/.agents/skills/gated" ] && [ ! -L "$HOME/.agents/skills/gated" ]
+  [ ! -e "$STORE/gated" ]
+  [ ! -L "$STORE/gated" ]
+  [ -f "$HOME/.agents/skills/gated" ]
+  [ ! -L "$HOME/.agents/skills/gated" ]
   [ "$before" = "$(shasum -a 256 "$HOME/.agents/skills/gated" | cut -d ' ' -f 1)" ]
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "multi-arg import refusal leaves every source untouched" {
@@ -324,17 +343,25 @@ record_links_for() {
   make_skill_src "$SANDBOX/inbox/baddiff" "source body"
   mkdir -p "$HOME/.agents/skills"
   make_skill_src "$HOME/.agents/skills/baddiff" "DIVERGENT body"
+  before_keepme="$(shasum -a 256 "$HOME/.claude/skills/keepme/SKILL.md" | cut -d ' ' -f 1)"
+  before_baddiff="$(shasum -a 256 "$HOME/.agents/skills/baddiff/SKILL.md" | cut -d ' ' -f 1)"
 
   run "$SKILLS" import "$SANDBOX/inbox/keepme" "$SANDBOX/inbox/baddiff"
   [ "$status" -eq 3 ] || { echo "$output"; false; }
   contains "$output" "$HOME/.agents/skills/baddiff"
 
   [ -f "$SANDBOX/inbox/keepme/SKILL.md" ]
-  [ -d "$HOME/.claude/skills/keepme" ] && [ ! -L "$HOME/.claude/skills/keepme" ]
+  [ -d "$HOME/.claude/skills/keepme" ]
+  [ ! -L "$HOME/.claude/skills/keepme" ]
+  [ "$before_keepme" = "$(shasum -a 256 "$HOME/.claude/skills/keepme/SKILL.md" | cut -d ' ' -f 1)" ]
   [ -f "$SANDBOX/inbox/baddiff/SKILL.md" ]
-  [ ! -e "$STORE/keepme" ] && [ ! -L "$STORE/keepme" ]
-  [ ! -e "$STORE/baddiff" ] && [ ! -L "$STORE/baddiff" ]
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ "$before_baddiff" = "$(shasum -a 256 "$HOME/.agents/skills/baddiff/SKILL.md" | cut -d ' ' -f 1)" ]
+  [ ! -e "$STORE/keepme" ]
+  [ ! -L "$STORE/keepme" ]
+  [ ! -e "$STORE/baddiff" ]
+  [ ! -L "$STORE/baddiff" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "import refuses a newline skill name with exit 2" {
@@ -345,7 +372,8 @@ record_links_for() {
   run "$SKILLS" import "$SANDBOX/inbox/$nlname"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [ -f "$SANDBOX/inbox/$nlname/SKILL.md" ]
-  [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ]
+  [ ! -e "$RECORD" ]
+  [ ! -L "$RECORD" ]
 }
 
 @test "full link commits the first skill before the second skill refuses" {
@@ -363,7 +391,8 @@ record_links_for() {
   [ -L "$HOME/.agents/skills/alpha" ]
   [ "$(link_target "$HOME/.claude/skills/alpha")" = "$STORE/alpha" ]
   [ "$(record_links_for alpha | jq 'length')" -eq 2 ]
-  [ -f "$HOME/.claude/skills/beta" ] && [ ! -L "$HOME/.claude/skills/beta" ]
+  [ -f "$HOME/.claude/skills/beta" ]
+  [ ! -L "$HOME/.claude/skills/beta" ]
   [ "$(record_links_for beta | jq 'length')" -eq 0 ]
 
   # Removing the blocker converges on the next run.
@@ -384,7 +413,8 @@ record_links_for() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   contains "$output" "imported skill: find-skills"
 
-  [ -d "$STORE/find-skills" ] && [ ! -L "$STORE/find-skills" ]
+  [ -d "$STORE/find-skills" ]
+  [ ! -L "$STORE/find-skills" ]
   contains "$(cat "$STORE/find-skills/SKILL.md")" "find-skills body"
   [ -L "$HOME/.claude/skills/find-skills" ]
   [ "$(link_target "$HOME/.claude/skills/find-skills")" = "$STORE/find-skills" ]
@@ -402,7 +432,8 @@ record_links_for() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   contains "$output" "imported skill: absfind"
 
-  [ -d "$STORE/absfind" ] && [ ! -L "$STORE/absfind" ]
+  [ -d "$STORE/absfind" ]
+  [ ! -L "$STORE/absfind" ]
   [ "$(link_target "$HOME/.claude/skills/absfind")" = "$STORE/absfind" ]
   [ "$(link_target "$HOME/.agents/skills/absfind")" = "$STORE/absfind" ]
   [ "$(record_links_for absfind | jq 'length')" -eq 2 ]

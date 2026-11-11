@@ -119,6 +119,49 @@ PY_HARNESS
   [ ! -s "$GIT_LOG" ]
 }
 
+# Hooks under test run with a deliberately narrow PATH (turn-baseline.bats
+# links only git awk cut cat perl), and that PATH's git is this fence. The
+# fence must parse config keys without external tools: with tr missing, a key
+# read empty and a mixed-case core.worktree route went unchecked.
+@test "config keys are matched without external tools and case-insensitively" {
+  local bare="$BATS_TEST_TMPDIR/no-tools"
+  # Only bash, which the fake backend's shebang needs; no tr, sed or awk.
+  mkdir -p "$bare" "$FIXTURE_ROOT/repo/.git"
+  ln -s "$BASH" "$bare/bash"
+  FENCE_FAKE_COMMON_DIR="$FIXTURE_ROOT/repo/.git"
+  run_bare_fence() {
+    run env PATH="$bare" \
+      TRELLIS_TEST_GIT_FENCE_ROOT="$FIXTURE_ROOT" \
+      TRELLIS_TEST_REAL_GIT="$FAKE_GIT" \
+      TRELLIS_TEST_REAL_PYTHON="${TRELLIS_TEST_REAL_PYTHON:-$(command -v python3)}" \
+      FENCE_GIT_LOG="$GIT_LOG" \
+      FENCE_FAKE_COMMON_DIR="$FENCE_FAKE_COMMON_DIR" \
+      OUTSIDE_WT="$OUTSIDE_ROOT" \
+      "$BASH" "$FENCE" "$@"
+  }
+
+  run_bare_fence -C "$FIXTURE_ROOT/repo" -c core.fileMode=true status
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ] || { echo "$output"; false; }
+  grep -qF -- '-c core.fileMode=true status' "$GIT_LOG"
+
+  : > "$GIT_LOG"
+  run_bare_fence -C "$FIXTURE_ROOT/repo" -c Core.WorkTree="$OUTSIDE_ROOT" add file
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  [[ "$output" == *"REFUSED"* ]] || { echo "$output"; false; }
+  if grep -F ' add file' "$GIT_LOG"; then false; fi
+
+  run_bare_fence -C "$FIXTURE_ROOT/repo" --config-env CORE.WORKTREE=OUTSIDE_WT add file
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  run_bare_fence -C "$FIXTURE_ROOT/repo" --config-env=core.WorkTree=OUTSIDE_WT add file
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  if grep -F ' add file' "$GIT_LOG"; then false; fi
+
+  run_bare_fence -C "$FIXTURE_ROOT/repo" config Core.Worktree relative/path
+  [ "$status" -eq 97 ] || { echo "$output"; false; }
+  [[ "$output" == *"unprovable relative target"* ]] || { echo "$output"; false; }
+}
+
 @test "worktree remove routed to a common dir outside the fixture is refused" {
   FENCE_FAKE_COMMON_DIR="$OUTSIDE_ROOT/shared.git"
   FENCE_INHERITED_GIT_DIR="$OUTSIDE_ROOT/shared.git"
@@ -595,5 +638,57 @@ guarded("worktree", "add", "--unknown-option", str(inside / "bad"), expected=97)
 guarded("worktree", "add", "--", str(outside / "new"), expected=97)
 assert not (outside / "new").exists()
 PY_LIVE
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "a relative configured work tree is resolved against the Git directory, inside or outside" {
+  run python3 -I - "$BATS_TEST_TMPDIR" "$FENCE" "${TRELLIS_TEST_REAL_GIT:-$(command -v git)}" <<'PY_RELATIVE'
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+root = Path(sys.argv[1]) / "relative-worktree"
+fence, real_git = sys.argv[2:]
+inside, outside = root / "inside", root / "outside"
+child, parent = inside / "child", inside / "parent"
+for path in (child, parent, outside):
+    path.mkdir(parents=True)
+env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+def git(cwd, *args):
+    return subprocess.run([real_git, "-C", str(cwd), *args], env=env, capture_output=True, text=True, check=True)
+
+def guarded(cwd, *args, expected=0):
+    result = subprocess.run(["bash", fence, "-C", str(cwd), *args], env={**env, "TRELLIS_TEST_GIT_FENCE_ROOT": str(inside), "TRELLIS_TEST_REAL_GIT": real_git}, capture_output=True, text=True)
+    assert result.returncode == expected, (args, result.returncode, result.stdout, result.stderr)
+    return result
+
+for repo in (child, parent):
+    git(repo, "init", "-q")
+    git(repo, "config", "user.name", "Fixture")
+    git(repo, "config", "user.email", "fixture@trellis.invalid")
+(child / "file").write_text("one\n")
+git(child, "add", "file")
+git(child, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "seed")
+git(parent, "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(child), "dep")
+dep = parent / "dep"
+# A submodule's own config holds a relative core.worktree inside the fixture.
+assert not os.path.isabs(git(dep, "config", "--get", "core.worktree").stdout.strip())
+guarded(dep, "config", "user.name", "Submodule")
+guarded(dep, "config", "user.email", "submodule@trellis.invalid")
+assert git(dep, "config", "--get", "user.name").stdout.strip() == "Submodule"
+(dep / "file").write_text("two\n")
+guarded(dep, "add", "file")
+guarded(dep, "-c", "core.hooksPath=/dev/null", "commit", "-qm", "inside")
+# The same relative spelling that climbs out of the fixture is still refused.
+modules = Path(git(dep, "rev-parse", "--absolute-git-dir").stdout.strip())
+escape = os.path.relpath(outside, modules)
+git(dep, "config", "core.worktree", escape)
+result = guarded(dep, "config", "user.name", "Escaped", expected=97)
+assert "configured work tree" in result.stderr, result.stderr
+assert git(dep, "config", "--get", "user.name").stdout.strip() == "Submodule"
+PY_RELATIVE
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

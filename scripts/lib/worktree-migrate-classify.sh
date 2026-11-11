@@ -91,8 +91,13 @@ wm_ignored() {
   if [ -n "$owner" ] && [ -f "$owner" ]; then
     jq -r '.artifacts[]? | select(.kind == "file" or .kind == "symlink") | .path' "$owner" \
       > "$kept.owned" 2>/dev/null || : > "$kept.owned"
-    awk 'NR == FNR { owned[$0] = 1; next } !($0 in owned)' "$kept.owned" "$kept" > "$kept.filtered"
-    mv "$kept.filtered" "$kept"
+    # Only filter when the owner actually named artifacts. awk's NR == FNR is
+    # true for every record of the second file when the first is empty, which
+    # would drop every kept path and could reclassify real work as remove.
+    if [ -s "$kept.owned" ]; then
+      awk 'NR == FNR { owned[$0] = 1; next } !($0 in owned)' "$kept.owned" "$kept" > "$kept.filtered"
+      mv "$kept.filtered" "$kept"
+    fi
     rm -f "$kept.owned"
   fi
 }
@@ -192,13 +197,54 @@ wm_detach_journal() {
   return 1
 }
 
+# Return 0 for an existing tracked file whose changes are hidden by Git index
+# flags, 1 when none are hidden, and 2 when that cannot be established. Clear
+# flags only in a private index copy; absent sparse-checkout entries are normal.
+wm_masked_tracked_changes() {
+  local path="$1" work="$2" entry tag file index changed flagged
+  local flags="$work/masked-flags" changes="$work/masked-changes" copy="$work/masked-index"
+  wm_git -C "$path" ls-files -v -z > "$work/masked-list" 2>/dev/null || return 2
+  : > "$flags" || return 2
+  while IFS= read -r -d '' entry; do
+    tag="${entry:0:1}"
+    file="${entry:2}"
+    case "$tag" in
+      S|[abcdefghijklmnopqrstuvwxyz])
+        if [ -e "$path/$file" ] || [ -L "$path/$file" ]; then
+          printf '%s\0' "$file" >> "$flags" || return 2
+        fi ;;
+    esac
+  done < "$work/masked-list"
+  [ -s "$flags" ] || return 1
+  index="$(wm_git -C "$path" rev-parse --path-format=absolute --git-path index 2>/dev/null)" || return 2
+  cp "$index" "$copy" || return 2
+  # wm_git deliberately unsets GIT_INDEX_FILE, so use an equivalently scrubbed
+  # environment here and explicitly bind the copied index for every command.
+  if ! env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR GIT_OPTIONAL_LOCKS=0 GIT_INDEX_FILE="$copy" \
+       git -c core.splitIndex=false -C "$path" update-index --no-skip-worktree -z --stdin < "$flags" 2>/dev/null ||
+     ! env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR GIT_OPTIONAL_LOCKS=0 GIT_INDEX_FILE="$copy" \
+       git -c core.splitIndex=false -C "$path" update-index --no-assume-unchanged -z --stdin < "$flags" 2>/dev/null ||
+     ! env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR GIT_OPTIONAL_LOCKS=0 GIT_INDEX_FILE="$copy" \
+       git -C "$path" diff-files --name-only -z > "$changes" 2>/dev/null; then
+    rm -f "${work:?}/masked-index"
+    return 2
+  fi
+  rm -f "${work:?}/masked-index"
+  while IFS= read -r -d '' changed; do
+    while IFS= read -r -d '' flagged; do
+      [ "$changed" != "$flagged" ] || return 0
+    done < "$flags"
+  done < "$changes"
+  return 1
+}
+
 # wm_classify_row ROW SNAPSHOT WORK — ROW (one fact object) with class,
 # reasons, target, dehydrate, after and the work facts filled in.
 wm_classify_row() {
   local row="$1" snapshot="$2" work="$3"
-  local path repo branch head missing orphan locked owner_count project_rc
+  local path repo branch head missing orphan locked owner_count project_rc prune_eligible
   local class="" holds="" notes="" target="" trc=0 in_use status_out modified=0 untracked=0
-  local kept_count=0 last now idle=0 unpushed=false merged=unchecked mrc tool
+  local kept_count=0 last now idle=0 unpushed=false merged=unchecked mrc tool masked_rc
   local preserve_branch="" push=false push_ref="" journal moved_to nested
 
   path="$(printf '%s' "$row" | jq -r '.path')"
@@ -208,6 +254,7 @@ wm_classify_row() {
   missing="$(printf '%s' "$row" | jq -r '.missing')"
   orphan="$(printf '%s' "$row" | jq -r '.orphan')"
   locked="$(printf '%s' "$row" | jq -r '.locked')"
+  prune_eligible="$(printf '%s' "$row" | jq -r '.prune_eligible')"
   owner_count="$(printf '%s' "$row" | jq -r '.owner_count')"
   project_rc="$(printf '%s' "$row" | jq -r '.project_rc')"
   : > "$work/kept"; : > "$work/regen"
@@ -225,8 +272,15 @@ wm_classify_row() {
     elif [ "$owner_count" -gt 0 ]; then
       class=hold
       holds="owner record names the missing path; archive it by hand (docs/UPGRADING.md, orphan owner records) before pruning"
+    elif [ "$prune_eligible" = false ]; then
+      class=hold
+      holds="missing-recent: run git worktree repair from the moved checkout, or use --prune-recent to override the expiry"
+    elif [ "$prune_eligible" != true ]; then
+      class=hold
+      holds="cannot determine whether Git would prune this missing worktree"
     else
       class=prune; notes="registered but missing on disk"
+      [ "${WM_PRUNE_RECENT:-0}" != 1 ] || notes="$notes (--prune-recent overrides the expiry)"
     fi
   else
     [ "$locked" != true ] || holds="${holds}locked"$'\n'
@@ -249,6 +303,13 @@ wm_classify_row() {
     else
       holds="${holds}command error: git status failed"$'\n'
     fi
+    masked_rc=0
+    wm_masked_tracked_changes "$path" "$work" || masked_rc=$?
+    case "$masked_rc" in
+      0) holds="${holds}index flags mask tracked changes"$'\n' ;;
+      1) ;;
+      *) holds="${holds}command error: cannot inspect tracked index flags"$'\n' ;;
+    esac
     # git refuses to move or remove a worktree holding a submodule, and a
     # preserve commit would record an embedded repository as a bare gitlink.
     nested="$(wm_nested_repo "$path")"
@@ -373,7 +434,7 @@ wm_classify() {
   done < "$facts" > "$work/classified.jsonl"
   jq -sc '
     def actionable: .class == "prune" or .class == "remove" or .class == "preserve" or .class == "move";
-    (map(select(.missing and .class != "prune" and (.locked | not)) | .common) | unique) as $blocked
+    (map(select(.missing and .class != "prune" and (.locked | not) and .prune_eligible != false) | .common) | unique) as $blocked
     | (map(select(.missing and .owner_count > 0) | {common, path})) as $orphaned
     | ([.[] | select(.class == "move" or .class == "preserve") | .target]
        | group_by(.) | map(select(length > 1) | .[0])) as $dup_targets

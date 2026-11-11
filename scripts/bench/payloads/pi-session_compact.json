@@ -1,0 +1,4 @@
+{
+  "schema_version": 1, "harness": "pi", "cwd": "@PROJECT@", "session_id": "bench-session-0001", "session_file": "@TRANSCRIPT@",
+  "phase": "lifecycle", "native_event": "session_compact", "reason": "manual", "will_retry": false
+}

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # block-destructive.sh — PreToolUse on Bash. Deny rm/git-force/SQL/.env reads.
 # Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - Reads Claude Code tool event JSON on stdin.
 #   - Emits a PreToolUse JSON decision on stdout when a rule fires.
-#   - Exit is ALWAYS 0. PreToolUse decisions ride in the JSON, not the exit code.
+#   - Exit is 0 on allow/deny via JSON, 2 when a sibling lib is missing (fail-closed, like missing jq).
 #
 # Rules: core-rules/hooks/rules/destructive.json, compiled into lib/guard-rules.sh
 # by scripts/gen-guard-rules.py and matched with bash builtins. Change a rule in
@@ -27,16 +28,16 @@ set -u
 
 INPUT=$(cat)
 
-# Degrade gracefully if jq is missing — surface the problem via stderr, don't block.
+# A missing jq refuses (exit 2), whatever TRELLIS_NO_JQ_DEGRADE says.
 # Source shared lib (sibling to this script) + enforce jq dependency.
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
-[ -f "$__se_lib" ] || { echo "block-destructive: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+[ -f "$__se_lib" ] || { echo "block-destructive: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 2; }
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
 _se_require_jq "block-destructive" block
 
 __gr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/guard-rules.sh"
-[ -f "$__gr_lib" ] || { echo "block-destructive: missing sibling lib at $__gr_lib — re-run sync-hooks" >&2; exit 1; }
+[ -f "$__gr_lib" ] || { echo "block-destructive: missing sibling lib at $__gr_lib — re-run sync-hooks" >&2; exit 2; }
 # shellcheck source=lib/guard-rules.sh disable=SC1090
 . "$__gr_lib"
 

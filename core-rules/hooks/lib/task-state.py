@@ -272,12 +272,22 @@ def storage(root, create):
 
 
 def names(fd):
+    # List through a descriptor opened under the lock, never the one that
+    # waited for it: btrfs fixes a directory stream's readdir range at open, so
+    # a snapshot replaced during the wait would list as neither old nor new.
+    try:
+        listing = os.open(".", os.O_RDONLY | os.O_DIRECTORY, dir_fd=fd)
+    except OSError:
+        raise Unavailable("state_directory_drift") from None
     result = []
-    with os.scandir(fd) as entries:
-        for entry in entries:
-            budget()
-            result.append(entry.name)
-            require(len(result) <= 100, "directory_scan_bound")
+    try:
+        with os.scandir(listing) as entries:
+            for entry in entries:
+                budget()
+                result.append(entry.name)
+                require(len(result) <= 100, "directory_scan_bound")
+    finally:
+        os.close(listing)
     return sorted(result)
 
 
@@ -359,13 +369,16 @@ def read(active):
     return {"status": status, "documents": documents, "foreign_records": foreign}
 
 
-def publish(result):
+def publish(result, payload=None, failure_payload=None):
     # Serialize before exposing any protocol bytes, under the original alarm.
+    # The context publisher supplies already validated bounded advisory bytes;
+    # normal capture/read callers retain the exact JSON protocol.
     # A committed capture is not rolled back if later output fails.
     sent = 0
     flags = None
     try:
-        payload = (json.dumps(result, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
+        if payload is None:
+            payload = (json.dumps(result, ensure_ascii=True, separators=(",", ":")) + "\n").encode()
         budget()
         flags = fcntl.fcntl(1, fcntl.F_GETFL)
         fcntl.fcntl(1, fcntl.F_SETFL, flags | os.O_NONBLOCK)
@@ -389,7 +402,8 @@ def publish(result):
                 if flags is None:
                     flags = fcntl.fcntl(1, fcntl.F_GETFL)
                     fcntl.fcntl(1, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-                os.write(1, b'{"status":"unavailable","reason":"output_or_budget_failure","documents":[],"foreign_records":0}\n')
+                os.write(1, failure_payload if failure_payload is not None else
+                         b'{"status":"unavailable","reason":"output_or_budget_failure","documents":[],"foreign_records":0}\n')
             except OSError:
                 pass
         return 1
@@ -398,7 +412,12 @@ def publish(result):
             fcntl.fcntl(1, fcntl.F_SETFL, flags)
 
 
-def main():
+def main(publisher=publish):
+    """Run one operation; an installed consumer may validate/render in-process.
+
+    The publisher runs before the original alarm is cancelled and must use
+    publish's deadline-bounded writer. No second read, retry or renewed budget.
+    """
     global DEADLINE
     DEADLINE = time.monotonic() + 30
     signal.signal(signal.SIGALRM, budget)
@@ -420,7 +439,7 @@ def main():
         result = {"status": "unavailable", "reason": str(exc) if isinstance(exc, Unavailable) else "io_or_invalid_data",
                   "documents": [], "foreign_records": 0}
     try:
-        return publish(result)
+        return publisher(result)
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
 

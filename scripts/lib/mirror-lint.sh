@@ -108,9 +108,14 @@ mirror_validate_symlinks() {
 # certify rather than certify blind.
 mirror_fleet_identity_tokens() {
   local source="${TRELLIS_MIRROR_IDENTITY_SOURCE:-${TRELLIS_HOME:-$HOME/.trellis}/registry.json}"
-  local public_tokens
+  local public_tokens private_tokens
   [ -f "$source" ] && [ ! -L "$source" ] || return 1
   public_tokens="$(mirror_fleet_public_identity_tokens "$source")" || return 1
+  private_tokens="$(mirror_fleet_private_identity_tokens "$source")" || return 1
+  # An exemption is safe only if no private row normalizes to the same token.
+  if [ -n "$public_tokens" ] && [ -n "$private_tokens" ]; then
+    public_tokens="$(printf '%s\n' "$public_tokens" | grep -vxF -- "$private_tokens" || [ "$?" -eq 1 ])" || return 1
+  fi
   # Deliberately parsed with grep/sed rather than jq. `trellis mirror` re-execs
   # through `env -i` with PATH=/usr/bin:/bin:/usr/sbin:/sbin, so a jq-dependent
   # guard resolves "unreadable" on every real publish — it would fail closed
@@ -126,7 +131,7 @@ mirror_fleet_identity_tokens() {
     sed -E 's/\.(com|org|net|money|live|dev|in|ai|site)$//' |
     grep -vE '^.{0,2}$' |
     sort -u |
-    { if [ -n "$public_tokens" ]; then grep -vxF -- "$public_tokens"; else cat; fi; }
+    { if [ -n "$public_tokens" ]; then grep -vxF -- "$public_tokens" || [ "$?" -eq 1 ]; else cat; fi; }
 }
 
 # mirror_fleet_public_identity_tokens SOURCE
@@ -162,9 +167,17 @@ mirror_fleet_identity_tokens() {
 # turning the common case into a hard publication failure. `sed` deletes the
 # same lines and exits 0 whether or not it matched.
 mirror_fleet_public_identity_tokens() {
-  local source="${1:-}"
+  mirror_fleet_identity_tokens_by_visibility "$1" public
+}
+
+mirror_fleet_private_identity_tokens() {
+  mirror_fleet_identity_tokens_by_visibility "$1" private
+}
+
+mirror_fleet_identity_tokens_by_visibility() {
+  local source="${1:-}" visibility="${2:-}"
   [ -f "$source" ] && [ ! -L "$source" ] || return 1
-  awk '
+  awk -v visibility="$visibility" '
     /^    "[^"]+"[[:space:]]*:[[:space:]]*\{[[:space:]]*$/ { inproj = 1; pid = ""; pub = 0; next }
     inproj && /^        "public_identity"[[:space:]]*:[[:space:]]*true/ { pub = 1; next }
     inproj && /^      "project_id"[[:space:]]*:[[:space:]]*"/ {
@@ -173,7 +186,10 @@ mirror_fleet_public_identity_tokens() {
       sub(/".*$/, "", pid)
       next
     }
-    inproj && /^    \}/ { if (pub && pid != "") print pid; inproj = 0; pid = ""; pub = 0; next }
+    inproj && /^    \}/ {
+      if (pid != "" && ((visibility == "public" && pub) || (visibility == "private" && !pub))) print pid
+      inproj = 0; pid = ""; pub = 0; next
+    }
   ' "$source" 2>/dev/null |
     LC_ALL=C tr '[:upper:]' '[:lower:]' |
     sed -E 's#.*/##; s/\.(com|org|net|money|live|dev|in|ai|site)$//' |
@@ -181,15 +197,176 @@ mirror_fleet_public_identity_tokens() {
     sort -u
 }
 
+# A binary exception is admitted only by the separately supplied payload, never
+# by a manifest the mirror can forge. Snapshot the exact verified bytes into a
+# printable-text projection; every other path keeps the ordinary full scan.
+mirror_prepare_native_scan() {
+  local mirror_dir="$1" payload="$2" scan_dir="$3"
+  python3 -I - "$mirror_dir" "$payload" "$scan_dir" <<'PY'
+import hashlib, json, os, re, stat, subprocess, sys
+from pathlib import Path
+
+mirror, payload, output = map(Path, sys.argv[1:])
+targets = {'aarch64-apple-darwin', 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'}
+def require(ok, message):
+    if not ok:
+        raise ValueError(message)
+def closed(obj, keys):
+    require(type(obj) is dict and set(obj) == set(keys.split()), 'invalid manifest fields')
+def digest(b):
+    return hashlib.sha256(b).hexdigest()
+def pairs(items):
+    result = {}
+    for key, value in items:
+        require(key not in result, 'duplicate manifest key')
+        result[key] = value
+    return result
+def read_file(root, relative):
+    # Walk from the supplied root without following any native-set component.
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        parts = relative.split('/')
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd); fd = child
+        before = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+        require(stat.S_ISREG(before.st_mode), 'non-regular native file')
+        child = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        try:
+            opened = os.fstat(child)
+            require((before.st_dev, before.st_ino) == (opened.st_dev, opened.st_ino), 'native file changed')
+            chunks = []
+            while True:
+                chunk = os.read(child, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)
+            final = os.fstat(child)
+            ident = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            require(ident(before) == ident(after) == ident(final), 'native file changed during read')
+            return b''.join(chunks), opened.st_mode
+        finally:
+            os.close(child)
+    finally:
+        os.close(fd)
+def inventory(root):
+    result = set()
+    for current, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            p = Path(current) / name
+            mode = p.lstat().st_mode
+            require(not stat.S_ISLNK(mode) and (stat.S_ISDIR(mode) or stat.S_ISREG(mode)), 'linked or special native entry')
+            result.add(p.relative_to(root).as_posix())
+    return result
+try:
+    require(payload.is_absolute() and payload.is_dir(), 'trusted payload unavailable')
+    base = mirror / 'core-rules/native'
+    trusted = payload / 'core-rules/native'
+    require(not base.is_symlink() and base.is_dir() and not trusted.is_symlink() and trusted.is_dir(), 'native root unavailable')
+    manifest, _ = read_file(base, 'artifacts.json')
+    trusted_manifest, _ = read_file(trusted, 'artifacts.json')
+    require(manifest == trusted_manifest, 'native manifest differs from trusted payload')
+    d = json.loads(manifest.decode('utf-8'), object_pairs_hook=pairs)
+    closed(d, 'schema_version version source_commit generation inputs toolchain install_path adapter assets')
+    require(type(d['schema_version']) is int and d['schema_version'] == 1 and d['version'] == '1.5.0', 'invalid native version')
+    require(d['install_path'] == 'bin/native/{version}/{target}/{sha256}/trellis-hooks', 'invalid native install path')
+    require(type(d['source_commit']) is str and re.fullmatch('[0-9a-f]{40}', d['source_commit']), 'invalid source provenance')
+    require(type(d['inputs']) is dict and bool(d['inputs']), 'missing native inputs')
+    for key, value in d['inputs'].items():
+        # Literal include_str!/include_bytes! edges outside the crate are
+        # recorded inputs too (build-native-hooks.sh); any safe relative path.
+        require(type(key) is str and key and not key.startswith('/') and all(part not in ('', '.', '..') for part in key.split('/'))
+                and not any(ord(c) < 32 for c in key), 'invalid native input')
+        require(type(value) is str and re.fullmatch('[0-9a-f]{64}', value), 'invalid input digest')
+    closed(d['toolchain'], 'channel rustc cargo_lock_sha256 rust_toolchain_sha256')
+    tc = d['toolchain']
+    require(tc['channel'] == '1.97.1' and tc['rustc'] == 'rustc 1.97.1 (8bab26f4f 2026-07-14)', 'invalid native toolchain')
+    require(tc['cargo_lock_sha256'] == d['inputs'].get('native/trellis-hooks/Cargo.lock') and tc['rust_toolchain_sha256'] == d['inputs'].get('native/trellis-hooks/rust-toolchain.toml'), 'toolchain input mismatch')
+    identity = {k: d[k] for k in ('version', 'inputs', 'toolchain')}
+    require(d['generation'] == digest(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()), 'invalid native generation')
+    require(type(d['assets']) is dict and bool(d['assets']) and set(d['assets']) <= targets, 'invalid native targets')
+    closed(d['adapter'], 'path size sha256')
+    require(d['adapter']['path'] == 'hook-adapter.sh', 'invalid adapter path')
+    records = [(d['adapter'], None)]
+    expected = {'artifacts.json', 'hook-adapter.sh'}
+    for target, asset in d['assets'].items():
+        closed(asset, 'path size sha256 format signature minimum_os')
+        require(asset['path'] == target + '/trellis-hooks', 'invalid native asset path')
+        darwin = target == 'aarch64-apple-darwin'
+        require((asset['format'], asset['signature'], asset['minimum_os']) == (('mach-o', 'adhoc', '13.0') if darwin else ('elf-static', 'none', None)), 'invalid native metadata')
+        expected.update((target, asset['path']))
+        records.append((asset, target))
+    require(inventory(base) == expected and inventory(trusted) == expected, 'missing or unlisted native file')
+    for record, target in records:
+        data, mode = read_file(base, record['path'])
+        reference, _ = read_file(trusted, record['path'])
+        require(type(record['size']) is int and record['size'] > 0 and len(data) == record['size'], 'native size mismatch')
+        require(type(record['sha256']) is str and re.fullmatch('[0-9a-f]{64}', record['sha256']) and digest(data) == record['sha256'] and data == reference, 'native digest mismatch')
+        if target is None:
+            continue
+        require(mode & 0o111, 'non-executable native asset')
+        if target == 'aarch64-apple-darwin':
+            require(data[:8] == b'\xcf\xfa\xed\xfe\x0c\x00\x00\x01', 'invalid Mach-O target')
+            if sys.platform == 'darwin':
+                require(subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(base / record['path'])], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0, 'invalid native signature')
+        else:
+            require(data[:6] == b'\x7fELF\x02\x01' and len(data) >= 64, 'invalid ELF')
+            require(int.from_bytes(data[18:20], 'little') == (62 if target.startswith('x86_64') else 183), 'invalid ELF architecture')
+            off = int.from_bytes(data[32:40], 'little'); width = int.from_bytes(data[54:56], 'little'); count = int.from_bytes(data[56:58], 'little')
+            require(width == 56 and count > 0 and off + width * count <= len(data), 'invalid ELF program headers')
+            require(all(int.from_bytes(data[off+i*width:off+i*width+4], 'little') != 3 for i in range(count)), 'dynamic ELF interpreter')
+        projected = output / target / 'trellis-hooks'
+        projected.parent.mkdir(parents=True)
+        projected.write_bytes(b'\n'.join(re.findall(rb'[\x20-\x7e]+', data)) + b'\n')
+except (OSError, ValueError, UnicodeError, KeyError, TypeError) as error:
+    print('core-rules/native: native runtime verification failed: ' + str(error))
+    raise SystemExit(1)
+PY
+}
+
+# Search every ordinary file as text, except exact verified assets whose
+# printable snapshots are searched instead. Unlisted and invalid files never
+# acquire a binary exemption. Results retain the original mirror path.
+# Every argument after OPTIONS is one pattern, passed to grep with -e.
+mirror_lint_grep() {
+  local root="$1" scan_dir="$2" options="$3" root_pat target line pattern
+  local -a excludes=() patterns=()
+  for pattern in "${@:4}"; do patterns+=( -e "$pattern" ); done
+  root_pat="$(mirror_find_path_escape "$root")"
+  if [ -n "$scan_dir" ]; then
+    for target in aarch64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+      [ -f "$scan_dir/$target/trellis-hooks" ] || continue
+      excludes+=( ! -path "$root_pat/core-rules/native/$target/trellis-hooks" )
+    done
+  fi
+  find -P "$root" -path "$root_pat/.git" -prune -o -type f "${excludes[@]+"${excludes[@]}"}" \
+    -exec grep "$options" "${patterns[@]}" {} + 2>/dev/null
+  if [ -n "$scan_dir" ]; then
+    while IFS= read -r line; do
+      printf '%s/core-rules/native/%s\n' "$root" "${line#"$scan_dir"/}"
+    done < <(find -P "$scan_dir" -type f -exec grep "$options" "${patterns[@]}" {} + 2>/dev/null)
+  fi
+  return 0
+}
+
 lint_mirror() {
-  local mirror_dir="${1:-}" mirror_pat rc=0 f rel hit path username
-  local identity_tokens identity_token address
+  local mirror_dir="${1:-}" mirror_pat rc=0 f rel hit path username scan_dir='' scan_file
+  local identity_tokens identity_token identity_ere identity_pattern address
   [ "$#" -eq 1 ] || { printf 'mirror-lint: usage: lint_mirror MIRROR_DIR\n' >&2; return 2; }
   [ -d "$mirror_dir" ] && [ ! -L "$mirror_dir" ] || {
     printf 'mirror-lint: not an ordinary directory: %s\n' "$mirror_dir" >&2
     return 2
   }
   mirror_pat="$(mirror_find_path_escape "$mirror_dir")"
+  if [ -e "$mirror_dir/core-rules/native" ] || [ -L "$mirror_dir/core-rules/native" ]; then
+    scan_dir="$(mktemp -d "${TMPDIR:-/tmp}/trellis-native-scan.XXXXXX")" || return 2
+    if ! mirror_prepare_native_scan "$mirror_dir" "${PAYLOAD_ROOT:-}" "$scan_dir"; then
+      rc=1
+      rm -rf "${scan_dir:?}"
+      scan_dir=''
+    fi
+  fi
 
   # Local machine state is never a public template payload. Keep the list
   # structural rather than content-based: it catches a future sync allowlist
@@ -254,29 +431,94 @@ lint_mirror() {
   if ! mirror_validate_symlinks "$mirror_dir"; then
     rc=1
   fi
-  # Any non-generic home path is an operator path, including one copied from
-  # a different machine.
+  # A home path may follow punctuation, control bytes, or high bytes; only a
+  # path-segment character before the slash makes it relative. Recognizable
+  # narrowly recognized relative route, glob and variable fixtures are not
+  # literal roots. Other route-like prefixes do not exempt a home name.
+  # Binary files retain the historical slash-terminated interior check
+  # regardless of the preceding byte.
+  # URLs are never discarded: their root, punctuation/fragment, Vite @fs, and
+  # slash-terminated interior home segments can publish an operator name. Bare
+  # nested API/documentation routes remain allowed. An ambiguous quoted command
+  # ending in a home segment fails closed like a rooted path with spaces.
+  # In the C locale, keep non-ASCII username bytes too; ASCII-only alnum
+  # would make a valid UTF-8 operator name disappear from the bytewise scan.
+  home_user_re="[[:alnum:]_.$(printf '\200-\377')-]+"
+  home_name_re="(Users|home)/${home_user_re}"
+  home_boundary_re="(^|[^[:alnum:]_.~/-])"
+  home_path_re="${home_boundary_re}(/|~/)${home_name_re}|${home_boundary_re}(/[^/[:space:]\"'\\\\]|~/)([^[:space:]\"'\\\\]|\\\\[[:space:]])*/${home_name_re}|\"([^\"[:space:]/]*[=,:])?(/[^/[:space:]\"'\\\\]|~/)([^\"\\\\]|\\\\[[:space:]])*/${home_name_re}([/:']|\")|'([^'[:space:]/]*[=,:])?(/[^/[:space:]\"'\\\\]|~/)([^'\\\\]|\\\\[[:space:]])*/${home_name_re}([/:\"]|')"
+  home_url_re="[[:alpha:]][[:alnum:]+.-]*://[^/[:space:]\"'<>]*/${home_name_re}|[[:alpha:]][[:alnum:]+.-]*://[^[:space:]\"'<>]*/${home_name_re}/|[[:alpha:]][[:alnum:]+.-]*://[^[:space:]\"'<>]*/@fs/${home_name_re}"
+  home_route_re="${home_boundary_re}([[:alnum:]_.-]+/)+(\\([^/[:space:]()]+\\)|\\[[^/[:space:]]+\\])/${home_name_re}(/)?|${home_boundary_re}\\*\\*/${home_name_re}(/)?|${home_boundary_re}\\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}/${home_name_re}(/)?"
+  # Keep this regex definition from looking like a literal home path itself.
+  home_route_segment="ho""me"
+  home_safe_route_re="${home_boundary_re}([[:alnum:]_.-]+/)*app/(\\([^/[:space:]()]+\\)|\\[[^/[:space:]]+\\])/${home_route_segment}/[[:alnum:]_.-]+[.](tsx|ts|jsx|js)(/)?|${home_boundary_re}\\*\\*/${home_route_segment}/node(/)?|${home_boundary_re}\\\$\\{[A-Za-z_][A-Za-z0-9_]*\\}/${home_route_segment}/config[.]json(/)?"
+  # Keep a possible NUL and the slash after the username for the binary pass.
+  home_candidate_re="(^|.)(/|~/)(([^[:space:]\\\\]|\\\\[[:space:]])*/)?${home_name_re}(/)?"
+  home_control_re="[$(printf '\001-\010\013\014\016-\037\177')]"
+  home_binary_file="" home_is_binary=0
   while IFS= read -r hit; do
     [ -n "$hit" ] || continue
-    rel="${hit%%:*}"
-    rel="${rel#"$mirror_dir"/}"
+    home_source_file="${hit%%:*}"
+    rel="${home_source_file#"$mirror_dir"/}"
     path="${hit#*:}"
+    if [ "$home_source_file" != "$home_binary_file" ]; then
+      home_binary_file="$home_source_file"
+      home_is_binary=0
+      # ASCII controls, NULs or invalid UTF-8 mark a byte-oriented payload.
+      # An unavailable validation tool fails closed as binary.
+      if LC_ALL=C grep -aqE "$home_control_re" -- "$home_source_file" 2>/dev/null || \
+         ! cmp -s "$home_source_file" <(LC_ALL=C tr -d '\000' < "$home_source_file") || \
+         ! /usr/bin/iconv -f UTF-8 -t UTF-8 "$home_source_file" >/dev/null 2>&1; then
+        home_is_binary=1
+      fi
+    fi
     while IFS= read -r username; do
       [ -n "$username" ] || continue
       username="${username#/Users/}"
       username="${username#/home/}"
       username="${username%%/*}"
       case "$username" in
-        me|example|user|you|test|jane|helios|alex|'...') ;;
-        *)
-          printf '%s: absolute-path leak\n' "$rel"
-          rc=1
-          break
-          ;;
+        me|example|user|you|test|jane|helios|alex|'…') continue ;;
+        *[!._-]*) ;;
+        *) continue ;;
       esac
-    done < <(printf '%s\n' "$path" | grep -oE '/(Users|home)/[[:alnum:]_.-]+/' 2>/dev/null)
-  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
-    -exec grep -HnE -- '/(Users|home)/[[:alnum:]_.-]+/' {} + 2>/dev/null)
+      # A valid Unicode punctuation-only token is a placeholder, not a user.
+      # Invalid bytes or an unavailable interpreter are never exempted.
+      if [[ "$username" != *[0-9A-Za-z]* ]] && [ -x /usr/bin/perl ] && \
+         printf '%s' "$username" | /usr/bin/perl -T -MEncode -e '
+           local $/; my $bytes = <STDIN>;
+           my $name = eval { Encode::decode("UTF-8", $bytes, Encode::FB_CROAK) };
+           exit 1 if $@;
+           exit($name =~ /\A\p{P}+\z/ ? 0 : 1);
+         ' 2>/dev/null; then
+        continue
+      fi
+      printf '%s: absolute-path leak\n' "$rel"
+      rc=1
+      break
+    # Recheck after NUL-to-tab conversion. The binary lane preserves the old
+    # anywhere rule; the text lane discards only recognized relative routes.
+    done < <(export LC_ALL=C
+      if [ "$home_is_binary" -eq 1 ]; then
+        if printf '%s\n' "$path" | grep -oE -e "$home_url_re" -e "$home_path_re" |
+          grep -oE "/${home_name_re}" 2>/dev/null; then :; fi
+        # Leave the final slash available as the start of the next match.
+        printf '%s\n' "$path" | awk -v re="/${home_name_re}/" '
+          { text = $0
+            while (match(text, re)) {
+              print substr(text, RSTART, RLENGTH - 1)
+              text = substr(text, RSTART + RLENGTH - 1)
+            }
+          }'
+      else
+        printf '%s\n' "$path" | grep -oE -e "$home_route_re" -e "$home_url_re" -e "$home_path_re" |
+          while IFS= read -r home_match; do
+            if printf '%s\n' "$home_match" | grep -qE "^(${home_safe_route_re})$"; then continue; fi
+            printf '%s\n' "$home_match" | grep -oE "/${home_name_re}" 2>/dev/null
+          done
+      fi)
+  done < <(export LC_ALL=C; mirror_lint_grep "$mirror_dir" "$scan_dir" -aHnoE \
+    "$home_route_re" "$home_url_re" "$home_path_re" "$home_candidate_re" | tr '\000' '\t')
 
   # Preserve the historical-record boundary for the retired AntiGravity
   # harness. Three tokens name LIVE, publishable things and are stripped before
@@ -344,7 +586,15 @@ Antigravity ANTIGRAVITY $mirror_allowed_tokens"
 $mirror_allowed_tokens"
             ;;
         esac
-        if awk -v allowed_tokens="$mirror_allowed_tokens" '
+        scan_file="$f"
+        case "$rel" in
+          core-rules/native/*)
+            if [ -n "$scan_dir" ] && [ -f "$scan_dir/${rel#core-rules/native/}" ]; then
+              scan_file="$scan_dir/${rel#core-rules/native/}"
+            fi
+            ;;
+        esac
+        if LC_ALL=C tr '\000' '\n' < "$scan_file" | awk -v allowed_tokens="$mirror_allowed_tokens" '
           {
             line = $0
             # Longest first: pi-/google- prefixes must be consumed before the
@@ -370,14 +620,13 @@ $mirror_allowed_tokens"
             }
           }
           END { exit stale ? 0 : 1 }
-        ' "$f"; then
+        '; then
           printf "%s: stale 'antigravity' in current operator surface\n" "$rel"
           rc=1
         fi
         ;;
     esac
-  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
-    -exec grep -IliF -- 'antigravity' {} + 2>/dev/null)
+  done < <(mirror_lint_grep "$mirror_dir" "$scan_dir" -aliF 'antigravity')
 
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -386,8 +635,7 @@ $mirror_allowed_tokens"
       docs/adr/*|docs/specs/*|CHANGELOG.md|scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
       *) printf "%s: instance-private proxy token must not publish\n" "$rel"; rc=1 ;;
     esac
-  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
-    -exec grep -IliE -- 'claudex|cli-proxy-api|cliproxy' {} + 2>/dev/null)
+  done < <(mirror_lint_grep "$mirror_dir" "$scan_dir" -aliE 'claudex|cli-proxy-api|cliproxy')
 
   # Fleet project identifiers must never reach a public mirror. Deliberately NO
   # historical-record exemption: unlike the retired-integration tokens above,
@@ -401,6 +649,10 @@ $mirror_allowed_tokens"
   else
     while IFS= read -r identity_token; do
       [ -n "$identity_token" ] || continue
+      # Treat underscore as an identifier separator but keep alphanumeric word
+      # boundaries, so HELIOS_HOME is caught without flagging heliospheric.
+      identity_ere="$(printf '%s' "$identity_token" | LC_ALL=C sed 's/[][\\.^$*+?{}()|]/\\&/g')"
+      identity_pattern="(^|[^[:alnum:]])${identity_ere}([^[:alnum:]]|$)"
       while IFS= read -r f; do
         [ -n "$f" ] || continue
         rel="${f#"$mirror_dir"/}"
@@ -408,8 +660,17 @@ $mirror_allowed_tokens"
           scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
           *) printf '%s: local fleet project identifier must not publish\n' "$rel"; rc=1 ;;
         esac
-      done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
-        -exec grep -IliwF -- "$identity_token" {} + 2>/dev/null)
+      done < <(LC_ALL=C mirror_lint_grep "$mirror_dir" "$scan_dir" -aliE "$identity_pattern")
+      # Filenames, directory names and symlink names are published too. Never
+      # follow links; NUL delimiters keep unusual path bytes in one record.
+      while IFS= read -r -d '' f; do
+        [ "$f" != "$mirror_dir" ] || continue
+        rel="${f#"$mirror_dir"/}"
+        if printf '%s\n' "$rel" | LC_ALL=C grep -qiE -- "$identity_pattern"; then
+          printf '%s: local fleet project identifier must not publish\n' "$rel"
+          rc=1
+        fi
+      done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -print0 2>/dev/null)
     done <<IDENTITY_TOKENS
 $identity_tokens
 IDENTITY_TOKENS
@@ -436,9 +697,9 @@ IDENTITY_TOKENS
       printf '%s: routable IP literal must not publish\n' "$rel"
       rc=1
       break
-    done < <(printf '%s\n' "$path" | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' 2>/dev/null)
-  done < <(find -P "$mirror_dir" -path "$mirror_pat/.git" -prune -o -type f \
-    -exec grep -HnE -- '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' {} + 2>/dev/null)
+    done < <(export LC_ALL=C; printf '%s\n' "$path" | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' 2>/dev/null)
+  done < <(export LC_ALL=C; mirror_lint_grep "$mirror_dir" "$scan_dir" -aHnoE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b')
 
+  if [ -n "$scan_dir" ]; then rm -rf "${scan_dir:?}"; fi
   return "$rc"
 }

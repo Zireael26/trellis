@@ -5,6 +5,7 @@ REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 LAUNCHER_TEMPLATE="$REPO_ROOT/scripts/trellis-launcher.sh"
 DISPATCHER_TEMPLATE="$REPO_ROOT/scripts/trellis"
 load helpers/payload-fixture
+load helpers/native-launcher
 
 setup() {
   SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/trellis-launcher.XXXXXX")"
@@ -81,6 +82,21 @@ make_release() {
   manifest="$SANDBOX/manifest-$version.jsonl"
   mkdir -p "$PAYLOAD/scripts"
   case "$fixture" in
+    native-probe)
+      mkdir -p "$PAYLOAD/scripts/lib"
+      printf '# trellis-payload-capability: exec-snapshot\n' > "$PAYLOAD/scripts/lib/trellis-home.sh"
+      cat > "$PAYLOAD/scripts/trellis" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$TMPDIR" > "$HOME/native-scratch.log"
+printf '%s\0' "$@" > "$HOME/native-argv.log"
+[ -z "${BASH_ENV-}${ENV-}${GIT_CONFIG_COUNT-}${GIT_CONFIG_KEY_0-}" ] || exit 91
+if [ "${1:-}" = stdin ]; then
+  IFS= read -r line
+  printf '%s\n' "$line"
+fi
+exit 3
+EOF
+      ;;
     dispatcher)
       cat > "$PAYLOAD/scripts/trellis" <<'EOF'
 #!/bin/bash
@@ -122,6 +138,47 @@ EOF
         "$PAYLOAD/core-rules/codex/hooks/lib/deps.sh"
       cp "$REPO_ROOT/core-rules/codex/hooks/lib/autonomy.sh" \
         "$PAYLOAD/core-rules/codex/hooks/lib/autonomy.sh"
+      printf '{"autonomy_default":4}\n' > "$PAYLOAD/trellis.config.json"
+      ;;
+    native-session|native-session-stubs|native-session-custom|native-session-deps)
+      # T24: the real dispatcher chain under a warm-capable snapshot.
+      mkdir -p "$PAYLOAD/core-rules/hooks" "$PAYLOAD/core-rules/codex/hooks" "$PAYLOAD/scripts/lib"
+      printf '# trellis-payload-capability: exec-snapshot\n' > "$PAYLOAD/scripts/lib/trellis-home.sh"
+      cp "$DISPATCHER_TEMPLATE" "$PAYLOAD/scripts/trellis"
+      for dir in core-rules/hooks core-rules/codex/hooks; do
+        cp -R "$REPO_ROOT/$dir/lib" "$PAYLOAD/$dir/lib"
+        for hook in session-start session-context inject-primer-index post-compact-context; do
+          cp "$REPO_ROOT/$dir/$hook.sh" "$PAYLOAD/$dir/$hook.sh"
+          chmod 755 "$PAYLOAD/$dir/$hook.sh"
+        done
+        [ "$fixture" != native-session-custom ] || printf '\n# custom dispatcher bytes\n' >> "$PAYLOAD/$dir/session-start.sh"
+        # QP M1: same dispatcher, sealed dependency with different policy.
+        [ "$fixture" != native-session-deps ] || cat >> "$PAYLOAD/$dir/lib/deps.sh" <<'EOF'
+_se_require_jq() { if [ "${1:-}" = session-start ]; then echo 'custom deps refusal' >&2; exit 7; fi; }
+EOF
+        [ "$fixture" != native-session ] || continue
+        # Members that expose how the dispatcher judged them. Behaviour is read
+        # at run time from $SANDBOX/member-mode so one sealed release serves all.
+        for hook in session-context inject-primer-index post-compact-context; do
+          cat > "$PAYLOAD/$dir/$hook.sh" <<EOF
+#!/usr/bin/env bash
+input="\$(cat)"
+/bin/ps -o comm= -p "\$PPID" | /usr/bin/sed 's#.*/##' > '$SANDBOX/member-parent'
+/usr/bin/env | /usr/bin/grep -Ev '^(_|SHLVL|PWD|OLDPWD)=' | LC_ALL=C /usr/bin/sort > '$SANDBOX/member-env-$hook'
+printf '%s' "\$input" > '$SANDBOX/member-stdin-$hook'
+case "\$(cat '$SANDBOX/member-mode' 2>/dev/null)/$hook" in
+  fail/inject-primer-index) exit 3 ;;
+  junk/session-context) printf 'not json\n'; exit 0 ;;
+  two/session-context) printf '%s\n' '{"hookSpecificOutput":{"additionalContext":"one"}} null {"hookSpecificOutput":{"additionalContext":"two"}}' ;;
+  controls/*) printf '%s\n' '{"hookSpecificOutput":{"additionalContext":"tab\\t del\\u007f \\u0001 \\"q\\" \\u00e9 \\ud83d\\ude00"}}' ;;
+  silent/*) printf '\n' ;;
+  sleep/session-context) echo \$\$ > '$SANDBOX/member-pid'; exec sleep 30 ;;
+  *) printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$hook" ;;
+esac
+EOF
+          chmod 755 "$PAYLOAD/$dir/$hook.sh"
+        done
+      done
       printf '{"autonomy_default":4}\n' > "$PAYLOAD/trellis.config.json"
       ;;
     command-bundle)
@@ -272,6 +329,473 @@ EOF
   chmod a-w "$RELEASE_DIR/release.json" "$RELEASE_DIR"
 }
 
+# The installed launcher closes PATH. Instrument the test copy's trusted
+# program selection instead of relying on a caller PATH that it must ignore.
+metadata_process_spies() {
+  cat > "$SANDBOX/perl-spy" <<EOF
+#!/bin/bash
+printf 'perl\n' >> '$SANDBOX/metadata-starts'
+exec /usr/bin/perl "\$@"
+EOF
+  chmod 755 "$SANDBOX/perl-spy"
+  python3 -I - "$LAUNCHER" "$SANDBOX" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);s=p.read_text();root=sys.argv[2]
+s=s.replace('perl_bin="$(command -v perl)"','perl_bin="'+root+'/perl-spy"')
+marker='launcher_main "$@"';assert s.count(marker)==1
+spy='jq() { printf "jq\\n" >> "'+root+'/metadata-starts"; /usr/bin/jq "$@"; }\n'
+# Simulate an absent jq in the closed PATH without modifying system tools.
+spy+='command() { if [ "$1" = -v ] && [ "${2:-}" = jq ]; then return 1; fi; builtin command "$@"; }\n'
+p.write_text(s.replace(marker,spy+marker))
+PY
+}
+
+@test "metadata routes validate once with one perl and zero jq without a release or scratch" {
+  rmdir "$TRELLIS_HOME/releases"
+  metadata_process_spies
+  local route
+  for route in version help check status; do
+    : > "$SANDBOX/metadata-starts"
+    case "$route" in
+      version) run_launcher --version ;;
+      help) run_launcher help ignored words ;;
+      check) run_launcher heavy --check ;;
+      status) run_launcher heavy --status ;;
+    esac
+    [ "$status" -eq 0 ] || { echo "$route: $status: $output"; false; }
+    [ "$(cat "$SANDBOX/metadata-starts")" = perl ] || { echo "$route starts: $(cat "$SANDBOX/metadata-starts")"; false; }
+    if [ "$route" = version ]; then [ "$output" = 'trellis 1.2.3 (configured; not verified)' ]; fi
+    [ ! -e "$TRELLIS_HOME/state" ] && [ ! -e "$TRELLIS_HOME/releases" ] && [ ! -e "$SOURCE_POISON_MARKER" ]
+  done
+}
+
+@test "metadata perl validator matches jq including exact schema and legacy lenient inputs" {
+  run python3 -I -c 'import re,subprocess; v=subprocess.check_output(["/usr/bin/jq","--version"],text=True); m=re.search(r"(\d+)\.(\d+)",v); assert m and tuple(map(int,m.groups())) >= (1,7), "exact-decimal oracle requires jq1.7+: "+v'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  rmdir "$TRELLIS_HOME/releases"
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/base.json"
+  python3 -I - "$SANDBOX" <<'PY'
+import json,pathlib,sys
+r=pathlib.Path(sys.argv[1]);base=json.loads((r/'base.json').read_bytes());cases={}
+for name,patch in [('valid',{}),('schema2',{'schema_version':2}),('schema-string',{'schema_version':'1'}),('version',{'active_cli_release':'bad'}),('fleet',{'default_fleet':'bad name'}),('extra',{'surprise':True}),('empty-remote',{'release_remote':''}),('path',{'source_root':'/x/../bad'}),('duplicate-roots',{'fleets':{'personal':{'discovery_roots':['/p','/p']}}}),('bad-heavy',{'heavy_slots':0})]:
+    cases[name]=json.dumps({**base,**patch}).encode()
+for name,literal in [('float','1.0'),('exponent','10e-1'),('near-high','1.0000000000000000001'),('near-low','0.99999999999999999999'),('schema01','01')]:
+    data={**base,'schema_version':'NUMBER'};cases[name]=json.dumps(data).replace('"NUMBER"',literal).encode()
+for name,value in [('nan','NaN'),('infinity','Infinity'),('zero','01'),('plus','+1'),('fraction','.5'),('dot','1.'),('low',r'"\udc00"'),('highhigh',r'"\ud800\ud800"'),('huge','1e1000'),('deep','['*254+'null'+']'*254),('too-deep','['*255+'null'+']'*255)]:
+    data={**base,'projects':'VALUE'};cases[name]=json.dumps(data).replace('"VALUE"',value).encode()
+raw=json.dumps(base).encode();cases.update(bom=b'\xef\xbb\xbf'+raw,nul=raw+b'\0',**{'nul-prefix':b'\0'+raw,'nul-middle':raw[:5]+b'\0'+raw[5:]},junk=raw+b'junk',bad=b'{malformed',missing=json.dumps({k:v for k,v in base.items() if k!='active_cli_release'}).encode())
+for name,raw in cases.items():(r/('metadata-case-'+name+'.json')).write_bytes(raw)
+PY
+  # Execute the exact old jq admission function as an independent oracle.
+  python3 -I - "$LAUNCHER_TEMPLATE" "$SANDBOX/jq-validator" <<'PY'
+import pathlib,sys
+s=pathlib.Path(sys.argv[1]).read_text();start=s.index('launcher_validate_machine_config() {');end=s.index('\n}',start)+2
+pathlib.Path(sys.argv[2]).write_text(s[start:end]+'\nlauncher_validate_machine_config "$1"\n')
+PY
+  local candidate expected
+  for candidate in "$SANDBOX"/metadata-case-*.json; do
+    cp "$candidate" "$TRELLIS_HOME/config.json"
+    run /bin/bash "$SANDBOX/jq-validator" "$TRELLIS_HOME/config.json"
+    expected=4
+    [ "$status" -ne 0 ] || expected=0
+    # jq1.7 may ignore trailing NUL; jq1.8 rejects it. Apex requires strict
+    # refusal on every host, including NUL before/inside/after the document.
+    # jq1.8 also permits deeper stacks than jq1.7: keep the conservative bound.
+    case "${candidate##*/}" in metadata-case-nul*.json|metadata-case-too-deep.json) expected=4 ;; esac
+    run_launcher --version
+    [ "$status" -eq "$expected" ] || { echo "${candidate##*/}: jq=$expected metadata=$status: $output"; false; }
+    run_launcher help
+    [ "$status" -eq "$expected" ] || { echo "help ${candidate##*/}: jq=$expected metadata=$status: $output"; false; }
+    [ ! -e "$TRELLIS_HOME/state" ] && [ ! -e "$SOURCE_POISON_MARKER" ]
+  done
+}
+
+@test "metadata refuses multiple top-level objects as malformed single-object config" {
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/one-config.json"
+  cat "$SANDBOX/one-config.json" "$SANDBOX/one-config.json" > "$TRELLIS_HOME/config.json"
+  # Accepted fail-closed difference: jq's stream filter may admit this, but a
+  # machine config is one object. Apex will harden canonical separately.
+  run_launcher --version
+  [ "$status" -eq 4 ] && [[ "$output" == *'machine config failed validation:'* ]] || { echo "$status: $output"; false; }
+  run_launcher help
+  [ "$status" -eq 4 ] || { echo "$status: $output"; false; }
+  [ ! -e "$TRELLIS_HOME/state" ] && [ ! -e "$SOURCE_POISON_MARKER" ]
+}
+
+@test "metadata heavy typing stays local while version usage and help text stay exact" {
+  jq '.heavy_slots=0' "$TRELLIS_HOME/config.json" > "$SANDBOX/bad-heavy.json"
+  cp "$SANDBOX/bad-heavy.json" "$TRELLIS_HOME/config.json"
+  run_launcher --version
+  [ "$status" -eq 0 ] && [ "$output" = 'trellis 1.2.3 (configured; not verified)' ] || { echo "$status: $output"; false; }
+  run_launcher --version extra
+  [ "$status" -eq 2 ] && [ "$output" = 'trellis: --version takes no arguments' ] || { echo "$status: $output"; false; }
+  local expected
+  expected="$(bash "$DISPATCHER_TEMPLATE" help)"
+  run_launcher help extra words
+  [ "$status" -eq 0 ] && [ "$output" = "$expected" ] || { echo "$status: $output"; false; }
+  run_launcher heavy --check
+  [ "$status" -eq 78 ] && [[ "$output" == *'heavy_slots must be an integer >= 1 (found 0)'* ]] || { echo "$status: $output"; false; }
+  [ ! -e "$TRELLIS_HOME/state" ] && [ ! -e "$SOURCE_POISON_MARKER" ]
+}
+
+@test "metadata cached slot_counts preserves direct read_slots typing and exact messages" {
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/slots-base.json"
+  local field value expected_status expected_output
+  for field in heavy_slots heavy_light_slots; do
+    for value in 0 -1 1.5 '"2"' true null '[]' '{}' 1000000 2 1.0 1e0; do
+      jq --arg field "$field" --argjson value "$value" '.[$field]=$value' "$SANDBOX/slots-base.json" > "$TRELLIS_HOME/config.json"
+      run env -i HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" PATH=/usr/bin:/bin \
+        /usr/bin/perl "$REPO_ROOT/scripts/lib/heavy-supervisor.pl" check
+      expected_status="$status"; expected_output="$output"
+      run_launcher heavy --check
+      [ "$status" -eq "$expected_status" ] && [ "$output" = "$expected_output" ] || {
+        echo "$field=$value direct=$expected_status: $expected_output; metadata=$status: $output"; false;
+      }
+    done
+  done
+}
+
+@test "T59 reviewer corpus covers every verdict class on all four metadata routes" {
+  run python3 -I "$REPO_ROOT/scripts/tests/helpers/metadata-parity-corpus.py" "$SANDBOX/reviewer-corpus"
+  [ "$status" -eq 0 ] && [ "$output" = 473 ] || { echo "$status: $output"; false; }
+  python3 -I - "$LAUNCHER_TEMPLATE" "$SANDBOX/reviewer-jq-validator" <<'PY'
+import pathlib,sys
+s=pathlib.Path(sys.argv[1]).read_text();start=s.index('launcher_validate_machine_config() {');end=s.index('\n}',start)+2
+pathlib.Path(sys.argv[2]).write_text(s[start:end]+'\nlauncher_validate_machine_config "$1"\n')
+PY
+  run python3 -I "$REPO_ROOT/scripts/tests/helpers/metadata-parity-driver.py" "$LAUNCHER" \
+    "$SANDBOX/reviewer-jq-validator" "$REPO_ROOT/scripts/lib/heavy-supervisor.pl" \
+    "$SANDBOX/reviewer-corpus" "$TRELLIS_HOME/config.json" "$SANDBOX/reviewer-results.json"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T59 GNU privacy checks start only the two needed listings" {
+  run python3 -I "$REPO_ROOT/scripts/tests/helpers/metadata-privacy-driver.py" "$LAUNCHER_TEMPLATE" "$SANDBOX/privacy-counts" "$BASH" counts
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T59 privacy bit and ACL failure policy is preserved across platform selectors" {
+  run python3 -I "$REPO_ROOT/scripts/tests/helpers/metadata-privacy-driver.py" "$LAUNCHER_TEMPLATE" "$SANDBOX/privacy-policy" "$BASH" policy
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T59 heavy metadata selectors with extra argv retain canonical dispatch" {
+  make_release 1.2.3 dispatcher
+  local option
+  for option in --check --status; do
+    run_launcher heavy "$option" extra
+    [ "$status" -eq 3 ] || { echo "extra argv was consumed as metadata: $status: $output"; false; }
+    [ "$(cat "$ARGV_LOG")" = "$(printf '3\n<heavy>\n<%s>\n<extra>' "$option")" ] || { echo 'canonical argv changed'; false; }
+  done
+}
+
+@test "T59 metadata byte ceiling admits exact boundary and refuses over-bound strings and arrays on all routes" {
+  python3 -I - "$REPO_ROOT/scripts/tests/helpers/metadata-large-config-probe.py" "$SANDBOX" <<'PY'
+import pathlib,runpy,sys
+make=runpy.run_path(sys.argv[1])['fixture_bytes'];root=pathlib.Path(sys.argv[2])
+for size in (32768,32769,1000195):
+    for shape in ('string','array'):
+        raw,_=make(size,shape);assert len(raw)==size
+        (root/f'boundary-{shape}-{size}.json').write_bytes(raw)
+PY
+  local shape size route
+  for shape in string array; do
+    for size in 32768 32769 1000195; do
+      cp "$SANDBOX/boundary-$shape-$size.json" "$TRELLIS_HOME/config.json"
+      for route in version help check status; do
+        case "$route" in version) run_launcher --version ;; help) run_launcher help ;; *) run_launcher heavy "--$route" ;; esac
+        if [ "$size" -eq 32768 ]; then
+          [ "$status" -eq 0 ] || { echo "$shape/$size/$route: $status: $output"; false; }
+        else
+          [ "$status" -eq 4 ] || { echo "$shape/$size/$route: $status: $output"; false; }
+          [[ "$output" == *'32768-byte limit'* && "$output" == *"actual $size bytes"* && "$output" == *"$TRELLIS_HOME/config.json"* && "$output" == *'command execution is unaffected'* ]] || { echo "$output"; false; }
+        fi
+      done
+    done
+  done
+  [ ! -d "$TRELLIS_HOME/state" ]
+  [ ! -e "$SOURCE_POISON_MARKER" ]
+}
+
+@test "T59 metadata ceiling reads at most sentinel bytes and reports held-file size" {
+  metadata_process_spies
+  python3 -I - "$REPO_ROOT/scripts/tests/helpers/metadata-large-config-probe.py" "$TRELLIS_HOME/config.json" "$SANDBOX" <<'PY'
+import pathlib,runpy,sys
+raw,_=runpy.run_path(sys.argv[1])['fixture_bytes'](1000195,'string');pathlib.Path(sys.argv[2]).write_bytes(raw)
+r=pathlib.Path(sys.argv[3]);(r/'ReadBudget.pm').write_text(r'''
+package ReadBudget;
+BEGIN {
+    *CORE::GLOBAL::read = sub (*\$$;$) {
+        my ($fh,$buffer,$wanted,$offset) = @_;
+        my $n = defined($offset) ? CORE::read($fh,$$buffer,$wanted,$offset) : CORE::read($fh,$$buffer,$wanted);
+        if (caller eq 'main') {
+            open(my $log,'>>',q{LOG_PATH}) or die $!;
+            print $log "$wanted ",defined($n) ? $n : -1,"\n"; close $log;
+        }
+        return $n;
+    };
+}
+1;
+'''.replace('LOG_PATH',str(r/'read-budget.log')))
+(r/'perl-spy').write_text('#!/bin/bash\nexec /usr/bin/perl -I'+str(r)+' -MReadBudget "$@"\n')
+PY
+  run_launcher --version
+  [ "$status" -eq 4 ] && [[ "$output" == *'actual 1000195 bytes'* ]] || { echo "$status: $output"; false; }
+  run python3 -I - "$SANDBOX/read-budget.log" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);assert p.is_file(),'no bounded config read was observed'
+rows=[tuple(map(int,line.split())) for line in p.read_text().splitlines()]
+assert rows and max(wanted for wanted,n in rows)<=32769 and sum(n for wanted,n in rows)==32769,rows
+print('bounded sentinel read verified')
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T59 metadata ceiling does not change executable canonical config authority" {
+  make_release 1.2.3 native-probe
+  python3 -I - "$REPO_ROOT/scripts/tests/helpers/metadata-large-config-probe.py" "$TRELLIS_HOME/config.json" <<'PY'
+import pathlib,runpy,sys
+raw,_=runpy.run_path(sys.argv[1])['fixture_bytes'](1000195,'array');pathlib.Path(sys.argv[2]).write_bytes(raw)
+PY
+  run_launcher --version
+  [ "$status" -eq 4 ] || { echo "$status: $output"; false; }
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "execution affected by metadata limit: $status: $output"; false; }
+  [ ! -e "$SOURCE_POISON_MARKER" ]
+}
+
+@test "T59 metadata lexical normalization uses byte offsets and preserves Unicode fields" {
+  python3 -I - "$TRELLIS_HOME/config.json" "$LAUNCHER_TEMPLATE" "$SANDBOX/byte-lexer.pl" <<'PY'
+import json,pathlib,sys
+config,template,probe=map(pathlib.Path,sys.argv[1:]);v=json.loads(config.read_text())
+v['source_root']='/a/é/😀';v['fleets']['personal']['discovery_roots']=['/p/é'];v['projects']=['é😀']*2000
+config.write_text(json.dumps(v,ensure_ascii=False))
+s=template.read_text().split("  cat <<'TRELLIS_METADATA_PL'\n",1)[1].split('\nTRELLIS_METADATA_PL\n',1)[0]
+prefix=s.split("open(my $metadata_fh, '<', $metadata_path)",1)[0]
+probe.write_text(prefix+r'''
+open(my $probe_fh, '<', $metadata_path) or die $!;
+my $raw = do { local $/; <$probe_fh> }; close $probe_fh;
+my $normal = metadata_json_text($raw);
+die "normalization refused" unless defined $normal;
+die "normalized JSON remains character-indexed" if utf8::is_utf8($normal);
+my $decoded = JSON::PP->new->utf8->decode($normal);
+die "Unicode field changed" unless $decoded->{source_root} eq '/a/'.chr(0xe9).'/'.chr(0x1f600);
+print "byte offsets; Unicode values preserved\\n";
+''')
+PY
+  run env -i HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" PATH=/usr/bin:/bin /usr/bin/perl "$SANDBOX/byte-lexer.pl" version 1
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  local route
+  for route in version help check status; do
+    case "$route" in version) run_launcher --version ;; help) run_launcher help ;; *) run_launcher heavy "--$route" ;; esac
+    [ "$status" -eq 0 ] || { echo "$route: $status: $output"; false; }
+  done
+}
+
+@test "T59 safety refuses NUL and invalid UTF8 on all four metadata routes" {
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/safety-base.json"
+  python3 -I - "$SANDBOX" <<'PY'
+import pathlib,sys
+r=pathlib.Path(sys.argv[1]);raw=(r/'safety-base.json').read_bytes()
+for name,data in [('nul-nl',raw+b'\0\n'),('nul-junk',raw+b'\0junk\n'),('nul-second',raw+b'\0'+raw+b'\n'),('nul-line',raw+b'\n\0\n'),('utf8-ff',raw.replace(b'fixture://release',b'\xff')),('utf8-overlong',raw.replace(b'fixture://release',b'\xc0\x80'))]:
+    (r/('unsafe-'+name)).write_bytes(data)
+PY
+  local candidate route
+  for candidate in "$SANDBOX"/unsafe-*; do
+    cp "$candidate" "$TRELLIS_HOME/config.json"
+    for route in version help check status; do
+      case "$route" in version) run_launcher --version ;; help) run_launcher help ;; *) run_launcher heavy "--$route" ;; esac
+      [ "$status" -eq 4 ] || { echo "${candidate##*/}/$route: $status: $output"; false; }
+    done
+  done
+}
+
+@test "T59 huge schema exponent refuses in under one second without an orphan Perl" {
+  python3 -I - "$TRELLIS_HOME/config.json" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);p.write_bytes(p.read_bytes().replace(b'"schema_version": 1',b'"schema_version": 1e-999999999'))
+PY
+  run python3 -I - "$LAUNCHER" <<'PY'
+import os,signal,subprocess,sys,time
+start=time.monotonic();p=subprocess.Popen([sys.argv[1],'--version'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
+try:
+    out,err=p.communicate(timeout=.9)
+except subprocess.TimeoutExpired:
+    os.killpg(p.pid,signal.SIGKILL);p.communicate()
+    raise AssertionError('schema exponent exceeded .9s; killed entire owned process group')
+elapsed=time.monotonic()-start
+assert p.returncode==4 and elapsed<1,(p.returncode,elapsed,out,err)
+print('bounded literal refusal',p.returncode)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T59 large slot integers preserve direct supervisor quoted error messages" {
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/large-base"
+  local field value expected expected_status
+  for field in heavy_slots heavy_light_slots; do
+    for value in 100000000000000000000 200000000000000000000 99999999999999999999; do
+      python3 -I - "$SANDBOX/large-base" "$TRELLIS_HOME/config.json" "$field" "$value" <<'PY'
+import json,pathlib,sys
+v=json.loads(pathlib.Path(sys.argv[1]).read_text());v[sys.argv[3]]='LARGE';pathlib.Path(sys.argv[2]).write_text(json.dumps(v).replace('"LARGE"',sys.argv[4]))
+PY
+      run env -i HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" PATH=/usr/bin:/bin /usr/bin/perl "$REPO_ROOT/scripts/lib/heavy-supervisor.pl" check
+      expected="$output";expected_status="$status"
+      run_launcher heavy --check
+      [ "$status" -eq "$expected_status" ] && [ "$output" = "$expected" ] || { echo "$field=$value: expected $expected; got $status: $output"; false; }
+    done
+  done
+}
+
+@test "T59 metadata assembly appends supervisor bytes only for check and status" {
+  run python3 -I - "$LAUNCHER_TEMPLATE" "$SANDBOX" <<'PY'
+import pathlib,subprocess,sys
+source=pathlib.Path(sys.argv[1]).read_text();root=pathlib.Path(sys.argv[2])
+def heredoc(marker):
+    return source.split("cat <<'"+marker+"'\n",1)[1].split('\n'+marker+'\n',1)[0]
+prefix=heredoc('TRELLIS_METADATA_PL');heavy=heredoc('TRELLIS_HEAVY_METADATA_PL')
+capture=root/'assembled.pl';collector=root/'collect-program'
+collector.write_text('#!'+sys.executable+'\nimport pathlib,sys\nassert sys.argv[1]=="-e"\npathlib.Path('+repr(str(capture))+').write_text(sys.argv[2])\n')
+collector.chmod(0o700)
+selector='perl_bin="$(command -v perl)"';assert source.count(selector)==1
+launcher=root/'capture-launcher';launcher.write_text(source.replace(selector,'perl_bin="'+str(collector)+'"'));launcher.chmod(0o700)
+for mode,argv in [('version',['--version']),('help',['help']),('check',['heavy','--check']),('status',['heavy','--status'])]:
+    result=subprocess.run([str(launcher),*argv],capture_output=True)
+    assert result.returncode==0,(mode,result.returncode,result.stderr)
+    expected=prefix if mode in ('version','help') else prefix+'\n'+heavy
+    assert capture.read_text()==expected,(mode,'wrong assembled Perl bytes',len(capture.read_bytes()),len(expected.encode()))
+print('four exact assembled programs; version/help contain only the metadata prefix')
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "T59 every metadata route requires needed modules but not unused modules" {
+  metadata_process_spies
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/module-config-base"
+  local module kind route expected
+  for module in JSON/PP Encode Fcntl MIME/Base64 Storable; do
+    mkdir -p "$(dirname "$SANDBOX/missing-modules/$module.pm")"
+    printf 'die "fixture module unavailable\\n";\n' > "$SANDBOX/missing-modules/$module.pm"
+    cat > "$SANDBOX/perl-spy" <<EOF
+#!/bin/bash
+exec /usr/bin/perl -I'$SANDBOX/missing-modules' "\$@"
+EOF
+    for kind in ascii unicode; do
+      python3 -I - "$SANDBOX/module-config-base" "$TRELLIS_HOME/config.json" "$kind" <<'PY'
+import json,pathlib,sys
+v=json.loads(pathlib.Path(sys.argv[1]).read_text())
+if sys.argv[3]=='unicode': v['source_root']='/a/é/😀'
+pathlib.Path(sys.argv[2]).write_text(json.dumps(v,ensure_ascii=False))
+PY
+      for route in version help check status; do
+        # Independent host-module oracle, never the candidate program: direct
+        # needs are fixed, but their transitive closure varies by Perl release.
+        # E.g. Linux Encode 3.24 -> Storable -> Fcntl; macOS Encode 3.0801 does
+        # not load either. A missing transitive need is still unavailable 5.
+        run env -i PATH=/usr/bin:/bin /usr/bin/perl -I"$SANDBOX/missing-modules" -e '
+          my ($kind, $route, $hidden) = @ARGV;
+          my $ok = eval {
+            require JSON::PP;
+            JSON::PP->new->utf8->decode("{}");
+            if ($kind eq "unicode") {
+              require Encode;
+              my $raw = "\xc3\xa9";
+              Encode::decode("UTF-8", $raw, Encode::FB_CROAK());
+            }
+            if ($route eq "check" || $route eq "status") {
+              require Fcntl; require MIME::Base64;
+              MIME::Base64::decode_base64("eD0xAA==");
+            }
+            1;
+          };
+          # A loader may probe/catch the first missing require internally;
+          # Perl then reports a reload of that same failed module instead.
+          die $@ if !$ok && $@ !~ /fixture module unavailable/ &&
+            index($@, "Attempt to reload $hidden aborted.") != 0;
+          exit($ok ? 0 : 5);
+        ' "$kind" "$route" "$module.pm"
+        expected="$status"
+        case "$expected" in 0|5) ;; *) echo "module oracle failed: $status: $output"; false ;; esac
+        case "$route" in version) run_launcher --version ;; help) run_launcher help ;; *) run_launcher heavy "--$route" ;; esac
+        [ "$status" -eq "$expected" ] || { echo "$module/$kind/$route expected=$expected got=$status: $output"; false; }
+      done
+    done
+    rm -f "${SANDBOX:?}/missing-modules/$module.pm"
+  done
+}
+
+assert_native_warm_scratch() {
+  # Observation only, never authorization: native uses16 random bytes, whereas
+  # canonical uses8. Disabling native dispatch must fail each paired test.
+  local scratch suffix
+  scratch="$(cat "$HOME/native-scratch.log")"
+  suffix="${scratch##*/.cmd.}"
+  [ "${#suffix}" -eq 32 ] || { echo "native warm route was not used: $scratch"; false; }
+}
+
+@test "paired native launcher accepts cold then certifies warm argv without legacy scratch nesting" {
+  make_release 1.2.3 native-probe
+  pin_native_launcher
+  for attempt in 1 2; do
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" BASH_ENV=/nonexistent ENV=/nonexistent \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.bad GIT_CONFIG_VALUE_0='!exit 99' \
+      "$LAUNCHER" doctor '' 'two words'
+    [ "$status" -eq 3 ] || { echo "$status: $output"; false; }
+    run python3 -I - "$HOME/native-argv.log" <<'PY'
+import pathlib,sys
+assert pathlib.Path(sys.argv[1]).read_bytes()==b'doctor\0\0two words\0'
+PY
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    assert_no_command_scratch
+  done
+  assert_native_warm_scratch
+  [ ! -e "$SOURCE_POISON_MARKER" ]
+}
+
+@test "paired native warm launcher preserves the caller stdin stream" {
+  make_release 1.2.3 native-probe
+  pin_native_launcher
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  run native_bounded /bin/bash -c 'printf "original input\n" | "$1" stdin' _ "$LAUNCHER"
+  [ "$status" -eq 3 ] && [ "$output" = 'original input' ] || { echo "$status: $output"; false; }
+  assert_native_warm_scratch
+  assert_no_command_scratch
+  [ ! -e "$SOURCE_POISON_MARKER" ]
+}
+
+@test "paired native launcher delegates uncertified original bytes but refuses unsafe config" {
+  make_release 1.2.3 native-probe
+  pin_native_launcher
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$status: $output"; false; }
+  assert_native_warm_scratch
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/paired-base.json"
+  python3 -I - "$TRELLIS_HOME/config.json" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);p.write_bytes(b'\xef\xbb\xbf'+p.read_bytes())
+PY
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$status: $output"; false; }
+  for kind in malformed group; do
+    cp "$SANDBOX/paired-base.json" "$TRELLIS_HOME/config.json"
+    chmod 600 "$TRELLIS_HOME/config.json"
+    if [ "$kind" = malformed ]; then
+      printf '{malformed' > "$TRELLIS_HOME/config.json"
+    else
+      chmod 640 "$TRELLIS_HOME/config.json"
+    fi
+    rm -f "$HOME/native-argv.log"
+    run_launcher doctor
+    [ "$status" -eq 4 ] || { echo "$kind: $status: $output"; false; }
+    [ ! -e "$HOME/native-argv.log" ]
+  done
+  assert_no_command_scratch
+  [ ! -e "$SOURCE_POISON_MARKER" ]
+}
+
 @test "--version reports configured release without payload preflight or state writes" {
   # No release store is needed, and the mutable source must never execute.
   rmdir "$TRELLIS_HOME/releases"
@@ -297,6 +821,76 @@ EOF
   run_launcher --version
   [ "$status" -eq 4 ]
   [[ "$output" == *'machine config is missing, not private'* ]]
+}
+
+# macOS ls prints "@" for an extended attribute in place of the "+" of an ACL,
+# so a mode-column check misses an ACL on a file that also carries an xattr.
+# Some hosts tag every new file with com.apple.provenance, so even the ACL-only
+# fixture can show "@" there.
+@test "launcher refuses a private config whose ACL an xattr marker hides" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: ls -e ACL listing and chmod +a fixture'
+  local config="$TRELLIS_HOME/config.json"
+  xattr -w com.example.x 1 "$config"
+  chmod +a "user:$(id -un) allow read" "$config"
+  [[ "$(LC_ALL=C /bin/ls -ld "$config")" == '-rw-------@ '* ]] || { ls -lde "$config"; false; }
+  run_launcher --version
+  [ "$status" -eq 4 ] || { echo "status=$status $output"; false; }
+  [[ "$output" == *'machine config is missing, not private'* ]] || { echo "$output"; false; }
+}
+
+@test "launcher admits a private config carrying an xattr and no ACL" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: xattr fixture'
+  local config="$TRELLIS_HOME/config.json"
+  xattr -w com.example.x 1 "$config"
+  [[ "$(LC_ALL=C /bin/ls -ld "$config")" == '-rw-------@ '* ]] || { ls -lde "$config"; false; }
+  run_launcher --version
+  [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
+  [ "$output" = 'trellis 1.2.3 (configured; not verified)' ]
+}
+
+@test "launcher refuses a private config carrying an ACL" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: chmod +a fixture'
+  chmod +a "user:$(id -un) allow read" "$TRELLIS_HOME/config.json"
+  run_launcher --version
+  [ "$status" -eq 4 ] || { echo "status=$status $output"; false; }
+  [[ "$output" == *'machine config is missing, not private'* ]] || { echo "$output"; false; }
+}
+
+# Native refuses any of setuid, setgid or sticky on the config (mask 0o7077).
+# A host may strip a bit chmod asked for (setgid outside the file's group), so
+# each row asserts on the bits actually present.
+@test "launcher refuses a private config carrying special mode bits" {
+  local config="$TRELLIS_HOME/config.json" mode actual
+  for mode in 4600 4700 2600 1600; do
+    chmod "$mode" "$config"
+    # BSD %Lp drops the special bits; %Mp is that digit.
+    actual="$(stat -f '%Mp%Lp' "$config" 2>/dev/null)" || actual=""
+    case "$actual" in ''|*[!0-7]*) actual="$(stat -c '%a' "$config")" ;; esac
+    if [ "$actual" -lt 1000 ]; then
+      echo "# $mode: host stripped the special bit (now $actual)" >&3
+      continue
+    fi
+    run_launcher --version
+    [ "$status" -eq 4 ] || { echo "mode $actual: status=$status $output"; false; }
+    [[ "$output" == *'machine config is missing, not private'* ]] || { echo "$output"; false; }
+  done
+  for mode in 600 700 400; do
+    chmod "$mode" "$config"
+    run_launcher --version
+    [ "$status" -eq 0 ] || { echo "mode $mode: status=$status $output"; false; }
+  done
+}
+
+@test "launcher refuses a Trellis home whose ACL an xattr marker hides" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: ls -e ACL listing and chmod +a fixture'
+  xattr -w com.example.x 1 "$TRELLIS_HOME"
+  run_launcher --version
+  [ "$status" -eq 0 ] || { echo "xattr alone: status=$status $output"; false; }
+  chmod +a "user:$(id -un) allow list" "$TRELLIS_HOME"
+  [[ "$(LC_ALL=C /bin/ls -ld "$TRELLIS_HOME")" == 'drwx------@ '* ]] || { ls -lde "$TRELLIS_HOME"; false; }
+  run_launcher --version
+  [ "$status" -eq 4 ] || { echo "status=$status $output"; false; }
+  [[ "$output" == *'Trellis home is missing, not private'* ]] || { echo "$output"; false; }
 }
 
 run_launcher() {
@@ -1029,8 +1623,8 @@ EOF
   [ "$(cat "$SANDBOX/scratch-mode.log")" = 'drwx------' ] ||
     { echo "scratch mode: $(cat "$SANDBOX/scratch-mode.log")"; false; }
   # The permission field only: macOS appends `@` for extended attributes, which
-  # the launcher's own private-directory check also ignores (it refuses `+`,
-  # an ACL, and reads exactly the ten mode characters).
+  # the launcher's own private-directory check also ignores (it refuses an ACL
+  # from the -e entry listing and reads exactly the ten mode characters).
   [ "$(LC_ALL=C ls -ld "$TRELLIS_HOME/state" | awk '{print substr($1, 1, 10)}')" = 'drwx------' ]
   [ "$(LC_ALL=C ls -ld "$TRELLIS_HOME/state/scratch" | awk '{print substr($1, 1, 10)}')" = 'drwx------' ]
   # A real command temp file allocated through ${TMPDIR:-/tmp}: the hostile
@@ -1654,4 +2248,143 @@ PY
     --remote "$SANDBOX/unfiltered-remote.git"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(payload_fixture_excluded_entries "$TRELLIS_HOME/releases/7.7.8/release.json")" -eq 5 ]
+}
+
+# ------------------------------------------------------------------ T24
+# The installed launcher runs `hook <harness> session-start` in process after
+# its warm proof. The shell route (pre-T24 decision) is the oracle.
+session_shell_reference() {
+  cp "$LAUNCHER" "$SANDBOX/shell-reference"
+  python3 -I - "$SANDBOX/shell-reference" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);s=p.read_text();old='launcher_native_run_if_available() {\n';assert s.count(old)==1
+p.write_text(s.replace(old,old+'  return 10 # test-only shell route reference\n',1))
+PY
+}
+
+# session_pair HARNESS ROOT EVENT: native then shell, each with stdout only.
+# Compares stdout, stderr and status.
+session_pair() {
+  local launcher rc
+  for launcher in "$LAUNCHER" "$SANDBOX/shell-reference"; do
+    rc=0
+    printf '%s' "$3" | native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
+      "$launcher" hook session-start "$1" "$2" > "$SANDBOX/pair-out" 2> "$SANDBOX/pair-err" || rc=$?
+    { printf 'status=%s\nstderr:\n' "$rc"; cat "$SANDBOX/pair-err"; } >> "$SANDBOX/pair-out"
+    if [ "$launcher" = "$LAUNCHER" ]; then mv "$SANDBOX/pair-out" "$SANDBOX/native-out"; fi
+  done
+  cmp -s "$SANDBOX/native-out" "$SANDBOX/pair-out" || {
+    echo "native:"; cat "$SANDBOX/native-out"; echo "shell:"; cat "$SANDBOX/pair-out"; false
+  }
+}
+
+warm_native_session() {
+  pin_native_launcher
+  session_shell_reference
+  PROJECT="$SANDBOX/projects/session project"
+  mkdir -p "$PROJECT/.trellis/runtime" "$PROJECT/sub dir"
+  git init -q "$PROJECT"
+  printf '# Context log\nbranch: main, last step é\n' > "$PROJECT/context-log.md"
+  # The first call is a cold stamp miss on the complete canonical route.
+  printf '{"source":"startup"}' | native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
+    "$LAUNCHER" hook session-start claude "$PROJECT" > /dev/null 2>&1 || true
+}
+
+@test "T24 native session-start equals the shell route byte for byte with the real hooks" {
+  make_release 1.2.3 native-session
+  warm_native_session
+  local harness event root
+  for harness in claude codex; do
+    for event in '{"source":"startup"}' '{"source":"resume","session_id":"s"}' '{"source":"compact"}' \
+      '{"source":"clear"}' '{}' '' 'not json' '{"source":"startup"} {"source":1}'; do
+      for root in "$PROJECT" "$PROJECT/sub dir"; do
+        session_pair "$harness" "$root" "$event"
+      done
+    done
+  done
+  session_pair claude "$PROJECT" '{"source":"startup"}'
+  grep -q 'branch: main, last step é' "$SANDBOX/native-out" || { cat "$SANDBOX/native-out"; false; }
+}
+
+@test "T24 native session-start runs members in process and judges them like the shell dispatcher" {
+  make_release 1.2.3 native-session-stubs
+  warm_native_session
+  local harness mode event parent
+  for harness in claude codex; do
+    for mode in ok fail junk two controls silent; do
+      printf '%s' "$mode" > "$SANDBOX/member-mode"
+      for event in '{"source":"startup"}' '{"source":"compact"}'; do
+        session_pair "$harness" "$PROJECT" "$event"
+        [ "$(cat "$SANDBOX/member-parent")" = bash ] || { echo "shell parent: $(cat "$SANDBOX/member-parent")"; false; }
+      done
+    done
+    printf ok > "$SANDBOX/member-mode"
+    printf '%s\n\n' '{"source":"startup","x":"a\u0000b"}' | native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
+      "$LAUNCHER" hook session-start "$harness" "$PROJECT/sub dir" > /dev/null
+    parent="$(cat "$SANDBOX/member-parent")"
+    [ "$parent" = trellis-hooks ] || { echo "$harness: member parent was $parent, not the native launcher"; false; }
+    cp "$SANDBOX/member-env-session-context" "$SANDBOX/native-env"
+    cp "$SANDBOX/member-stdin-session-context" "$SANDBOX/native-stdin"
+    printf '%s\n\n' '{"source":"startup","x":"a\u0000b"}' | native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
+      "$SANDBOX/shell-reference" hook session-start "$harness" "$PROJECT/sub dir" > /dev/null
+    cmp "$SANDBOX/native-env" "$SANDBOX/member-env-session-context" || {
+      diff "$SANDBOX/native-env" "$SANDBOX/member-env-session-context"; false
+    }
+    cmp "$SANDBOX/native-stdin" "$SANDBOX/member-stdin-session-context"
+  done
+  assert_no_command_scratch
+}
+
+@test "T24 a different dispatcher or a refused root keeps the complete shell route" {
+  make_release 1.2.3 native-session-custom
+  warm_native_session
+  printf ok > "$SANDBOX/member-mode"
+  printf '{"source":"startup"}' | native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
+    "$LAUNCHER" hook session-start claude "$PROJECT" > /dev/null
+  [ "$(cat "$SANDBOX/member-parent")" = bash ] || { echo "custom dispatcher ran natively"; false; }
+  session_pair claude "$PROJECT" '{"source":"startup"}'
+  local root
+  for root in relative "$PROJECT/./sub dir" "$PROJECT/missing" "$PROJECT//" "$SANDBOX/projects/../projects"; do
+    session_pair claude "$root" '{"source":"startup"}'
+  done
+}
+
+@test "T24 a changed sealed dispatcher dependency keeps the complete shell route" {
+  make_release 1.2.3 native-session-deps
+  warm_native_session
+  printf ok > "$SANDBOX/member-mode"
+  local harness
+  for harness in claude codex; do
+    session_pair "$harness" "$PROJECT" '{"source":"startup"}'
+    grep -q '^status=7$' "$SANDBOX/native-out" || { cat "$SANDBOX/native-out"; false; }
+    grep -q 'custom deps refusal' "$SANDBOX/native-out" || { cat "$SANDBOX/native-out"; false; }
+  done
+}
+
+@test "T24 native session-start leaves no state that could authorize a later call" {
+  make_release 1.2.3 native-session-stubs
+  warm_native_session
+  local before after launcher
+  printf ok > "$SANDBOX/member-mode"
+  state_listing() {
+    find "$TRELLIS_HOME" "$PROJECT" -path "$TRELLIS_HOME/state/scratch" -prune -o -print | LC_ALL=C sort
+  }
+  before="$(state_listing)"
+  printf '{"source":"startup"}' | native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
+    "$LAUNCHER" hook session-start claude "$PROJECT" > /dev/null
+  [ "$(state_listing)" = "$before" ] || { diff <(printf '%s\n' "$before") <(state_listing); false; }
+  # Killed mid-member: still nothing beyond its private command scratch.
+  printf 'sleep' > "$SANDBOX/member-mode"
+  rm -f "$SANDBOX/member-pid"
+  printf '{"source":"startup"}' | env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" hook session-start claude "$PROJECT" > /dev/null 2>&1 &
+  launcher=$!
+  local tries=100
+  while [ ! -s "$SANDBOX/member-pid" ] && [ "$tries" -gt 0 ]; do sleep 0.05; tries=$((tries - 1)); done
+  [ -s "$SANDBOX/member-pid" ] || { echo "member never started"; false; }
+  [ "$(cat "$SANDBOX/member-parent")" = trellis-hooks ]
+  kill -KILL "$launcher"
+  kill -KILL "$(cat "$SANDBOX/member-pid")"
+  wait "$launcher" || true
+  after="$(state_listing)"
+  [ "$after" = "$before" ] || { diff <(printf '%s\n' "$before") <(printf '%s\n' "$after"); false; }
 }

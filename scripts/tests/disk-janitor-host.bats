@@ -619,3 +619,98 @@ EOF
   [ ! -e "$wt_free" ] || { echo "fully pushed worktree survived"; false; }
   [ -d "$wt_held" ] || { echo "unpushed tracked worktree removed"; false; }
 }
+
+@test "DH.5 an unknown freshness result keeps tmp scratch instead of deleting it" {
+  local fixture="$TMPDIR/bats-run-ageunknown" shim="$SANDBOX/find-shim" real_find
+  mkdir -p "$fixture"
+  printf 'recent\n' > "$fixture/fresh.txt"
+  touch -t "$STALE_TOUCH" "$fixture"
+  real_find="$(command -v find)"
+  mkdir -p "$shim"
+  cat > "$shim/find" <<'SH'
+#!/bin/bash
+matched=0
+for arg in "$@"; do [ "$arg" = "$DJ_FRESH_FIXTURE" ] && matched=1; done
+case " $* " in
+  *" -mmin "*)
+    if [ "$matched" -eq 1 ]; then
+      printf '%s\n' "$DJ_FRESH_FIXTURE/fresh.txt"
+      exit 1
+    fi ;;
+esac
+exec "$DJ_REAL_FIND" "$@"
+SH
+  chmod 755 "$shim/find"
+  export DJ_DARWIN_TMPDIR_OVERRIDE="$TMPDIR"
+
+  run env PATH="$shim:$PATH" DJ_FRESH_FIXTURE="$fixture" DJ_REAL_FIND="$real_find" \
+    bash "$DJ" --report --scopes tmp
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"$fixture"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete] $fixture "* ]] || { echo "unknown age listed for deletion: $output"; false; }
+  [[ "$output" == *"age unknown"* ]] || { echo "unknown age not explained: $output"; false; }
+
+  run env PATH="$shim:$PATH" DJ_FRESH_FIXTURE="$fixture" DJ_REAL_FIND="$real_find" \
+    bash "$DJ" --apply --yes --scopes tmp </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$fixture" ] || { echo "unknown-age scratch removed"; false; }
+}
+
+@test "DH.5 apply revalidation keeps tmp scratch whose age becomes unknown" {
+  local fixture="$TMPDIR/bats-run-ageflip" shim="$SANDBOX/find-shim" real_find
+  mkdir -p "$fixture"
+  printf 'recent\n' > "$fixture/fresh.txt"
+  touch -t "$STALE_TOUCH" "$fixture"
+  real_find="$(command -v find)"
+  mkdir -p "$shim"
+  cat > "$shim/find" <<'SH'
+#!/bin/bash
+matched=0
+for arg in "$@"; do [ "$arg" = "$DJ_FRESH_FIXTURE" ] && matched=1; done
+case " $* " in
+  *" -mmin "*)
+    if [ "$matched" -eq 1 ]; then
+      count=0
+      [ -f "$DJ_FRESH_COUNT" ] && count="$(cat "$DJ_FRESH_COUNT")"
+      count=$((count + 1))
+      printf '%s\n' "$count" > "$DJ_FRESH_COUNT"
+      # First call (plan) reports no recent content; apply revalidation fails
+      # after printing a match, which dj_pi_entry_fresh maps to rc 2.
+      [ "$count" -eq 1 ] && exit 0
+      printf '%s\n' "$DJ_FRESH_FIXTURE/fresh.txt"
+      exit 1
+    fi ;;
+esac
+exec "$DJ_REAL_FIND" "$@"
+SH
+  chmod 755 "$shim/find"
+  export DJ_DARWIN_TMPDIR_OVERRIDE="$TMPDIR"
+
+  run env PATH="$shim:$PATH" DJ_FRESH_FIXTURE="$fixture" \
+    DJ_FRESH_COUNT="$SANDBOX/fresh-count" DJ_REAL_FIND="$real_find" \
+    bash "$DJ" --apply --yes --scopes tmp </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$fixture" ] || { echo "apply deleted unknown-age scratch"; false; }
+  [[ "$output" == *"age unknown"* ]] || { echo "$output"; false; }
+}
+
+@test "DH.4 pi worktree apply keeps an entry whose age is unknown" {
+  local wt="$SANDBOX/pi-agent-unknown"
+  mkdir -p "$wt"
+  run bash -c '
+    . "$1/scripts/lib/disk-janitor-lib.sh"
+    . "$1/scripts/lib/disk-janitor-host.sh"
+    PLAN_TMP="$2/plan.tsv"
+    LSOF_SNAPSHOT_TMP="$2/lsof"
+    printf "pi\tdelete\tpi-worktree\t%s\t0\t-\t-\n" "$3" > "$PLAN_TMP"
+    scope_enabled() { return 0; }
+    confirm_category() { return 0; }
+    dj_capture_lsof_snapshot() { return 1; }
+    dj_pi_entry_fresh() { return 2; }
+    dj_host_worktree_dirty() { return 0; }
+    dj_host_pi_worktree_apply
+  ' _ "$REPO_ROOT" "$SANDBOX" "$wt"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"age unknown"* ]] || { echo "$output"; false; }
+  [ -d "$wt" ]
+}

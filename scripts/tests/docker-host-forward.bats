@@ -242,10 +242,19 @@ assert_context_resolution() {
 }
 
 @test "passthrough shim bytes remain compatible with existing husky attachments" {
-  local digest
-  digest="$(printf '%s\n' "$(_attachment_hooks_passthrough_shim_body pre-commit)" | shasum -a 256)"
-  # Pin the pre-1.3.16 bytes: shim verification is not release-versioned.
+  local digest released="$ROOT/released-pre-commit"
+  # The v1.3.6-v1.4.2 bytes, from the verbatim released generator. The current
+  # body may differ; the released bytes must still verify, by digest pin.
+  printf '%s\n' "$(
+    . "$REPO_ROOT/scripts/tests/fixtures/released-hook-shims/v142-generator.sh"
+    _attachment_hooks_passthrough_shim_body pre-commit
+  )" > "$released"
+  chmod 700 "$released"
+  digest="$(shasum -a 256 "$released")"
   [ "${digest%% *}" = 36b82c9dd9a6bb366ca127f7d3ff22d30eb2ad0a907dad6da442fdf2a952369f ]
+  _attachment_hooks_known_shim_matches "$released" pre-commit
+  printf '# modified\n' >> "$released"
+  ! _attachment_hooks_known_shim_matches "$released" pre-commit
 }
 
 @test "gate receives only the resolved Docker endpoint without context metadata" {

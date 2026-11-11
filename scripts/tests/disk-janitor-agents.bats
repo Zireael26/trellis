@@ -27,8 +27,14 @@ setup() {
   AGENTS="$HOME/Library/LaunchAgents"
   LAUNCHCTL_LOG="$SANDBOX/launchctl.log"
   STUB_BIN="$SANDBOX/stub-bin"
-  mkdir -p "$HOME/.local/bin" "$TRELLIS_HOME/releases/1.2.3/payload/scripts" "$AGENTS" "$STUB_BIN"
-  chmod 700 "$TRELLIS_HOME"
+  FIXTURE_SCRIPTS="$SANDBOX/fixture-scripts"
+  mkdir -p "$HOME/.local/bin" "$TRELLIS_HOME/releases/1.2.3/payload/scripts" "$AGENTS" "$STUB_BIN" "$FIXTURE_SCRIPTS"
+  chmod 700 "$HOME" "$TRELLIS_HOME"
+  printf '#!/bin/sh\nexit 0\n' > "$FIXTURE_SCRIPTS/disk-janitor.sh"
+  printf '#!/bin/bash\nexec %q "$@"\n' "$(command -v git)" > "$STUB_BIN/git"
+  printf '#!/bin/sh\nexit 99\n' > "$STUB_BIN/gh"
+  printf '#!/bin/sh\nexit 99\n' > "$STUB_BIN/launchctl"
+  chmod 700 "$FIXTURE_SCRIPTS/disk-janitor.sh" "$STUB_BIN/git" "$STUB_BIN/gh" "$STUB_BIN/launchctl"
   cat > "$TRELLIS_HOME/config.json" <<'EOF'
 {"schema_version":1,"active_cli_release":"1.2.3"}
 EOF
@@ -49,13 +55,15 @@ run_installer() {
   run /usr/bin/env \
     HOME="$HOME" \
     TRELLIS_HOME="$TRELLIS_HOME" \
-    TRELLIS_TEST_SKIP_JANITOR_DRY_RUN="${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN:-}" \
+    FIXTURE_JANITOR_OK="${FIXTURE_JANITOR_OK:-}" FIXTURE_SCRIPTS="$FIXTURE_SCRIPTS" STUB_BIN="$STUB_BIN" \
     PATH="$PATH" \
     LAUNCHCTL_LOG="$LAUNCHCTL_LOG" \
     /bin/bash -c '
       installer="$1"
       shift
       . "$installer"
+      PATH="$STUB_BIN:$PATH"; export PATH
+      if [ "${FIXTURE_JANITOR_OK:-}" = 1 ]; then SCRIPT_DIR="$FIXTURE_SCRIPTS"; fi
       launchctl_run() {
         printf "%s\t%s\n" "$1" "$2" >> "$LAUNCHCTL_LOG"
       }
@@ -64,8 +72,8 @@ run_installer() {
 }
 
 run_agent_rows() {
-  run /bin/bash -c 'TRELLIS_TEST_SKIP_JANITOR_DRY_RUN="${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN:-}" . "$1"; hc_disk_janitor_agent_rows "$2" "$3"' \
-    _ "$HEALTH_CHECKS" "$HOME" "$TRELLIS_HOME"
+  run env FIXTURE_JANITOR_OK="${FIXTURE_JANITOR_OK:-}" /bin/bash -c '. "$1"; if [ "${FIXTURE_JANITOR_OK:-}" = 1 ]; then SCRIPT_DIR="$4"; fi; hc_disk_janitor_agent_rows "$2" "$3"' \
+    _ "$HEALTH_CHECKS" "$HOME" "$TRELLIS_HOME" "$FIXTURE_SCRIPTS"
 }
 
 # A minimal portable machine home: enough for doctor to reach its host rows.
@@ -82,7 +90,6 @@ EOF
 
 run_doctor() {
   run /usr/bin/env -u TRELLIS_CONFIG -u DOCKER_HOST HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
-    TRELLIS_TEST_SKIP_JANITOR_DRY_RUN="${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN:-}" \
     PATH="$STUB_BIN:$PATH" bash "$DOCTOR"
 }
 
@@ -158,23 +165,23 @@ assert_flagged() {
 
 @test "installer-rendered agents match the shared expectation in install and doctor" {
   local apply="$AGENTS/$APPLY_LABEL.plist" report="$AGENTS/$REPORT_LABEL.plist"
-  TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_installer --with-apply
+  FIXTURE_JANITOR_OK=1 run_installer --with-apply
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ -f "$apply" ] && [ -f "$report" ]
 
-  TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_agent_rows
+  FIXTURE_JANITOR_OK=1 run_agent_rows
   [ "$status" -eq 0 ]
   [ "$output" = "$(printf '0\tdisk-janitor agent: %s matches the installer'"'"'s expected arguments and schedule\n0\tdisk-janitor agent: %s matches the installer'"'"'s expected arguments and schedule' "$apply" "$report")" ] ||
     { echo "$output"; false; }
 
   # An exact pre-existing apply agent does not block a reinstall.
   : > "$LAUNCHCTL_LOG"
-  TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_installer --with-apply
+  FIXTURE_JANITOR_OK=1 run_installer --with-apply
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" != *"refusing"* ]] || { echo "$output"; false; }
 
   write_doctor_home
-  TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_doctor
+  run_doctor
   [[ "$output" == *"✓ disk-janitor agent: $apply matches"* ]] || { echo "$output"; false; }
   [[ "$output" != *"✗ disk-janitor agent"* ]] || { echo "$output"; false; }
 }
@@ -323,16 +330,16 @@ run_remedy() {
   local apply="$AGENTS/$APPLY_LABEL.plist"
   ln -s "$HOME" "$SANDBOX/home-link"
   ln -s "$TRELLIS_HOME" "$SANDBOX/trellis-home-link"
-  HOME="$SANDBOX/home-link" TRELLIS_HOME="$SANDBOX/trellis-home-link" TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_installer --with-apply
+  HOME="$SANDBOX/home-link" TRELLIS_HOME="$SANDBOX/trellis-home-link" FIXTURE_JANITOR_OK=1 run_installer --with-apply
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(/usr/bin/plutil -extract ProgramArguments.3 raw -o - "$apply")" = "TRELLIS_HOME=$TRELLIS_HOME" ]
 
-  run /bin/bash -c 'export TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1; . "$1"; hc_disk_janitor_agent_rows "$2" "$3"' \
-    _ "$HEALTH_CHECKS" "$SANDBOX/home-link" "$SANDBOX/trellis-home-link"
+  run /bin/bash -c '. "$1"; SCRIPT_DIR="$4"; hc_disk_janitor_agent_rows "$2" "$3"' \
+    _ "$HEALTH_CHECKS" "$SANDBOX/home-link" "$SANDBOX/trellis-home-link" "$FIXTURE_SCRIPTS"
   [ "$status" -eq 0 ]
   [[ "$output" == $'0\t'*"$apply matches"*$'\n0\t'*"matches"* ]] || { echo "$output"; false; }
 
-  HOME="$SANDBOX/home-link" TRELLIS_HOME="$SANDBOX/trellis-home-link" TRELLIS_TEST_SKIP_JANITOR_DRY_RUN=1 run_installer --with-apply
+  HOME="$SANDBOX/home-link" TRELLIS_HOME="$SANDBOX/trellis-home-link" FIXTURE_JANITOR_OK=1 run_installer --with-apply
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 

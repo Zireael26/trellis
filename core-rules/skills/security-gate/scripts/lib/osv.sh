@@ -3,7 +3,11 @@
 # Usage: osv.sh <project-dir> <out-jsonl> [--status FILE]
 #   [--changed-manifests FILE] [--tracked FILE] [--config FILE]
 # Changed/tracked lists are NUL-delimited.
-# Exit 0: completed (including vulnerabilities); exit 2: incomplete.
+# Exit 0: completed (including vulnerabilities); exit 2: incomplete; exit 3:
+# not applicable, only in a baseline (no changed list), and only on the
+# scanner's own proof: exit 128, "no package sources found", no scan receipt,
+# and no tracked dependency file it should have read. The status file then
+# carries a second, not-applicable line.
 #
 # --config FILE is passed on as --config, which replaces osv-scanner's discovery of
 # osv-scanner.toml beside each manifest; diff mode hands in the range base's
@@ -30,11 +34,20 @@ STATUS_OUT=/dev/null
 MANIFEST_LIST=""; TRACKED_LIST=""; CONFIG=""; SEEN=" "
 case "$0" in */*) _sg_lib_dir="${0%/*}" ;; *) _sg_lib_dir=. ;; esac
 builtin source "$_sg_lib_dir/engine.sh"
-sg_path_sanitize "$PROJECT_DIR" || { echo "osv-scanner did not complete: cannot resolve $PROJECT_DIR" >&2; exit 2; }
-RAN=0; RC=not-run; PARSED=0; SCANNED=0
+# Inspect the selected scanner before dropping project PATH entries; otherwise
+# an unsafe first candidate would silently turn into a different scanner.
+OSV_RC=0
+OSV_BIN="$(sg_resolve_engine osv-scanner "$PROJECT_DIR")" || OSV_RC=$?
+if ! sg_path_sanitize "$PROJECT_DIR" || ! sg_vet_helpers "$PROJECT_DIR" bash mktemp rm git; then
+  echo "osv-scanner did not complete: unsafe helper or project path" >&2
+  : > "$OUT"
+  exit 2
+fi
+builtin unset BASH_ENV ENV PYTHONPATH PYTHONHOME
+RAN=0; RC=not-run; PARSED=0; SCANNED=0; NOT_APPLICABLE=0
 RAW="$(mktemp)"
 ERR="$(mktemp)"
-trap 'printf "osv-scanner: ran=%s exit=%s parsed=%s scanned=%s\n" "$RAN" "$RC" "$PARSED" "$SCANNED" > "$STATUS_OUT"; rm -f "$RAW" "$ERR" "$RAW.scanned" "$RAW.reason" "$RAW.tracked"' EXIT
+trap 'printf "osv-scanner: ran=%s exit=%s parsed=%s scanned=%s\n" "$RAN" "$RC" "$PARSED" "$SCANNED" > "$STATUS_OUT"; [ "$NOT_APPLICABLE" -eq 0 ] || printf "osv-scanner: not-applicable: scanner found no package sources and scanned nothing\n" >> "$STATUS_OUT"; rm -f "$RAW" "$ERR" "$RAW.scanned" "$RAW.reason" "$RAW.tracked"' EXIT
 : > "$OUT"
 
 # Never interpret a config/status file as a changed-manifest list. In particular,
@@ -72,10 +85,8 @@ if [ -n "$CONFIG" ]; then
   CONFIG_ARGS=(--config "$CONFIG")
 fi
 
-OSV_RC=0
-OSV_BIN="$(sg_resolve_engine osv-scanner "$PROJECT_DIR")" || OSV_RC=$?
 PY_RC=0
-PYTHON3_BIN="$(sg_resolve_engine python3 "$PROJECT_DIR")" || PY_RC=$?
+PYTHON3_BIN="$(sg_resolve_python "$PROJECT_DIR")" || PY_RC=$?
 case "$OSV_RC:$PY_RC" in
   0:0) ;;
   3:*) echo "osv-scanner did not complete: osv-scanner resolves inside the scanned project" >&2; exit 2 ;;
@@ -83,6 +94,21 @@ case "$OSV_RC:$PY_RC" in
   0:*) echo "osv-scanner did not complete: python3 not installed" >&2; exit 2 ;;
   *)   echo "osv-scanner did not complete: binary not installed" >&2; exit 2 ;;
 esac
+
+# A baseline's completeness rests on reading osv-scanner's stderr: its
+# receipts, its extraction errors and its no-source run, all in the 2.x
+# dialect qualified on 2.6.0. Another major version's wording is unverified,
+# so its scan is incomplete rather than read in the wrong dialect.
+if [ -z "$MANIFEST_LIST" ]; then
+  OSV_MAJOR=""
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^osv-scanner\ version:?\ v?([0-9]+)\.[0-9]+ ]]; then OSV_MAJOR="${BASH_REMATCH[1]}"; break; fi
+  done < <("$OSV_BIN" --version 2>/dev/null)
+  if [ "$OSV_MAJOR" != 2 ]; then
+    echo "osv-scanner did not complete: unsupported osv-scanner version for diagnostic parsing (major ${OSV_MAJOR:-unknown}; 2.x supported)" >&2
+    exit 2
+  fi
+fi
 
 # Baseline/direct callers also get the tracked-only boundary, even without a
 # changed-manifest list. Never fall back to counting local/untracked sources.
@@ -94,6 +120,13 @@ if [ -z "$TRACKED_LIST" ]; then
   fi
 fi
 
+
+# A scanner diagnostic on stderr that reports an extraction, read or walk
+# failure. The progress and receipt lines osv-scanner 2.6.0 always prints are
+# not diagnostics, even when a path in them contains "error".
+export SG_OSV_BENIGN='^(Scanning dir |Starting filesystem walk for root: |End status: |Scanned .+ file)'
+export SG_OSV_ERROR='(?i)\b(error|errors|failed|failure|unable|cannot|denied|panic)\b'
+
 # osv-scanner exits 1 when vulns are found; that is success for our purposes.
 RAN=1; RC=0
 # Tracked manifests in ignored directories still belong to the pushed range.
@@ -101,7 +134,52 @@ RAN=1; RC=0
 "$OSV_BIN" --format=json --recursive --no-ignore "${CONFIG_ARGS[@]+"${CONFIG_ARGS[@]}"}" "$PROJECT_DIR" >"$RAW" 2>"$ERR" || RC=$?
 case "$RC" in
   0|1) ;;
-  128) echo "osv-scanner did not complete: no lockfile osv-scanner can read (scanner exit 128)" >&2; exit 2 ;;
+  128)
+    # Nothing to scan is the scanner's finding, never ours: a filename list
+    # here can only hold the stage incomplete, never declare it not applicable.
+    TRACKED_DEP=""
+    if [ -z "$MANIFEST_LIST" ]; then
+      while IFS= read -r -d '' f; do
+        case "${f##*/}" in
+          package.json|package-lock.json|npm-shrinkwrap.json|pnpm-lock.yaml|yarn.lock|bun.lock|bun.lockb|deno.json|deno.lock|\
+          Cargo.toml|Cargo.lock|go.mod|go.sum|pyproject.toml|poetry.lock|uv.lock|Pipfile|Pipfile.lock|pdm.lock|setup.py|setup.cfg|*requirements*.txt|\
+          Gemfile|Gemfile.lock|*.gemspec|composer.json|composer.lock|pom.xml|build.gradle|build.gradle.kts|gradle.lockfile|\
+          *.csproj|packages.config|packages.lock.json|*.cdx.json|*.deps.json|mix.exs|mix.lock|pubspec.yaml|pubspec.lock|Package.swift|Package.resolved|\
+          Podfile.lock|renv.lock|conanfile.txt|conan.lock|vcpkg.json|*.cabal|cabal.project.freeze|stack.yaml.lock)
+            TRACKED_DEP="$f"; break ;;
+        esac
+      done < "$TRACKED_LIST"
+      # Not applicable only for a failure-free no-source run, as osv-scanner
+      # 2.6.0 prints one: no stdout, nothing extracted ("0 Extract calls"),
+      # no receipt, and no stderr line but its progress lines and one
+      # "No package sources found". An extraction, read or walk error before
+      # that message is a failure with nothing to show for it.
+      NO_SOURCES="$("$PYTHON3_BIN" -I - "$RAW" "$ERR" <<'PY'
+import os, re, sys
+with open(sys.argv[1], "rb") as fh: stdout = fh.read()
+with open(sys.argv[2], encoding="utf-8", errors="replace") as fh: lines = [ln.rstrip("\r\n") for ln in fh if ln.strip()]
+benign, error = re.compile(os.environ["SG_OSV_BENIGN"]), re.compile(os.environ["SG_OSV_ERROR"])
+for ln in lines:
+    if not benign.match(ln) and error.search(ln):
+        print("scanner reported: " + ln[:200].replace("\n", " ")); sys.exit(0)
+quiet = re.compile(r"^(Scanning dir .+|Starting filesystem walk for root: .+|End status: \d+ dirs visited, \d+ inodes visited, 0 Extract calls, .*|No package sources found, --help for usage information\.)$")
+if (not stdout.strip() and all(quiet.match(ln) for ln in lines)
+        and sum(ln.startswith("No package sources found") for ln in lines) == 1
+        and any(ln.startswith("End status: ") for ln in lines)):
+    print("not-applicable")
+PY
+)"
+      if [ -z "$TRACKED_DEP" ] && [ "$NO_SOURCES" = not-applicable ]; then
+        NOT_APPLICABLE=1
+        echo "osv-scanner: not applicable: osv-scanner found no package sources and scanned nothing" >&2
+        exit 3
+      fi
+      case "$NO_SOURCES" in
+        "scanner reported: "*) echo "osv-scanner did not complete: $NO_SOURCES" >&2; exit 2 ;;
+      esac
+    fi
+    echo "osv-scanner did not complete: no lockfile osv-scanner can read (scanner exit 128)${TRACKED_DEP:+; tracked dependency file: $TRACKED_DEP}" >&2
+    exit 2 ;;
   *) echo "osv-scanner did not complete: scanner exit $RC" >&2; exit 2 ;;
 esac
 
@@ -467,6 +545,26 @@ for manifest in manifests:
             reasons.append("changed manifest not scanned: " + display + " (sibling go.mod not scanned)")
     elif path not in scanned:
         reasons.append("changed manifest not scanned: " + display)
+if not sys.argv[4]:
+    # Baseline: an extraction, read or walk error anywhere in the tree leaves a
+    # source unscanned, whatever else osv-scanner found.
+    benign, error = re.compile(os.environ["SG_OSV_BENIGN"]), re.compile(os.environ["SG_OSV_ERROR"])
+    with open(sys.argv[3], encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            line = line.rstrip("\r\n")
+            if line.strip() and not benign.match(line) and error.search(line):
+                reasons.append("scanner reported: " + line[:200])
+                break
+    # Baseline (no changed list): every tracked lockfile osv-scanner reads, as
+    # diff mode names them, needs its own receipt. Exit 0 with results[] empty
+    # proves nothing about a lockfile osv-scanner never opened.
+    baseline_locks = {"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock",
+                      "bun.lock", "bun.lockb", "Cargo.lock", "poetry.lock", "uv.lock",
+                      "Pipfile.lock", "Gemfile.lock", "go.mod"}
+    for path in sorted(tracked):
+        name = os.path.basename(path)
+        if (name in baseline_locks or fnmatch.fnmatchcase(name, "*requirements*.txt")) and path not in scanned:
+            reasons.append("tracked lockfile not scanned: " + os.path.relpath(path, root).replace("\n", "\\n"))
 if reasons:
     with open(sys.argv[6], "w") as fh: fh.write("; ".join(reasons) + "\n")
     sys.exit(2)

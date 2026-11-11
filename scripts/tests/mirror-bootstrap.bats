@@ -140,6 +140,17 @@ print('actual allocation rows=' + str(len(rows)) + ' scratch=' + scratch)
 PY
 }
 
+@test "T57 mirror bootstrap publishes the complete verified native set" {
+  cp -R "$REPO_ROOT/core-rules/native" "$SOURCE/core-rules/native"
+  reseal_source_release 'native delivery fixture'
+  run_sync --apply
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  cmp -s "$PAYLOAD/core-rules/native/artifacts.json" "$MIRROR/core-rules/native/artifacts.json"
+  cmp -s "$PAYLOAD/core-rules/native/aarch64-apple-darwin/trellis-hooks" \
+    "$MIRROR/core-rules/native/aarch64-apple-darwin/trellis-hooks"
+  [ ! -e "$MIRROR/native" ]
+}
+
 @test "mirror bootstrap actual publisher applies reviewed bytes without global temp writes" {
   run_sync --dry-run
   echo "publisher dry-run raw_exit=$status $output"

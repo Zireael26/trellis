@@ -48,6 +48,241 @@
 # and the surviving custom entries are re-derived once and only once, so nothing
 # accumulates.
 
+# settings_owned_json OP BASE OWNED_KEYS [TEMPLATE] [BEFORE] [CREATED_PATHS]
+# Same strings-only owner schema: event arrays own their positional canonical
+# prefix (and each canonical block's hook prefix), never appended project hooks.
+# Pure planner: no writes, no basename guesses and no executable discovery.
+settings_owned_json() {
+  python3 -I - "$@" <<'PY'
+import copy, json, sys
+from pathlib import Path
+
+op, filename, encoded_keys = sys.argv[1:4]
+missing = object()
+def require(ok, reason):
+    if not ok:
+        raise ValueError(reason)
+def pairs(items):
+    d = {}
+    for key, value in items:
+        require(key not in d, 'duplicate JSON key'); d[key] = value
+    return d
+def parse(text):
+    return json.loads(text, object_pairs_hook=pairs)
+def read(path):
+    return parse(Path(path).read_text())
+def same(a, b):
+    if type(a) is not type(b):
+        return False
+    if type(a) is dict:
+        return set(a) == set(b) and all(same(a[k], b[k]) for k in a)
+    if type(a) is list:
+        return len(a) == len(b) and all(same(x, y) for x, y in zip(a, b))
+    return a == b
+def lookup(obj, path):
+    for key in path:
+        if type(obj) is not dict or key not in obj:
+            return missing
+        obj = obj[key]
+    return obj
+def event_path(path):
+    return len(path) == 2 and path[0] == 'hooks'
+def event_residual(actual, owned):
+    require(type(actual) is list and type(owned) is list and len(actual) >= len(owned), 'owned event positions changed')
+    residual = []
+    for current, expected in zip(actual, owned):
+        require(type(current) is dict and type(expected) is dict and 'hooks' in expected, 'invalid owned event block')
+        require(type(expected['hooks']) is list and type(current.get('hooks')) is list, 'invalid owned hooks')
+        require(all(k in current and same(current[k], v) for k, v in expected.items() if k != 'hooks'), 'owned block position drift')
+        hooks = current['hooks']; prefix = expected['hooks']
+        require(len(hooks) >= len(prefix) and all(same(a, b) for a, b in zip(hooks, prefix)), 'owned hook position drift')
+        require(set(current) == set(expected), 'owned block field drift')
+        if len(hooks) > len(prefix):
+            block = copy.deepcopy(current); block['hooks'] = block['hooks'][len(prefix):]
+            residual.append(block)
+    residual.extend(copy.deepcopy(actual[len(owned):]))
+    return residual
+def restored_event_prefix(before, key):
+    # Only bytes equal to the recorded owned canonical prefix may have been
+    # restored by adopt-identical. The remainder of a before-image is project
+    # residual, never a second restoration source.
+    if before is missing:
+        return False
+    try:
+        event_residual(before, key['value'])
+    except ValueError:
+        return False
+    return True
+def valid_owned(keys):
+    require(type(keys) is list, 'owned keys are not a list')
+    seen = []
+    for key in keys:
+        require(type(key) is dict and set(key) == {'path', 'value'}, 'invalid owned key')
+        p = key['path']
+        require(type(p) is list and p and all(type(x) is str and x and not any(ord(c) < 32 for c in x) for x in p), 'invalid owned JSON path')
+        require(not any(p[:len(old)] == old or old[:len(p)] == p for old in seen), 'overlapping owned JSON paths')
+        seen.append(p)
+def detail(base, keys):
+    result = []
+    for key in keys:
+        p, expected = key['path'], key['value']; actual = lookup(base, p)
+        if actual is missing:
+            result.append({'path': p, 'state': 'missing'})
+        else:
+            try:
+                if event_path(p):
+                    event_residual(actual, expected)
+                else:
+                    require(same(actual, expected), 'owned value changed')
+            except ValueError:
+                result.append({'path': p, 'state': 'changed'})
+    return sorted(result, key=lambda v: v['path'])
+def set_path(base, path, value):
+    current = base
+    for key in path[:-1]:
+        if key not in current:
+            current[key] = {}
+        require(type(current[key]) is dict, 'object position collision')
+        current = current[key]
+    current[path[-1]] = copy.deepcopy(value)
+def delete_path(base, path):
+    parent = lookup(base, path[:-1])
+    if type(parent) is dict:
+        parent.pop(path[-1], None)
+def leaves(obj, path=()):
+    if type(obj) is dict and obj:
+        return [leaf for key, value in obj.items() for leaf in leaves(value, path + (key,))]
+    return [{'path': list(path), 'value': copy.deepcopy(obj)}] if path else []
+def objects(obj, path=()):
+    if type(obj) is not dict:
+        return []
+    return ([list(path)] if path else []) + [p for k, v in obj.items() for p in objects(v, path + (k,))]
+def subtract(base, keys):
+    require(not detail(base, keys), 'old owned values/positions drifted')
+    result = copy.deepcopy(base)
+    for key in keys:
+        p = key['path']; actual = lookup(result, p)
+        if event_path(p):
+            rest = event_residual(actual, key['value'])
+            if rest:
+                set_path(result, p, rest)
+            else:
+                delete_path(result, p)
+        else:
+            delete_path(result, p)
+    return result
+def prune(base, created):
+    for p in sorted(created, key=len, reverse=True):
+        if lookup(base, p) == {}:
+            delete_path(base, p)
+    return base
+def merge(base, template):
+    result = copy.deepcopy(base)
+    adopt = len(sys.argv) > 7 and sys.argv[7] == 'true'
+    for leaf in leaves(template):
+        p, new = leaf['path'], leaf['value']; current = lookup(result, p)
+        if current is not missing:
+            if adopt and same(current, new):
+                continue
+            require(event_path(p) and tuple(p) in event_ownership and type(current) is list and type(new) is list, 'project key collision')
+            canonical = [h for block in new for h in block.get('hooks', [])]
+            for block in current:
+                require(type(block) is dict and type(block.get('hooks')) is list, 'invalid project hook block')
+                for hook in block['hooks']:
+                    require(not any(same(hook, h) for h in canonical), 'project hook collides with new owned entry')
+            set_path(result, p, new + current)
+        else:
+            set_path(result, p, new)
+    return result
+try:
+    base = read(filename); keys = parse(encoded_keys)
+    require(type(base) is dict, 'settings must be an object'); valid_owned(keys)
+    event_ownership = {tuple(k['path']) for k in keys if event_path(k['path'])}
+    if op == 'detail':
+        result = detail(base, keys)
+    elif op in ('merge', 'merge-base', 'reconstruct'):
+        template = read(sys.argv[4]); require(type(template) is dict, 'template must be an object')
+        created = parse(sys.argv[6]) if len(sys.argv) > 6 else []
+        if op == 'reconstruct':
+            # Cold health/transaction proof: the template supplies ownership;
+            # before-image event members are project-owned residual prefixes.
+            event_ownership = {tuple(k['path']) for k in leaves(template) if event_path(k['path'])}
+            residual = copy.deepcopy(base)
+            for key in leaves(template):
+                p = key['path']
+                if event_path(p) and restored_event_prefix(lookup(base, p), key):
+                    rest = event_residual(lookup(base, p), key['value'])
+                    if rest:
+                        set_path(residual, p, rest)
+                    else:
+                        delete_path(residual, p)
+        elif op == 'merge-base':
+            # User relink has already proved/subtracted the old ownership and
+            # supplies its inverse result. Keep all residual event members.
+            residual = copy.deepcopy(base)
+            recorded_before = copy.deepcopy(base)
+            original = read(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else {}
+            for key in keys:
+                p = key['path']
+                if not event_path(p):
+                    delete_path(residual, p)
+                    if not same(key['value'], lookup(template, p)):
+                        delete_path(recorded_before, p)
+                else:
+                    # Adopt-identical transferred this canonical prefix into
+                    # ownership. Relink replaces it even when the new template
+                    # keeps/adds only some hooks; project residuals stay unowned.
+                    before = lookup(original, p)
+                    current = lookup(residual, p)
+                    if (before is not missing and current is not missing
+                            and restored_event_prefix(before, key)):
+                        rest = event_residual(current, key['value'])
+                        if rest:
+                            set_path(residual, p, rest)
+                        else:
+                            delete_path(residual, p)
+                        if not same(key['value'], lookup(template, p)):
+                            # Do not resurrect retired canonical bytes on a
+                            # later exact relink/detach from this before-image.
+                            if rest:
+                                set_path(recorded_before, p, rest)
+                            else:
+                                delete_path(recorded_before, p)
+            residual = prune(residual, created)
+        else:
+            residual = prune(subtract(base, keys), created)
+        before_for_paths = recorded_before if op == 'merge-base' else base
+        result = {'after': merge(residual, template), 'owned_keys': leaves(template),
+                  'created_paths': sorted({tuple(p) for p in created + objects(template) if lookup(before_for_paths, p) is missing or p in created})}
+        if op == 'merge-base':
+            result['before'] = recorded_before
+    elif op == 'inverse':
+        before = read(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5] else {}
+        created = parse(sys.argv[6]) if len(sys.argv) > 6 else []
+        result = subtract(base, keys)
+        # Live residual event members are authoritative, including edits and
+        # removals since the snapshot. A residual-bearing before-image is not a
+        # second copy to concatenate or resurrect. The sole restoration case
+        # is an exact adopt-identical pre-attach canonical value.
+        for key in keys:
+            p = key['path']; old = lookup(before, p); current = lookup(result, p)
+            if old is not missing:
+                if event_path(p):
+                    if restored_event_prefix(old, key):
+                        require(current is missing or type(current) is list, 'inverse event collision')
+                        set_path(result, p, key['value'] + ([] if current is missing else current))
+                else:
+                    set_path(result, p, old)
+        result = prune(result, created)
+    else:
+        raise ValueError('unknown owned JSON operation')
+    print(json.dumps(result, sort_keys=True, indent=2))
+except (OSError, ValueError, TypeError, KeyError) as error:
+    print('settings ownership: ' + str(error), file=sys.stderr)
+    raise SystemExit(3)
+PY
+}
+
 # reconcile_settings_hooks <canonical_template> <project_settings>
 #   canonical_template : path to core-rules/templates/claude-settings.json
 #   project_settings   : path to <project>/.claude/settings.json (must exist)

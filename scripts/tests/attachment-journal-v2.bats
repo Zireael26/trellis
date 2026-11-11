@@ -108,7 +108,9 @@ killed_commit() {
   local step=$1
   _attachment_ensure_private_dir "$TRELLIS_HOME/state/attachment-progress" || return 1
   _attachment_ensure_private_dir "$ROOT/holder" || return 1
-  A3_KILL_AT=$step python3 -I -c "$KILLING" "$JOURNAL" "$LOG" "" "$ROOT/holder" "$BASHPID"
+  # Bash 3.2 has no BASHPID; use the production 3.2-safe current-process pid.
+  _attachment_capture_current_pid "$ROOT/holder" || return 1
+  A3_KILL_AT=$step python3 -I -c "$KILLING" "$JOURNAL" "$LOG" "" "$ROOT/holder" "$_ATTACHMENT_PROCESS_PID"
 }
 
 have_pre_v2() {
@@ -150,8 +152,44 @@ setup() {
   make_plan
 }
 
+# shellcheck source=scripts/tests/helpers/hfs-volume.bash
+. "$BATS_TEST_DIRNAME/helpers/hfs-volume.bash"
+
 teardown() {
   rm -rf "$ROOT"
+  hfs_volume_detach
+}
+
+# T39: the same transaction on a real HFS+ volume, where a symlink cannot be
+# hard-linked and is published by the exclusive, inode-keeping rename. Killed
+# at every durable step, including between that rename and its identity
+# check, it recovers to the pre-attach tree; uninterrupted it attaches.
+@test "on a real HFS+ volume a transaction killed at every durable step recovers, then attaches" {
+  hfs_volume_attach
+  local apfs_root="$ROOT"
+  TMPDIR="$HFS_MNT" setup
+  rm -rf "$apfs_root"
+  KILLING=$(killing_program)
+  before=$(snapshot "$PROJECT")
+  step=1
+  while :; do
+    attachment_prepare "$TRELLIS_HOME" "$PLAN" "$JOURNAL"
+    status=0
+    killed_commit "$step" || status=$?
+    [ "$status" -ne 0 ] || break
+    [ "$status" -eq 137 ] || { echo "step $step: publisher exited $status"; return 1; }
+    run attachment_recover "$TRELLIS_HOME" "$JOURNAL"
+    [ "$status" -eq 0 ] || { echo "step $step: recover exited $status: $output"; return 1; }
+    [ ! -e "$JOURNAL" ] && [ ! -e "$LOG" ] || { echo "step $step: journal or log left"; return 1; }
+    [ "$(snapshot "$PROJECT")" = "$before" ] || { echo "step $step:"; diff <(printf '%s\n' "$before") <(snapshot "$PROJECT"); return 1; }
+    [ -z "$(find "$PROJECT" -name '.*attachment-stage-*' -o -name '.trellis-attachment-remove-*')" ] || return 1
+    step=$((step + 1))
+  done
+  [ "$step" -gt 20 ] || { echo "only $step steps: the seam did not engage"; return 1; }
+  # The uninterrupted publisher run that ended the loop published every
+  # artifact, the symlink by exclusive rename, with no stage left behind.
+  [ -L "$PROJECT/tools/link.md" ] && [ "$(readlink "$PROJECT/tools/link.md")" = attached.txt ]
+  [ -z "$(find "$PROJECT" -name '.*attachment-stage-*')" ]
 }
 
 @test "commit writes the journal once and logs per-artifact progress" {

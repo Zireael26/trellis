@@ -66,6 +66,121 @@ plant_pass() {
   head -1 "$(find "$TRELLIS_HOME/state/spec-gate" -type f -name '*.claude')" | grep -Eq '^trellis-stop-pass v1 [0-9a-f]{64}$'
 }
 
+@test "Stop cache key uses sha256sum and falls back for a malformed digest" {
+  local sha dir tool mode shell key baseline
+  sha="$(command -v sha256sum || true)"
+  [ -n "$sha" ] && [ -x "$sha" ] || skip "sha256sum not available"
+  export REAL_SHA256="$sha" DIGEST_TRACE="$BATS_TEST_TMPDIR/digest-trace"
+  local bins="$BATS_TEST_TMPDIR/hash-paths"
+  mkdir -p "$bins/no-shasum" "$bins/shasum-only" "$bins/both" \
+    "$bins/bad-sha" "$bins/bad-sha-no-shasum"
+  for dir in "$bins/no-shasum" "$bins/shasum-only" "$bins/both" \
+      "$bins/bad-sha" "$bins/bad-sha-no-shasum"; do
+    for tool in git perl dirname; do
+      ln -s "$(command -v "$tool")" "$dir/$tool"
+    done
+  done
+  printf '%s\n' '#!/bin/bash' 'printf "sha256sum\\n" >> "$DIGEST_TRACE"' \
+    'exec "$REAL_SHA256" "$@"' > "$bins/sha256sum"
+  printf '%s\n' '#!/bin/bash' 'printf "shasum\\n" >> "$DIGEST_TRACE"' \
+    '[ "$1" = -a ] && [ "$2" = 256 ] || exit 9' 'shift 2' \
+    'exec "$REAL_SHA256" "$@"' > "$bins/shasum"
+  printf '%s\n' '#!/bin/bash' 'printf "sha256sum\\n" >> "$DIGEST_TRACE"' \
+    'printf "%s  -\\n" xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' > "$bins/bad-sha256sum"
+  chmod +x "$bins/sha256sum" "$bins/shasum" "$bins/bad-sha256sum"
+  ln -s "$bins/sha256sum" "$bins/no-shasum/sha256sum"
+  ln -s "$bins/shasum" "$bins/shasum-only/shasum"
+  ln -s "$bins/sha256sum" "$bins/both/sha256sum"
+  ln -s "$bins/shasum" "$bins/both/shasum"
+  ln -s "$bins/bad-sha256sum" "$bins/bad-sha/sha256sum"
+  ln -s "$bins/shasum" "$bins/bad-sha/shasum"
+  ln -s "$bins/bad-sha256sum" "$bins/bad-sha-no-shasum/sha256sum"
+
+  # On macOS this covers /bin/bash 3.2 as well as the PATH-selected Bash 5.
+  for shell in /bin/bash "$(command -v bash)"; do
+    baseline=""
+    for mode in shasum-only no-shasum both bad-sha bad-sha-no-shasum; do
+      : > "$DIGEST_TRACE"
+      run env PATH="$bins/$mode" "$shell" -c '
+        . "$1"
+        case "$3" in
+          no-shasum|bad-sha-no-shasum)
+            ! command -v shasum >/dev/null 2>&1 || exit 90 ;;
+        esac
+        sg_stop_cache_key "$2"
+      ' "$GATE" "$CORE" "$REPO_DIR" "$mode"
+      if [ "$mode" = bad-sha-no-shasum ]; then
+        [ "$status" -eq 1 ]
+        [ -z "$output" ]
+        [ "$(< "$DIGEST_TRACE")" = sha256sum ]
+        continue
+      fi
+      [ "$status" -eq 0 ] || { echo "$shell $mode: $output"; return 1; }
+      key="$output"
+      [[ "$key" =~ ^[0-9a-f]{64}$ ]]
+      case "$mode" in
+        shasum-only) baseline="$key"; [ "$(< "$DIGEST_TRACE")" = shasum ] ;;
+        bad-sha) [ "$key" = "$baseline" ]; [ "$(< "$DIGEST_TRACE")" = $'sha256sum\nshasum' ] ;;
+        *) [ "$key" = "$baseline" ]; [ "$(< "$DIGEST_TRACE")" = sha256sum ] ;;
+      esac
+    done
+  done
+}
+
+@test "Stop key preserves the legacy newline-terminated digest input" {
+  local sha expected shell
+  sha="$(command -v sha256sum || true)"
+  [ -n "$sha" ] && [ -x "$sha" ] || skip "sha256sum not available"
+  expected="$(printf '%s\n' 'trellis-spec-gate-key v1' 'dir /fixture' 'root /fixture' \
+    'branch feature/demo' 'head 012345' "env $TRELLIS_ROOT|||" \
+    'refs/heads/demo 012345' $'file\tmetadata' | "$sha")"
+  expected="${expected%% *}"
+  for shell in /bin/bash "$(command -v bash)"; do
+    run "$shell" -c '
+      . "$1"
+      unset SG_REQUEST_RANGE SG_REQUEST_REF SG_REQUEST_HEAD
+      git() {
+        shift 2
+        case "$*" in
+          "rev-parse --show-toplevel") printf "/fixture\\n" ;;
+          "rev-parse --git-common-dir") printf ".git\\n" ;;
+          "symbolic-ref -q --short HEAD") printf "feature/demo\\n" ;;
+          "rev-parse -q --verify HEAD^{commit}") printf "012345\\n" ;;
+          for-each-ref*) printf "refs/heads/demo 012345\\n" ;;
+          *) return 1 ;;
+        esac
+      }
+      _se_repo_root() { printf "/fixture"; }
+      _se_stat_lines() { printf "file\\tmetadata\\n"; }
+      sg_find_resolver() { return 1; }
+      sg_stop_cache_key /fixture
+    ' "$GATE" "$CORE"
+    [ "$status" -eq 0 ] || { echo "$shell: $output"; return 1; }
+    [ "$output" = "$expected" ]
+  done
+}
+
+@test "Stop cache reuses its pass without shasum" {
+  config true
+  big_branch
+  local bin="$BATS_TEST_TMPDIR/no-shasum-path" tool path
+  mkdir -p "$bin"
+  for tool in bash git perl dirname basename sha256sum jq cat grep sed awk \
+      cut sort uniq wc tr head tail stat mkdir mv rm chmod date mktemp; do
+    path="$(command -v "$tool" || true)"
+    [ -z "$path" ] || ln -s "$path" "$bin/$tool"
+  done
+  [ -x "$bin/sha256sum" ] || skip "sha256sum not available"
+  run env PATH="$bin" bash -c '! command -v shasum >/dev/null 2>&1'
+  [ "$status" -eq 0 ]
+  # The same restricted environment must actually block without a receipt.
+  run env PATH="$bin" bash "$GATE" <<< '{}'
+  [ "$status" -eq 2 ] || { echo "uncached: $output"; return 1; }
+  plant_pass
+  run env PATH="$bin" bash "$GATE" <<< '{}'
+  [ "$status" -eq 0 ] || { echo "cached: $output"; return 1; }
+}
+
 @test "a matching key short-circuits, and HEAD, refs, policy and records each invalidate it" {
   config true
   big_branch

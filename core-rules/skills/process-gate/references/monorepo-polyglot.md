@@ -226,11 +226,11 @@ Polyglot PRs trend large because cross-language refactors cross boundaries: a si
 Representative starting defaults:
 
 ```bash
-PROCESS_GATE_PR_SIZE_LIMIT=400   # soft
-PROCESS_GATE_PR_SIZE_HARD=800    # hard
+PROCESS_GATE_PR_SIZE_LIMIT=600    # warn above this
+PROCESS_GATE_PR_SIZE_HARD=1200    # fail above this
 ```
 
-Generated code under `pkg/proto/`, `clients/sdk-ts/`, and `py/product_proto/` should be marked `linguist-generated` in `.gitattributes` so it does not count against the budget. Without that mark, every proto change blows the soft limit.
+Generated code under `pkg/proto/`, `clients/sdk-ts/`, and `py/product_proto/` can be marked `linguist-generated` in `.gitattributes`; the mark must already be in the range base to exclude the code. Marker-only additions and binary code changes above the warn limit also need acknowledgement. The canonical [PR hygiene reference](pr-hygiene.md#pr-size) defines exclusions, base attributes, rename handling, binary detection and the receipt.
 
 When a cross-language refactor legitimately exceeds the hard cap, land an ADR under `docs/adr/` naming the change and explaining why splitting would make review or rollback less clear. The gate accepts the override only when the diff includes a new ADR.
 

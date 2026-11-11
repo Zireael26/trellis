@@ -224,6 +224,7 @@ build_portable_release() {
   cp "$REPO_ROOT/core-rules/inheritance-manifest.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/inheritance-manifest.json"
   cp -R "$REPO_ROOT/core-rules/pi" "$PORTABLE_RELEASE_PAYLOAD/core-rules/pi"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks" "$PORTABLE_RELEASE_PAYLOAD/core-rules/legacy-hooks"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$PORTABLE_RELEASE_PAYLOAD/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
@@ -507,7 +508,12 @@ add_portable_identity_error_sibling() {
 prepare_portable_attachment() {
   local owner_project_id="${1:-portable-fixture}" release="${2:-1.2.3}"
   local identity checkout_id worktree_id owner
-  run env -u TRELLIS_CONFIG HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+  # No detached post-attach job may outlive the attach: a no-op `chmod 700`
+  # of TRELLIS_HOME by GNU chmod (BSD chmod skips the call) bumps the home's
+  # ctime, so a show-config racing it refuses its rows as "registry changed
+  # during diagnostic". attach-postjob.bats covers the job itself.
+  run env -u TRELLIS_CONFIG TRELLIS_ATTACH_POSTJOB=off \
+    HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
     bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
       --fleet personal --release "$release" \
       --harness claude --harness codex "$PORTABLE_PROJECT"

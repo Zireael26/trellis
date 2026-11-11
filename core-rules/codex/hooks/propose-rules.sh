@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # propose-rules.sh — Codex Stop. Scans the just-finished session for patterns worth
 # capturing in gotchas.md or core-rules/CLAUDE.md and emits a proposed diff
 # for the user to apply (or ignore).
@@ -78,10 +79,39 @@ run_with_timeout() {
 # ---------------------------------------------------------------------------
 _pr_has_secret_material() {
   local candidate="$1"
-  if printf '%s\n' "$candidate" | grep -qE '(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})'; then
+  if printf '%s\n' "$candidate" | grep -qE '(AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|-----BEGIN PGP PRIVATE KEY BLOCK-----|gh[pousr]_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|sk_(live|test)_[A-Za-z0-9_-]{16,}|xox[baprs]-[A-Za-z0-9-]{10,})'; then
     return 0
   fi
-  printf '%s\n' "$candidate" | grep -qiE "(password|passwd|secret|api[_-]?key|token|access[_-]?key)[[:space:]]*(:|=)[[:space:]]*([\"'][^\"']+[\"']|[^[:space:]\"'#]+)"
+  if printf '%s\n' "$candidate" | grep -qE '://[^[:space:]/:]*:[^[:space:]@/]+@'; then
+    return 0
+  fi
+  # Preserve the original substring match for camelCase and joined key names.
+  printf '%s\n' "$candidate" | grep -qiE "[\"']?([A-Za-z0-9]+[_-])*(password|passwd|secret|api[_-]?key|token|access[_-]?key)([_-](key|token))?[\"']?[[:space:]]*(:|=)[[:space:]]*([\"'][^\"']+[\"']|[^[:space:]\"'#,}]+)"
+}
+
+# The shared resolver is permissive when policy or a preset is unavailable.
+# That is not sufficient proof for this hook's durable L5 write boundary.
+_pr_l5_ceiling_verifiable() {
+  local root="$1" cfg json presets preset file value
+  for cfg in "$root/.trellis.json" "$root/.trellis.config.json"; do
+    [ -e "$cfg" ] || [ -L "$cfg" ] || continue
+    [ -f "$cfg" ] && [ -r "$cfg" ] || return 1
+    json="$(jq -cse 'if length == 1 and (.[0] | type) == "object" then .[0] else error("invalid policy") end' "$cfg" 2>/dev/null)" || return 1
+    jq -e 'has("presets")' <<<"$json" >/dev/null 2>&1 || continue
+    presets="$(jq -er '.presets | if type == "array" and all(.[]; type == "string" and test("^[A-Za-z0-9._-]+$")) then join("\n") else error("invalid presets") end' <<<"$json" 2>/dev/null)" || return 1
+    [ -n "$presets" ] || return 0
+    [ -n "${TRELLIS_ROOT:-}" ] || return 1
+    while IFS= read -r preset; do
+      file="$TRELLIS_ROOT/core-rules/presets/$preset.md"
+      [ -f "$file" ] && [ -r "$file" ] || return 1
+      value="$(_se_autonomy_frontmatter_value "$file" autonomy_ceiling)" || return 1
+      if [ -n "$value" ]; then
+        _se_valid_autonomy_level "$value" && [ "$value" -eq 5 ] || return 1
+      fi
+    done <<<"$presets"
+    return 0
+  done
+  return 0
 }
 
 _pr_candidate_is_well_formed() {
@@ -381,8 +411,7 @@ slip-up is not a pattern).'
 # sentinel and bails, while the parent run proceeds. run_with_timeout (the
 # perl-alarm shim) replaces the bare `timeout 30`, which is a NO-OP on macOS.
 #
-# The transcript tail is untrusted content, so the child reviewer runs with ZERO
-# host tools: `--tools Read` makes the available set EXCLUSIVE (Read + advisor),
+# The transcript tail is untrusted content, so the child reviewer runs with only Read (plus advisor), not zero host tools: `--tools Read` makes the available set EXCLUSIVE (Read + advisor),
 # matching the rung-2 reviewer. A `--disallowedTools` denylist would be incomplete
 # — the host permissions.defaultMode can be `auto` (auto-allow headless), and the
 # default set includes ToolSearch (loads further deferred tools) + agent-spawn
@@ -409,9 +438,17 @@ fi
 
 # L1–L4 remain advisory-only. The resolver applies canonical project policy,
 # session overrides, and active-preset ceilings before this write boundary.
-_se_resolve_autonomy "$REPO_ROOT"
+if ! _se_resolve_autonomy "$REPO_ROOT"; then
+  echo 'propose-rules: autonomy policy unavailable; no proposal persisted' >&2
+  exit 0
+fi
 if [ "$AUTONOMY_LEVEL" != "5" ]; then
   _se_emit_system_message "propose-rules: candidate gotchas.md entry below — review and append if useful.\n\n$OUT"
+  exit 0
+fi
+
+if ! _pr_l5_ceiling_verifiable "$REPO_ROOT"; then
+  _se_emit_system_message "propose-rules: cannot verify the autonomy preset ceiling; candidate was not auto-appended."
   exit 0
 fi
 

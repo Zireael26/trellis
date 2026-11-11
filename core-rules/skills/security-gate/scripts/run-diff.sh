@@ -74,6 +74,8 @@ print_verdict() {
   printf "## security-gate verdict (diff)\n\n"
   # A refusal before the diff base resolves has no receipt to print.
   [ -z "${DIFF_BASE_RECEIPT:-}" ] || printf "%s\n\n" "$DIFF_BASE_RECEIPT"
+  # Set once the baseline is read; a refusal before that has none.
+  [ -z "${BASELINE_RECEIPT:-}" ] || printf "%-18s %s\n" "Baseline:" "$BASELINE_RECEIPT"
   printf "%-18s %s\n" "SAST:"            "$sast"
   printf "%-18s %s\n" "Deps:"            "$deps"
   printf "%-18s %s\n" "Secrets:"         "$secrets"
@@ -95,10 +97,8 @@ if [ -z "$PROJECT_DIR" ]; then
   elif [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
     PROJECT_DIR="$CLAUDE_PROJECT_DIR"
   else
-    # git finds the project here, so vet it against the cwd before it runs.
-    sg_resolve_engine git "$PWD" >/dev/null || [ "$?" -ne 3 ] \
-      || config_refuse "git resolves inside the scanned project; refusing to run it"
-    PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    # The checkout cannot supply the git used to discover its own root.
+    PROJECT_DIR="$(sg_project_from_cwd)" || config_refuse "cannot discover the project root"
   fi
 fi
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
@@ -109,6 +109,13 @@ fi
 # git runs from here on, so it is vetted before its first use, not after.
 sg_resolve_engine git "$PROJECT_DIR" >/dev/null || [ "$?" -ne 3 ] \
   || config_refuse "git resolves inside the scanned project; refusing to run it"
+# PATH entries outside the checkout can themselves contain symlinks into it.
+# Pin every bare helper used here and by the diff-base resolver before use.
+sg_vet_helpers "$PROJECT_DIR" bash git basename mktemp mkdir rm cat head awk cut sed grep tr jq ls sort tail date \
+  || config_refuse "unsafe helper; refusing to run it"
+SG_BASH="$(sg_checked_program "$BASH" "$PROJECT_DIR")" \
+  || config_refuse "unsafe bash at $BASH; refusing to run it"
+builtin unset BASH_ENV ENV PYTHONPATH PYTHONHOME
 # The project key names the REPOSITORY, not the directory the run happened in.
 # `basename $PROJECT_DIR` is the worktree name inside a linked worktree, so a
 # worktree could never match its own repo's baseline and every diff scan there
@@ -326,8 +333,12 @@ resolve_engine SEMGREP_BIN semgrep
 resolve_engine SHELLCHECK_BIN shellcheck
 resolve_engine GITLEAKS_BIN gitleaks
 resolve_engine GH_BIN gh
-resolve_engine PYTHON3_BIN python3
+# python3 is run as the real binary behind any shim (lib/engine.sh).
+_sg_py_rc=0
+PYTHON3_BIN="$(sg_resolve_python "$PROJECT_DIR")" || _sg_py_rc=$?
+[ "$_sg_py_rc" -ne 3 ] || config_refuse "python3 resolves inside the scanned project, or to an interpreter that cannot be vouched for; refusing to run it"
 [ -n "$PYTHON3_BIN" ] || config_refuse "python3 not found on PATH; scanner output cannot be parsed"
+builtin unset _sg_py_rc
 
 # --- scanner config from the range base -------------------------------------
 # gitleaks loads .gitleaks.toml from --source and .gitleaksignore from --source
@@ -685,6 +696,42 @@ if [ -z "$BASELINE" ] || [ ! -f "$BASELINE" ]; then
   exit 1
 fi
 
+# --- baseline completeness ------------------------------------------------
+# Dedupe trusts the baseline's findings to stand for the whole tree; a
+# baseline that says, or by its own engine records shows, that an engine did
+# not complete cannot. lib/baseline_state.py is the one schema check (shared
+# with red-team mode and process-gate's adapter): profile engine set,
+# status/exit pairs, where not_applicable may appear, and `complete`. One
+# written before 1.4.2 has no completion fields, keeps its old treatment, and
+# the verdict says its completeness is unknown. Anything else BLOCKS, on every
+# path that returns a verdict.
+BASELINE_STATE=""
+_sg_state="$("$PYTHON3_BIN" -I "$SKILL_DIR/scripts/lib/baseline_state.py" "$BASELINE" "${BASELINE##*/}" 2>/dev/null)" \
+  && BASELINE_STATE="${_sg_state%%$'\t'*}" && BASELINE_RECEIPT="${_sg_state#*$'\t'}"
+case "$BASELINE_STATE" in
+  complete|unknown|incomplete:*) ;;
+  *) BASELINE_STATE="unreadable"; BASELINE_RECEIPT="❌ unreadable — ${BASELINE##*/}" ;;
+esac
+builtin unset _sg_state
+
+# Every verdict after this point passes through here, as through
+# apply_config_block.
+apply_baseline_block() {
+  case "$BASELINE_STATE" in
+    complete) ;;
+    unknown)
+      printf 'security-gate: baseline completeness unknown (pre-1.4.2 baseline): %s records no engine completion; deduped as before\n' \
+        "${BASELINE##*/}" ;;
+    incomplete:*)
+      printf 'security-gate: baseline %s is incomplete (%s): its findings do not cover the whole tree, so no diff is MERGEABLE on it. Re-run run-baseline.sh until it completes and commit that baseline.\n' \
+        "${BASELINE##*/}" "${BASELINE_STATE#incomplete: }"
+      OVERALL="BLOCKED" ;;
+    *)
+      printf 'security-gate: baseline %s cannot be read, so its completeness is unknown and no diff is MERGEABLE on it\n' "${BASELINE##*/}"
+      OVERALL="BLOCKED" ;;
+  esac
+}
+
 # --- changed files in range -----------------------------------------------
 # An empty file list and a FAILED diff are different facts, and the previous
 # form could not tell them apart: `2>/dev/null || true` swallowed the error, so
@@ -731,6 +778,7 @@ if [ ! -s "$CHANGED_LIST" ]; then
   fi
   if [ "$RANGE_COMMITS" -eq 0 ]; then
     OVERALL="MERGEABLE"
+    apply_baseline_block
     apply_config_block
     print_verdict "✅ pass" "✅ pass" "✅ pass" "$OVERALL"
     [ "$OVERALL" = MERGEABLE ] || exit 1
@@ -803,6 +851,16 @@ if [ -n "${SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS:-}" ]; then
   SHELLCHECK_EXCLUDE_GLOBS=(${SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS})
   set +f
 fi
+
+# Decide whether ShellCheck will run before assigning it any Semgrep parse
+# errors. A disabled stage cannot supply substitute coverage.
+case "${SECURITY_GATE_SHELLCHECK:-}" in
+  1|true|on|yes)  SHELLCHECK_ENABLED=true ;;
+  0|false|off|no) SHELLCHECK_ENABLED=false ;;
+  "")             if [ "$PROFILE" = "shell-tooling" ]; then SHELLCHECK_ENABLED=true; else SHELLCHECK_ENABLED=false; fi ;;
+  *)              echo "warn: unrecognized SECURITY_GATE_SHELLCHECK value — treating as unset" >&2
+                  if [ "$PROFILE" = "shell-tooling" ]; then SHELLCHECK_ENABLED=true; else SHELLCHECK_ENABLED=false; fi ;;
+esac
 
 # Semgrep — scoped to changed files (filter to existing files; skip deletions).
 :>"$SEMGREP_OUT"
@@ -878,8 +936,20 @@ if [ "${#SCOPE_FILES[@]}" -gt 0 ]; then
   # proves it reached its end by creating SG_PARSE_DONE; rc 0 alone is not
   # completion.
   # Only shell files eligible for ShellCheck can transfer parse coverage to it.
-  # Keep this exact scope: excluded shell paths and zsh receive no exception.
-  printf '%s\0' ${SHELL_SCOPE_FILES[@]+"${SHELL_SCOPE_FILES[@]}"} > "$WORK/semgrep.shell-scope"
+  # Keep this exact scope: excluded shell paths and zsh receive no exception,
+  # nor does a shell shebang on any other basename holding a '.' (evil.cgi,
+  # .foo, ..ts): semgrep picks the language by suffix, so that error is a real
+  # gap. lib/semgrep.sh applies the same rule to a baseline.
+  : > "$WORK/semgrep.shell-scope"
+  if [ "$SHELLCHECK_ENABLED" = true ]; then
+    for f in ${SHELL_SCOPE_FILES[@]+"${SHELL_SCOPE_FILES[@]}"}; do
+      case "${f##*/}" in
+        *.sh|*.bash) ;;
+        *.*) continue ;;
+      esac
+      printf '%s\0' "$f" >> "$WORK/semgrep.shell-scope"
+    done
+  fi
   SG_SHELL_SCOPE="$WORK/semgrep.shell-scope" SG_SHELL_PARSE_NOTICE="$WORK/semgrep.shell-parse-notice" \
     SG_PARSE_DONE="$WORK/semgrep.done" "$PYTHON3_BIN" -I - "$RAW" "$PROJECT_DIR" "$WORK/semgrep.scanned" "$COVERED_EXTENSIONS" "$WORK/semgrep.reason" "${SCOPE_FILES[@]}" >"$SEMGREP_OUT" 2>/dev/null <<'PY'
 import json, sys, os
@@ -975,14 +1045,6 @@ scanner_status semgrep "$RAN" "$RC" "$PARSED" "$SCANNED" "$REASON"
 # this on would block every push over pre-existing debt. `SECURITY_GATE_SHELLCHECK=1`
 # in a project's `security-gate-local/local.config.sh` is the opt-in; `=0` is the
 # opt-out for a `shell-tooling` project that is not ready yet.
-case "${SECURITY_GATE_SHELLCHECK:-}" in
-  1|true|on|yes)  SHELLCHECK_ENABLED=true ;;
-  0|false|off|no) SHELLCHECK_ENABLED=false ;;
-  "")             if [ "$PROFILE" = "shell-tooling" ]; then SHELLCHECK_ENABLED=true; else SHELLCHECK_ENABLED=false; fi ;;
-  *)              echo "warn: unrecognized SECURITY_GATE_SHELLCHECK value — treating as unset" >&2
-                  if [ "$PROFILE" = "shell-tooling" ]; then SHELLCHECK_ENABLED=true; else SHELLCHECK_ENABLED=false; fi ;;
-esac
-
 RAN=0; RC=not-run; PARSED=0; SCANNED=0; REASON=""
 if [ "$SHELLCHECK_ENABLED" = true ] && [ "${#SHELL_SCOPE_FILES[@]}" -gt 0 ]; then
   [ -z "$SHELLCHECK_BIN" ] || RAN=1
@@ -1040,7 +1102,7 @@ done < "$CHANGED_LIST"
 if [ "$DEPS_CHANGED" = "1" ]; then
   TRACKED_LIST="$WORK/tracked.list"
   if git -C "$PROJECT_DIR" ls-files -z --recurse-submodules > "$TRACKED_LIST" 2>/dev/null; then
-    "$BASH" -p "$SKILL_DIR/scripts/lib/osv.sh" "$PROJECT_DIR" "$OSV_OUT" \
+    "$SG_BASH" -p "$SKILL_DIR/scripts/lib/osv.sh" "$PROJECT_DIR" "$OSV_OUT" \
       --status "$WORK/osv.status" --changed-manifests "$MANIFEST_LIST" --tracked "$TRACKED_LIST" \
       --config "$OSV_CONFIG_FILE"
     [ "$?" -eq 0 ] || DEPS_INCOMPLETE=1
@@ -1197,6 +1259,7 @@ OVERALL="MERGEABLE"
 [ "$SAST_WORST" = "warn" ] || [ "$DEPS_WORST" = "warn" ] || [ "$SECRETS_WORST" = "warn" ] && OVERALL="NEEDS CHANGES"
 [ "$SAST_WORST" = "fail" ] || [ "$DEPS_WORST" = "fail" ] || [ "$SECRETS_WORST" = "fail" ] && OVERALL="BLOCKED"
 
+apply_baseline_block
 apply_config_block
 
 print_verdict "$(glyph "$SAST_WORST")" "$(glyph "$DEPS_WORST")" "$(glyph "$SECRETS_WORST")" "$OVERALL"

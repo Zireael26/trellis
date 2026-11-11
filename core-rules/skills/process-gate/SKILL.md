@@ -30,13 +30,22 @@ Nine canonical gates, all harness-agnostic. Each has a reference file, a validat
 |---|---|---|---|
 | 1 | PR hygiene (commit format, size, branch name, description) | [`references/pr-hygiene.md`](references/pr-hygiene.md) | [`scripts/check-pr.sh`](scripts/check-pr.sh) |
 | 2 | Secrets in diff | [`references/secrets.md`](references/secrets.md) | [`scripts/check-secrets.sh`](scripts/check-secrets.sh) |
-| 3 | Bypass markers (`--no-verify`, force-push, override env vars) | [`references/bypass.md`](references/bypass.md) | [`scripts/check-bypass.sh`](scripts/check-bypass.sh) |
+| 3 | Bypass markers (hook registration, persistent config drift, override markers) | [`references/bypass.md`](references/bypass.md) | [`scripts/check-bypass.sh`](scripts/check-bypass.sh) |
 | 4 | Tests & coverage | [`references/tests.md`](references/tests.md) | [`scripts/check-tests.sh`](scripts/check-tests.sh) |
 | 5 | Docs discipline (CHANGELOG, gotchas, ADRs) | [`references/docs.md`](references/docs.md) | [`scripts/check-docs.sh`](scripts/check-docs.sh) |
 | 6 | Stack-specific gates (design tokens, a11y, forbidden phrases, etc.) | [`references/stack-profiles.md`](references/stack-profiles.md) | project-local — loaded from `local.config.sh` |
 | 7 | Security (diff) | [`../security-gate/SKILL.md`](../security-gate/SKILL.md) | [`../security-gate/scripts/run-diff.sh`](../security-gate/scripts/run-diff.sh) |
 | 8 | Analyze | [`../analyze/SKILL.md`](../analyze/SKILL.md) | orchestrated by [`scripts/run-all.sh`](scripts/run-all.sh) |
 | 9 | Anti-slop (evidence doctrine in added lines; opt-in per project) | [`references/anti-slop-gate.md`](references/anti-slop-gate.md) | [`scripts/check-slop.sh`](scripts/check-slop.sh) |
+
+The Security adapter runs only the security-gate sibling of the executing
+process-gate payload. A missing or project-directed sibling fails with its
+payload path; project `.claude`, `.agents` and in-tree gates are never
+fallbacks. A Trellis source checkout may explicitly invoke its own adapter and
+sibling gate in development, including on a self-scan; that is trusted source
+invocation, not discovery of a gate from the scanned project.
+
+A passing bypass row does not prove commit hooks ran: Git reflog does not record `--no-verify` or other commit invocation flags. The checker and aggregate verdict state this limitation; authenticated hook-run receipts are future work.
 
 ## Where this sits in the verification chain
 
@@ -67,8 +76,8 @@ Minimal `local.config.sh`:
 PROCESS_GATE_TEST_CMD="pnpm test"             # used by check-tests.sh
 PROCESS_GATE_TYPECHECK_CMD="pnpm typecheck"   # used by check-tests.sh
 PROCESS_GATE_LINT_CMD="pnpm lint"             # used by check-tests.sh
-PROCESS_GATE_PR_SIZE_LIMIT=400                # warn threshold (default 400)
-PROCESS_GATE_PR_SIZE_HARD=800                 # fail threshold (default 800)
+PROCESS_GATE_PR_SIZE_LIMIT=600                # warn above 600 (default)
+PROCESS_GATE_PR_SIZE_HARD=1200                # fail above 1200 (default)
 
 # Stack-profile validators (run after the canonical nine).
 PROCESS_GATE_STACK_VALIDATORS=(
@@ -79,6 +88,8 @@ PROCESS_GATE_STACK_VALIDATORS=(
 # Optional: stack profile name (web-next, web-vite, monorepo-pnpm, unity, native-other, n-a)
 PROCESS_GATE_STACK_PROFILE="web-next"
 ```
+
+PR size counts additions and deletions outside the documented test, fixture, generated and lockfile classes; the receipt reports each excluded class, marker-only additions and binary files. Marker-only additions and binary code lines above the warning limit also require reviewer acknowledgement. See [`references/pr-hygiene.md`](references/pr-hygiene.md#pr-size) for exact paths, base attributes, markers and rename handling.
 
 If `local.config.sh` is missing the canonical scripts use sensible defaults and warn that no stack profile is declared.
 

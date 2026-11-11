@@ -13,8 +13,8 @@ import uuid
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-from gate_receipts import private, state_root
-from gate_verdict import git, key, safe_inputs, tree_verdicts
+from gate_receipts import private, state_root  # noqa: E402 (needs lib on sys.path)
+from gate_verdict import git, key, safe_inputs, tree_verdicts  # noqa: E402
 
 
 @contextlib.contextmanager
@@ -61,6 +61,11 @@ def run_weekly(root: Path) -> int:
                 or name in ("PG_PUSH_TEST_SCOPE", "BATS_TEST_FILTER", "BATS_FILTER", "AGGREGATE_SCRIPT", "PACKER", "TRELLIS_STAGE_WEIGHTS_TSV")):
             removed.append(name)
             del environment[name]
+    # The weekly run is the one that also runs the slow tier (cases that skip
+    # without it); it widens the battery and never narrows it. The name stays
+    # outside TRELLIS_TEST_*, which verdict capture refuses as a test seam: this
+    # one is hashed into the input key, so the P1 comparison still works.
+    environment["TRELLIS_SLOW_TESTS"] = "1"
     receipt = kept / "aggregate.tsv"
     fd = os.open(str(receipt), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     os.close(fd)

@@ -6,7 +6,9 @@ existing attachment machinery. Journals retain the v1 recovery contract.
 """
 import base64
 import copy
+from contextlib import ExitStack, contextmanager
 import ctypes
+import errno
 import hashlib
 import importlib.util
 import json
@@ -46,9 +48,83 @@ def relative(path):
     return load_integrity().relative(path)
 
 
+def project_file_present(path):
+    # The authoritative planner accepts regular project files, not symlinks.
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
 def require(condition, reason):
     if not condition:
         raise ValueError(reason)
+
+
+class RenderMiss(ValueError):
+    """A donor whose explicit-json render the canonical renderer does not
+    reproduce for the donor's own root. Always labelled on stderr; still a
+    read-only miss (10) that runs the full attach, never a fast-path success."""
+
+
+MARKERS = ('__TRELLIS_USER_HOME__', '__TRELLIS_HOME__', '__TRELLIS_LAUNCHER__')
+
+
+def native_shaped(template):
+    """The canonical renderer's own routing test (attachment.sh
+    attachment_contextual_template_render_impl): such a template goes to the
+    candidate renderer, whose output names the project root and this host's
+    companion, so it is reproduced by that renderer, never by substitution."""
+    strings = []
+    def walk(value):
+        if isinstance(value, dict):
+            if value.get('command') == MARKERS[2]:
+                return True
+            args = value.get('args')
+            if isinstance(args, list) and any(isinstance(a, str) and '__TRELLIS_' in a for a in args):
+                return True
+            return any(walk(v) for v in value.values())
+        if isinstance(value, list):
+            return any(walk(v) for v in value)
+        if isinstance(value, str):
+            strings.append(value)
+        return False
+    if walk(template):
+        return True
+    hooks = template.get('hooks') if isinstance(template, dict) else None
+    return (any('__TRELLIS_' in v for v in strings) and isinstance(hooks, dict)
+            and ('WorktreeCreate' in hooks or 'WorktreeRemove' in hooks))
+
+
+COMPANION = re.compile(r'/bin/native/([^/]+)/([^/]+)/([0-9a-f]{64})/trellis-hooks')
+
+
+def companions(value):
+    found = set()
+    def walk(item):
+        if isinstance(item, str):
+            found.update(COMPANION.findall(item))
+        elif isinstance(item, list):
+            for child in item:
+                walk(child)
+        elif isinstance(item, dict):
+            for child in item.values():
+                walk(child)
+    walk(value)
+    return found
+
+
+def render_miss_label(actual, wanted):
+    have, want = companions(actual), companions(wanted)
+    if have == want:
+        return 'donor render differs from its own root render'
+    if not have:
+        return 'legacy donor render; this host renders native'
+    if not want:
+        return 'native donor render; this host renders legacy'
+    if {t for _, t, _ in have} != {t for _, t, _ in want}:
+        return 'donor render is for another host target'
+    return 'donor render names another companion'
 
 
 def sha(data):
@@ -100,11 +176,13 @@ def artifact_exact(root, artifact):
     return data
 
 
-def current_inventory(donor, payload, harnesses):
+def current_inventory(donor, payload, harnesses, native=None):
     """Reject historical/adopted inventories that need the current full planner.
 
     Recognize the shipped nonrecursive link/render shapes only. Unknown shapes
     are misses, not a second permissive implementation of the general planner.
+    A native-shaped explicit-json template is appended to `native` for the
+    canonical renderer (canonical_renders); without that list it is a miss.
     """
     manifest_path = 'core-rules/inheritance-manifest.json'
     manifest = json.loads(read_regular(payload + '/' + manifest_path, sealed=True))
@@ -139,7 +217,7 @@ def current_inventory(donor, payload, harnesses):
                 destination = relative(entry['destination'])
                 source = relative(entry['project_target'])
                 target = '../' * destination.count('/') + source
-                if not os.path.isfile(donor['worktree_root'] + '/' + source):
+                if not project_file_present(donor['worktree_root'] + '/' + source):
                     target = '../' * destination.count('/') + '.trellis/runtime/' + relative(entry['fallback_source'])
                 require(destination not in expected, 'duplicate surface destination')
                 expected[destination] = ('symlink', target)
@@ -161,6 +239,11 @@ def current_inventory(donor, payload, harnesses):
             else:
                 require(entry['merge'] == 'explicit-json', 'unknown render merge')
                 value = json.loads(data)
+                if native_shaped(value):
+                    require(native is not None, 'native render needs the canonical renderer')
+                    native.append({'template': template, 'destination': destination, 'mode': entry['mode'], 'merge': 'explicit-json'})
+                    expected[destination] = ('native', None, entry['mode'])
+                    continue
                 context = donor.get('render_context') or {}
                 replacements = {'__TRELLIS_USER_HOME__': context.get('user_home_shell'), '__TRELLIS_HOME__': context.get('trellis_home_shell'), '__TRELLIS_LAUNCHER__': context.get('launcher_shell')}
                 def substitute(value):
@@ -181,15 +264,104 @@ def current_inventory(donor, payload, harnesses):
     require(set(actual) == set(expected), 'historical or incomplete donor inventory')
     for path, wanted in expected.items():
         artifact = actual[path]
-        require(artifact['kind'] == ('file' if wanted[0] == 'json' else wanted[0]), 'surface kind differs')
+        require(artifact['kind'] == ('file' if wanted[0] in ('json', 'native') else wanted[0]), 'surface kind differs')
         if wanted[0] == 'symlink':
             require(artifact['target'] == wanted[1], 'surface target differs')
         elif wanted[0] == 'file':
             require(artifact['sha256'] == wanted[1] and artifact.get('mode') == wanted[2], 'render template differs')
+        elif wanted[0] == 'native':
+            require(artifact.get('mode') == wanted[2], 'guard template differs')  # content: canonical_renders
         else:
             data = artifact_exact(donor['worktree_root'], artifact)
             require(json.loads(data) == wanted[1] and artifact.get('mode') == wanted[2], 'guard template differs')
     return sources
+
+
+def render_inputs(payload):
+    """Payload files the canonical renderer reads besides the template: the
+    native manifest and adapter, and the pinned legacy provider it selects on
+    a native miss. Each present one joins the executed-release verification."""
+    names = []
+    for name in ('core-rules/native/artifacts.json', 'core-rules/native/hook-adapter.sh'):
+        if os.path.lexists(payload + '/' + name):
+            names.append(name)
+    provider = 'core-rules/legacy-hooks'
+    if os.path.lexists(payload + '/' + provider + '/manifest.json'):
+        listed = json.loads(read_regular(payload + '/' + provider + '/manifest.json', sealed=True))['files']
+        names.append(provider + '/manifest.json')
+        names.extend(provider + '/' + relative(name) for name in sorted(listed))
+    return names
+
+
+# One Bash process renders every native-shaped template twice through the
+# canonical attach functions: for the donor's own root (to verify the donor)
+# and, as attach_json_render_plan, for the target root (the plan's artifact
+# and render record). One Claude version probe serves the whole batch; the
+# full attach probes per render, a few milliseconds apart.
+RENDER = r'''
+. "$1" || exit 1
+payload="$2"; context="$3"; donor_root="$4"; target_root="$5"
+shift 5 || exit 1
+if attachment_claude_on_failure_supported; then fast_direct=0; else fast_direct=1; fi
+attachment_claude_on_failure_supported() { return "$fast_direct"; }
+for record in "$@"; do
+  template="$(printf '%s\n' "$record" | jq -r .template)" || exit 1
+  donor="$(attach_contextual_template_render "$payload/$template" "$template" "$context" "$donor_root")" || exit 1
+  target="$(attach_json_render_plan "$target_root" "$payload" "$record" "$context")" || exit 1
+  jq -cn --argjson donor "$donor" --argjson target "$target" '{donor:$donor,target:$target}' || exit 1
+done
+'''
+
+
+def canonical_renders(payload, donor, root, entries):
+    """T34 option B: verify each native donor render against the canonical
+    render for the donor's own root, then take the target's artifact and
+    render record from the canonical plan for the target root."""
+    result = subprocess.run(['/bin/bash', '-c', RENDER, 'fast-render', str(Path(__file__).parent.parent / 'attach-project.sh'),
+                             payload, json.dumps(donor.get('render_context')), donor['worktree_root'], root,
+                             *[json.dumps(e, sort_keys=True) for e in entries]],
+                            env=dict(os.environ, TRELLIS_LIBS_PRELOADED='0'), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode != 0:
+        raise RenderMiss('canonical render refused: ' + result.stderr.decode(errors='replace').strip()[-400:])
+    lines = result.stdout.decode().splitlines()
+    require(len(lines) == len(entries), 'canonical render output differs')
+    artifacts = {a['path']: a for a in donor['artifacts']}
+    renders = [r for r in donor.get('renders', [])]
+    out = {}
+    for entry, line in zip(entries, lines):
+        doc = json.loads(line)
+        path = entry['destination']
+        actual = json.loads(artifact_exact(donor['worktree_root'], artifacts[path]))
+        if actual != doc['donor']:
+            raise RenderMiss(render_miss_label(actual, doc['donor']))
+        artifact, render = doc['target']['artifact'], doc['target']['render']
+        require(artifact.get('path') == path and artifact.get('kind') == 'file' and artifact.get('mode') == entry['mode']
+                and 'replace' not in artifact and render.get('before_exists') is False, 'canonical target plan differs')
+        recorded = [r for r in renders if r.get('path') == path]
+        require(len(recorded) == 1, 'donor render record missing')
+        # owned_keys carry the rendered values, so they name each root: the
+        # donor's must be its own canonical render's values at the target's
+        # owned paths. Every other render field is root-independent.
+        strip = lambda r: {k: v for k, v in r.items() if k not in ('after_sha256', 'after_base64', 'owned_keys')}
+        have, want = strip(recorded[0]), strip(render)
+        fields = sorted(k for k in set(have) | set(want) if have.get(k) != want.get(k))
+        def at(value, keys):
+            for key in keys:
+                value = value[key]
+            return value
+        try:
+            owned = [{'path': k['path'], 'value': at(doc['donor'], k['path'])} for k in render['owned_keys']]
+        except (KeyError, IndexError, TypeError):
+            owned = None
+        if recorded[0].get('owned_keys') != owned:
+            fields.append('owned_keys')
+        if recorded[0].get('after_sha256') != artifacts[path].get('sha256'):
+            fields.append('after_sha256')
+        if fields:
+            raise RenderMiss('donor render record differs from the canonical plan: ' + ','.join(fields))
+        out[path] = (artifact, render)
+    return out
 
 
 def caller_toolchain():
@@ -242,37 +414,443 @@ def json_bytes(value):
 def write_json(path, value, exclusive=False, on_publish=None):
     parent, name = os.path.split(path)
     with directory(parent) as fd:
-        stage = '.' + name + '.fast-' + uuid.uuid4().hex
-        out = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
-        try:
-            with os.fdopen(out, 'wb') as stream:
-                stream.write(json_bytes(value))
-            if exclusive:
+        write_json_at(fd, name, value, exclusive, on_publish)
+
+
+def write_json_at(fd, name, value, exclusive=False, on_publish=None):
+    stage = '.' + name + '.fast-' + uuid.uuid4().hex
+    out = os.open(stage, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    try:
+        with os.fdopen(out, 'wb') as stream:
+            stream.write(json_bytes(value))
+        if exclusive:
+            try:
                 os.link(stage, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
-            else:
-                os.replace(stage, name, src_dir_fd=fd, dst_dir_fd=fd)
-            if on_publish is not None:
-                on_publish()
+            except OSError as error:
+                if not link_unsupported(error):
+                    raise
+                exclusive_rename_at(fd, stage, name)
+        else:
+            os.replace(stage, name, src_dir_fd=fd, dst_dir_fd=fd)
+        if on_publish is not None:
+            on_publish()
+    finally:
+        try:
+            os.unlink(stage, dir_fd=fd)
+        except FileNotFoundError:
+            pass  # replace consumed the staging name
+
+
+# T39: HFS+ cannot hard-link a symlink (ENOTSUP). Only for that, publish by an
+# exclusive rename that keeps the staged inode: never over an existing name.
+RENAME_EXCL_DARWIN = 0x4
+RENAME_NOREPLACE_LINUX = 1
+AT_FDCWD_LINUX = -100
+
+
+def link_unsupported(error):
+    return error.errno in (errno.ENOTSUP, getattr(errno, 'EOPNOTSUPP', errno.ENOTSUP))
+
+
+def exclusive_rename_at(fd, source, destination):
+    '''renameatx_np(RENAME_EXCL) or renameat2(RENAME_NOREPLACE); raise OSError.'''
+    libc = ctypes.CDLL(None, use_errno=True)
+    src, dst = os.fsencode(source), os.fsencode(destination)
+    if sys.platform == 'darwin':
+        call = libc.renameatx_np
+        call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = call(fd, src, fd, dst, RENAME_EXCL_DARWIN)
+    else:
+        call = libc.renameat2
+        call.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        result = call(fd, src, fd, dst, RENAME_NOREPLACE_LINUX)
+    if result != 0:
+        code = ctypes.get_errno()
+        raise OSError(code, os.strerror(code), source)
+
+
+class LostTransactionLock(Exception):
+    """The original acquired lock scope can no longer be proved."""
+
+
+def lock_require(condition, reason):
+    if not condition:
+        raise LostTransactionLock(reason)
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate JSON key')
+        result[key] = value
+    return result
+
+
+def require_private_lock_fds(expected):
+    """Keep the three fixed lock fds and close all unrelated inherited fds."""
+    lock_require(tuple(expected) == (31, 32, 33), 'invalid lock fd set')
+    for fd in expected:
+        try:
+            os.fstat(fd)
+        except OSError as error:
+            raise LostTransactionLock('missing lock fd') from error
+    for path in ('/proc/self/fd', '/dev/fd'):
+        try:
+            names = os.listdir(path)
+            break
+        except OSError:
+            continue
+    else:
+        raise LostTransactionLock('cannot enumerate inherited descriptors')
+    highest = max([33] + [int(name) for name in names if name.isdigit()])
+    os.closerange(3, 31)
+    os.closerange(34, highest + 1)
+    for fd in expected:
+        try:
+            os.fstat(fd)
+        except OSError as error:
+            raise LostTransactionLock('lock fd closed during sanitization') from error
+
+
+def read_lock_token(fd):
+    info = os.fstat(fd)
+    lock_require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and
+                 info.st_nlink == 1 and stat.S_IMODE(info.st_mode) == 0o600 and info.st_size <= 16384,
+                 'unsafe lock owner token')
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks = []
+    while True:
+        part = os.read(fd, 16385)
+        if not part:
+            break
+        chunks.append(part)
+        lock_require(sum(map(len, chunks)) <= 16384, 'oversized lock owner token')
+    return b''.join(chunks)
+
+
+class TransactionLocks:
+    def __init__(self, entries, parents):
+        self.entries = entries
+        self.parents = parents
+
+    def recheck(self):
+        # The holder's parent fd alone is not enough: its old directory could
+        # have been moved away while a new lock namespace takes its place.
+        for path, held_parent, original in self.parents:
+            try:
+                with directory(path) as named_parent:
+                    lock_require(integrity._anchor(os.fstat(held_parent)) == integrity._anchor(original) ==
+                                 integrity._anchor(os.fstat(named_parent)), 'lock namespace changed')
+            except LostTransactionLock:
+                raise
+            except (OSError, ValueError) as error:
+                raise LostTransactionLock('lock namespace could not be rechecked') from error
+        for entry in self.entries:
+            try:
+                held = os.fstat(entry['fd'])
+                named = os.stat(entry['holder'], dir_fd=entry['parent'], follow_symlinks=False)
+                lock_require(integrity._fingerprint(held) == integrity._fingerprint(entry['holder_info']) ==
+                             integrity._fingerprint(named), 'lock holder changed')
+                token_info = os.fstat(entry['token_fd'])
+                token_name = os.stat(entry['token_name'], dir_fd=entry['fd'], follow_symlinks=False)
+                lock_require(integrity._fingerprint(token_info) == integrity._fingerprint(entry['token_info']) ==
+                             integrity._fingerprint(token_name) and read_lock_token(entry['token_fd']) == entry['token'],
+                             'lock owner token changed')
+                if entry['alias']:
+                    alias = os.stat(entry['alias'], dir_fd=entry['parent'], follow_symlinks=False)
+                    lock_require(integrity._fingerprint(alias) == integrity._fingerprint(entry['alias_info']) and
+                                 os.readlink(entry['alias'], dir_fd=entry['parent']) == entry['holder'],
+                                 'lock alias changed')
+                os.kill(entry['pid'], 0)
+            except LostTransactionLock:
+                raise
+            except (OSError, ValueError) as error:
+                raise LostTransactionLock('lock scope could not be rechecked') from error
+
+    def proof_infos(self):
+        infos = []
+        for entry in self.entries:
+            infos.extend((entry['holder_info'], entry['token_info']))
+            if entry['alias_info'] is not None:
+                infos.append(entry['alias_info'])
+        return infos
+
+
+@contextmanager
+def transaction_lock_scope(home, binding, attachment_id, checkout_pid, attachment_pid, registry_pid, fds=(31, 32, 33)):
+    """Pin the exact acquired holders, public aliases and owner tokens."""
+    operation_failed = False
+    try:
+        load_integrity()
+        checkout = binding['checkout_id']
+        worktree = binding['worktree_id']
+        common = binding['git_common_dir']
+        checkout_pid, attachment_pid, registry_pid = map(int, (checkout_pid, attachment_pid, registry_pid))
+        lock_require(len(fds) == 3 and len(set(fds)) == 3 and
+                     all(pid > 0 for pid in (checkout_pid, attachment_pid, registry_pid)), 'invalid lock scope')
+        with ExitStack() as stack:
+            state_parent = stack.enter_context(directory(home + '/state/locks'))
+            registry_parent = stack.enter_context(directory(home + '/locks'))
+            specs = [
+                (fds[0], state_parent, 'attachment-checkout-' + checkout + '.lock',
+                 '.attachment-checkout-' + checkout + '.holder-', 'owner.json', checkout_pid,
+                 {'checkout_id': checkout, 'git_common_dir': common}),
+                (fds[1], state_parent, 'attachment-' + checkout + '-' + worktree + '.lock',
+                 '.attachment-' + checkout + '-' + worktree + '.holder-', 'owner.json', attachment_pid,
+                 {'checkout_id': checkout, 'worktree_id': worktree, 'attachment_id': attachment_id}),
+                (fds[2], registry_parent, None, 'registry.lock', 'pid', registry_pid, None),
+            ]
+            entries = []
+            for fd, parent, alias, prefix, token_name, pid, expected in specs:
+                alias_info = None
+                if alias:
+                    alias_info = os.stat(alias, dir_fd=parent, follow_symlinks=False)
+                    lock_require(stat.S_ISLNK(alias_info.st_mode) and alias_info.st_uid == os.geteuid(),
+                                 'unsafe lock alias')
+                    holder = os.readlink(alias, dir_fd=parent)
+                    lock_require('/' not in holder and holder.startswith(prefix) and holder not in ('.', '..'),
+                                 'invalid lock holder target')
+                else:
+                    holder = prefix
+                holder_info = os.fstat(fd)
+                named = os.stat(holder, dir_fd=parent, follow_symlinks=False)
+                lock_require(stat.S_ISDIR(holder_info.st_mode) and holder_info.st_uid == os.geteuid() and
+                             stat.S_IMODE(holder_info.st_mode) == 0o700 and
+                             integrity._fingerprint(holder_info) == integrity._fingerprint(named),
+                             'lock fd does not match named holder')
+                token_fd = os.open(token_name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+                stack.callback(os.close, token_fd)
+                token_info = os.fstat(token_fd)
+                token = read_lock_token(token_fd)
+                token_named = os.stat(token_name, dir_fd=fd, follow_symlinks=False)
+                lock_require(integrity._fingerprint(token_info) == integrity._fingerprint(token_named),
+                             'lock token name changed')
+                if expected is None:
+                    lock_require(token == (str(pid) + '\n').encode(), 'registry lock owner differs')
+                else:
+                    data = json.loads(token.decode('utf-8'), object_pairs_hook=unique_json_object)
+                    lock_require(isinstance(data, dict) and set(data) == set(expected) | {'pid', 'process_birth'} and
+                                 type(data.get('pid')) is int and data['pid'] == pid and
+                                 isinstance(data.get('process_birth'), str) and data['process_birth'] and
+                                 all(data.get(key) == value for key, value in expected.items()),
+                                 'attachment lock owner differs')
+                entries.append({'fd': fd, 'parent': parent, 'alias': alias, 'alias_info': alias_info,
+                                'holder': holder, 'holder_info': holder_info, 'token_fd': token_fd,
+                                'token_name': token_name, 'token_info': token_info, 'token': token, 'pid': pid})
+            parents = [(home + '/state/locks', state_parent, os.fstat(state_parent)),
+                       (home + '/locks', registry_parent, os.fstat(registry_parent))]
+            scope = TransactionLocks(entries, parents)
+            scope.recheck()
+            try:
+                yield scope
+            except BaseException:
+                operation_failed = True
+                raise
+            finally:
+                scope.recheck()
+    except LostTransactionLock:
+        raise
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        if operation_failed:
+            raise
+        raise LostTransactionLock('cannot bind transaction locks') from error
+
+
+def canonical_json(data):
+    value = json.loads(data.decode('utf-8'), object_pairs_hook=unique_json_object)
+    return json.dumps(value, sort_keys=True, ensure_ascii=True, allow_nan=False, separators=(',', ':'))
+
+
+def same_registry_snapshot(raw, diagnostic):
+    """Conservative typed equality with the canonical diagnostic snapshot.
+
+    Unknown/duplicate JSON shapes, non-finite numbers and different numeric
+    encodings miss; this is an eligibility check, not schema validation.
+    """
+    try:
+        return canonical_json(raw) == canonical_json(diagnostic)
+    except (ValueError, TypeError, UnicodeError):
+        return False
+
+
+def registry_digest(data):
+    # The locked writer re-serializes (jq -S), so bind the JSON value.
+    return sha(canonical_json(data).encode('ascii'))
+
+
+def require_fine_ctime(device, infos, ticks):
+    """A reuse miss unless every pinned input is on the probed fine-ctime device."""
+    require(len(infos) >= 2 and len(ticks) == 3, 'missing ctime proof inputs')
+    require(all(info.st_dev == device and info.st_ctime_ns % 1000000 for info in infos),
+            'foreign device or coarse input ctime')
+    require(len(set(ticks)) == 3 and all(value % 1000000 for value in ticks),
+            'ctime does not move finely')
+
+
+def prove_fine_ctime(scratch_fd, inputs):
+    """Probe two metadata changes on the same device as the held inputs."""
+    name = '.registry-ctime-' + uuid.uuid4().hex
+    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scratch_fd)
+    try:
+        probe = os.fstat(fd)
+        ticks = [probe.st_ctime_ns]
+        for mode in (0o400, 0o600):
+            os.fchmod(fd, mode)
+            ticks.append(os.fstat(fd).st_ctime_ns)
+        probe = os.fstat(fd)
+        require_fine_ctime(probe.st_dev, list(inputs) + [probe], ticks)
+    finally:
+        held = os.fstat(fd)
+        try:
+            named = os.stat(name, dir_fd=scratch_fd, follow_symlinks=False)
+            if stat.S_ISREG(named.st_mode) and integrity._fingerprint(named) == integrity._fingerprint(held):
+                os.unlink(name, dir_fd=scratch_fd)
+        except FileNotFoundError:
+            pass
+        os.close(fd)
+
+
+@contextmanager
+def private_capture(scratch_fd, parent_fd, name, snapshot_name, mode=None, check=None):
+    """Copy one held input into the private workspace for the canonical child.
+
+    Keep original and capture descriptors live through the child; a
+    name/inode/content change of either is a read-only miss, never permission
+    to publish a journal. Yields the bytes and both identities for the
+    caller's fine-ctime proof.
+    """
+    with integrity._bound_file(parent_fd, name, mode=mode) as live:
+        if check is not None:
+            check(live)
+        fd = os.open(snapshot_name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=scratch_fd)
+        captured = None
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(os.dup(fd), 'wb') as output:
+                output.write(live)
+            # Keep the original staging fd open across the name check and
+            # canonical child. A replacement, even with identical bytes,
+            # must not become the authority lent to that child.
+            captured = os.fstat(fd)
+            named = os.stat(snapshot_name, dir_fd=scratch_fd, follow_symlinks=False)
+            require(stat.S_ISREG(captured.st_mode) and captured.st_nlink == 1 and
+                    integrity._fingerprint(named) == integrity._fingerprint(captured),
+                    'captured input name changed')
+            with integrity._bound_file(scratch_fd, snapshot_name, mode=0o600) as snapshot:
+                require(snapshot == live, 'captured input bytes differ')
+                yield live, [os.stat(name, dir_fd=parent_fd, follow_symlinks=False),
+                             os.stat(snapshot_name, dir_fd=scratch_fd, follow_symlinks=False)]
         finally:
             try:
-                os.unlink(stage, dir_fd=fd)
+                current = os.stat(snapshot_name, dir_fd=scratch_fd, follow_symlinks=False)
+                if (captured is not None and stat.S_ISREG(current.st_mode) and
+                        integrity._fingerprint(current) == integrity._fingerprint(captured) ==
+                        integrity._fingerprint(os.fstat(fd))):
+                    os.unlink(snapshot_name, dir_fd=scratch_fd)
             except FileNotFoundError:
-                pass  # replace consumed the staging name
+                pass
+            os.close(fd)
+
+
+@contextmanager
+def captured_preflight_registry(scratch_fd, registry_path, diagnostic, lock_infos=()):
+    """Lend one pinned capture to the existing canonical registry proposal.
+
+    The normalized diagnostic bytes arrive on stdin from the lock-holding
+    parent. Unsupported ctime or a foreign device is a read-only miss. The
+    capture is named relative to the held workspace, the child's cwd.
+    """
+    parent, registry_name = os.path.split(registry_path)
+    snapshot_name = 'registry.captured.json'
+    def check(live):
+        require(same_registry_snapshot(live, diagnostic), 'registry capture differs')
+    with directory(parent) as registry_fd, \
+         private_capture(scratch_fd, registry_fd, registry_name, snapshot_name, 0o600, check) as (live, inputs):
+        prove_fine_ctime(scratch_fd, inputs + list(lock_infos))
+        yield live, snapshot_name
+
+
+@contextmanager
+def captured_shared_exclude(scratch_fd, common, common_pin):
+    """One exclude read for the donor and every canonical exclude check.
+
+    Bound to the pinned common directory and lent to the child as a private
+    copy, so repeated canonical checks of one record value see one file. The
+    caller adds the identities to its fine-ctime proof.
+    """
+    snapshot_name = 'exclude.captured'
+    with directory(common) as common_fd:
+        require(identity(os.fstat(common_fd)) == common_pin, 'common directory replaced')
+        with integrity._child_directory(common_fd, 'info') as info_fd, \
+             private_capture(scratch_fd, info_fd, 'exclude', snapshot_name) as (data, inputs):
+            yield data, snapshot_name, inputs
+
+
+@contextmanager
+def captured_owner_records(owner_dir, keys):
+    keys = tuple(keys)
+    require(len(keys) == len(set(keys)) and all(re.fullmatch(r'[0-9a-f]{64}', key) for key in keys),
+            'invalid owner keys')
+    with directory(owner_dir) as fd:
+        expected = {key + '.json' for key in keys}
+        require(set(os.listdir(fd)) == expected, 'owner namespace differs')
+        parent_info = os.fstat(fd)
+        infos = [parent_info]
+        records = {}
+        with ExitStack() as held:
+            for key in keys:
+                name = key + '.json'
+                path = owner_dir + '/' + name
+                records[path] = held.enter_context(integrity._bound_file(fd, name, mode=0o600))
+                infos.append(os.stat(name, dir_fd=fd, follow_symlinks=False))
+            yield records, infos
+            require(set(os.listdir(fd)) == expected and
+                    integrity._fingerprint(os.fstat(fd)) == integrity._fingerprint(parent_info),
+                    'owner namespace changed during preflight')
 
 
 PREFLIGHT = r'''
 . "$1" || exit 1
 home="$2"; registry="$3"; proposal="$4"; plan="$5"; authority="$6"; donor_owner="$7"
+exclude_path="$8"; exclude_capture="$9"
 trap 'surface_plan_cleanup' EXIT
 _SURFACE_PLAN_HARNESSES=()
 while IFS= read -r harness; do _SURFACE_PLAN_HARNESSES+=("$harness"); done < <(jq -r '.[]' "$plan.harnesses")
 release="$(jq -r .release "$plan")"
-surface_plan_validate_manifest "$home/releases/$release/payload/core-rules/inheritance-manifest.json" || exit 1
-shift 7
+payload="$home/releases/$release/payload"
+manifest="$payload/core-rules/inheritance-manifest.json"
+surface_plan_validate_manifest "$manifest" || exit 1
+surface_plan_validate_expanded_skills "$payload" "$manifest" || exit 1
+shift 9 || exit 1
+verified_excludes=()
 for owner in "$@"; do
-  _attachment_owner_json_valid "$owner" && attach_exclude_verify_state "$(jq -c '.exclude' "$owner")" || { printf 'invalid exclude owner\n' >&2; exit 1; }
   if [ "$owner" = "$donor_owner" ]; then
-    _attachment_verify_owner_artifacts_impl "$home" "$owner" || { printf 'non-exact donor owner\n' >&2; exit 1; }
+    # This canonical verifier calls _attachment_owner_json_valid itself. With a
+    # shared seed proof for these exact bytes (T2a) only the per-artifact leaf
+    # loop is skipped: attach-fastpath.py re-proved every leaf under the locks.
+    leaves=all
+    if [ -n "${_TRELLIS_PREFLIGHT_DONOR_PROVEN:-}" ] &&
+       [ "$_TRELLIS_PREFLIGHT_DONOR_PROVEN" = "$owner"$'\t'"$(_attachment_hash "$owner")" ]; then
+      leaves=proven-leaves
+    fi
+    _attachment_verify_owner_artifacts_impl "$home" "$owner" "$leaves" || { printf 'non-exact donor owner\n' >&2; exit 1; }
+  else
+    _attachment_owner_json_valid "$owner" || { printf 'invalid owner\n' >&2; exit 1; }
+  fi
+  # Every record must name the shared exclude the parent captured; the check
+  # then reads that private copy, so one result serves each identical value.
+  exclude="$(jq -cS --arg live "$exclude_path" --arg capture "$exclude_capture" \
+    'if .exclude.path == $live then .exclude | .path = $capture else error("foreign exclude path") end' "$owner")" ||
+    { printf 'invalid exclude owner\n' >&2; exit 1; }
+  verified=0
+  for previous in "${verified_excludes[@]+"${verified_excludes[@]}"}"; do
+    if [ "$previous" = "$exclude" ]; then verified=1; break; fi
+  done
+  if [ "$verified" = 0 ]; then
+    attach_exclude_verify_state "$exclude" || { printf 'invalid exclude owner\n' >&2; exit 1; }
+    verified_excludes+=("$exclude")
   fi
 done
 _attachment_verify_managed_hooks "$home" "$authority" || { printf 'invalid managed hooks\n' >&2; exit 1; }
@@ -291,7 +869,25 @@ local_registry_propose_register_worktree "$registry" "$proposal" \
 '''
 
 
-def prepare(home, root, fleet, project_id, binding, release, harnesses, expected_donor, attachment_id, root_pin, common_pin):
+def shared_donor_proof(proof, expected_donor, donor_owner, snapshots, release):
+    """T2a: the seed's canonical verify of the donor (attachment_verify_donor)
+    stands in for PREFLIGHT's per-artifact loop only for the expected donor,
+    the identical owner bytes captured under the locks, and this release.
+    prepare() has already re-proved every donor leaf with artifact_exact."""
+    if not proof or not expected_donor:
+        return None
+    fields = proof.split('\t')
+    if len(fields) != 3:
+        return None
+    owner, digest, proof_release = fields
+    if owner != donor_owner or proof_release != release or not re.fullmatch('[0-9a-f]{64}', digest):
+        return None
+    if owner not in snapshots or sha(snapshots[owner]) != digest:
+        return None
+    return owner + '\t' + digest
+
+
+def prepare(home, root, fleet, project_id, binding, release, harnesses, expected_donor, attachment_id, root_pin, common_pin, exclude_bytes, owner_stack, registry_bytes):
     checkout, worktree, common = binding['checkout_id'], binding['worktree_id'], binding['git_common_dir']
     require(binding['root'] == root and sha(root.encode()) == worktree and sha(common.encode()) == checkout, 'invalid identity binding')
     with directory(root) as fd:
@@ -310,8 +906,6 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
             require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700, 'nonprivate attachment state')
     with directory(journal_dir) as fd:
         require(not os.listdir(fd), 'pending journal')
-    registry_path = home + '/registry.json'
-    registry_bytes = read_regular(registry_path, mode=0o600)
     registry = json.loads(registry_bytes)
     project = registry['projects'][fleet + '/' + project_id]
     require(project['status'] == 'active' and not project.get('metadata', {}).get('legacy', {}).get('blacklisted', False), 'inactive checkout')
@@ -323,12 +917,10 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
     rows = {key: row for key, row in group['worktrees'].items() if row.get('attachment_id')}
     require(rows and worktree not in rows, 'no attached donor')
     require(sys.platform == 'darwin' or (sys.platform.startswith('linux') and hasattr(ctypes.CDLL(None), 'renameat2')), 'exclusive directory publication unavailable')
-    with directory(owner_dir) as fd:
-        require(set(os.listdir(fd)) == {key + '.json' for key in rows}, 'orphan or unexpected owner state')
-    owners, owner_files, owner_snapshots, authority = {}, [], {}, None
+    owner_snapshots, owner_infos = owner_stack.enter_context(captured_owner_records(owner_dir, sorted(rows)))
+    owners, owner_files, authority = {}, [], None
     for key, row in sorted(rows.items()):
         path = owner_dir + '/' + key + '.json'
-        owner_snapshots[path] = read_regular(path, mode=0o600)
         record = json.loads(owner_snapshots[path])
         donor_root = row['root']
         require(donor_root != root and sha(donor_root.encode()) == key, 'donor root binding differs')
@@ -369,7 +961,7 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
         require(caller_toolchain() == toolchain, 'caller toolchain needs fresh capture')
         if donor.get('render_context'):
             require(donor['render_context']['user_home'] == os.path.realpath(os.environ.get('HOME', '')), 'different render home')
-    require(os.path.isfile(root + '/CLAUDE.md') == os.path.isfile(donor['worktree_root'] + '/CLAUDE.md'), 'different project CLAUDE context')
+    require(project_file_present(root + '/CLAUDE.md') == project_file_present(donor['worktree_root'] + '/CLAUDE.md'), 'different project CLAUDE context')
     managed = state + '/git-hooks/' + checkout
     authority_record = owners[Path(authority).stem]
     hooks = authority_record['git_hooks']
@@ -384,11 +976,16 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
         pins.append(found[0])
     require(pins[0] == pins[1], 'dispatcher pins differ')
     payload = home + '/releases/' + release + '/payload'
-    required = ['scripts/seed-inheritance-symlinks.sh', hooks['pre_push_source']] + current_inventory(donor, payload, harnesses)
+    native = []
+    required = ['scripts/seed-inheritance-symlinks.sh', hooks['pre_push_source']] + current_inventory(donor, payload, harnesses, native)
+    if native:
+        required += render_inputs(payload)
     release_record = integrity.verify_release_executed(home + '/releases/' + release, pins[0], required)
     require(release_record['version'] == release, 'release version differs')
+    # Native renders name the project root and this host's companion, so the
+    # target's are the canonical renderer's, never the donor's bytes.
+    target_renders = canonical_renders(payload, donor, root, native) if native else {}
     exclude_path = common + '/info/exclude'
-    exclude_bytes = read_regular(exclude_path)
     exclude = copy.deepcopy(authority_record['exclude'])
     require(exclude['managed_by_attachment'] and exclude['path'] == exclude_path and exclude['git_common_dir'] == common, 'exclude authority mismatch')
     require(exclude_bytes == base64.b64decode(exclude['after_base64'], validate=True), 'exclude bytes changed')
@@ -397,7 +994,8 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
     block = base64.b64decode(exclude['managed_block_base64'], validate=True)
     require(sha(block) == exclude['managed_block_sha256'] and exclude_bytes.count(block) == 1, 'exclude block differs')
     exclude.update(before_exists=True, before_sha256=sha(exclude_bytes), before_base64=encoded(exclude_bytes), after_exists=True, after_sha256=sha(exclude_bytes), after_base64=encoded(exclude_bytes), managed_by_attachment=False)
-    leaves = [copy.deepcopy(a) for a in donor['artifacts'] if a['kind'] != 'parent']
+    leaves = [copy.deepcopy(target_renders[a['path']][0]) if a['path'] in target_renders else copy.deepcopy(a)
+              for a in donor['artifacts'] if a['kind'] != 'parent']
     require(any(a == {'path': '.trellis/runtime', 'kind': 'symlink', 'target': payload} for a in leaves), 'runtime release anchor differs')
     parents = set()
     for artifact in leaves:
@@ -405,7 +1003,7 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
         require(not os.path.lexists(root + '/' + path), 'project-owned target leaf')
         parts = path.split('/')[:-1]
         parents.update('/'.join(parts[:i]) for i in range(1, len(parts) + 1))
-        if artifact['kind'] == 'file':
+        if artifact['kind'] == 'file' and path not in target_renders:
             artifact['content_base64'] = encoded(artifact_exact(donor['worktree_root'], artifact))
     owned_parents = []
     for path in sorted(parents, key=lambda p: (p.count('/'), p)):
@@ -420,14 +1018,19 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
     require(set(paths) <= set(ignored), 'exclude not effective')
     plan = copy.deepcopy(donor)
     plan.update(status='prepared', project_root=root, worktree_root=root, checkout_id=checkout, worktree_id=worktree, attachment_id=attachment_id, artifacts=owned_parents + leaves, exclude=exclude, git_hooks={'enabled': False})
+    if target_renders:
+        plan['renders'] = [copy.deepcopy(target_renders[r['path']][1]) if r['path'] in target_renders else r for r in plan.get('renders', [])]
     donor_owner = owner_dir + '/' + donor['worktree_id'] + '.json'
-    return plan, registry_path, registry_bytes, owner_path, journal_dir + '/' + attachment_id + '.json', authority, donor_owner, owner_files, owner_snapshots
+    return plan, owner_path, journal_dir + '/' + attachment_id + '.json', authority, donor_owner, owner_files, owner_snapshots, owner_infos
 
 
-def publish(plan, owner_path, journal_path, root_pin, common_pin):
+def publish(plan, owner_path, journal_path, root_pin, common_pin, recheck_locks):
     root = plan['worktree_root']
     common = plan['exclude']['git_common_dir']
     def namespace():
+        # Every namespace check, including the last one before the owner
+        # commit, also proves the transaction locks are still the held ones.
+        recheck_locks()
         for path, pin in ((root, root_pin), (common, common_pin)):
             with directory(path) as fd:
                 require(identity(os.fstat(fd)) == pin, 'namespace replaced')
@@ -456,8 +1059,14 @@ def publish(plan, owner_path, journal_path, root_pin, common_pin):
             if kind in ('parent', 'directory'):
                 native_directory_publish(fd, stage, name)
             else:
-                os.link(stage, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
-                os.unlink(stage, dir_fd=fd)
+                try:
+                    os.link(stage, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+                except OSError as error:
+                    if not link_unsupported(error):
+                        raise
+                    exclusive_rename_at(fd, stage, name)
+                else:
+                    os.unlink(stage, dir_fd=fd)
             require(identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) == journal['pending']['staging_identity'], 'publication identity differs')
             namespace()
             journal['phase'] += 1
@@ -484,50 +1093,107 @@ def main():
     try:
         mode, workspace = sys.argv[1:3]
         started = mode == '--finish'
+        if mode in ('--begin', '--finish'):
+            require_private_lock_fds((31, 32, 33))
         load_integrity()
         require(mode in ('--begin', '--finish'), 'invalid phase')
-        with directory(workspace) as fd:
-            require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700, 'nonprivate workspace')
-        plan_file, proposal = workspace + '/plan.json', workspace + '/registry.json'
+        if mode == '--finish':
+            with directory(workspace) as fd:
+                require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700, 'nonprivate workspace')
+        plan_file = workspace + '/plan.json'
+        # Only this caller's explicit argument may carry a donor proof; never
+        # let an inherited value reach PREFLIGHT.
+        donor_proof = os.environ.pop('TRELLIS_FASTPATH_DONOR_PROOF', '')
+        os.environ.pop('_TRELLIS_PREFLIGHT_DONOR_PROVEN', None)
         if mode == '--begin':
-            home, root, fleet, project, binding, release, harnesses, expected_donor, attachment_id, root_pin, common_pin = sys.argv[3:]
-            plan, registry_path, registry_before, owner_path, candidate, authority, donor_owner, owners, snapshots = prepare(home, root, fleet, project, json.loads(binding), release, json.loads(harnesses), json.loads(expected_donor or 'null'), attachment_id, root_pin, common_pin)
-            # No project or persistent-state writes during eligibility validation.
-            write_json(plan_file, plan, exclusive=True)
-            with open(plan_file + '.harnesses', 'x') as stream:
-                stream.write(harnesses)
-            os.chmod(plan_file + '.harnesses', 0o600)
-            env = dict(os.environ, TRELLIS_LIBS_PRELOADED='0')
-            result = subprocess.run(['/bin/bash', '-c', PREFLIGHT, 'fast-preflight', str(Path(__file__).parent.parent / 'attach-project.sh'), home, registry_path, proposal, plan_file, authority, donor_owner, *owners], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            require(result.returncode == 0, 'existing attachment preflight refused: ' + result.stderr.decode(errors='replace')[-2000:])
-            json.loads(read_regular(proposal))
-            # The only persistent write in begin: a recoverable v1 journal.
-            for path, before in snapshots.items():
-                require(read_regular(path, mode=0o600) == before, 'donor changed during preflight')
-            require(read_regular(registry_path, mode=0o600) == registry_before, 'registry changed during preflight')
-            require(not os.path.lexists(candidate), 'journal appeared during preflight')
-            with directory(root) as fd:
-                require(identity(os.fstat(fd)) == root_pin, 'root replaced')
-            with directory(os.path.dirname(candidate)):
-                pass
-            write_json(candidate, dict(plan, phase=0, applied=[], pending=None, removal=None), exclusive=True)
+            diagnostic = sys.stdin.buffer.read()
+            (home, root, fleet, project, binding, release, harnesses, expected_donor, attachment_id,
+             root_pin, common_pin, checkout_pid, attachment_pid, registry_pid) = sys.argv[3:]
+            binding = json.loads(binding)
+            # One held workspace descriptor serves every begin-phase workspace
+            # access and is the canonical child's cwd, so renaming a workspace
+            # ancestor cannot redirect what the child reads or writes.
+            with transaction_lock_scope(home, binding, attachment_id, checkout_pid, attachment_pid, registry_pid) as locks:
+                registry_path = home + '/registry.json'
+                with ExitStack() as owner_stack:
+                    scratch_fd = owner_stack.enter_context(directory(workspace))
+                    require(stat.S_IMODE(os.fstat(scratch_fd).st_mode) == 0o700, 'nonprivate workspace')
+                    registry_before, captured_registry = owner_stack.enter_context(
+                        captured_preflight_registry(scratch_fd, registry_path, diagnostic, locks.proof_infos()))
+                    exclude_before, captured_exclude, exclude_infos = owner_stack.enter_context(
+                        captured_shared_exclude(scratch_fd, binding['git_common_dir'], common_pin))
+                    locks.recheck()
+                    plan, owner_path, candidate, authority, donor_owner, owners, snapshots, owner_infos = prepare(home, root, fleet, project, binding, release, json.loads(harnesses), json.loads(expected_donor or 'null'), attachment_id, root_pin, common_pin, exclude_before, owner_stack, registry_before)
+                    prove_fine_ctime(scratch_fd, owner_infos + exclude_infos)
+                    # No project or persistent-state writes during eligibility validation.
+                    write_json_at(scratch_fd, 'plan.json', plan, exclusive=True)
+                    out = os.open('plan.json.harnesses', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scratch_fd)
+                    with os.fdopen(out, 'w') as stream:
+                        stream.write(harnesses)
+                    env = dict(os.environ, TRELLIS_LIBS_PRELOADED='0')
+                    proven = shared_donor_proof(donor_proof, json.loads(expected_donor or 'null'), donor_owner, snapshots, release)
+                    if proven:
+                        env['_TRELLIS_PREFLIGHT_DONOR_PROVEN'] = proven
+                    if os.environ.get('TRELLIS_FASTPATH_TRACE') == '1':
+                        print('trellis attach: donor proof ' + ('shared' if proven else 'not shared'), file=sys.stderr)
+                    locks.recheck()
+                    result = subprocess.run(['/bin/bash', '-c', PREFLIGHT, 'fast-preflight', str(Path(__file__).parent.parent / 'attach-project.sh'), home, captured_registry, 'registry.json', 'plan.json', authority, donor_owner, binding['git_common_dir'] + '/info/exclude', captured_exclude, *owners],
+                                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=lambda: os.fchdir(scratch_fd))
+                    require(result.returncode == 0, 'existing attachment preflight refused: ' + result.stderr.decode(errors='replace')[-2000:])
+                    with integrity._bound_file(scratch_fd, 'registry.json') as data:
+                        proposal_digest = registry_digest(data)
+                    for path, before in snapshots.items():
+                        require(read_regular(path, mode=0o600) == before, 'donor changed during preflight')
+                    require(read_regular(registry_path, mode=0o600) == registry_before, 'registry changed during preflight')
+                # All pinned input contexts must close cleanly before this first
+                # persistent write: a recoverable v1 journal. The lock scope
+                # remains held and is checked immediately before and after it.
+                require(not os.path.lexists(candidate), 'journal appeared during preflight')
+                with directory(root) as fd:
+                    require(identity(os.fstat(fd)) == root_pin, 'root replaced')
+                with directory(os.path.dirname(candidate)):
+                    pass
+                locks.recheck()
+                write_json(candidate, dict(plan, phase=0, applied=[], pending=None, removal=None), exclusive=True)
+                locks.recheck()
+            # The only stdout line: --finish binds the registry write to it
+            # instead of re-reading the workspace proposal by path.
+            print(proposal_digest)
             return 0
         # The calling Bash process holds the registry lock and performs the
         # bound-row write through local_registry_write_locked_bound_rows.
         plan = json.loads(read_regular(plan_file, mode=0o600))
-        registry_path = sys.argv[3] + '/registry.json'
-        root_pin, common_pin = sys.argv[4:6]
-        require(json.loads(read_regular(registry_path, mode=0o600)) == json.loads(read_regular(proposal)), 'registry API write differs from proposal')
-        owner_path = sys.argv[3] + '/state/attachments/' + plan['checkout_id'] + '/' + plan['worktree_id'] + '.json'
-        candidate = sys.argv[3] + '/state/attachment-journals/' + plan['attachment_id'] + '.json'
-        publish(plan, owner_path, candidate, root_pin, common_pin)
+        home = sys.argv[3]
+        registry_path = home + '/registry.json'
+        root_pin, common_pin, proposal_digest, checkout_pid, attachment_pid, registry_pid = sys.argv[4:10]
+        owner_path = home + '/state/attachments/' + plan['checkout_id'] + '/' + plan['worktree_id'] + '.json'
+        candidate = home + '/state/attachment-journals/' + plan['attachment_id'] + '.json'
+        binding = {'checkout_id': plan['checkout_id'], 'worktree_id': plan['worktree_id'],
+                   'git_common_dir': plan['exclude']['git_common_dir']}
+        # The caller kept its three lock pins through the registry write:
+        # publication and the owner commit run only while they still name
+        # the holders --begin proved, and a lost lock leaves the journal.
+        with transaction_lock_scope(home, binding, plan['attachment_id'],
+                                    checkout_pid, attachment_pid, registry_pid) as locks:
+            require(re.fullmatch(r'[0-9a-f]{64}', proposal_digest) is not None and
+                    registry_digest(read_regular(registry_path, mode=0o600)) == proposal_digest,
+                    'registry API write differs from the begin proposal')
+            publish(plan, owner_path, candidate, root_pin, common_pin, locks.recheck)
         print(owner_path)
         return 0
+    except LostTransactionLock as error:
+        if 'candidate' in locals() and os.path.lexists(candidate):
+            print('trellis attach: lock scope changed after journaling; run trellis recover: ' + str(error), file=sys.stderr)
+        else:
+            print('trellis attach: lock scope changed; inspect the retained locks and retry: ' + str(error), file=sys.stderr)
+        return 3
     except Exception as error:
         if started or (mode == '--begin' and 'candidate' in locals() and os.path.lexists(candidate)):
             print('trellis attach: donor batch interrupted; run trellis recover: ' + str(error), file=sys.stderr)
             return 3
-        if os.environ.get('TRELLIS_FASTPATH_TRACE') == '1':
+        if isinstance(error, RenderMiss):
+            print('trellis attach: donor not reused (' + str(error) + '); running the full attach', file=sys.stderr)
+        elif os.environ.get('TRELLIS_FASTPATH_TRACE') == '1':
             print('trellis attach: donor fast-path miss: ' + repr(str(error)), file=sys.stderr)
         return 10
 

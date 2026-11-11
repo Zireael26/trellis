@@ -60,7 +60,10 @@ dispatch() {
       [ "$(printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext')" = $'session-context\n\ninject-primer-index' ] ||
         { echo "$harness_dir $source: $out"; false; }
       [ "$(grep '^hook=' "$RECORD" | tr '\n' ' ')" = "hook=session-context hook=inject-primer-index " ] || { cat "$RECORD"; false; }
-      [ "$(grep -c "^stdin={\"source\":\"$source\",\"session_id\":\"s-1\"}\$" "$RECORD")" -eq 2 ] || { cat "$RECORD"; false; }
+      # Bash 3.2 mis-parses escaped quotes inside a quoted $(...); build the
+      # exact line first.
+      expected_stdin='stdin={"source":"'"$source"'","session_id":"s-1"}'
+      [ "$(grep -cxF -- "$expected_stdin" "$RECORD")" -eq 2 ] || { cat "$RECORD"; false; }
     done
 
     rm -f "$RECORD"

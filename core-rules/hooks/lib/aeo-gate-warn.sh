@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # Instance rollout adapter for Spec 033 Mode 2. This script is intentionally
 # non-blocking: every enabled invocation emits exactly one verdict and exits 0.
 

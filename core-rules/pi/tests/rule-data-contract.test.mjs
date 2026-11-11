@@ -11,6 +11,12 @@ import { deliveredFixture } from './delivered-fixture.mjs';
 
 const destructive = JSON.parse(readFileSync(new URL('../../hooks/rules/destructive.json', import.meta.url), 'utf8'));
 const reread = JSON.parse(readFileSync(new URL('../../hooks/rules/reread.json', import.meta.url), 'utf8'));
+// The one exemption-bearing rule, wherever later rules are appended.
+const exempting = doc => {
+  const rules = doc.rules.filter(rule => rule.exempt);
+  assert.equal(rules.length, 1, 'exactly one destructive rule carries an exemption');
+  return rules[0];
+};
 function fixture(t, mutate) {
   const directory = mkdtempSync(resolve(tmpdir(), 'trellis-rule-contract-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -23,9 +29,9 @@ function fixture(t, mutate) {
 for (const [name, mutate] of [
   ['document', docs => { docs.destructive.future_policy = true; }],
   ['rule', docs => { docs.destructive.rules[0].future_policy = true; }],
-  ['superseded rewrite', docs => { docs.destructive.rules.at(-1).rewrite = {}; }],
-  ['exemption', docs => { docs.destructive.rules.at(-1).exempt.future_policy = true; }],
-  ['superseded exemption field', docs => { docs.destructive.rules.at(-1).exempt.commands = ['gcloud']; }],
+  ['superseded rewrite', docs => { exempting(docs.destructive).rewrite = {}; }],
+  ['exemption', docs => { exempting(docs.destructive).exempt.future_policy = true; }],
+  ['superseded exemption field', docs => { exempting(docs.destructive).exempt.commands = ['gcloud']; }],
   ['reread budget', docs => { docs.reread.warn_budget.future_policy = 0; }],
   ['failure markers', docs => { docs.reread.edit_failure_markers.future_policy = true; }],
 ]) {
@@ -38,7 +44,7 @@ test('H1 schema drift blocks both native execution gates', async t => {
   const f = await deliveredFixture(t, undefined, runtime => {
     const path = resolve(runtime, 'core-rules/hooks/rules/destructive.json');
     const doc = JSON.parse(readFileSync(path, 'utf8'));
-    doc.rules.at(-1).exempt.future_policy = true;
+    exempting(doc).exempt.future_policy = true;
     writeFileSync(path, JSON.stringify(doc));
   });
   assert.equal((await f.fire('tool_call', f.call('bash', { command: 'printf harmless' }))).block, true);
@@ -103,8 +109,8 @@ test('H1 identifier replacement uses POSIX leftmost-longest spans and preserves 
     ['projects/p|projects/p/secrets/$', 'gcloud secrets describe tail projects/p/secrets/s', ' projects/p', 'deny'],
     ['projects/p|projects/p/secrets/$', 'gcloud secrets describe tail projects/p/secrets/', ' projects/p/secrets/', 'allow'],
   ]) {
-    const directory = fixture(t, docs => { docs.destructive.rules.at(-1).exempt.identifier = identifier; });
-    const boundary = destructive.rules.at(-1).exempt.identifier_boundary;
+    const directory = fixture(t, docs => { exempting(docs.destructive).exempt.identifier = identifier; });
+    const boundary = exempting(destructive).exempt.identifier_boundary;
     const bash = spawnSync('bash', ['--noprofile', '--norc', '-c',
       '[[ "$1" =~ $2 ]] || exit 1; printf "%s" "${BASH_REMATCH[0]}"', 'posix-span', command, `(${boundary})(${identifier})`], {
       encoding: 'utf8', timeout: 10_000,

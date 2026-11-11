@@ -707,13 +707,15 @@ fi
 # ---------------------------------------------------------------------------
 # Recurrence pre-pass — the turbo-outputs landmine that caused the 148 GB
 # incident. Pure report; calls the shared lib predicate + fix-hint string.
-# Returns the offending project list as text on stdout (one "name\tpath" per
-# line); empty when clean.
+# Stores the offending project list in TURBO_LANDMINES and uncheckable files
+# in TURBO_UNCHECKED. This diagnostic does not authorize cleanup.
 # ---------------------------------------------------------------------------
 TURBO_LANDMINES=""
+TURBO_UNCHECKED=""
 turbo_prepass() {
-  local fleet project_id checkout_id worktree_id proj common tj rc label
+  local fleet project_id checkout_id worktree_id proj common tj rc label diagnostic
   TURBO_LANDMINES=""
+  TURBO_UNCHECKED=""
   [ "$TARGET_COUNT" -gt 0 ] || return 0
   while IFS="$(printf '\t')" read -r fleet project_id checkout_id worktree_id proj common; do
     # Treat the recurrence scan like every other filesystem scan: never read a
@@ -724,14 +726,21 @@ turbo_prepass() {
     fi
     tj="$proj/turbo.json"
     [ -f "$tj" ] || continue
-    if dj_turbo_outputs_unscoped "$tj"; then rc=0; else rc=$?; fi
+    if diagnostic="$(dj_turbo_outputs_unscoped "$tj" 2>&1)"; then rc=0; else rc=$?; fi
+    label="$fleet/$project_id [$checkout_id/$worktree_id]"
     if [ "$rc" -eq 0 ]; then
-      label="$fleet/$project_id [$checkout_id/$worktree_id]"
       if [ -z "$TURBO_LANDMINES" ]; then
         TURBO_LANDMINES="$label	$tj"
       else
         TURBO_LANDMINES="$TURBO_LANDMINES
 $label	$tj"
+      fi
+    elif [ "$rc" -ne 1 ]; then
+      if [ -z "$TURBO_UNCHECKED" ]; then
+        TURBO_UNCHECKED="$label: $diagnostic"
+      else
+        TURBO_UNCHECKED="$TURBO_UNCHECKED
+$label: $diagnostic"
       fi
     fi
   done <"$TARGETS_TMP"
@@ -1081,6 +1090,7 @@ RELEASE_STAGING_DELETE_COUNT=0
 RELEASE_STAGING_DELETE_BYTES=0
 RELEASE_STAGING_ALL_BYTES=0
 RELEASE_STAGING_RECLAIMED_BYTES=0
+RELEASE_STAGING_RECLAIMED_KNOWN=1
 
 scan_release_staging() {
   # D3 (spec 069): the release-staging matcher is `release_store_reap_tmp`
@@ -1202,7 +1212,7 @@ pi_load_owners() {
 }
 
 scan_pi() {
-  local root entry row verdict kind detail tab nl bytes _wt_pi_agent _wt_eligible
+  local root entry row verdict kind detail tab nl bytes _wt_pi_agent _wt_eligible fresh_rc
   tab="$(printf '\t')"
   nl="$(printf '\nx')"; nl="${nl%x}"
   pi_load_owners
@@ -1245,9 +1255,20 @@ EOF
         if [ "$verdict" = "reclaimable" ]; then _wt_eligible=1; fi
         if [ "$verdict" = "skip" ]; then case "$detail" in *"registered with its parent"*) _wt_eligible=1 ;; esac; fi
         if [ "$_wt_eligible" -eq 1 ]; then
-          if dj_pi_entry_fresh "$entry" "$PI_WORKTREE_TTL_DAYS"; then
-            verdict="skip"
-            detail="fresh — younger than ${PI_WORKTREE_TTL_DAYS}d pi-worktree TTL; held"
+          fresh_rc=0
+          dj_pi_entry_fresh "$entry" "$PI_WORKTREE_TTL_DAYS" || fresh_rc=$?
+          case "$fresh_rc" in
+            0)
+              verdict="skip"
+              detail="fresh — younger than ${PI_WORKTREE_TTL_DAYS}d pi-worktree TTL; held"
+              ;;
+            2)
+              verdict="skip"
+              detail="age unknown (unreadable content); held"
+              ;;
+          esac
+          if [ "$fresh_rc" -ne 1 ]; then
+            :
           elif dj_host_worktree_dirty "$entry"; then
             verdict="candidate"
             detail="candidate (dirty or untracked files); held"
@@ -1631,8 +1652,16 @@ render_report() {
 $TURBO_LANDMINES
 INNER
     echo "  fix: $(dj_turbo_fix_hint)"
-  else
+  elif [ -z "$TURBO_UNCHECKED" ]; then
     echo "  ✓ no unscoped turbo outputs across scanned projects"
+  fi
+  if [ -n "$TURBO_UNCHECKED" ]; then
+    echo '  WARNING: turbo outputs could not be checked:'
+    while IFS= read -r line; do
+      [ -z "$line" ] || printf '    - %s\n' "$line"
+    done <<INNER
+$TURBO_UNCHECKED
+INNER
   fi
   echo
 
@@ -2242,9 +2271,14 @@ if scope_enabled worktrees; then
   printf '  worktrees: %s reaped\n' "$(dj_human_bytes "$WT_REAPED_BYTES")"
 fi
 if scope_enabled releases; then
-  printf '  release staging: actual reclaimed %s (planned %s)\n' \
-    "$(dj_human_bytes "$RELEASE_STAGING_RECLAIMED_BYTES")" \
-    "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
+  if [ "$RELEASE_STAGING_RECLAIMED_KNOWN" -eq 1 ]; then
+    printf '  release staging: actual reclaimed %s (planned %s)\n' \
+      "$(dj_human_bytes "$RELEASE_STAGING_RECLAIMED_BYTES")" \
+      "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
+  else
+    printf '  release staging: actual reclaimed unknown (planned %s; reap-tmp receipt unavailable)\n' \
+      "$(dj_human_bytes "$RELEASE_STAGING_DELETE_BYTES")"
+  fi
 fi
 if scope_enabled docker; then
   if [ "$DOCKER_SCAN_OK" -eq 1 ]; then

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Rollout: reconcile each locally attached project's release-backed Claude
-# settings surface. Idempotent; safe to re-run.
+# settings surfaces. Native-bearing generations use the durable release-adopt
+# transaction for both local harnesses; an attached native user surface is
+# reconciled at its existing release, never implicitly upgraded. Idempotent.
 #
-# The attachment owns `.claude/settings.local.json`, rendering its explicit
-# local settings contract from the project's exact verified immutable release.
-# This rollout never changes project-owned `.claude/settings.json` or any other
-# project settings.
+# Attachments own the rendered local Claude/Codex contracts from each exact
+# verified release. Project-owned settings are never changed. A bulk run also
+# reconciles an already attached native user surface at its recorded release;
+# a project-scoped run does not touch unrelated user-global policy.
 #
 # Usage:
 #   rollout-settings.sh                 # interactive, all local registry rows
@@ -48,6 +50,29 @@ done
 . "$SCRIPT_DIR/lib/release-store.sh"
 # shellcheck source=lib/surface-plan.sh
 . "$SCRIPT_DIR/lib/surface-plan.sh"
+# shellcheck source=lib/attachment.sh
+. "$SCRIPT_DIR/lib/attachment.sh"
+
+# A native rollout must execute migration-capable release code through the
+# fixed launcher and its verified snapshot, not a target release pathname.
+# Hold config stable across admission/child execution so an old first-hop
+# management release cannot silently report a legacy adoption as migration.
+rollout_native_command() (
+  local home="$TRELLIS_HOME" config active release_dir context launcher
+  trellis_home_lock_acquire "$home" config 30 || exit "$?"
+  trap 'trellis_home_lock_release >/dev/null 2>&1 || true' EXIT
+  config="$home/config.json"
+  trellis_home_validate_config "$config" || exit "$?"
+  active="$(jq -r '.active_cli_release' "$config")" || exit 4
+  release_dir="$(release_store_locate "$active")" || exit "$?"
+  grep -qF '# trellis-release-capability: native-render-migration' "$release_dir/payload/scripts/release.sh" || {
+    printf 'ERROR: active CLI release cannot migrate native settings; complete the verified two-configure launcher bootstrap first\n' >&2
+    exit "$TRELLIS_EX_STATE"
+  }
+  context="$(attachment_contextual_render_context "$home")" || exit "$?"
+  launcher="$(printf '%s\n' "$context" | jq -r '.launcher')" || exit 4
+  "$launcher" "$@"
+)
 
 safe_display_root() {
   if trellis_home_has_unsafe_chars "${1:-}"; then
@@ -296,19 +321,16 @@ row_has_harness() {
 }
 
 settings_plan_is_exact() {
-  local plan="$1" rc
+  local plan="$1" required="${2:-[\"claude\"]}" rc
 
-  if printf '%s\n' "$plan" | jq -e '
-    [.artifacts[]
-      | select(
-          .harness == "claude"
-          and .kind == "render"
-          and .source == "core-rules/templates/claude-settings.local.json"
-          and .destination == ".claude/settings.local.json"
-          and .merge == "explicit-json"
-          and .mode == "0600"
-        )]
-    | length == 1
+  if printf '%s\n' "$plan" | jq -e --argjson required "$required" '
+    . as $plan | all($required[]; . as $harness
+      | [$plan.artifacts[]
+          | select(.harness == $harness and .kind == "render"
+              and .source == (if $harness == "claude" then "core-rules/templates/claude-settings.local.json" else "core-rules/templates/codex-hooks.local.json" end)
+              and .destination == (if $harness == "claude" then ".claude/settings.local.json" else ".codex/hooks.json" end)
+              and .merge == "explicit-json" and .mode == "0600")]
+        | length == 1)
   ' >/dev/null; then
     return 0
   else
@@ -319,7 +341,8 @@ settings_plan_is_exact() {
 
 reconcile_row() {
   local row="$1" fleet project_key project_id kind availability status excluded root release attachment_id checkout_id worktree_id
-  local resolved release_dir payload plan ans rc harnesses_json expected_harnesses_json
+  local resolved release_dir payload plan ans rc harnesses_json expected_harnesses_json native=false claude=false required='["claude"]' harness
+  local -a rendered_harnesses=()
 
   # Read each field on its own. A tab-separated row escapes backslashes, so a
   # legal backslash-containing root would never reconcile against the registry.
@@ -398,16 +421,13 @@ reconcile_row() {
     printf 'skip (ineligible row without attachment ownership): %s → %s\n' "$project_key" "$(safe_display_root "$root")"
     return 0
   fi
-  if row_has_harness "$row" "claude"; then
-    :
+  if row_has_harness "$row" claude; then
+    claude=true
+  elif row_has_harness "$row" codex; then
+    : # Eligibility for Codex is decided from the verified release below.
   else
-    rc=$?
-    if [ "$rc" -eq 1 ]; then
-      printf 'skip (ineligible row without Claude harness): %s → %s\n' "$project_key" "$(safe_display_root "$root")"
-      return 0
-    fi
-    printf 'ERROR: invalid harness data for %s\n' "$project_key" >&2
-    return "$rc"
+    printf 'skip (ineligible row without rendered-settings harness): %s → %s\n' "$project_key" "$(safe_display_root "$root")"
+    return 0
   fi
   require_safe_display_path "$root" || return "$?"
   if [ -z "$release" ]; then
@@ -441,7 +461,17 @@ reconcile_row() {
     return "$rc"
   fi
   payload="$release_dir/payload"
-  if plan="$(surface_plan_emit "$payload" "claude")"; then
+  if [ -f "$payload/core-rules/native/artifacts.json" ]; then
+    native=true
+    required="$(printf '%s\n' "$expected_harnesses_json" | jq -c '[.[] | select(. == "claude" or . == "codex")]')" || return 4
+    while IFS= read -r harness; do rendered_harnesses+=("$harness"); done < <(printf '%s\n' "$required" | jq -r '.[]')
+  elif [ "$claude" != true ]; then
+    printf 'skip (ineligible legacy row without Claude harness): %s → %s\n' "$project_key" "$(safe_display_root "$root")"
+    return 0
+  else
+    rendered_harnesses=(claude)
+  fi
+  if plan="$(surface_plan_emit "$payload" "${rendered_harnesses[@]}")"; then
     :
   else
     rc=$?
@@ -449,18 +479,18 @@ reconcile_row() {
       "$project_key" "$root" "$release" >&2
     return "$rc"
   fi
-  if settings_plan_is_exact "$plan"; then
+  if settings_plan_is_exact "$plan" "$required"; then
     :
   else
     rc=$?
-    printf 'ERROR: release lacks the exact Claude local-settings surface: %s → %s (%s)\n' \
+    printf 'ERROR: release lacks an exact selected local-settings surface: %s → %s (%s)\n' \
       "$project_key" "$root" "$release" >&2
     return "$rc"
   fi
 
   printf '== %s ==\n' "$project_key"
   if $DRY_RUN; then
-    printf '  + would reconcile attachment-managed Claude local settings from release %s at %s\n' \
+    printf '  + would reconcile attachment-managed local settings from release %s at %s\n' \
       "$release" "$root"
     return 0
   fi
@@ -482,6 +512,12 @@ reconcile_row() {
     esac
   fi
 
+  if [ "$native" = true ]; then
+    # Project policy selection is unchanged: this is the registry row's exact
+    # release, migrated transactionally for its checkout group and harnesses.
+    rollout_native_command release adopt "$release" --fleet "$fleet" --project "$project_id"
+    return "$?"
+  fi
   if "$SCRIPT_DIR/attach-project.sh" relink \
     --home "$TRELLIS_HOME" \
     --fleet "$fleet" \
@@ -500,6 +536,27 @@ reconcile_row() {
     printf 'ERROR: attachment relink failed: %s → %s\n' "$project_key" "$root" >&2
     return "$rc"
   fi
+}
+
+reconcile_native_user() {
+  local owner release release_dir ans=''
+  [ -z "$ONLY_PROJECT" ] || return 0
+  owner="$(_attachment_user_owner_path "$TRELLIS_HOME")"
+  if [ ! -e "$owner" ] && [ ! -L "$owner" ]; then return 0; fi
+  _attachment_user_owner_json_valid "$owner" || return "$TRELLIS_EX_STATE"
+  release="$(jq -r '.release' "$owner")" || return "$TRELLIS_EX_STATE"
+  release_dir="$(release_store_locate "$release")" || return "$?"
+  [ -f "$release_dir/payload/core-rules/native/artifacts.json" ] || return 0
+  if $DRY_RUN; then
+    printf '  + would reconcile attached user settings at recorded release %s\n' "$release"
+    return 0
+  fi
+  if ! $ASSUME_YES; then
+    printf '  reconcile attached user settings at recorded release %s? [y/N] ' "$release"
+    read -r ans || return "$TRELLIS_EX_UNAVAILABLE"
+    case "$ans" in y|Y|yes|YES) ;; *) return 0 ;; esac
+  fi
+  rollout_native_command relink --user --home "$TRELLIS_HOME" --release "$release"
 }
 
 if select_target_rows; then
@@ -533,6 +590,13 @@ if [ "${#TARGET_ROWS[@]}" -gt 0 ]; then
   done
 fi
 
+if reconcile_native_user; then
+  :
+else
+  rc=$?
+  aggregate_rc="$(local_registry_max_class "$aggregate_rc" "$rc")"
+fi
+
 if [ "$aggregate_rc" -ne 0 ]; then
   printf '== completed with errors (status %s) ==\n' "$aggregate_rc" >&2
   exit "$aggregate_rc"
@@ -540,5 +604,5 @@ fi
 
 printf '== done ==\n'
 printf '\n'
-printf 'Claude local settings are release-backed, local attachment-managed surfaces.\n'
+printf 'Rendered settings are release-backed, attachment-managed surfaces.\n'
 printf 'This rollout never writes project-owned settings.\n'

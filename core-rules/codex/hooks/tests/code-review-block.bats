@@ -97,6 +97,7 @@ deploy_hook() {
   cp "$CODEX_HOOK_DIR/lib/deps.sh"             "$hookdir/lib/deps.sh"
   cp "$CODEX_HOOK_DIR/lib/pm.sh"               "$hookdir/lib/pm.sh"
   cp "$CODEX_HOOK_DIR/lib/autonomy.sh"         "$hookdir/lib/autonomy.sh"
+  cp "$CORE_LIB_DIR/../../../scripts/lib/trellis-python.sh" "$hookdir/lib/trellis-python.sh"
   chmod +x "$hookdir/code-review-subagent.sh" "$hookdir/lib/code-reviewer.sh"
   printf '%s' "$hookdir/code-review-subagent.sh"
 }
@@ -564,9 +565,8 @@ EOF
 }
 
 # =========================================================================
-# S4 review-coverage parity (spec 050, SC6/SC7): the Codex sibling keys its
-# `.codex/.review-done-<hash>` marker on the FULL diff while the reviewer
-# payload stays capped at 200000 bytes. Mirrors
+# S4 review-coverage parity under 074 D2: oversized diffs are unmet with zero
+# reviewer calls, never prefix-reviewed or marked completed. Mirrors
 # core-rules/hooks/tests/code-review-marker.bats cases 1–4.
 # =========================================================================
 
@@ -598,7 +598,7 @@ codex_marker_count() {
 # SAFETY: two diffs sharing the first 200000 bytes must not share one marker.
 # Only tail.py is re-staged between runs (never `git add -A`: that would stage
 # run 1's marker under .codex/ and shift the tracked-diff prefix for run 2).
-@test "codex marker: two diffs sharing the 200 KB prefix hash differently (both runs review)" {
+@test "codex marker: oversized diffs sharing a prefix never call review or complete" {
   setup_overcap_repo 'TAIL = "alpha"'
   COUNT="$BATS_TEST_TMPDIR/prefix.count"; : > "$COUNT"
   CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
@@ -612,12 +612,12 @@ codex_marker_count() {
   run_hook
   [ "$status" -eq 0 ]
 
-  [ "$(call_count "$COUNT")" -eq 2 ]
+  [ "$(call_count "$COUNT")" -eq 0 ]
+  [ "$(codex_marker_count)" -eq 0 ]
 }
 
-# SAFETY: a diff larger than the reviewer payload cap was only prefix-reviewed,
-# so the hook must report incomplete and mint NO completed marker.
-@test "codex marker: an over-cap diff reports incomplete and writes NO marker" {
+# SAFETY: oversized diffs remain unmet without a reviewer call or marker.
+@test "codex marker: an over-cap diff reports unmet and writes NO marker" {
   setup_overcap_repo 'TAIL = "alpha"'
   COUNT="$BATS_TEST_TMPDIR/overcap.count"; : > "$COUNT"
   CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
@@ -625,13 +625,13 @@ codex_marker_count() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$stderr" == *'incomplete'* ]] || { echo "$stderr"; false; }
+  [[ "$stderr" == *'UNREVIEWED'* ]] || { echo "$stderr"; false; }
+  [ "$(call_count "$COUNT")" -eq 0 ]
   [ "$(codex_marker_count)" -eq 0 ]
 }
 
-# SAFETY: with no completed marker written for a prefix review, the next Stop
-# over the same over-cap diff must run the review again, not skip it.
-@test "codex marker: a second invocation over the same over-cap diff re-runs the review" {
+# SAFETY: repeated oversized Stops retain unmet without paying for a prefix.
+@test "codex marker: consecutive over-cap Stops make zero reviewer calls" {
   setup_overcap_repo 'TAIL = "alpha"'
   COUNT="$BATS_TEST_TMPDIR/rerun.count"; : > "$COUNT"
   CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[]}"' "$COUNT")"
@@ -642,7 +642,7 @@ codex_marker_count() {
   run_hook
   [ "$status" -eq 0 ]
 
-  [ "$(call_count "$COUNT")" -eq 2 ]
+  [ "$(call_count "$COUNT")" -eq 0 ]
   [ "$(codex_marker_count)" -eq 0 ]
 }
 
@@ -658,4 +658,73 @@ codex_marker_count() {
   [ "$status" -eq 0 ]
   [ "$(call_count "$COUNT")" -eq 1 ]
   [ "$(codex_marker_count)" -eq 1 ]
+}
+
+@test "H2: dropped critical with bad file still blocks with file ?" {
+  setup_triggering_repo_clean
+  COUNT="$BATS_TEST_TMPDIR/h2-codex.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"critical\",\"file\":null,\"msg\":\"auth bypass across modules\"},{\"severity\":\"minor\",\"file\":\"a.ts\",\"line\":1,\"msg\":\"nit\"}]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'auth bypass across modules'* ]] || { echo "$output"; false; }
+}
+
+@test "H2b: dropped non-critical does not write a marker" {
+  setup_triggering_repo_clean
+  COUNT="$BATS_TEST_TMPDIR/h2b-codex.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"minor\",\"file\":\"a.ts\",\"line\":1,\"msg\":\"nit\"},{\"severity\":\"minor\",\"file\":null,\"msg\":\"bad\"}]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'nit'* ]] || { echo "$output"; false; }
+  [ "$(codex_marker_count)" -eq 0 ]
+}
+
+@test "sweep-fx1-R2-M2: a dropped non-critical finding counts toward the attempt cap" {
+  setup_triggering_repo_clean
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home-m2"
+  COUNT="$BATS_TEST_TMPDIR/dropped-cap-codex.count"; : > "$COUNT"
+  CODE_REVIEWER_CMD="$(make_override_reviewer 'printf "%s\n" "{\"status\":\"completed\",\"findings\":[{\"severity\":\"minor\",\"file\":null,\"msg\":\"bad\"}]}"' "$COUNT")"
+  export CODE_REVIEWER_CMD
+
+  for n in 1 2 3; do
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$stderr" == *"malformed finding(s) dropped"*"(attempt $n of 3 on this diff)"* ]] || { echo "$stderr"; false; }
+  done
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *'UNREVIEWED'* ]] || { echo "$stderr"; false; }
+  [ "$(call_count "$COUNT")" -eq 3 ]
+  [ "$(codex_marker_count)" -eq 0 ]
+}
+
+@test "sweep-fx1-R2-L2: a parseable critical blocks in any envelope status or shape" {
+  setup_triggering_repo_clean
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home-l2"
+  COUNT="$BATS_TEST_TMPDIR/l2-codex.count"; : > "$COUNT"
+  local env_file="$BATS_TEST_TMPDIR/l2-envelope.json" crit='{"severity":"critical","file":"a.py","line":1,"msg":"L2CRIT"}'
+  CODE_REVIEWER_CMD="$(make_override_reviewer "cat $(_shq "$env_file")" "$COUNT")"
+  export CODE_REVIEWER_CMD
+  for envelope in \
+    "{\"status\":\"incomplete\",\"findings\":[$crit]}" \
+    "{\"status\":\"bogus\",\"findings\":[$crit]}" \
+    "{\"status\":\"completed\",\"findings\":$crit}" \
+    "{\"status\":\"completed\",\"findings\":{\"first\":$crit}}" \
+    "{\"status\":\"completed\",\"findings\":[]}
+{\"status\":\"completed\",\"findings\":[$crit]}"; do
+    printf '%s\n' "$envelope" > "$env_file"
+    run_hook
+    [ "$status" -eq 0 ] || { echo "$envelope -> $status $output $stderr"; false; }
+    [[ "$output" == *'"decision":"block"'* && "$output" == *'L2CRIT'* ]] || { echo "$envelope -> $output"; false; }
+  done
+  printf '%s\n' '{"status":"bogus","findings":[{"severity":"minor","file":"a.py","msg":"nit"}]}' > "$env_file"
+  run_hook
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$stderr" == *'malformed findings envelope'* ]] || { echo "$stderr"; false; }
 }

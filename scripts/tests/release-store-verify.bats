@@ -138,10 +138,15 @@ PY
   printf '%s\n' "$rel"
 }
 
+# The scratch, hash-batching and kill tests below describe the shell pass,
+# which still runs whenever release_verify.py reaches no verdict; they set
+# VERIFY_SHELL_PASS=1 to run it. scripts/tests/show-config-batch.bats holds the
+# batch pass's own tests and runs every refusal through both passes.
 verify_release() {
   local rel="$1" version="$2"
-  env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+  env TRELLIS_HOME="$TRELLIS_HOME" VERIFY_SHELL_PASS="${VERIFY_SHELL_PASS:-}" bash -c '
     . "$1"
+    [ "$VERIFY_SHELL_PASS" != 1 ] || _RELEASE_STORE_VERIFY_PROGRAM=""
     release_store_verify_path "$2" "$3"
   ' release-store-verify "$RELEASE_STORE_LIB" "$rel" "$version"
 }
@@ -157,8 +162,9 @@ verify_release_scratch() {
   else
     envcmd=(env "TMPDIR=$tmp" "TRELLIS_HOME=$TRELLIS_HOME")
   fi
-  "${envcmd[@]}" bash -c '
+  "${envcmd[@]}" VERIFY_SHELL_PASS="${VERIFY_SHELL_PASS:-}" bash -c '
     . "$1"
+    [ "$VERIFY_SHELL_PASS" != 1 ] || _RELEASE_STORE_VERIFY_PROGRAM=""
     record="$4"
     mktemp() {
       [ "${1:-}" = "-d" ] && printf "%s\n" "$2" >> "$record"
@@ -195,6 +201,90 @@ release_fingerprint() {
 @test "valid sealed fixture verifies" {
   rel="$(install_small_release 1.0.0)"
   run verify_release "$rel" "1.0.0"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "full verify and list reject an ACL hidden by a macOS xattr" {
+  [ "$(uname -s)" = Darwin ] || skip 'native Darwin ACL and xattr fixture'
+  rel="$(install_small_release 1.0.0)"
+  file="$rel/payload/core-rules/CLAUDE.md"
+  chmod u+w "$file"
+  xattr -w com.trellis.fixture data "$file" || skip 'extended attributes unavailable'
+  chmod a-w "$file"
+  chmod +a "user:$(id -un) allow write" "$file" || skip 'ACLs unavailable'
+  [[ "$(ls -ld "$file")" == *'@ '* ]] || skip 'filesystem does not display the xattr marker'
+
+  run verify_release "$rel" 1.0.0
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *'ACL'* ]] || { echo "$output"; false; }
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1"; release_store_list' _ "$RELEASE_STORE_LIB"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" != *$'\n1.0.0'* ]] || { echo "$output"; false; }
+
+  # An xattr by itself does not grant writes and remains allowed.
+  chmod -N "$file"
+  run verify_release "$rel" 1.0.0
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  # A same-process memo must not hide an ACL added after the first verify.
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    . "$1"
+    release_store_verify_path "$2" 1.0.0 || exit 90
+    chmod +a "user:$(id -un) allow write" "$3" || exit 91
+    release_store_verify_path "$2" 1.0.0
+  ' _ "$RELEASE_STORE_LIB" "$rel" "$file"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  chmod -N "$file"
+}
+
+@test "verify and list distinguish an empty store from an inaccessible store" {
+  [ "$(id -u)" -ne 0 ] || skip 'root bypasses directory permissions'
+  local lib="$RELEASE_STORE_LIB" missing="$SANDBOX/missing/home" hidden="$SANDBOX/hidden"
+  # A genuinely absent or empty store remains a successful no-op.
+  run env TRELLIS_HOME="$missing" bash -c '. "$1"; release_store_verify' _ "$lib"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1"; release_store_verify' _ "$lib"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  mkdir -p "$hidden/home/releases"
+  chmod 000 "$hidden"
+  run env TRELLIS_HOME="$hidden/home" bash -c '. "$1"; release_store_verify' _ "$lib"
+  chmod 700 "$hidden"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+
+  chmod 311 "$TRELLIS_HOME/releases"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1"; release_store_verify' _ "$lib"
+  verify_status="$status"; verify_output="$output"
+  run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1"; release_store_list' _ "$lib"
+  chmod 700 "$TRELLIS_HOME/releases"
+  [ "$verify_status" -eq 4 ] || { echo "$verify_output"; false; }
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+}
+
+@test "verification rejects chained links escaping the payload but allows contained chains" {
+  local outside="$TRELLIS_HOME/releases/1.0.0/payload" rel payload
+  mkdir -p "$outside"
+  printf 'outside release\n' > "$outside/x"
+  rel="$TRELLIS_HOME/releases/2.0.0"
+  payload="$rel/payload"
+  mkdir -p "$payload/d" "$payload/core-rules"
+  printf 'safe content\n' > "$payload/core-rules/VERSION"
+  ln -s .. "$payload/d/L2"
+  ln -s 'd/L2/../../1.0.0/payload/x' "$payload/L1"
+  seal_payload_as_release 2.0.0
+  [ "$(< "$payload/L1")" = 'outside release' ]
+  run verify_release "$rel" 2.0.0
+  [ "$status" -eq 4 ] && [[ "$output" == *'unsafe release symlink target: L1'* ]] || { echo "$output"; false; }
+
+  # The same intermediate link may be used by a chain that stays contained.
+  rel="$TRELLIS_HOME/releases/3.0.0"
+  payload="$rel/payload"
+  mkdir -p "$payload/d" "$payload/core-rules"
+  printf 'safe content\n' > "$payload/core-rules/VERSION"
+  ln -s .. "$payload/d/L2"
+  ln -s 'd/L2/core-rules/VERSION' "$payload/L1"
+  seal_payload_as_release 3.0.0
+  [ "$(< "$payload/L1")" = 'safe content' ]
+  run verify_release "$rel" 3.0.0
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
@@ -320,6 +410,7 @@ release_fingerprint() {
 # sanitization, denies the resulting global-temp fallback. Direct library
 # callers also lose TMPDIR selection for verifier scratch, by design.
 @test "verifier scratch is allocated in the store, not in ambient TMPDIR" {
+  VERIFY_SHELL_PASS=1
   rel="$(install_small_release 1.0.0)"
   outside="$SANDBOX/outside-tmp"
   mkdir -p "$outside"
@@ -333,6 +424,7 @@ release_fingerprint() {
 }
 
 @test "unset, hostile, missing and symlinked TMPDIR do not divert verifier scratch" {
+  VERIFY_SHELL_PASS=1
   rel="$(install_small_release 1.0.0)"
   outside="$SANDBOX/outside-tmp"
   mkdir -p "$outside"
@@ -350,6 +442,7 @@ release_fingerprint() {
 }
 
 @test "verifier scratch is removed after success and after a content failure" {
+  VERIFY_SHELL_PASS=1
   rel="$(install_small_release 1.0.0)"
   run verify_release "$rel" "1.0.0"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -375,6 +468,7 @@ release_fingerprint() {
 }
 
 @test "a private store path with spaces verifies and leaves the sealed release unchanged" {
+  VERIFY_SHELL_PASS=1
   TRELLIS_HOME="$SANDBOX/store with spaces/trellis home"
   mkdir -p "$TRELLIS_HOME/releases"
   chmod 700 "$TRELLIS_HOME" "$TRELLIS_HOME/releases"
@@ -390,6 +484,7 @@ release_fingerprint() {
 }
 
 @test "an unwritable store parent refuses with exit 5 and does not fall back outside" {
+  VERIFY_SHELL_PASS=1
   [ "$(id -u)" -ne 0 ] || skip "root ignores directory write permission"
   rel="$(install_small_release 1.0.0)"
   outside="$SANDBOX/outside-tmp"
@@ -414,6 +509,7 @@ release_fingerprint() {
 # the regular files, and a hash-object spawn count that does not grow with the
 # 2800 entries. Synthetic files, never ~/.trellis.
 @test "synthetic 2800-entry fixture verifies with one batched hash" {
+  VERIFY_SHELL_PASS=1
   rel="$(install_perf_release 2800)"
   mkdir "$SANDBOX/bin"
   TEST_REAL_GIT="$(command -v git)"
@@ -445,6 +541,7 @@ SH
   rel="$(install_small_release 1.0.0)"
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
     . "$1"
+    _RELEASE_STORE_VERIFY_PROGRAM=""
     probe="$4"
     jq() {
       [ "$*" != "-r .tree[].path $TRELLIS_HOME/releases/1.0.0/release.json" ] ||
@@ -466,6 +563,7 @@ SH
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
     top=$$
     . "$1"
+    _RELEASE_STORE_VERIFY_PROGRAM=""
     jq() {
       [ "$*" != "-r .tree[].path $TRELLIS_HOME/releases/1.0.0/release.json" ] ||
         sh -c "kill -9 \$PPID $top"

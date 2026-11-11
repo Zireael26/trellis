@@ -297,12 +297,161 @@ show_config_validate_active_presets() {
 
 command -v jq >/dev/null 2>&1 || { echo 'show-config: jq is required' >&2; exit "$TRELLIS_EX_UNAVAILABLE"; }
 
+# Classify two unchanged-format _local_registry_file_token results. A retry is
+# allowed only for metadata drift on the home or its state directory; the read
+# file's own row and every other ancestor must remain exact. These guards cover
+# config.json, the guarded registry and owner files, and the release inputs.
+# Hook sidecars, project policy/session files and Git internals retain their
+# existing per-check validation; a directory token is not proof of those files.
+_show_config_token_delta() {
+  local before="$1" after="$2" parent="$3" root="$4" home="$5"
+  local line cursor present count i=0 changed=0 old_dev old_ino old_size old_mode old_mt old_ct
+  local new_dev new_ino new_size new_mode new_mt new_ct
+  local -a old_rows=() new_rows=() paths=()
+  while IFS= read -r line; do old_rows+=("$line"); done <<EOF
+$before
+EOF
+  while IFS= read -r line; do new_rows+=("$line"); done <<EOF
+$after
+EOF
+  [ "${#old_rows[@]}" -gt 1 ] && [ "${#old_rows[@]}" -eq "${#new_rows[@]}" ] || return 4
+  present="${old_rows[0]}"
+  case "$present" in 0|1) ;; *) return 4 ;; esac
+  [ "${new_rows[0]}" = "$present" ] || return 4
+  cursor="$parent"
+  while :; do
+    paths+=("$cursor")
+    [ "$cursor" != "$root" ] || break
+    case "$cursor" in "$root"/*) ;; *) return 4 ;; esac
+    cursor="${cursor%/*}"
+    [ -n "$cursor" ] || return 4
+  done
+  count=$((1 + ${#paths[@]} + present))
+  [ "${#old_rows[@]}" -eq "$count" ] || return 4
+  if [ "$present" = 1 ] && [ "${old_rows[$((count - 1))]}" != "${new_rows[$((count - 1))]}" ]; then
+    return 4
+  fi
+  for cursor in "${paths[@]}"; do
+    i=$((i + 1))
+    [ "${old_rows[$i]}" != "${new_rows[$i]}" ] || continue
+    case "$cursor" in "$home"|"$home/state") ;; *) return 4 ;; esac
+    IFS=$'\t' read -r old_dev old_ino old_size old_mode old_mt old_ct <<< "${old_rows[$i]}"
+    IFS=$'\t' read -r new_dev new_ino new_size new_mode new_mt new_ct <<< "${new_rows[$i]}"
+    [ -n "$old_dev" ] && [ -n "$old_ino" ] && [ -n "$old_size" ] && [ -n "$old_mode" ] &&
+      [ -n "$old_mt" ] && [ -n "$old_ct" ] && [ -n "$new_size" ] && [ -n "$new_mt" ] && [ -n "$new_ct" ] &&
+      [ "$old_dev:$old_ino:$old_mode" = "$new_dev:$new_ino:$new_mode" ] || return 4
+    changed=1
+  done
+  [ "$changed" = 0 ] || return 10
+  return 0
+}
+
+_show_config_compare_read_token() {
+  local rc=0
+  _show_config_token_delta "$@" || rc=$?
+  case "$rc" in
+    0) ;;
+    10) _SC_PARENT_DRIFT=1; export -n _SC_PARENT_DRIFT ;;
+    *) _SC_INPUT_DRIFT=1; export -n _SC_INPUT_DRIFT ;;
+  esac
+}
+
+# Each candidate owner checked by the shared-hook scan gets its own in-memory
+# token before that scan reads it. Unavailable/coarse evidence disables retries,
+# never the legacy predicate.
+_show_config_record_owner_for_retry() {
+  local home="$1" owner="$2" fingerprint=""
+  if fingerprint="$(_local_registry_file_token "${owner%/*}" "$owner" "$home")"; then
+    export -n fingerprint
+    case "$fingerprint" in
+      $'1\n'*) _SC_LEDGER_PATHS+=("$owner"); _SC_LEDGER_TOKENS+=("$fingerprint") ;;
+      *) _SC_RETRY_SAFE=0; export -n _SC_RETRY_SAFE ;;
+    esac
+  else
+    _SC_RETRY_SAFE=0
+    export -n _SC_RETRY_SAFE
+  fi
+  return 0
+}
+
+# Record the selected owner first, including its parent directory, so a name
+# added or removed during the subsequent glob cannot escape the postflight.
+# This is a retry ledger, never evidence that an owner is valid.
+_show_config_record_checkout_owners_for_retry() {
+  local home="$1" checkout="$2" owner="$3" candidate
+  [ "${_HC_DIAG_AUDIT_ACTIVE:-0}" = 1 ] || return 0
+  case "$checkout" in ''|*[!0-9a-f]*) _SC_RETRY_SAFE=0; export -n _SC_RETRY_SAFE; return 0 ;; esac
+  if [ "${#checkout}" -ne 64 ] || [ "${owner%/*}" != "$home/state/attachments/$checkout" ]; then
+    _SC_RETRY_SAFE=0
+    export -n _SC_RETRY_SAFE
+    return 0
+  fi
+  _show_config_record_owner_for_retry "$home" "$owner"
+  for candidate in "$home/state/attachments/$checkout"/*.json; do
+    [ -e "$candidate" ] || [ -L "$candidate" ] || continue
+    [ "$candidate" != "$owner" ] || continue
+    _show_config_record_owner_for_retry "$home" "$candidate"
+  done
+}
+
+_show_config_release_rows_match() {
+  local -a _TRELLIS_RELEASE_STAMP_PATHS _TRELLIS_RELEASE_STAMP_KINDS _TRELLIS_RELEASE_STAMP_ROWS
+  _TRELLIS_RELEASE_STAMP_PATHS=("${_SC_RELEASE_PATHS[@]+"${_SC_RELEASE_PATHS[@]}"}")
+  _TRELLIS_RELEASE_STAMP_KINDS=("${_SC_RELEASE_KINDS[@]+"${_SC_RELEASE_KINDS[@]}"}")
+  _TRELLIS_RELEASE_STAMP_ROWS=("${_SC_RELEASE_ROWS[@]+"${_SC_RELEASE_ROWS[@]}"}")
+  _release_stamp_matches || return 1
+  if [ "$_SC_EXTRA_ACTIVE" = 1 ]; then
+    _TRELLIS_RELEASE_STAMP_PATHS=("${_SC_EXTRA_PATHS[@]+"${_SC_EXTRA_PATHS[@]}"}")
+    _TRELLIS_RELEASE_STAMP_KINDS=("${_SC_EXTRA_KINDS[@]+"${_SC_EXTRA_KINDS[@]}"}")
+    _TRELLIS_RELEASE_STAMP_ROWS=("${_SC_EXTRA_ROWS[@]+"${_SC_EXTRA_ROWS[@]}"}")
+    _release_stamp_matches || return 1
+  fi
+}
+
+# Each attempt is a fresh subshell: no discarded row, mutable shell memo or
+# stale configuration can leak into a retry. The caller publishes only the
+# selected attempt's buffered output.
+show_config_attempt() (
+local _SC_RETRY_SAFE=1 _SC_PARENT_DRIFT=0 _SC_INPUT_DRIFT=0
+local _SC_CONFIG_FINGERPRINT="" _SC_CONFIG_ACTIVE=0 _SC_CONFIG_HASH="" _SC_CONFIG_MODE="" _SC_CONFIG_HASH_ACTIVE=0
+local _SC_CONFIG_HASH_FAILED=0
+local _SC_REGISTRY_TOKEN="" _SC_REGISTRY_ACTIVE=0
+local _SC_OWNER_HOME="" _SC_OWNER_PATH="" _SC_OWNER_TOKEN="" _SC_OWNER_ACTIVE=0
+local _SC_RELEASE_ACTIVE=0 _SC_EXTRA_ACTIVE=0 _SC_EXTRA_INVALID=0 _SC_CALLBACK_RAN=0
+local _SC_CURRENT="" _SC_ITEM="" _SC_INDEX=0 _SC_RC=0
+local -a _SC_LEDGER_PATHS=() _SC_LEDGER_TOKENS=()
+local -a _SC_RELEASE_PATHS=() _SC_RELEASE_KINDS=() _SC_RELEASE_ROWS=()
+local -a _SC_EXTRA_PATHS=() _SC_EXTRA_KINDS=() _SC_EXTRA_ROWS=()
+export -n _SC_RETRY_SAFE _SC_PARENT_DRIFT _SC_INPUT_DRIFT \
+  _SC_CONFIG_FINGERPRINT _SC_CONFIG_ACTIVE _SC_CONFIG_HASH _SC_CONFIG_MODE _SC_CONFIG_HASH_ACTIVE _SC_CONFIG_HASH_FAILED \
+  _SC_REGISTRY_TOKEN _SC_REGISTRY_ACTIVE \
+  _SC_OWNER_HOME _SC_OWNER_PATH _SC_OWNER_TOKEN _SC_OWNER_ACTIVE \
+  _SC_RELEASE_ACTIVE _SC_EXTRA_ACTIVE _SC_EXTRA_INVALID _SC_CALLBACK_RAN \
+  _SC_CURRENT _SC_ITEM _SC_INDEX _SC_RC _SC_LEDGER_PATHS _SC_LEDGER_TOKENS \
+  _SC_RELEASE_PATHS _SC_RELEASE_KINDS _SC_RELEASE_ROWS _SC_EXTRA_PATHS _SC_EXTRA_KINDS _SC_EXTRA_ROWS
 SHOW_CONFIG_EXIT=0
 # Same string the entry gate refused (or cleared) against; trellis_home_resolve
 # adds only its shared absolute-path validation on top.
 HOME_PATH="$(trellis_home_resolve "$SELECTED_HOME")" || exit "$?"
 MACHINE_CONFIG="$HOME_PATH/config.json"
 POLICY="$SCRIPT_DIR/../trellis.config.json"
+if _SC_CONFIG_FINGERPRINT="$(_local_registry_file_token "$HOME_PATH" "$MACHINE_CONFIG" "$HOME_PATH")"; then
+  _SC_CONFIG_ACTIVE=1
+else
+  # Coarse ctime cannot support a retry. Preserve the coarse-filesystem path
+  # with a fresh content/mode comparison, not a stamp or an assumed verdict.
+  _SC_RETRY_SAFE=0
+  _SC_CONFIG_HASH_FAILED=1
+  if [ -f "$MACHINE_CONFIG" ] && [ ! -L "$MACHINE_CONFIG" ]; then
+    if _SC_CONFIG_HASH="$(_attachment_hash "$MACHINE_CONFIG")" &&
+       _SC_CONFIG_MODE="$(_attachment_mode "$MACHINE_CONFIG")"; then
+      _SC_CONFIG_HASH_ACTIVE=1
+      _SC_CONFIG_HASH_FAILED=0
+    fi
+  fi
+fi
+export -n _SC_CONFIG_FINGERPRINT _SC_CONFIG_ACTIVE _SC_CONFIG_HASH _SC_CONFIG_MODE _SC_CONFIG_HASH_ACTIVE \
+  _SC_CONFIG_HASH_FAILED _SC_RETRY_SAFE
 
 echo '=== Tracked portable policy ==='
 if [ -f "$POLICY" ] && [ ! -L "$POLICY" ] && show_config_tracked_policy_is_usable "$POLICY"; then
@@ -323,7 +472,10 @@ if [ -L "$HOME_PATH" ] || [ ! -d "$HOME_PATH" ]; then
   exit "$TRELLIS_EX_UNAVAILABLE"
 fi
 if MACHINE_STATUS="$(hc_portable_machine_config "$HOME_PATH")"; then
-  :
+  if [ "$_SC_CONFIG_HASH_FAILED" = 1 ]; then
+    echo 'show-config: could not capture machine config for diagnostic' >&2
+    exit "$TRELLIS_EX_UNAVAILABLE"
+  fi
 else
   printf '  Trellis home:          %s\n' "$HOME_PATH"
   printf '  machine config:        %s\n' "$MACHINE_STATUS"
@@ -352,8 +504,14 @@ fi
 printf '  selected fleet:        %s\n' "$SELECTED_FLEET"
 printf '  configured fleets:     %s\n' "$(jq -r '.fleets | keys | join(", ")' "$MACHINE_CONFIG")"
 printf '  active CLI release:    %s\n' "$ACTIVE_RELEASE"
+
+# Buffer the diagnostic body until its release proof has survived postflight.
+# The guard performs a fresh full audit; its stamp fingerprint detects change
+# but is never, by itself, evidence that a release is valid.
+show_config_render_body() {
 ACTIVE_RELEASE_PATH=""
-if ACTIVE_RELEASE_PATH="$(TRELLIS_HOME="$HOME_PATH" release_store_locate "$ACTIVE_RELEASE" 2>/dev/null)"; then
+if _hc_portable_scoped_release_audit "$HOME_PATH" "$ACTIVE_RELEASE" >/dev/null 2>&1 &&
+   ACTIVE_RELEASE_PATH="$(TRELLIS_HOME="$HOME_PATH" release_store_release_path "$ACTIVE_RELEASE" 2>/dev/null)"; then
   printf '  release payload:       %s/payload (verified immutable installed payload)\n' "$ACTIVE_RELEASE_PATH"
 else
   ACTIVE_RELEASE_RC=$?
@@ -417,20 +575,40 @@ elif [ "$PROJECT_ROOT_STATE" != valid ]; then
   echo '  project root:          unavailable or unsafe Git worktree root'
 else
   printf '  project root:          %s\n' "$PROJECT_ROOT"
-  RESOLUTION=""
-  RESOLUTION_RC=0
-  if RESOLUTION="$(local_registry_resolve_root "$HOME_PATH" "$PROJECT_ROOT" 2>/dev/null)"; then
-    RESOLUTION_OK=1
+  # Resolve and classify against the same validated, migrated registry bytes.
+  # The token detects changes; it never authorizes a row. When nanosecond ctime
+  # is unavailable, postflight re-reads the canonical validated state instead.
+  if REGISTRY_GUARD_TOKEN="$(_local_registry_diagnostic_token "$HOME_PATH")"; then
+    REGISTRY_GUARD_MODE=token
+    _SC_REGISTRY_TOKEN="$REGISTRY_GUARD_TOKEN"; _SC_REGISTRY_ACTIVE=1
   else
-    RESOLUTION_OK=0
-    RESOLUTION_RC=$?
+    REGISTRY_GUARD_MODE=state
+    _SC_RETRY_SAFE=0
   fi
-  REGISTRY_SNAPSHOT=""
-  if REGISTRY_SNAPSHOT="$(local_registry_list_json "$HOME_PATH" 2>/dev/null)"; then
-    REGISTRY_SNAPSHOT_OK=1
+  export -n _SC_REGISTRY_TOKEN _SC_REGISTRY_ACTIVE _SC_RETRY_SAFE
+  REGISTRY_SOURCE_RC=0
+  REGISTRY_GUARD_STATE="$(local_registry_read_diagnostic_state "$HOME_PATH" 2>/dev/null)" || REGISTRY_SOURCE_RC=$?
+  if [ "$REGISTRY_SOURCE_RC" -eq 0 ] && [ "$REGISTRY_GUARD_MODE" = token ]; then
+    REGISTRY_CURRENT_TOKEN="$(_local_registry_diagnostic_token "$HOME_PATH")" || REGISTRY_CURRENT_TOKEN=""
+    if [ "$REGISTRY_CURRENT_TOKEN" != "$REGISTRY_GUARD_TOKEN" ]; then
+      REGISTRY_SOURCE_RC="$TRELLIS_EX_STATE"
+    fi
+  fi
+  RESOLUTION=""; RESOLUTION_RC="$REGISTRY_SOURCE_RC"; RESOLUTION_OK=0
+  REGISTRY_SNAPSHOT=""; REGISTRY_SNAPSHOT_RC="$REGISTRY_SOURCE_RC"; REGISTRY_SNAPSHOT_OK=0
+  if [ "$REGISTRY_SOURCE_RC" -eq 0 ]; then
+    if RESOLUTION="$(_local_registry_resolve_root_from_snapshot "$HOME_PATH" "$PROJECT_ROOT" "$REGISTRY_GUARD_STATE" 2>/dev/null)"; then
+      RESOLUTION_OK=1
+    else
+      RESOLUTION_RC=$?
+    fi
+    if REGISTRY_SNAPSHOT="$(_local_registry_list_json_from_snapshot "$HOME_PATH" "" "$REGISTRY_GUARD_STATE" 2>/dev/null)"; then
+      REGISTRY_SNAPSHOT_OK=1
+    else
+      REGISTRY_SNAPSHOT_RC=$?
+    fi
   else
-    REGISTRY_SNAPSHOT_OK=0
-    REGISTRY_SNAPSHOT_RC=$?
+    REGISTRY_GUARD_MODE=none
   fi
 
   # A row that fails identity validation no longer fails the whole listing; the
@@ -562,6 +740,7 @@ else
       show_config_note_failure "$TRELLIS_EX_STATE"
     else
       OWNER="$HOME_PATH/state/attachments/$CHECKOUT_ID/$WORKTREE_ID.json"
+      _show_config_record_checkout_owners_for_retry "$HOME_PATH" "$CHECKOUT_ID" "$OWNER"
       OWNER_DETAIL_FILE=""
       if OWNER_DETAIL_FILE="$(mktemp "${TMPDIR:-/tmp}/trellis.show-config.owner.XXXXXX")"; then
         ATTACHMENT_DETAIL=""
@@ -675,7 +854,10 @@ if [ -n "$AUTONOMY_POLICY_ROOT" ]; then
     # the mutable show-config checkout and configured source are display-only.
     TRELLIS_ROOT="$AUTONOMY_POLICY_ROOT"
     export TRELLIS_ROOT
-    _se_resolve_autonomy "$PROJECT_ROOT"
+    if ! _se_resolve_autonomy "$PROJECT_ROOT"; then
+      AUTONOMY_UNAVAILABLE='project autonomy policy is unreadable'
+      show_config_note_failure "$TRELLIS_EX_STATE"
+    else
     AUTONOMY_READY=1
 
     printf '  policy source:         %s\n' "$AUTONOMY_POLICY_LABEL"
@@ -709,6 +891,7 @@ EOF
       printf '  limiting preset:       %s\n' "$AUTONOMY_LIMITING_PRESET"
     else
       echo '  limiting preset:       (none; hard ceiling L5)'
+    fi
     fi
   fi
 fi
@@ -748,4 +931,150 @@ else
   printf '  resolution:            unavailable (%s)\n' "$AUTONOMY_UNAVAILABLE"
 fi
 
-exit "$SHOW_CONFIG_EXIT"
+return "$SHOW_CONFIG_EXIT"
+}
+
+# Defer all authority-bearing diagnostic rows until the one captured registry
+# is checked again. A changed/unreadable registry cannot publish stale rows.
+show_config_render_diagnostics() {
+  local REGISTRY_GUARD_MODE=none REGISTRY_GUARD_TOKEN="" REGISTRY_GUARD_STATE=""
+  local current="" tmp_root out rc=0 drift=0
+  tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/trellis-show-config.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  out="$tmp_root/output"
+  if show_config_render_body > "$out"; then rc=0; else rc=$?; fi
+  case "$REGISTRY_GUARD_MODE" in
+    token)
+      current="$(_local_registry_diagnostic_token "$HOME_PATH")" || drift=1
+      [ "$current" = "$REGISTRY_GUARD_TOKEN" ] || drift=1 ;;
+    state)
+      current="$(local_registry_read_diagnostic_state "$HOME_PATH" 2>/dev/null)" || drift=1
+      [ "$current" = "$REGISTRY_GUARD_STATE" ] || drift=1 ;;
+  esac
+  if [ "$drift" -ne 0 ]; then
+    rm -rf "${tmp_root:?}"
+    echo 'show-config: registry changed during diagnostic; refusing stale rows' >&2
+    [ "$rc" -ge "$TRELLIS_EX_STATE" ] && return "$rc"
+    return "$TRELLIS_EX_STATE"
+  fi
+  cat "$out" || rc="$TRELLIS_EX_UNAVAILABLE"
+  rm -rf "${tmp_root:?}"
+  return "$rc"
+}
+
+# Copy the private proof inputs before the frozen guard clears its scope. They
+# detect changes only; no copied token is ever treated as an audit verdict.
+show_config_capture_diagnostic_state() {
+  local rc=0
+  show_config_render_diagnostics || rc=$?
+  _SC_CALLBACK_RAN=1
+  _SC_OWNER_HOME="$_HC_DIAG_OWNER_HOME"; _SC_OWNER_PATH="$_HC_DIAG_OWNER_PATH"
+  _SC_OWNER_TOKEN="$_HC_DIAG_OWNER_TOKEN"; _SC_OWNER_ACTIVE="$_HC_DIAG_OWNER_ACTIVE"
+  _SC_RELEASE_ACTIVE="$_HC_DIAG_AUDIT_ACTIVE"
+  _SC_EXTRA_ACTIVE="$_HC_DIAG_EXTRA_ACTIVE"; _SC_EXTRA_INVALID="$_HC_DIAG_EXTRA_INVALID"
+  _SC_RELEASE_PATHS=("${_HC_DIAG_AUDIT_PATHS[@]+"${_HC_DIAG_AUDIT_PATHS[@]}"}")
+  _SC_RELEASE_KINDS=("${_HC_DIAG_AUDIT_KINDS[@]+"${_HC_DIAG_AUDIT_KINDS[@]}"}")
+  _SC_RELEASE_ROWS=("${_HC_DIAG_AUDIT_ROWS[@]+"${_HC_DIAG_AUDIT_ROWS[@]}"}")
+  _SC_EXTRA_PATHS=("${_HC_DIAG_EXTRA_PATHS[@]+"${_HC_DIAG_EXTRA_PATHS[@]}"}")
+  _SC_EXTRA_KINDS=("${_HC_DIAG_EXTRA_KINDS[@]+"${_HC_DIAG_EXTRA_KINDS[@]}"}")
+  _SC_EXTRA_ROWS=("${_HC_DIAG_EXTRA_ROWS[@]+"${_HC_DIAG_EXTRA_ROWS[@]}"}")
+  export -n _SC_CALLBACK_RAN _SC_OWNER_HOME _SC_OWNER_PATH _SC_OWNER_TOKEN _SC_OWNER_ACTIVE \
+    _SC_RELEASE_ACTIVE _SC_EXTRA_ACTIVE _SC_EXTRA_INVALID _SC_RELEASE_PATHS _SC_RELEASE_KINDS \
+    _SC_RELEASE_ROWS _SC_EXTRA_PATHS _SC_EXTRA_KINDS _SC_EXTRA_ROWS
+  return "$rc"
+}
+
+if _hc_portable_guarded_release_run "$HOME_PATH" "$ACTIVE_RELEASE" show_config_capture_diagnostic_state; then
+  _SC_RC="$SHOW_CONFIG_EXIT"
+else
+  _SC_RC=$?
+  [ "$SHOW_CONFIG_EXIT" -le "$_SC_RC" ] || _SC_RC="$SHOW_CONFIG_EXIT"
+fi
+export -n _SC_RC
+
+# Always classify the actual read-file rows first. A changed or unreadable row
+# is never made safe by a later retry. Missing/coarse tokens disable retry and
+# retain the existing legacy/coarse-state path.
+if [ "$_SC_CONFIG_ACTIVE" = 1 ]; then
+  if _SC_CURRENT="$(_local_registry_file_token "$HOME_PATH" "$MACHINE_CONFIG" "$HOME_PATH")"; then
+    _show_config_compare_read_token "$_SC_CONFIG_FINGERPRINT" "$_SC_CURRENT" "$HOME_PATH" "$HOME_PATH" "$HOME_PATH"
+  else _SC_INPUT_DRIFT=1; fi
+elif [ "$_SC_CONFIG_HASH_ACTIVE" = 1 ]; then
+  if [ ! -f "$MACHINE_CONFIG" ] || [ -L "$MACHINE_CONFIG" ] ||
+     ! _SC_CURRENT="$(_attachment_hash "$MACHINE_CONFIG")" || [ "$_SC_CURRENT" != "$_SC_CONFIG_HASH" ] ||
+     ! _SC_CURRENT="$(_attachment_mode "$MACHINE_CONFIG")" || [ "$_SC_CURRENT" != "$_SC_CONFIG_MODE" ]; then
+    _SC_INPUT_DRIFT=1
+  fi
+fi
+if [ "$_SC_REGISTRY_ACTIVE" = 1 ]; then
+  if _SC_CURRENT="$(_local_registry_diagnostic_token "$HOME_PATH")"; then
+    _show_config_compare_read_token "$_SC_REGISTRY_TOKEN" "$_SC_CURRENT" "$HOME_PATH" "$HOME_PATH" "$HOME_PATH"
+  else _SC_INPUT_DRIFT=1; fi
+fi
+if [ "$_SC_OWNER_ACTIVE" = 1 ]; then
+  if _SC_CURRENT="$(_local_registry_file_token "${_SC_OWNER_PATH%/*}" "$_SC_OWNER_PATH" "$_SC_OWNER_HOME")"; then
+    _show_config_compare_read_token "$_SC_OWNER_TOKEN" "$_SC_CURRENT" "${_SC_OWNER_PATH%/*}" "$_SC_OWNER_HOME" "$HOME_PATH"
+  else _SC_INPUT_DRIFT=1; fi
+elif [ -n "${OWNER:-}" ]; then
+  _SC_RETRY_SAFE=0
+fi
+for _SC_ITEM in "${_SC_LEDGER_PATHS[@]+"${_SC_LEDGER_PATHS[@]}"}"; do
+  if _SC_CURRENT="$(_local_registry_file_token "${_SC_ITEM%/*}" "$_SC_ITEM" "$HOME_PATH")"; then
+    _show_config_compare_read_token "${_SC_LEDGER_TOKENS[$_SC_INDEX]}" "$_SC_CURRENT" "${_SC_ITEM%/*}" "$HOME_PATH" "$HOME_PATH"
+  else _SC_INPUT_DRIFT=1; fi
+  _SC_INDEX=$((_SC_INDEX + 1))
+done
+if [ "$_SC_INPUT_DRIFT" = 1 ]; then
+  [ "$_SC_RC" -le "$TRELLIS_EX_STATE" ] || exit 77
+  exit 76
+fi
+if [ "$_SC_PARENT_DRIFT" = 1 ]; then
+  if [ "$_SC_RETRY_SAFE" = 1 ] && [ "$_SC_CALLBACK_RAN" = 1 ] &&
+     [ "$_SC_RC" -le "$TRELLIS_EX_STATE" ] && [ "$_SC_RELEASE_ACTIVE" = 1 ] &&
+     [ "$_SC_EXTRA_INVALID" = 0 ] &&
+     { [ -z "${ATTACHMENT_RELEASE:-}" ] || [ "$ATTACHMENT_RELEASE" = "$ACTIVE_RELEASE" ] || [ "$_SC_EXTRA_ACTIVE" = 1 ]; }; then
+    # A failed release recheck is a finding, never permission to publish the
+    # earlier successful guard or retry over changed release inputs.
+    _show_config_release_rows_match || exit 76
+    exit 75
+  fi
+  # A parent changed but its inputs cannot all be rechecked: refuse rather
+  # than publish an earlier verdict or retry on incomplete evidence.
+  [ "$_SC_RC" -le "$TRELLIS_EX_STATE" ] || exit 77
+  exit 76
+fi
+exit "$_SC_RC"
+)
+
+# Internal statuses 75/76/77 never escape: they request a bounded fresh attempt
+# or suppress stale rows without lowering an unavailable result. Persistent
+# parent churn gets at most two retries.
+_SHOW_RETRY_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/trellis-show-config-retry.XXXXXX")" || exit "$TRELLIS_EX_UNAVAILABLE"
+_SHOW_RETRY_COUNT=0
+while :; do
+  if show_config_attempt > "$_SHOW_RETRY_ROOT/out" 2> "$_SHOW_RETRY_ROOT/err"; then
+    _SHOW_RETRY_RC=0
+  else
+    _SHOW_RETRY_RC=$?
+  fi
+  case "$_SHOW_RETRY_RC" in
+    75)
+      if [ "$_SHOW_RETRY_COUNT" -lt 2 ]; then
+        _SHOW_RETRY_COUNT=$((_SHOW_RETRY_COUNT + 1))
+        continue
+      fi
+      rm -rf "${_SHOW_RETRY_ROOT:?}"
+      echo 'show-config: state directory kept changing; refusing stale rows' >&2
+      exit "$TRELLIS_EX_STATE" ;;
+    76|77)
+      cat "$_SHOW_RETRY_ROOT/err" >&2 || :
+      rm -rf "${_SHOW_RETRY_ROOT:?}"
+      echo 'show-config: a guarded input changed during diagnostic; refusing stale rows' >&2
+      [ "$_SHOW_RETRY_RC" -ne 77 ] || exit "$TRELLIS_EX_UNAVAILABLE"
+      exit "$TRELLIS_EX_STATE" ;;
+    *)
+      cat "$_SHOW_RETRY_ROOT/out" || _SHOW_RETRY_RC="$TRELLIS_EX_UNAVAILABLE"
+      cat "$_SHOW_RETRY_ROOT/err" >&2 || _SHOW_RETRY_RC="$TRELLIS_EX_UNAVAILABLE"
+      rm -rf "${_SHOW_RETRY_ROOT:?}"
+      exit "$_SHOW_RETRY_RC" ;;
+  esac
+done

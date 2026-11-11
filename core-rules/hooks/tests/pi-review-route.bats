@@ -631,6 +631,9 @@ deploy_codex_review_hook() {
   mkdir -p "$hookdir/lib"
   cp "$CODEX_HOOKS_DIR/code-review-subagent.sh" "$hookdir/code-review-subagent.sh"
   cp "$HOOKS_DIR/lib/code-reviewer.sh" "$hookdir/lib/code-reviewer.sh"
+  # Standalone copies must carry the trusted resolver introduced by T29 M4.
+  # Registered hooks instead resolve it from the immutable payload tree.
+  cp "$HOOKS_DIR/../../scripts/lib/trellis-python.sh" "$hookdir/lib/trellis-python.sh"
   cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/pm.sh" "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$hookdir/lib/"
   chmod +x "$hookdir/code-review-subagent.sh" "$hookdir/lib/code-reviewer.sh"
   printf '%s' "$hookdir/code-review-subagent.sh"
@@ -668,7 +671,24 @@ PY
   stub_dir="$(make_pi_stub "$marker")"
   claude_dir="$(make_tombstone_claude)"
   path_backup="$PATH"
-  if [ "$harness" = codex ]; then
+  if [ "$harness" = codex-registered ]; then
+    # Use the shipped registration command, not a hand-written approximation:
+    # since T34 the shell form is the pinned legacy surface (the native Stop
+    # route runs the review member in the companion, covered by events.rs).
+    # The real-attach proof additionally checks this layout in a sealed release.
+    mkdir -p "$PROJECT_DIR/.trellis"
+    # Actual attach excludes its managed runtime anchor from the agent diff.
+    printf '/.trellis/\n' >> "$PROJECT_DIR/.git/info/exclude"
+    ln -s "$(cd "$HOOKS_DIR/../.." && pwd -P)" "$PROJECT_DIR/.trellis/runtime"
+    hook="$(jq -r '.hooks.Stop[].hooks[] | select(.command | contains("/code-review-subagent.sh")) | .command' \
+      "$HOOKS_DIR/../legacy-hooks/codex-hooks.local.json")"
+    [ -r "$PROJECT_DIR/.trellis/runtime/scripts/lib/trellis-python.sh" ] || return 1
+    run env -u CODE_REVIEWER_CMD -u CLAUDE_PROJECT_DIR -u TRELLIS_ROOT CODEX_PROJECT_DIR="$PROJECT_DIR" \
+      HOME="$fake_home" TRELLIS_HOME="$fake_home/.trellis" \
+      HC_SCOPE="$scope" HC_TERMINAL_ID="$terminal" ${legacy:+HERDR_ENV=1 HERDR_WORKSPACE_ID=w HERDR_PANE_ID=p} \
+      PATH="$stub_dir:$claude_dir:$path_backup" bash -c "$hook" <<<'{}'
+    MARKERS="$(find "$PROJECT_DIR" -maxdepth 2 -type f -name '.review-done-*' | wc -l | tr -d ' ')"
+  elif [ "$harness" = codex ]; then
     hook="$(deploy_codex_review_hook)"
     run env -u CODE_REVIEWER_CMD -u CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR="$PROJECT_DIR" \
       HOME="$fake_home" TRELLIS_HOME="$fake_home/.trellis" \
@@ -690,12 +710,12 @@ PY
 
 @test "deployed hooks: a valid hc decision routes to pi and completes the review" {
   local harness legacy
-  for harness in claude codex; do
+  for harness in claude codex codex-registered; do
     for legacy in "" legacy; do
       setup_tombstone
       hook_case "$harness" fixture-scope t3 fixture-scope t3 "" "$legacy"
       [ "$status" -eq 0 ] || { echo "$harness/$legacy: $output"; false; }
-      [[ "$RAN" == *RAN_PI* ]] || { echo "$harness/$legacy: pi did not run"; false; }
+      [[ "$RAN" == *RAN_PI* ]] || { echo "$harness/$legacy: pi did not run; hook output: $output"; false; }
       [ -z "$CLAUDE_RAN" ] || { echo "$harness/$legacy: claude ran"; false; }
       [ "$MARKERS" -eq 1 ] || { echo "$harness/$legacy: markers=$MARKERS"; false; }
       teardown_tombstone

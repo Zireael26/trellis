@@ -13,7 +13,7 @@ setup() {
 }
 
 teardown() {
-  rm -rf "$SANDBOX"
+  rm -rf "${SANDBOX:?}"
 }
 
 make_skill() {
@@ -59,6 +59,31 @@ run_hook() {
     and (.hookSpecificOutput.permissionDecisionReason | contains("bytes=65537"))
     and (keys == ["hookSpecificOutput"])
   ' <<<"$output" >/dev/null
+}
+
+@test "supervised model and slash twins quickly report the budget for a 25 MB Skill" {
+  make_skill "$PROJECT/.claude/skills/huge" 25000000
+  local tree hook harness input expected started
+  for tree in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+      if [ "$hook" = skill-preload-guard.sh ]; then
+        harness=claude
+        expected=11
+        input='{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"huge"}}'
+      else
+        harness=claude-expansion
+        expected=11
+        input='{"hook_event_name":"UserPromptExpansion","expansion_type":"slash_command","command_name":"huge"}'
+      fi
+      started=$SECONDS
+      run env HOME="$USER_HOME" CLAUDE_PROJECT_DIR="$PROJECT" HOOK_INPUT="$input" \
+        /bin/bash -c 'printf "%s" "$HOOK_INPUT" | /usr/bin/perl "$1" "$2" "${3%.sh}" /bin/bash "$4/$3"' \
+        _ "$HOOKS_DIR/lib/guard-supervise.pl" "$harness" "$hook" "$tree"
+      [ "$status" -eq "$expected" ] || { echo "$tree/$hook supervisor exit=$status: $output"; false; }
+      jq -e '(tostring | contains("Skill root exceeds 65536-byte inline budget")) and (tostring | contains("bytes=25000000"))' <<<"$output" >/dev/null
+      [ "$((SECONDS-started))" -lt 10 ] || { echo "$tree/$hook took 10 seconds or more"; false; }
+    done
+  done
 }
 
 @test "direct slash command denies oversized root with UserPromptExpansion contract" {
@@ -123,6 +148,169 @@ run_hook() {
   [ -z "$output" ]
 }
 
+@test "canonical and hook Skill size libraries remain byte-identical" {
+  cmp "$HOOKS_DIR/lib/skill-size.sh" "$HOOKS_DIR/../codex/hooks/lib/skill-size.sh"
+  cmp "$HOOKS_DIR/lib/skill-size.sh" "$HOOKS_DIR/../../scripts/lib/skill-size.sh"
+}
+
+@test "qualified resolver selects its named plugin before unrelated suffix matches" {
+  local lib root="$USER_HOME/.claude/plugins/cache/vendor/plugin-a/1/skills/foo"
+  make_named_skill "$PROJECT/.claude/skills/foo" bar 128
+  make_named_skill "$root" foo 70000
+  make_named_skill "$USER_HOME/.claude/plugins/marketplaces/vendor/plugins/plugin-a/skills/foo" foo 128
+  for lib in "$HOOKS_DIR/lib/skill-size.sh" "$HOOKS_DIR/../codex/hooks/lib/skill-size.sh" "$HOOKS_DIR/../../scripts/lib/skill-size.sh"; do
+    run bash -c '. "$1"; skill_size_resolve_root plugin-a:foo "$2" "$3"' _ "$lib" "$PROJECT" "$USER_HOME"
+    [ "$status" -eq 0 ] && [ "$output" = "$root" ] || { echo "$output"; false; }
+    # Unknown qualifiers retain the documented suffix fallback.
+    run bash -c '. "$1"; skill_size_resolve_root unknown:foo "$2" "$3"' _ "$lib" "$PROJECT" "$USER_HOME"
+    [ "$status" -eq 0 ] && [ "$output" = "$PROJECT/.claude/skills/foo" ] || { echo "$output"; false; }
+  done
+  mkdir -p "$USER_HOME/.claude/plugins/cache/vendor/plugin-a/2/skills"
+  ln -s "$root" "$USER_HOME/.claude/plugins/cache/vendor/plugin-a/2/skills/foo"
+  for lib in "$HOOKS_DIR/lib/skill-size.sh" "$HOOKS_DIR/../codex/hooks/lib/skill-size.sh" "$HOOKS_DIR/../../scripts/lib/skill-size.sh"; do
+    run bash -c '. "$1"; skill_size_resolve_root plugin-a:foo "$2" "$3"' _ "$lib" "$PROJECT" "$USER_HOME"
+    [ "$status" -eq 0 ] && [ "$output" = "$root" ] || { echo "$output"; false; }
+  done
+  make_named_skill "$USER_HOME/.claude/plugins/cache/vendor/plugin-a/3/skills/foo" foo 128
+  for lib in "$HOOKS_DIR/lib/skill-size.sh" "$HOOKS_DIR/../codex/hooks/lib/skill-size.sh" "$HOOKS_DIR/../../scripts/lib/skill-size.sh"; do
+    run bash -c '. "$1"; skill_size_resolve_root plugin-a:foo "$2" "$3"' _ "$lib" "$PROJECT" "$USER_HOME"
+    [ "$status" -eq 2 ] && [[ "$output" == *'ambiguous Skill'* ]] || { echo "$output"; false; }
+  done
+}
+
+@test "shadowed named skills cannot hide oversized qualified or declared targets" {
+  local hooks hook input name
+  local project_skill="$PROJECT/.claude/skills/foo"
+  make_named_skill "$project_skill" bar 128
+  make_named_skill "$USER_HOME/.claude/plugins/cache/vendor/plugin-a/1/skills/foo" foo 70000
+  make_named_skill "$USER_HOME/.claude/plugins/cache/vendor/other/1/skills/foo" foo 128
+  make_named_skill "$USER_HOME/.claude/plugins/cache/vendor/plugin-c/1/skills/foo" foo 128
+  make_named_skill "$USER_HOME/.claude/plugins/marketplaces/vendor/plugins/plugin-c/skills/foo" foo 70000
+  for hooks in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for name in plugin-a:foo foo; do
+      for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+        if [ "$hook" = skill-preload-guard.sh ]; then
+          input="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"$name\"}}"
+        else
+          input="{\"hook_event_name\":\"UserPromptExpansion\",\"expansion_type\":\"slash_command\",\"command_name\":\"$name\"}"
+        fi
+        run_hook "$hooks/$hook" "$input"
+        [ "$status" -eq 0 ]
+        jq -e '.decision == "block" or .hookSpecificOutput.permissionDecision == "deny"' <<<"$output" >/dev/null
+        [[ "$output" == *'plugin-a'* ]] || { echo "$output"; false; }
+      done
+    done
+    for name in other:foo missing:foo plugin-c:foo; do
+      run_hook "$hooks/skill-preload-guard.sh" "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"$name\"}}"
+      [ "$status" -eq 0 ] && [ -z "$output" ] || { echo "$name $output"; false; }
+    done
+  done
+  # The documented project precedence is unchanged for a correctly named root.
+  make_named_skill "$project_skill" foo 128
+  for hooks in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    run_hook "$hooks/skill-preload-guard.sh" '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"foo"}}'
+    [ "$status" -eq 0 ] && [ -z "$output" ]
+  done
+}
+
+@test "unsafe discovered paths deny matching identities without denying unrelated skills" {
+  local bad_tab="$PROJECT/.claude/skills/"$'bad\tpath' bad_newline="$USER_HOME/.claude/skills/"$'bad\npath'
+  local hooks name hook input lib
+  make_named_skill "$bad_tab" unsafe-tab 70000
+  make_named_skill "$bad_newline" unsafe-newline 70000
+  make_skill "$USER_HOME/.claude/skills/unsafe-tab" 128
+  make_skill "$PROJECT/.claude/skills/ordinary" 128
+  # A safe spelling resolving to an unsafe physical directory is also invalid.
+  ln -s "$bad_tab" "$PROJECT/.claude/skills/unsafe-alias"
+  for hooks in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for name in unsafe-tab unsafe-newline unsafe-alias; do
+      for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+        if [ "$hook" = skill-preload-guard.sh ]; then
+          input="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"$name\"}}"
+        else
+          input="{\"hook_event_name\":\"UserPromptExpansion\",\"expansion_type\":\"slash_command\",\"command_name\":\"$name\"}"
+        fi
+        run_hook "$hooks/$hook" "$input"
+        [ "$status" -eq 0 ]
+        jq -e '.decision == "block" or .hookSpecificOutput.permissionDecision == "deny"' <<<"$output" >/dev/null
+      done
+    done
+    run_hook "$hooks/skill-preload-guard.sh" '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"ordinary"}}'
+    [ "$status" -eq 0 ] && [ -z "$output" ]
+    run_hook "$hooks/skill-slash-guard.sh" '{"hook_event_name":"UserPromptExpansion","expansion_type":"slash_command","command_name":"unknown"}'
+    [ "$status" -eq 0 ] && [ -z "$output" ]
+  done
+  for lib in "$HOOKS_DIR/lib/skill-size.sh" "$HOOKS_DIR/../codex/hooks/lib/skill-size.sh" "$HOOKS_DIR/../../scripts/lib/skill-size.sh"; do
+    run bash -c '. "$1"; skill_size_discover_roots "$2" "$3"' _ "$lib" "$PROJECT" "$USER_HOME"
+    [ "$status" -eq 2 ] || { echo "$output"; false; }
+  done
+}
+
+@test "CRLF BOM and padded frontmatter names enforce budget without widening matches" {
+  local hooks format name dir input hook lib
+  for format in crlf bom padded bom-crlf; do
+    name="big-$format"
+    dir="$PROJECT/.claude/skills/dir-$format"
+    mkdir -p "$dir" "$USER_HOME/.claude/skills/$name"
+    python3 -I - "$dir/SKILL.md" "$name" "$format" <<'PY'
+import pathlib, sys
+path, name, fmt = sys.argv[1:]
+end = b'\r\n' if 'crlf' in fmt else b'\n'
+fence = b'---  ' if fmt == 'padded' else b'---'
+prefix = (b'\xef\xbb\xbf' if 'bom' in fmt else b'') + fence + end + b'name: ' + name.encode() + end + fence + end
+pathlib.Path(path).write_bytes(prefix + b'x' * 70000)
+PY
+    printf 'small\n' > "$USER_HOME/.claude/skills/$name/SKILL.md"
+  done
+  make_named_skill "$PROJECT/.claude/skills/small-root" small-declared 128
+  for hooks in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for format in crlf bom padded bom-crlf; do
+      name="big-$format"
+      for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+        if [ "$hook" = skill-preload-guard.sh ]; then
+          input="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"$name\"}}"
+        else
+          input="{\"hook_event_name\":\"UserPromptExpansion\",\"expansion_type\":\"slash_command\",\"command_name\":\"$name\"}"
+        fi
+        run_hook "$hooks/$hook" "$input"
+        [ "$status" -eq 0 ]
+        jq -e '.decision == "block" or .hookSpecificOutput.permissionDecision == "deny"' <<<"$output" >/dev/null
+        [[ "$output" == *"dir-$format"* ]] || { echo "$output"; false; }
+      done
+    done
+    run_hook "$hooks/skill-preload-guard.sh" '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"small-declared"}}'
+    [ "$status" -eq 0 ] && [ -z "$output" ]
+  done
+  # The canonical size library must resolve the same frontmatter as both twins.
+  for lib in "$HOOKS_DIR/lib/skill-size.sh" "$HOOKS_DIR/../codex/hooks/lib/skill-size.sh" "$HOOKS_DIR/../../scripts/lib/skill-size.sh"; do
+    run bash -c '. "$1"; skill_size_resolve_root big-bom-crlf "$2" "$3"' _ "$lib" "$PROJECT" "$USER_HOME"
+    [ "$status" -eq 0 ] && [[ "$output" == *'/dir-bom-crlf' ]]
+  done
+}
+
+@test "invalid discovery directories deny matching events in both hook trees" {
+  local hooks input hook envname
+  for hooks in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for envname in HOME CLAUDE_PROJECT_DIR; do
+      for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+        if [ "$hook" = skill-preload-guard.sh ]; then
+          input='{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"example"}}'
+        else
+          input='{"hook_event_name":"UserPromptExpansion","expansion_type":"slash_command","command_name":"example"}'
+        fi
+        run env HOME="$USER_HOME" CLAUDE_PROJECT_DIR="$PROJECT" "$envname=$SANDBOX/absent" HOOK_INPUT="$input" \
+          bash -c 'printf "%s" "$HOOK_INPUT" | bash "$1"' _ "$hooks/$hook"
+        [ "$status" -eq 0 ] || { echo "$output"; false; }
+        jq -e '.decision == "block" or .hookSpecificOutput.permissionDecision == "deny"' <<<"$output" >/dev/null
+      done
+    done
+    # An unrelated event must still pass even when discovery is unavailable.
+    run env HOME="$SANDBOX/absent" CLAUDE_PROJECT_DIR="$PROJECT" bash -c \
+      'printf "%s" '\''{"hook_event_name":"PreToolUse","tool_name":"Bash"}'\'' | bash "$1"' _ "$hooks/skill-preload-guard.sh"
+    [ "$status" -eq 0 ] && [ -z "$output" ]
+  done
+}
+
 @test "ambiguous discoverable Skill name fails closed for invocation" {
   make_skill "$USER_HOME/.claude/plugins/cache/vendor/one/1.0.0/skills/duplicate" 1
   make_skill "$USER_HOME/.claude/plugins/cache/vendor/two/1.0.0/skills/duplicate" 1
@@ -137,6 +325,131 @@ run_hook() {
   run_hook "$SLASH_HOOK" '{"hook_event_name":"UserPromptExpansion","expansion_type":"slash_command","command_name":"duplicate","command_source":"projectSettings","prompt":"/duplicate"}'
   [ "$status" -eq 0 ]
   jq -e '.decision == "block" and (.reason | contains("resolves ambiguously"))' <<<"$output" >/dev/null
+}
+
+@test "both guard trees distinguish invalid names from ambiguity" {
+  local tree hook name input
+  for tree in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+      for name in 'a/b' 'plugin:'; do
+        if [ "$hook" = skill-preload-guard.sh ]; then
+          input="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"$name\"}}"
+        else
+          input="{\"hook_event_name\":\"UserPromptExpansion\",\"expansion_type\":\"slash_command\",\"command_name\":\"$name\"}"
+        fi
+        run_hook "$tree/$hook" "$input"
+        [ "$status" -eq 0 ]
+        jq -e '(.hookSpecificOutput.permissionDecision == "deny" or .decision == "block") and (tostring | contains("invalid name or discovery root")) and ((tostring | contains("resolves ambiguously")) | not)' <<<"$output" >/dev/null
+      done
+    done
+    run /bin/bash -c '. "$1/lib/skill-size.sh"; . "$1/lib/skill-preload.sh"; skill_preload_check known "$2" "$3"' \
+      _ "$tree" "$PROJECT/missing" "$USER_HOME"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid name or discovery root"* ]]
+  done
+}
+
+@test "both guard trees reject invalid UTF-8 before model or slash expansion" {
+  make_skill "$PROJECT/.claude/skills/invalid-directory" 1
+  printf '%s\n' '---' > "$PROJECT/.claude/skills/invalid-directory/SKILL.md"
+  printf 'description: \377\nname: invalid\n---\nbody' >> "$PROJECT/.claude/skills/invalid-directory/SKILL.md"
+  local tree hook input
+  for tree in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+      if [ "$hook" = skill-preload-guard.sh ]; then
+        input='{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"invalid"}}'
+      else
+        input='{"hook_event_name":"UserPromptExpansion","expansion_type":"slash_command","command_name":"invalid"}'
+      fi
+      run_hook "$tree/$hook" "$input"
+      [ "$status" -eq 0 ]
+      jq -e '(.hookSpecificOutput.permissionDecision == "deny" or .decision == "block") and (tostring | contains("unreadable manifest"))' <<<"$output" >/dev/null
+    done
+  done
+}
+
+@test "both model and slash twins refuse budget and ambiguous roots before expansion" {
+  make_skill "$PROJECT/.claude/skills/exact" 65536
+  make_skill "$PROJECT/.claude/skills/over" 65537
+  make_skill "$USER_HOME/.claude/plugins/cache/v/a/1/skills/shared" 1
+  make_skill "$USER_HOME/.claude/plugins/cache/v/b/1/skills/shared" 1
+  local tree hook name input
+  for tree in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+      for name in exact over shared plugin:shared unknown; do
+        if [ "$hook" = skill-preload-guard.sh ]; then
+          input="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"$name\"}}"
+        else
+          input="{\"hook_event_name\":\"UserPromptExpansion\",\"expansion_type\":\"slash_command\",\"command_name\":\"$name\"}"
+        fi
+        run_hook "$tree/$hook" "$input"
+        [ "$status" -eq 0 ]
+        case "$name" in
+          over) jq -e '(.hookSpecificOutput.permissionDecision == "deny" or .decision == "block") and (tostring | contains("inline budget"))' <<<"$output" >/dev/null ;;
+          shared|plugin:shared) jq -e '(.hookSpecificOutput.permissionDecision == "deny" or .decision == "block") and (tostring | contains("resolves ambiguously"))' <<<"$output" >/dev/null ;;
+          *) [ -z "$output" ] ;;
+        esac
+      done
+    done
+  done
+}
+
+@test "both model and slash twins refuse when snapshot temp creation is denied" {
+  [ "$(uname -s)" = Darwin ] || skip "macOS bash 3.2 temp-file regression"
+  make_skill "$PROJECT/.claude/skills/over" 65537
+  local profile='(version 1)(allow default)(deny file-write-create)' tree hook input
+  run /usr/bin/sandbox-exec -p "$profile" /bin/bash -c 'cat <<< probe'
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot create temp file"* ]]
+  for tree in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+      if [ "$hook" = skill-preload-guard.sh ]; then
+        input='{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"over"}}'
+      else
+        input='{"hook_event_name":"UserPromptExpansion","expansion_type":"slash_command","command_name":"over"}'
+      fi
+      run env HOME="$USER_HOME" CLAUDE_PROJECT_DIR="$PROJECT" HOOK_INPUT="$input" \
+        /usr/bin/sandbox-exec -p "$profile" /bin/bash -c \
+        'printf "%s" "$HOOK_INPUT" | /bin/bash "$1"' _ "$tree/$hook"
+      [ "$status" -eq 0 ]
+      jq -e '(.hookSpecificOutput.permissionDecision == "deny" or .decision == "block") and (tostring | contains("invalid name or discovery root"))' <<<"$output" >/dev/null
+    done
+  done
+}
+
+@test "both guard trees reject non-scalar and exact-budget invalid UTF-8" {
+  make_skill "$PROJECT/.claude/skills/non-scalar" 1
+  make_skill "$PROJECT/.claude/skills/exact-invalid" 65536
+  printf '\364\220\200\200' > "$PROJECT/.claude/skills/non-scalar/SKILL.md"
+  printf '\377' | dd of="$PROJECT/.claude/skills/exact-invalid/SKILL.md" bs=1 seek=65535 conv=notrunc 2>/dev/null
+  local tree hook name input
+  for tree in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    for hook in skill-preload-guard.sh skill-slash-guard.sh; do
+      for name in non-scalar exact-invalid; do
+        if [ "$hook" = skill-preload-guard.sh ]; then
+          input="{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Skill\",\"tool_input\":{\"skill\":\"$name\"}}"
+        else
+          input="{\"hook_event_name\":\"UserPromptExpansion\",\"expansion_type\":\"slash_command\",\"command_name\":\"$name\"}"
+        fi
+        run_hook "$tree/$hook" "$input"
+        [ "$status" -eq 0 ]
+        jq -e '(.hookSpecificOutput.permissionDecision == "deny" or .decision == "block") and (tostring | contains("unreadable manifest"))' <<<"$output" >/dev/null
+      done
+    done
+  done
+}
+
+@test "both model guards refuse without jq even with degradation requested" {
+  local jq_free="$SANDBOX/jq-free" tree
+  mkdir -p "$jq_free"
+  ln -s "$(command -v cat)" "$jq_free/cat"
+  ln -s "$(command -v dirname)" "$jq_free/dirname"
+  for tree in "$HOOKS_DIR" "$HOOKS_DIR/../codex/hooks"; do
+    run env HOME="$USER_HOME" CLAUDE_PROJECT_DIR="$PROJECT" PATH="$jq_free" TRELLIS_NO_JQ_DEGRADE=1 \
+      /bin/bash "$tree/skill-preload-guard.sh" <<< '{}'
+    [ "$status" -eq 2 ] || { echo "$tree missing jq allowed: $output"; false; }
+    [[ "$output" == *"jq required but not found; refusing"* ]]
+  done
 }
 
 @test "SessionStart preflight warns only for oversized and ambiguous roots" {
@@ -170,11 +483,12 @@ run_hook() {
   # B0-5 runs the guard through the guard-supervise.pl sh entry; the guard
   # path is the supervisor's last, quoted argument (pinned in guard-supervise.bats).
   local tail='guard-supervise "$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude skill-preload-guard "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-preload-guard.sh"'
-  jq -e --arg tail "$tail" '
+  local slash_tail='guard-supervise "$CLAUDE_PROJECT_DIR/.claude/hooks/lib/guard-supervise.pl" claude-expansion skill-slash-guard "$CLAUDE_PROJECT_DIR/.claude/hooks/skill-slash-guard.sh"'
+  jq -e --arg tail "$tail" --arg slash_tail "$slash_tail" '
     any(.hooks.PreToolUse[];
       .matcher == "Skill" and any(.hooks[]; .command | startswith("/bin/sh -c ") and endswith(" " + $tail)))
     and any(.hooks.UserPromptExpansion[];
-      .matcher == ".*" and any(.hooks[]; .command | endswith("/skill-slash-guard.sh")))
+      .matcher == ".*" and any(.hooks[]; .command | startswith("/bin/sh -c ") and endswith(" " + $slash_tail)))
     and (any(.hooks.SessionStart[].hooks[];
       .command | contains("skill-size-preflight")) | not)
   ' "$settings" >/dev/null

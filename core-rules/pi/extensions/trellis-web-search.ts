@@ -64,7 +64,7 @@ export type Deps = {
   realpath: (p: string) => string;
 };
 
-type Parsed = { answer: string; sources: Array<{ url: string; title: string }>; queries: string[] };
+type Parsed = { answer: string; sources: Array<{ url: string; title: string }>; queries: string[]; completed: boolean };
 // What execute's cleanup needs to release on every exit path.
 type CallState = { httpStatus: number | null; response: any; reader: ReadableStreamDefaultReader<Uint8Array> | null };
 type Outcome =
@@ -197,6 +197,10 @@ function parseLine(rawLine: string, parsed: Parsed): Reason | null {
   }
   if (data?.error != null) return "provider_error";
   for (const c of data?.response?.candidates ?? []) {
+    if (c?.finishReason != null && c.finishReason !== "") {
+      if (c.finishReason !== "STOP") return "provider_error";
+      parsed.completed = true;
+    }
     for (const p of c?.content?.parts ?? []) {
       if (typeof p?.text === "string" && !p.thought) parsed.answer += p.text;
     }
@@ -424,7 +428,7 @@ export function createWebSearch(deps: Deps) {
     // split across chunks intact, `pending` holds a line split across chunks,
     // and the raw byte count is capped, so an endless stream cannot hold the
     // call or grow memory without bound.
-    const parsed: Parsed = { answer: "", sources: [], queries: [] };
+    const parsed: Parsed = { answer: "", sources: [], queries: [], completed: false };
     const reader = response.body?.getReader();
     state.reader = reader ?? null;
     if (reader) {
@@ -456,6 +460,8 @@ export function createWebSearch(deps: Deps) {
       if (end) return end;
     }
     if (stopped()) return STOPPED;
+    // EOF alone is not a provider completion: a proxy may have cut the body.
+    if (!parsed.completed) return { status: "error", reason: "provider_error" };
     const secrets = [credential.token, credential.projectId];
     const redact = redactor(secrets);
     const exposes = exposer(secrets);

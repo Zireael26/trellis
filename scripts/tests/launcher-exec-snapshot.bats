@@ -53,7 +53,12 @@ make_release() {
   local extra="${1:-0}" version="${2:-1.2.3}" kind="${3:-current}" payload i
   payload="$RELEASES/$version/payload"
   mkdir -p "$payload/scripts/lib"
-  if [ "$kind" = old ]; then
+  if [ "$kind" = heavy ]; then
+    cp "$REPO_ROOT/scripts/trellis" "$REPO_ROOT/scripts/heavy.sh" "$payload/scripts/"
+    cp "$REPO_ROOT/scripts/lib/heavy-supervisor.pl" "$payload/scripts/lib/"
+    chmod 755 "$payload/scripts/heavy.sh"
+    printf '# trellis-payload-capability: exec-snapshot\n' > "$payload/scripts/lib/trellis-home.sh"
+  elif [ "$kind" = old ]; then
     cat > "$payload/scripts/trellis" <<'EOF'
 #!/bin/bash
 old_gate() {
@@ -111,6 +116,29 @@ run_launcher() {
   run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" "$@"
 }
 
+load helpers/native-launcher
+
+run_native_launcher() {
+  local binary
+  binary="$(native_launcher_binary)" || return $?
+  run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$binary" launcher run-v1 -- "$@"
+}
+
+native_reseal_cli() {
+  local replacement="$1" payload="$RELEASES/1.2.3/payload"
+  chmod u+w "$payload/scripts/trellis"
+  cp "$replacement" "$payload/scripts/trellis"
+  chmod 555 "$payload/scripts/trellis"
+  python3 -I "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$payload" > "$SANDBOX/manifest.jsonl"
+  chmod u+w "$RELEASES/1.2.3/release.json"
+  jq --slurpfile tree "$SANDBOX/manifest.jsonl" '.tree = $tree' \
+    "$RELEASES/1.2.3/release.json" > "$SANDBOX/new-record"
+  cp "$SANDBOX/new-record" "$RELEASES/1.2.3/release.json"
+  chmod 444 "$RELEASES/1.2.3/release.json"
+  DIGEST="$(python3 -I -c 'import hashlib,sys; print(hashlib.sha256(open(sys.argv[1],"rb").read()).hexdigest())' "$RELEASES/1.2.3/release.json")"
+  SNAPSHOT="$EXEC_STORE/1.2.3-$DIGEST"
+}
+
 inode_of() {
   python3 -I -c 'import os, sys; print(os.lstat(sys.argv[1]).st_ino)' "$1"
 }
@@ -141,6 +169,560 @@ tamper() {
   printf '#!/bin/bash\ntouch %q\nexit 0\n' "$MARKER" > "$file"
   touch -r "$SANDBOX/original" "$file"
   chmod a-w "$file" "$dir"
+}
+
+@test "T60 executable heavy uses a verified snapshot and refuses installed supervisor tamper" {
+  make_release 0 1.2.3 heavy
+  pin_native_launcher
+  for attempt in cold warm; do
+    run native_bounded "$LAUNCHER" heavy --lane fixture -- true
+    [ "$status" -eq 0 ] || { echo "$attempt: $status: $output"; false; }
+    [ -d "$SNAPSHOT" ]
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+  done
+  tamper "$RELEASES/1.2.3/payload/scripts/lib/heavy-supervisor.pl"
+  run native_bounded "$LAUNCHER" heavy --lane fixture -- /usr/bin/touch "$MARKER"
+  [ "$status" -eq 4 ] || { echo "$status: $output"; false; }
+  [ ! -e "$MARKER" ]
+}
+
+@test "native fusion runs cold and warm snapshots and removes its command scratch" {
+  make_release
+  run_native_launcher doctor
+  [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "$status: $output"; false; }
+  assert_one_snapshot_no_work
+  run_native_launcher doctor
+  [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "$status: $output"; false; }
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "native fusion preserves stdin and non-UTF8 argv without inheriting shell or Git injection" {
+  make_release
+  cat > "$SANDBOX/raw-cli" <<'EOF'
+#!/bin/bash
+IFS= read -r line
+printf 'stdin=%s argc=%s raw=' "$line" "$#"
+printf '%s' "$2" | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n'
+printf '\n'
+[ -z "${BASH_ENV-}${ENV-}${GIT_CONFIG_COUNT-}${GIT_CONFIG_KEY_0-}${GIT_CONFIG_VALUE_0-}" ] || exit 91
+[ -d "$TMPDIR" ] && [ "$TMPDIR" != /tmp ] || exit 92
+exit 3
+EOF
+  native_reseal_cli "$SANDBOX/raw-cli"
+  local binary
+  binary="$(native_launcher_binary)"
+  printf 'original input\n' > "$SANDBOX/input"
+  # Exercise both first-run delegation and the native warm path.
+  for attempt in 1 2; do
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" BASH_ENV=/nonexistent ENV=/nonexistent \
+      GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.bad GIT_CONFIG_VALUE_0='!exit 99' \
+      "$binary" launcher run-v1 -- doctor $'\377' < "$SANDBOX/input"
+    [ "$status" -eq 3 ] && [ "$output" = 'stdin=original input argc=2 raw=ff' ] || { echo "$status: $output"; false; }
+  done
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "native fusion refuses an installed old-mtime tamper before any payload runs" {
+  make_release
+  run_native_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  tamper "$RELEASES/1.2.3/payload/scripts/trellis"
+  run_native_launcher doctor
+  [ "$status" -eq 4 ] || { echo "$status: $output"; false; }
+  [ ! -e "$MARKER" ]
+}
+
+@test "native fusion repairs a tampered snapshot before executing it" {
+  make_release
+  run_native_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  tamper "$SNAPSHOT/payload/scripts/trellis"
+  run_native_launcher doctor
+  local expected="trellis: release execution snapshot failed verification and is rebuilt: $SNAPSHOT"
+  expected="$expected"$'\n'"$RAN"
+  [ "$status" -eq 3 ] && [ "$output" = "$expected" ] || { echo "$status: $output"; false; }
+  [ ! -e "$MARKER" ]
+  assert_one_snapshot_no_work
+}
+
+@test "native fusion scratch replacement refuses without deleting the replacement" {
+  make_release
+  cat > "$SANDBOX/scratch-cli" <<'EOF'
+#!/bin/bash
+if [ -f "$TRELLIS_HOME/corrupt-scratch" ]; then
+  mv "$TMPDIR" "$TMPDIR.moved"
+  mkdir "$TMPDIR"
+  printf 'preserve\n' > "$TMPDIR/foreign"
+fi
+exit 3
+EOF
+  native_reseal_cli "$SANDBOX/scratch-cli"
+  run_native_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  touch "$TRELLIS_HOME/corrupt-scratch"
+  run_native_launcher doctor
+  [ "$status" -eq 4 ] || { echo "$status: $output"; false; }
+  [ "$(find "$TRELLIS_HOME/state/scratch" -name foreign -type f | wc -l | tr -d ' ')" -eq 1 ]
+}
+
+@test "native fusion postflight refuses success and preserves a greater child status" {
+  make_release
+  cat > "$SANDBOX/postflight-cli" <<'EOF'
+#!/bin/bash
+if [ -f "$TRELLIS_HOME/change-snapshot" ]; then
+  chmod u+w "$0"
+  exit "$(cat "$TRELLIS_HOME/child-status")"
+fi
+exit 3
+EOF
+  native_reseal_cli "$SANDBOX/postflight-cli"
+  for child_status in 0 7; do
+    rm -f "${TRELLIS_HOME:?}/change-snapshot"
+    run_native_launcher doctor
+    [ "$status" -eq 3 ] || { echo "$output"; false; }
+    printf '%s\n' "$child_status" > "$TRELLIS_HOME/child-status"
+    touch "$TRELLIS_HOME/change-snapshot"
+    run_native_launcher doctor
+    local expected=4
+    [ "$child_status" -le 4 ] || expected="$child_status"
+    [ "$status" -eq "$expected" ] || { echo "$status: $output"; false; }
+    [[ "$output" == *'identity changed'* ]] || { echo "$output"; false; }
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+  done
+}
+
+@test "paired payload retains SIGPIPE on cold warm and canonical fallback paths" {
+  make_release
+  cat > "$SANDBOX/sigpipe-cli" <<'EOF'
+#!/bin/bash
+/usr/bin/yes | /usr/bin/head -1 >/dev/null
+producer=${PIPESTATUS[0]}
+printf 'producer=%s\n' "$producer"
+[ "$producer" -eq 141 ] || exit 92
+# With ignored SIGPIPE this producer spins forever on EPIPE. The status
+# assertion above fails first so a regression cannot emit unbounded noise.
+while :; do echo x; done | /usr/bin/head -1 >/dev/null
+[ "${PIPESTATUS[0]}" -eq 141 ] || exit 93
+exit 3
+EOF
+  native_reseal_cli "$SANDBOX/sigpipe-cli"
+  pin_native_launcher
+  for path in cold warm fallback; do
+    if [ "$path" = fallback ]; then
+      python3 -I - "$TRELLIS_HOME/config.json" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);p.write_bytes(b'\xef\xbb\xbf'+p.read_bytes())
+PY
+    fi
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
+    [ "$status" -eq 3 ] && [ "$output" = 'producer=141' ] || { echo "$path: $status: $output"; false; }
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+  done
+}
+
+@test "native fusion rechecks installed release after child even with broken stderr" {
+  make_release
+  cat > "$SANDBOX/installed-postflight-cli" <<'EOF'
+#!/bin/bash
+if [ -f "$TRELLIS_HOME/change-installed" ]; then
+  chmod u+w "$TRELLIS_HOME/releases/1.2.3/payload/README"
+  exit "$(cat "$TRELLIS_HOME/child-status")"
+fi
+exit 3
+EOF
+  native_reseal_cli "$SANDBOX/installed-postflight-cli"
+  local binary child_status expected
+  binary="$(native_launcher_binary)"
+  for child_status in 0 7; do
+    rm -f "$TRELLIS_HOME/change-installed"
+    chmod a-w "$RELEASES/1.2.3/payload/README"
+    run_native_launcher doctor
+    [ "$status" -eq 3 ] || { echo "$output"; false; }
+    printf '%s\n' "$child_status" > "$TRELLIS_HOME/child-status"
+    touch "$TRELLIS_HOME/change-installed"
+    run python3 -I - "$binary" <<'PY'
+import os,subprocess,sys
+r,w=os.pipe();os.close(r)
+try:
+    p=subprocess.run([sys.argv[1],'launcher','run-v1','--','doctor'],stderr=w,stdout=subprocess.PIPE,timeout=45)
+finally:
+    os.close(w)
+sys.stdout.buffer.write(p.stdout)
+sys.exit(p.returncode if p.returncode>=0 else 128-p.returncode)
+PY
+    expected=4
+    [ "$child_status" -le 4 ] || expected="$child_status"
+    [ "$status" -eq "$expected" ] || { echo "post-child closed stderr: $status: $output"; false; }
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+  done
+}
+
+@test "paired launcher delegates executable routes before legacy jq validation" {
+  make_release
+  pin_native_launcher
+  python3 -I - "$LAUNCHER" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);text=p.read_text();old='launcher_validate_machine_config() {'
+assert text.count(old)==1
+p.write_text(text.replace(old,old+'\n  return 91 # fixture: legacy config route must not run'))
+PY
+  for attempt in 1 2; do
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
+    [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "$status: $output"; false; }
+  done
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "paired launcher selects its physical-home pin and ignores planted companions" {
+  make_release
+  pin_native_launcher
+  mkdir -p "$SANDBOX/planted"
+  printf '#!/bin/sh\ntouch "%s"\nexit 0\n' "$MARKER" > "$SANDBOX/planted/trellis-hooks"
+  chmod 755 "$SANDBOX/planted/trellis-hooks"
+  cp "$SANDBOX/planted/trellis-hooks" "$SANDBOX/projects/trellis-hooks"
+  ln -s "$SANDBOX" "$SANDBOX/parent-alias"
+  cd "$SANDBOX/projects"
+  for attempt in 1 2; do
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$SANDBOX/parent-alias/trellis-home" \
+      PATH="$SANDBOX/planted:$PATH" "$LAUNCHER" doctor
+    [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "$status: $output"; false; }
+  done
+  [ ! -e "$MARKER" ]
+}
+
+@test "paired launcher refuses a missing pin without discovering a replacement" {
+  make_release
+  pin_native_launcher
+  local entry
+  entry="$(find "$TRELLIS_HOME/bin/native" -type f -name trellis-hooks)"
+  chmod u+w "${entry%/*}"
+  rm -f "${entry:?}"
+  mkdir -p "$SANDBOX/planted"
+  printf '#!/bin/sh\ntouch "%s"\nexit 0\n' "$MARKER" > "$SANDBOX/planted/trellis-hooks"
+  chmod 755 "$SANDBOX/planted/trellis-hooks"
+  run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" PATH="$SANDBOX/planted:$PATH" "$LAUNCHER" doctor
+  [ "$status" -eq 4 ] && [[ "$output" == *'installed launcher companion is unavailable:'* ]] || { echo "$status: $output"; false; }
+  [[ "$output" != *'ran doctor'* ]] && [ ! -e "$MARKER" ]
+}
+
+@test "paired native launcher rejects malformed and unknown-key config without invoking the payload" {
+  make_release
+  pin_native_launcher
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/good-config"
+  # These optional fields are intentionally untyped in canonical validation.
+  # Do not tighten them accidentally via serde_json's number/depth limits.
+  python3 -I - "$SANDBOX/good-config" "$SANDBOX" <<'PY'
+import json,pathlib,sys
+base=json.loads(pathlib.Path(sys.argv[1]).read_text());root=pathlib.Path(sys.argv[2])
+for field in ['projects','heavy_slots','heavy_light_slots']:
+    for name,value in [('huge','1e1000'),('deep','['*160+'null'+']'*160)]:
+        data=dict(base);data[field]='UNREPRESENTABLE_TEST'
+        text=json.dumps(data).replace('"UNREPRESENTABLE_TEST"',value)
+        (root/('untyped-'+field+'-'+name+'.json')).write_text(text)
+for name,value in [('schema-valid-float','1.0'),('schema-valid-exponent','1e0'),('schema-near-high','1.0000000000000000001'),('schema-near-low','0.99999999999999999999')]:
+    data=dict(base);data['schema_version']='EXACT_SCHEMA_NUMBER'
+    text=json.dumps(data).replace('"EXACT_SCHEMA_NUMBER"',value)
+    (root/(name+'.json')).write_text(text)
+PY
+  cp "$LAUNCHER_TEMPLATE" "$SANDBOX/legacy-launcher"
+  chmod 755 "$SANDBOX/legacy-launcher"
+  for candidate in "$SANDBOX"/untyped-*.json "$SANDBOX"/schema-valid-*.json; do
+    cp "$candidate" "$TRELLIS_HOME/config.json"
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$SANDBOX/legacy-launcher" doctor
+    [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "legacy $candidate: $status: $output"; false; }
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
+    [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "native $candidate: $status: $output"; false; }
+  done
+  for kind in malformed unknown-key high-surrogate schema-near-high schema-near-low; do
+    if [ "$kind" = malformed ]; then
+      printf '{malformed' > "$TRELLIS_HOME/config.json"
+    elif [ "$kind" = unknown-key ]; then
+      jq '. + {unknown_key: true}' "$SANDBOX/good-config" > "$TRELLIS_HOME/config.json"
+    elif [ "$kind" = schema-near-high ] || [ "$kind" = schema-near-low ]; then
+      cp "$SANDBOX/$kind.json" "$TRELLIS_HOME/config.json"
+    else
+      python3 -I - "$SANDBOX/good-config" "$TRELLIS_HOME/config.json" <<'PY'
+import json,pathlib,sys
+data=json.loads(pathlib.Path(sys.argv[1]).read_text());data['projects']=chr(0xd800)
+pathlib.Path(sys.argv[2]).write_text(json.dumps(data))
+PY
+    fi
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$SANDBOX/legacy-launcher" doctor
+    [ "$status" -eq 4 ] || { echo "legacy $kind: $status: $output"; false; }
+    run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
+    [ "$status" -eq 4 ] && [[ "$output" == *'machine config failed validation'* ]] || { echo "$status: $output"; false; }
+    [[ "$output" != *'ran doctor'* ]]
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+  done
+}
+
+# Both launchers read the same original bytes, never a JSON round-trip.
+assert_canonical_config_parity() {
+  local label="$1" expected
+  run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$SANDBOX/canonical-launcher" doctor
+  expected="$status"
+  [ "$expected" -eq 3 ] || [ "$expected" -eq 4 ] || { echo "canonical $label: $status: $output"; false; }
+  run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
+  [ "$status" -eq "$expected" ] || { echo "$label: canonical=$expected native=$status: $output"; false; }
+  if [ "$expected" -eq 3 ]; then
+    [ "$output" = "$RAN" ] || { echo "$label: $output"; false; }
+  else
+    [[ "$output" != *'ran doctor'* ]] || { echo "$label executed payload: $output"; false; }
+  fi
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+prepare_config_parity() {
+  make_release
+  pin_native_launcher
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/parity-base.json"
+  cp "$LAUNCHER_TEMPLATE" "$SANDBOX/canonical-launcher"
+  chmod 755 "$SANDBOX/canonical-launcher"
+}
+
+@test "paired config depth boundaries defer arrays objects and earlier duplicate values to canonical" {
+  prepare_config_parity
+  python3 -I - "$SANDBOX" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);base=json.loads((root/'parity-base.json').read_bytes())
+for field in ['projects','heavy_slots','heavy_light_slots']:
+    for kind in ['array','object']:
+        for depth in [127,128,254,255]:
+            value=('['*depth+'null'+']'*depth if kind=='array' else '{"x":'*depth+'null'+'}'*depth)
+            data=dict(base);data[field]='DEPTH_VALUE'
+            text=json.dumps(data).replace('"DEPTH_VALUE"',value)
+            (root/(f'depth-{field}-{kind}-{depth}.json')).write_text(text)
+            duplicate=text[:-1]+',"'+field+'":null}'
+            (root/(f'depth-{field}-{kind}-{depth}-duplicate.json')).write_text(duplicate)
+PY
+  for candidate in "$SANDBOX"/depth-*.json; do
+    cp "$candidate" "$TRELLIS_HOME/config.json"
+    assert_canonical_config_parity "${candidate##*/}"
+  done
+}
+
+@test "paired config uncertainty delegates original lenient syntax encoding and duplicates to canonical" {
+  prepare_config_parity
+  python3 -I - "$SANDBOX" <<'PY'
+import json,pathlib,sys
+root=pathlib.Path(sys.argv[1]);base=json.loads((root/'parity-base.json').read_bytes())
+for field in ['projects','heavy_slots','heavy_light_slots']:
+    for name,value in [('NaN','NaN'),('nan','nan'),('Infinity','Infinity'),('negativeInfinity','-Infinity'),('leadingzero','01'),('plus','+1'),('leadingdot','.5'),('trailingdot','1.'),('low',r'"\udc00"'),('highhigh',r'"\ud800\ud800"')]:
+        data=dict(base);data[field]='ODD_VALUE'
+        (root/(f'odd-{field}-{name}.json')).write_text(json.dumps(data).replace('"ODD_VALUE"',value))
+raw=json.dumps(base).encode()
+for name,value in [('bom',b'\xef\xbb\xbf'+raw),('nul',raw+b'\0'),('junk',raw+b'junk'),('typed-low',raw.replace(b'fixture://release',br'\udc00')),('typed-invalid-utf8',raw.replace(b'fixture://release',b'\xff')),('schema01',raw.replace(b'"schema_version": 1',b'"schema_version": 01')),('duplicate-schema',b'{"schema_version":1e1000,'+raw[1:]),('duplicate-fleets',b'{"fleets":'+b'['*200+b'null'+b']'*200+b','+raw[1:])]:
+    (root/(f'odd-{name}.json')).write_bytes(value)
+PY
+  for candidate in "$SANDBOX"/odd-*.json; do
+    cp "$candidate" "$TRELLIS_HOME/config.json"
+    assert_canonical_config_parity "${candidate##*/}"
+  done
+}
+
+@test "paired config group access and special mode bits never authorize warm execution" {
+  prepare_config_parity
+  for mode in 640 1600 2600 4600; do
+    chmod "$mode" "$TRELLIS_HOME/config.json"
+    local expected
+    expected="$(python3 -I -c 'import os,sys;print(4 if os.stat(sys.argv[1]).st_mode & 0o7077 else 3)' "$TRELLIS_HOME/config.json")"
+    # Some hosts strip setgid. Judge the bits actually set; synthetic identity
+    # unit rows additionally cover all bits, independent of host capability.
+    run_launcher doctor
+    [ "$status" -eq "$expected" ] || { echo "mode-$mode: expected=$expected native=$status: $output"; false; }
+    if [ "$expected" -eq 4 ]; then [[ "$output" != *'ran doctor'* ]]; fi
+  done
+}
+
+@test "paired invalid config with broken stderr returns refusal rather than panic" {
+  prepare_config_parity
+  printf '{malformed' > "$TRELLIS_HOME/config.json"
+  run python3 -I - "$LAUNCHER" <<'PY'
+import os,subprocess,sys
+r,w=os.pipe();os.close(r)
+try:
+    p=subprocess.run([sys.argv[1],'doctor'],stderr=w,stdout=subprocess.PIPE,timeout=45)
+finally:
+    os.close(w)
+sys.stdout.buffer.write(p.stdout)
+sys.exit(p.returncode if p.returncode>=0 else 128-p.returncode)
+PY
+  [ "$status" -eq 4 ] && [ -z "$output" ] || { echo "$status: $output"; false; }
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+# T60/T58 fd parity: payload children see exactly the caller's descriptors, as
+# on the shell route, and none of native's proof or carrier descriptors.
+@test "native fusion passes caller descriptors and closes proof descriptors in payload children" {
+  make_release
+  cat > "$SANDBOX/fd-probe.py" <<'EOF'
+import os
+extra=[]
+for name in os.listdir("/dev/fd"):
+    try:
+        fd=int(name)
+        os.fstat(fd)
+    except (OSError,ValueError):
+        continue
+    if fd>2:
+        extra.append(fd)
+print("extra="+",".join(map(str,sorted(extra))))
+EOF
+  printf '#!/bin/bash\npython3 -I %q\nexit 3\n' "$SANDBOX/fd-probe.py" > "$SANDBOX/fd-cli"
+  native_reseal_cli "$SANDBOX/fd-cli"
+  exec 9< "$TRELLIS_HOME/config.json"
+  run python3 -I "$SANDBOX/fd-probe.py"
+  local expected="$output"
+  [[ "$expected" == *9* ]] || { echo "caller baseline: $expected"; false; }
+  for attempt in 1 2; do
+    run_native_launcher doctor
+    [ "$status" -eq 3 ] && [ "$output" = "$expected" ] || { echo "$attempt: $status: $output versus $expected"; false; }
+  done
+  exec 9<&-
+}
+
+@test "native fusion forwards HUP INT TERM and cleans scratch even with inherited ignored INT" {
+  make_release
+  cat > "$SANDBOX/signal-cli" <<'EOF'
+#!/bin/bash
+if [ -f "$TRELLIS_HOME/hold" ]; then
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  printf 'ready\n'
+  while :; do /bin/sleep 0.05; done
+fi
+exit 3
+EOF
+  native_reseal_cli "$SANDBOX/signal-cli"
+  run_native_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  touch "$TRELLIS_HOME/hold"
+  local binary
+  binary="$(native_launcher_binary)"
+  run python3 -I -c '
+import os,selectors,signal,subprocess,sys
+for sig in [signal.SIGHUP,signal.SIGINT,signal.SIGTERM]:
+    def ignored_int():
+        signal.signal(signal.SIGINT,signal.SIG_IGN)
+    child=subprocess.Popen([sys.argv[1],"launcher","run-v1","--","doctor"],stdout=subprocess.PIPE,stderr=subprocess.PIPE,stdin=subprocess.DEVNULL,start_new_session=True,preexec_fn=ignored_int)
+    try:
+        ready=selectors.DefaultSelector();ready.register(child.stdout,selectors.EVENT_READ)
+        assert ready.select(timeout=20),"no readiness acknowledgement"
+        assert child.stdout.readline()==b"ready\n"
+        ready.close()
+        os.kill(child.pid,sig)
+        out,err=child.communicate(timeout=10)
+        assert child.returncode==128+sig,(sig,child.returncode,out,err)
+        assert out==err==b"",(sig,out,err)
+        print("signal="+str(sig)+" status="+str(child.returncode))
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid,signal.SIGKILL)
+            child.wait()
+' "$binary"
+  [ "$status" -eq 0 ] && [ "$output" = $'signal=1 status=129\nsignal=2 status=130\nsignal=15 status=143' ] || { echo "$status: $output"; false; }
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "native fusion rejects ACL-bearing private configuration before payload execution" {
+  make_release
+  pin_native_launcher
+  run_launcher doctor
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  case "$(uname -s)" in
+    Darwin) chmod +a "user:$(id -un) allow read" "$TRELLIS_HOME/config.json" ;;
+    Linux)
+      command -v setfacl >/dev/null || skip 'POSIX ACL tools unavailable'
+      setfacl -m "u:$(id -u):r--,m::---" "$TRELLIS_HOME/config.json"
+      ;;
+    *) skip 'native ACL fixture unavailable' ;;
+  esac
+  run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
+  [ "$status" -eq 4 ] && [[ "$output" == *'ACL'* ]] || { echo "$status: $output"; false; }
+  [[ "$output" != *'ran doctor'* ]]
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "paired launcher retains legacy verification for an installed T70 scaffold" {
+  make_release
+  # Known fixture trust-root bytes model the old native ABI (no run-v1), not
+  # target payload code. Publish by the same fixed literal digest pin helper.
+  printf '#!/bin/sh\nexit 5\n' > "$SANDBOX/old-scaffold"
+  chmod 500 "$SANDBOX/old-scaffold"
+  pin_native_launcher "$SANDBOX/old-scaffold"
+  run_launcher doctor
+  [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "$status: $output"; false; }
+  tamper "$RELEASES/1.2.3/payload/scripts/trellis"
+  run_launcher doctor
+  [ "$status" -eq 4 ] || { echo "$status: $output"; false; }
+  [ ! -e "$MARKER" ]
+}
+
+@test "native fusion derives private scratch independently of caller umask" {
+  make_release
+  local binary
+  binary="$(native_launcher_binary)"
+  run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" /bin/bash -c \
+    'umask 0777; exec "$1" launcher run-v1 -- doctor' native-umask "$binary"
+  [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "$status: $output"; false; }
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "launcher refuses an ACL hidden by an xattr and permits an xattr alone" {
+  [ "$(uname -s)" = Darwin ] || skip 'native Darwin ACL and xattr fixture'
+  make_release
+  file="$RELEASES/1.2.3/payload/README"
+  chmod u+w "$file"
+  xattr -w com.trellis.fixture data "$file" || skip 'extended attributes unavailable'
+  chmod a-w "$file"
+  chmod +a "user:$(id -un) allow write" "$file" || skip 'ACLs unavailable'
+  [[ "$(ls -ld "$file")" == *'@ '* ]] || skip 'filesystem does not display the xattr marker'
+  run_launcher doctor
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *'ACL'* ]] || { echo "$output"; false; }
+  chmod -N "$file"
+  run_launcher doctor
+  [ "$status" -eq 3 ] && [ "$output" = "$RAN" ] || { echo "$output"; false; }
+}
+
+@test "launcher rejects chained links escaping the configured payload" {
+  make_release
+  local payload="$RELEASES/1.2.3/payload"
+  mkdir -p "$RELEASES/1.0.0/payload"
+  printf 'outside release\n' > "$RELEASES/1.0.0/payload/x"
+  chmod u+w "$RELEASES/1.2.3" "$payload"
+  mkdir "$payload/d"
+  ln -s .. "$payload/d/L2"
+  ln -s 'd/L2/../../1.0.0/payload/x' "$payload/L1"
+  python3 -I "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$payload" > "$SANDBOX/manifest.jsonl"
+  chmod u+w "$RELEASES/1.2.3/release.json"
+  jq -n --slurpfile tree "$SANDBOX/manifest.jsonl" '{
+    schema_version: 1, version: "1.2.3", tag: "v1.2.3",
+    commit: "0000000000000000000000000000000000000000", remote: "fixture://release", tree: $tree
+  }' > "$RELEASES/1.2.3/release.json"
+  find "$payload" -type f -exec chmod a-w {} +
+  find "$payload" -type d -exec chmod a-w {} +
+  chmod a-w "$RELEASES/1.2.3/release.json" "$RELEASES/1.2.3"
+  [ "$(< "$payload/L1")" = 'outside release' ]
+  run_launcher doctor
+  [ "$status" -eq 4 ] && [[ "$output" == *'unsafe symlink: L1'* ]] || { echo "$output"; false; }
+
+  # The same intermediate link is safe when it resolves inside the payload.
+  chmod u+w "$RELEASES/1.2.3" "$payload" "$RELEASES/1.2.3/release.json"
+  rm -f "${payload:?}/L1"
+  ln -s 'd/L2/README' "$payload/L1"
+  python3 -I "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$payload" > "$SANDBOX/manifest.jsonl"
+  jq --slurpfile tree "$SANDBOX/manifest.jsonl" '.tree = $tree' \
+    "$RELEASES/1.2.3/release.json" > "$SANDBOX/release.json"
+  mv "$SANDBOX/release.json" "$RELEASES/1.2.3/release.json"
+  chmod a-w "$payload" "$RELEASES/1.2.3/release.json" "$RELEASES/1.2.3"
+  run_launcher doctor
+  [ "$status" -eq 3 ] && [[ "$output" == 'ran doctor from '* ]] || { echo "$output"; false; }
 }
 
 @test "a warm run executes the persistent snapshot without re-verifying anything" {

@@ -118,6 +118,34 @@ assert_trailing_summary() {
   assert_trailing_summary "$fixture: candidates=1 valid=1 kinds_ok=true surfaced=0/0 verdict=PASS"
 }
 
+@test "unclosed Markdown fences and comments fail instead of hiding later entries" {
+  local opener file="$BATS_TEST_TMPDIR/unclosed.log"
+  for opener in '```' '~~~' '<!--'; do
+    printf '%s\n%s\n' "$opener" '- 2026-11-03T10:00:00Z [L3] [scope] Malformed.' > "$file"
+    run_validator "$file"
+    [ "$status" -ne 0 ] || { echo "unclosed $opener passed: $output"; false; }
+    assert_output_contains 'line 1: unclosed'
+    assert_output_contains 'verdict=FAIL'
+  done
+  # Properly closed scaffolding stays an annotation, not a decision candidate.
+  printf '%s\n%s\n%s\n' '```' 'an example' '```' > "$file"
+  run_validator "$file"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_output_contains 'candidates=0 valid=0'
+}
+
+@test "entry-shaped non-heading lines beginning with hash are not ignored" {
+  local file="$BATS_TEST_TMPDIR/headings.log"
+  printf '%s\n' '#- 2026-11-03T10:00:00Z [L3] [scope] Malformed.' > "$file"
+  run_validator "$file"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  assert_output_contains 'line 1: missing leading'
+  printf '%s\n' '# Ordinary heading' '## 2026-11-03T10:00:00Z [L3] [architectural] Heading example' > "$file"
+  run_validator "$file"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_output_contains 'candidates=0 valid=0'
+}
+
 @test "unlisted-kind reports audit-remediation and exact line 3" {
   local fixture="$FIXTURE_ROOT/unlisted-kind.log"
 

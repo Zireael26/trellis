@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # SessionStart: when running inside a Herdr (herdr-core `hc`) terminal, inject
 # the foreman context so the apex adopts the herdr-foreman skill for multi-unit
 # work.

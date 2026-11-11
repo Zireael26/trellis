@@ -7,14 +7,37 @@ WRAPPER="$REPO_ROOT/scripts/run-tests-local.py"
 
 setup() {
   unset PG_PUSH_TEST_SCOPE
-  local parent=/tmp
+  # Pure synthetic checks need no Darwin process fixture and stay entirely
+  # inside Bats' fenced temporary directory on every platform.
+  case "$BATS_TEST_DESCRIPTION" in
+    'hardening: '*)
+      SANDBOX="$BATS_TEST_TMPDIR/hardening"
+      mkdir -m 700 "$SANDBOX"
+      export HOME="$SANDBOX/home" TRELLIS_HOME="$SANDBOX/trellis" TMPDIR="$SANDBOX/tmp"
+      mkdir -m 700 "$HOME" "$TRELLIS_HOME" "$TMPDIR"
+      return ;;
+  esac
+  local parent=/tmp portable_fixture=0
+  case "$BATS_TEST_DESCRIPTION" in
+    'shard CPU derivation '*|'secondary environment and path reads '*|\
+    'fixture process scanner preserves membership '*|'vanished process inspections '*|\
+    'live unreadable process inspections '*|'unrelated failed BSD reads '*|\
+    'transient PID retries '*|'partial BSD membership '*|\
+    'invalid runner and gate-runs arguments '*|'run-tests list is receipt-free '*|\
+    'eight-way plan accounts '*|'inventory '*|'immutable inventory '*) portable_fixture=1 ;;
+  esac
   case "${TMPDIR:-}" in
     /tmp/tg-*|/private/tmp/tg-*) parent="$TMPDIR" ;;
+  esac
+  [ "$portable_fixture" -ne 1 ] || parent="${TMPDIR:-/tmp}"
+  case "$BATS_TEST_DESCRIPTION" in
+    'scoped runs interrupted during teardown '*|'scoped runs with a foreign survivor '*) parent="${TMPDIR:-/tmp}" ;;
   esac
   SANDBOX="$(mktemp -d "$parent/run-tests-local.XXXXXX")"
   SANDBOX="$(cd "$SANDBOX" && pwd -P)"
   export HOME="$SANDBOX/home" TRELLIS_HOME="$SANDBOX/trellis" TMPDIR="$SANDBOX/tmp"
   mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR"
+  chmod 700 "$HOME" "$TRELLIS_HOME" "$TMPDIR"
   # Keep the existing containment fixtures deterministic on every host.
   export TRELLIS_TEST_SHARDS=8
   export TRELLIS_GATE_STATE_DIR="$SANDBOX/state"
@@ -28,10 +51,9 @@ setup() {
   : > "$FAKE_CHILD_PIDS"
   export FAKE_REAL_PYTHON FAKE_GATE_MODULE="$WRAPPER"
   FAKE_REAL_PYTHON="$(python3 -c 'import sys; print(sys.executable)')"
-  unset FAKE_PRIORITY_ONLY
-  # The new priority assertions are portable; the older containment fixture is
-  # not. Keep its native macOS coverage unchanged, and isolate only these three
-  # cases from libproc on other hosts (real main/priority/receipts/children).
+  unset FAKE_PRIORITY_ONLY FAKE_PORTABLE_ONLY
+  # Priority cases replace process enumeration on non-Darwin; pure fixtures
+  # need no libproc snapshot at all. Native containment remains Darwin-only.
   case "$BATS_TEST_DESCRIPTION" in
     'shards run at nice -n 10 '*|'a missing nice runs shards '*|'shard prefix is nice -n 10 '*)
       if [ "$("$FAKE_REAL_PYTHON" -c 'import sys; print(sys.platform)')" != darwin ]; then
@@ -39,7 +61,10 @@ setup() {
       fi
       ;;
   esac
-  if [ "${FAKE_PRIORITY_ONLY:-}" != 1 ]; then
+  if [ "$portable_fixture" -eq 1 ] && [ "$("$FAKE_REAL_PYTHON" -c 'import sys; print(sys.platform)')" != darwin ]; then
+    export FAKE_PORTABLE_ONLY=1
+  fi
+  if [ "${FAKE_PRIORITY_ONLY:-}" != 1 ] && [ "${FAKE_PORTABLE_ONLY:-}" != 1 ]; then
   [ "$("$FAKE_REAL_PYTHON" -c 'import sys; print(sys.platform)')" = darwin ] || skip "Darwin libproc containment fixture"
   "$FAKE_REAL_PYTHON" - "$SANDBOX/baseline.json" <<'PY'
 import ctypes, json, sys
@@ -333,7 +358,10 @@ if mutation:
         'retry': ('return read()\n\n\ndef bsd_info', 'raise ContainmentError("retry disabled")\n\n\ndef bsd_info'),
         'empty-argv': ('offset = 4 + ((offset - 4 + 1 + alignment - 1) // alignment) * alignment',
                        'offset += 1\n    while offset < len(raw) and raw[offset] == 0:\n        offset += 1'),
-        'earlier-boot-root': ('_remove_run_root(data)\n                _receipt(data, 0, False)', 'pass\n                _receipt(data, 0, False)'),
+        'earlier-boot-root': ('_delete_empty_record(path, data)\n                _receipt(data, 0, False)\n                continue',
+                              'path.unlink()\n                _receipt(data, 0, False)\n                continue'),
+        'earlier-boot-order': ('_delete_empty_record(path, data)\n                _receipt(data, 0, False)\n                continue',
+                               'path.unlink()\n                _remove_run_root(data)\n                _receipt(data, 0, False)\n                continue'),
         'unreadable-member': ('unreadable.add(pid)\n                continue', 'owned.add(pid)\n                continue'),
         'unreadable-fail': ('except UnreadableProcess:\n                if _birth(table[pid]) == 0:',
                             'except UnreadableProcess:\n                raise ContainmentError("unreadable inversion")\n                if _birth(table[pid]) == 0:'),
@@ -552,7 +580,7 @@ elif mode == 'fast-empty':
     assert len(scans) == 2, 'boundary did not require two empty scans'
     assert time.monotonic() - started < 0.25, 'empty boundary slept through grace'
     sys.exit(0)
-elif mode in ('foreign-guard', 'outside-tmp', 'earlier-boot', 'earlier-boot-unsafe', 'stale-group', 'scan-failure', 'uid-exclusion', 'ancestor-exclusion', 'preexisting', 'clock-step'):
+elif mode in ('foreign-guard', 'outside-tmp', 'earlier-boot', 'earlier-boot-unsafe', 'earlier-boot-cleanup-fails', 'earlier-boot-fsync-fails', 'stale-group', 'scan-failure', 'uid-exclusion', 'ancestor-exclusion', 'preexisting', 'clock-step'):
     import json
     import shutil
     import tempfile
@@ -651,7 +679,7 @@ elif mode in ('foreign-guard', 'outside-tmp', 'earlier-boot', 'earlier-boot-unsa
             assert boundary.scan(time.monotonic() + 1) == {}
             assert boundary.teardown(time.monotonic() + 1, .05) == 0
             assert process.poll() is None
-        elif mode in ('earlier-boot', 'earlier-boot-unsafe'):
+        elif mode in ('earlier-boot', 'earlier-boot-unsafe', 'earlier-boot-cleanup-fails', 'earlier-boot-fsync-fails'):
             data['boot_session'] = 'previous-boot'
             state = gate.RunState()
             record = state.runs / (token + '.json')
@@ -662,6 +690,47 @@ elif mode in ('foreign-guard', 'outside-tmp', 'earlier-boot', 'earlier-boot-unsa
                 assert not gate.sweep_records(state, 1, .05)
                 assert root.exists() and record.exists(), 'unsafe root or its record was removed'
                 os.chmod(root, 0o700)
+            if mode == 'earlier-boot-cleanup-fails':
+                # The record is the only path back to this root: a cleanup that
+                # fails after the root passed every check must keep it, and the
+                # receipt must say so truthfully.
+                import contextlib
+                import io
+                real_rmtree = shutil.rmtree
+                def refuse(path, *args, **kwargs):
+                    raise PermissionError(13, 'injected cleanup failure', str(path))
+                gate.shutil.rmtree = refuse
+                receipt = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(receipt):
+                        assert not gate.sweep_records(state, 1, .05)
+                finally:
+                    gate.shutil.rmtree = real_rmtree
+                assert 'record=retained' in receipt.getvalue(), receipt.getvalue()
+                assert 'root=present' in receipt.getvalue(), receipt.getvalue()
+                assert record.exists(), 'receipt says retained but the record is gone'
+                assert root.exists()
+            if mode == 'earlier-boot-fsync-fails':
+                # Root and record are both gone; only the directory fsync after
+                # the unlink failed. That is a durability failure, not a
+                # retained record, and the receipt must say which.
+                import contextlib
+                import io
+                real_fsync = gate._fsync_directory
+                def fail_fsync(path):
+                    raise OSError(5, 'injected directory fsync failure', str(path))
+                gate._fsync_directory = fail_fsync
+                receipt, errors = io.StringIO(), io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(receipt), contextlib.redirect_stderr(errors):
+                        assert not gate.sweep_records(state, 1, .05)
+                finally:
+                    gate._fsync_directory = real_fsync
+                assert not record.exists() and not root.exists()
+                assert 'record=retained' not in receipt.getvalue(), 'receipt says retained but the record is gone: ' + receipt.getvalue()
+                assert 'survivors=0 record=deleted-unsynced' in receipt.getvalue(), receipt.getvalue()
+                assert 'root=absent' in receipt.getvalue(), receipt.getvalue()
+                assert 'not durable' in errors.getvalue(), errors.getvalue()
             assert gate.sweep_records(state, 1, .05)
             assert not record.exists()
             assert not root.exists(), 'earlier-boot private root leaked'
@@ -776,6 +845,15 @@ elif mode == 'foreign-output':
             foreign.kill()
             foreign.wait()
     sys.exit(result)
+elif mode == 'interrupt-during-teardown':
+    original = gate.Boundary.teardown
+    def teardown(self, *args):
+        result = original(self, *args)
+        assert result == 0
+        os.kill(os.getpid(), signal.SIGTERM)
+        return result
+    gate.Boundary.teardown = teardown
+    sys.exit(gate.main([]))
 elif mode == 'heavy-propagation':
     import fcntl
     slot = Path(os.environ['FAKE_SANDBOX']) / 'fake-heavy.slot'
@@ -1016,6 +1094,7 @@ PY
 }
 
 teardown() {
+  case "$BATS_TEST_DESCRIPTION" in 'hardening: '*) return ;; esac
   local pid
   for pid in "${SIGNAL_WRAPPER_PID:-}" "${OUTER_PID:-}" "${GATE_PID:-}"; do
     [ -n "$pid" ] || continue
@@ -1083,6 +1162,91 @@ start_wrapper() {
   wait_ready "$SIGNAL_WRAPPER_PID" || { cat "$SANDBOX/background.out"; false; }
 }
 
+@test "hardening: reap leaves old foreign names and symlink entries alone" {
+  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+import importlib.util, os, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('gate', sys.argv[1])
+gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
+root = Path(sys.argv[2])
+kept = root / 'failed-shards'; kept.mkdir()
+old = kept / ('a' * 32); old.mkdir(); (old / 'out').write_text('old')
+later = kept / ('c' * 32); later.mkdir(); (later / 'out').write_text('later')
+foreign = kept / 'operator-notes'; foreign.mkdir(); (foreign / 'out').write_text('private')
+outside = root / 'outside'; outside.mkdir(); (outside / 'out').write_text('target')
+link = kept / ('b' * 32); link.symlink_to(outside, target_is_directory=True)
+aged = time.time() - 8 * 86400
+for item in (old, later, foreign, outside): os.utime(item, (aged, aged))
+os.utime(link, (aged, aged), follow_symlinks=False)
+assert link.lstat().st_mtime < time.time() - 7 * 86400, 'symlink itself is not old'
+gate._prune_failed_shards(SimpleNamespace(root=root))
+assert not old.exists(), 'old valid retained output was not pruned'
+assert not later.exists(), 'pruning stopped at the symlink before the later directory'
+assert (foreign / 'out').read_text() == 'private', 'foreign directory was pruned'
+assert link.is_symlink() and (outside / 'out').read_text() == 'target', 'symlink entry was followed'
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "hardening: reap does not follow a symlinked failed-shards root" {
+  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+import importlib.util, os, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('gate', sys.argv[1])
+gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
+root = Path(sys.argv[2]); outside = root / 'outside'; outside.mkdir()
+old = outside / ('c' * 32); old.mkdir(); (old / 'out').write_text('private')
+os.utime(old, (time.time() - 8 * 86400,) * 2)
+link = root / 'failed-shards'; link.symlink_to(outside, target_is_directory=True)
+gate._prune_failed_shards(SimpleNamespace(root=root))
+assert link.is_symlink() and (old / 'out').read_text() == 'private', 'symlink root was followed'
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "hardening: a birthless ancestor cannot become a boundary member" {
+  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location('gate', sys.argv[1])
+gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
+me, parent = gate._BSDInfo(), gate._BSDInfo()
+me.pid, me.ppid, me.uid, me.status, me.start_sec = os.getpid(), 98765, os.getuid(), 2, 1
+parent.pid, parent.ppid, parent.uid, parent.status, parent.start_sec = 98765, 1, os.getuid(), 2, 0
+gate.process_table = lambda end: {me.pid: me, parent.pid: parent}
+gate.bsd_info = lambda pid: parent
+gate.process_files = lambda pid, end: []
+gate.process_environment = lambda pid: {b'TRELLIS_GATE_RUN_ID=token'}
+data = {'token':'token', 'owner':{'pid':me.pid, 'start_us':1}, 'started_us':2_000_000,
+        'run_root':sys.argv[2], 'groups':[], 'sentinel_id':{'dev':1, 'ino':1}}
+assert gate.Boundary(data, live=True).scan(time.monotonic() + 3) == {}, 'birthless ancestor became a member'
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "hardening: boundary membership requires an exact environment entry" {
+  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+import importlib.util, os, sys, time
+spec = importlib.util.spec_from_file_location('gate', sys.argv[1])
+gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
+entry = gate._BSDInfo()
+entry.pid, entry.ppid, entry.uid, entry.status, entry.start_sec = 98766, 1, os.getuid(), 2, 2
+gate.process_table = lambda end: {entry.pid: entry}
+gate.bsd_info = lambda pid: entry
+gate.process_files = lambda pid, end: []
+gate._scan_identity = lambda pid, end: (pid, 2_000_000)
+data = {'token':'exact', 'owner':{'pid':os.getpid(), 'start_us':1}, 'started_us':1,
+        'run_root':sys.argv[2], 'groups':[], 'sentinel_id':{'dev':1, 'ino':1}}
+for environment in ({b'OTHER=TRELLIS_GATE_RUN_ID=exact'}, {b'TRELLIS_GATE_RUN_ID=exact-suffix'}):
+    gate.process_environment = lambda pid: environment
+    assert gate.Boundary(data, live=True).scan(time.monotonic() + 3) == {}, 'substring granted membership'
+gate.process_environment = lambda pid: {b'TRELLIS_GATE_RUN_ID=exact'}
+assert gate.Boundary(data, live=True).scan(time.monotonic() + 3) == {entry.pid:(entry.pid, 2_000_000)}
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
 @test "selected files reach the planner and every shard with one narrowed receipt" {
   export FAKE_SELECTED_FILE=scripts/tests/check-decisions-log.bats
   export PG_TESTS_BASE=base PG_TESTS_HEAD=head PG_PUSH_TEST_SCOPE=branch
@@ -1099,6 +1263,13 @@ start_wrapper() {
   run_wrapper
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(< "$PG_TESTS_RECEIPT_FILE")" = 'PG_TESTS_RECEIPT full' ]
+}
+
+@test "scoped runs interrupted during teardown publish no successful receipt" {
+  export PG_PUSH_TEST_SCOPE=full PG_TESTS_RECEIPT_FILE="$SANDBOX/scope-receipt"
+  run_driver interrupt-during-teardown
+  [ "$status" -eq 143 ] || { echo "$output"; false; }
+  [ ! -e "$PG_TESTS_RECEIPT_FILE" ]
 }
 
 @test "failed selected shards never publish a successful scope receipt" {
@@ -1150,7 +1321,10 @@ start_wrapper() {
   run python3 "$WRAPPER"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(wc -l < "$SANDBOX/shard-nice" | tr -d ' ')" -eq 8 ]
-  [ "$(sort -u "$SANDBOX/shard-nice")" = "$((base + 10))" ]
+  # The kernel caps nice at 20, so a planner already above 10 (as when this
+  # suite itself runs inside a niced battery shard) yields shards at 20.
+  expect=$((base + 10)); [ "$expect" -le 20 ] || expect=20
+  [ "$(sort -u "$SANDBOX/shard-nice")" = "$expect" ]
   [ "$(cat "$SANDBOX/planner-nice")" = "$base" ]
   python3 -I -B - "$TRELLIS_LOCAL_GATE_RECEIPT.provenance.jsonl" <<'PY'
 import json, sys
@@ -1701,12 +1875,12 @@ PY
 }
 
 @test "vanished process inspections cannot become preflight or teardown survivors" {
-  run python3 "$BATS_TEST_DIRNAME/test_runner_process_race.py" VanishedProcessTests
+  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" VanishedProcessTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "live unreadable process inspections retain fail-closed containment" {
-  run python3 "$BATS_TEST_DIRNAME/test_runner_process_race.py" LiveUnreadableTests
+  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" LiveUnreadableTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
@@ -1797,6 +1971,15 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
+@test "scoped runs with a foreign survivor publish no successful receipt" {
+  export TRELLIS_LOCAL_GATE_RESERVE=0.5 PG_PUSH_TEST_SCOPE=full
+  export PG_TESTS_RECEIPT_FILE="$SANDBOX/scope-receipt"
+  run_driver foreign-output
+  [ "$status" -eq 71 ] || { echo "$output"; false; }
+  [[ "$output" == *"survivors=1 record=retained"* ]]
+  [ ! -e "$PG_TESTS_RECEIPT_FILE" ]
+}
+
 @test "own PID ancestors and other UIDs cannot become boundary members" {
   # Inversion: structural signals grant authority over the runner, its parent, or another UID.
   run_driver uid-exclusion
@@ -1812,6 +1995,20 @@ PY
   run_driver earlier-boot
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   run_driver earlier-boot-unsafe
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "an earlier-boot record outlives a failed sandbox cleanup and the retry removes both" {
+  # Inversion (audit P02): the record is unlinked before cleanup, so a failure
+  # leaves an unreachable sandbox behind a receipt that says record=retained.
+  run_driver earlier-boot-cleanup-fails
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "a directory fsync failure after an earlier-boot unlink is reported as unsynced, not retained" {
+  # Inversion (review R4/F4): after the root and record were both removed, an
+  # fsync OSError printed survivors=1 record=retained.
+  run_driver earlier-boot-fsync-fails
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
@@ -1857,7 +2054,7 @@ PY
 
 @test "invalid runner and gate-runs arguments return 64 before launch" {
   # Inversion: unknown options silently run a gate or weaken its scope.
-  run python3 "$WRAPPER" --not-a-real-option
+  run "$FAKE_REAL_PYTHON" -I "$WRAPPER" --not-a-real-option
   [ "$status" -eq 64 ]; [ ! -s "$FAKE_INVOCATIONS" ]
   run bash "$REPO_ROOT/scripts/gate-runs.sh" status extra
   [ "$status" -eq 64 ]
@@ -1941,6 +2138,7 @@ clock|backwards wall clock uses a safer birth bound and records clock_step
 retry|transient per-pid scan errors get exactly one bounded retry
 empty-argv|empty argv zero preserves the first environment entry
 earlier-boot-root|stale sweeps ignore group IDs and earlier-boot records send no signal
+earlier-boot-order|an earlier-boot record outlives a failed sandbox cleanup and the retry removes both
 unreadable-member|unreadable in-run processes are excluded counted listed and never fail the gate
 unreadable-fail|unreadable in-run processes are excluded counted listed and never fail the gate
 wait-reap|host WNOWAIT observes an exit twice and retains the zombie until explicit reap
@@ -1970,7 +2168,7 @@ PY
     count=$((count + 1))
     printf 'mutation=%s targeted_test=red\n' "$mutation"
   done < "$table"
-  [ "$count" -eq 37 ]
+  [ "$count" -eq 38 ]
 }
 
 inventory_fixture() {
@@ -2151,8 +2349,14 @@ PY
   FIXTURE_PAYLOAD_SCAN=1 inventory_fixture
   local scan="$GIT_FIXTURE/scripts/tests/release-payload-commit.bats"
   printf '6\tbats scripts/tests/release-payload-commit.bats\t1\t0\n' >> "$SANDBOX/inventory.tsv"
-  sed -i '' "s#^SCAN_EXEMPT_PAIRS='core-rules/hooks/lib/spec-gate-core.sh|specs/\$#&\\
-scripts/check-gate-inventory.sh|scripts/tests/#" "$scan"
+  python3 -I - "$scan" <<'PY'
+from pathlib import Path
+import sys
+path = Path(sys.argv[1]); text = path.read_text()
+old = "SCAN_EXEMPT_PAIRS='core-rules/hooks/lib/spec-gate-core.sh|specs/\n"
+assert text.count(old) == 1
+path.write_text(text.replace(old, old + 'scripts/check-gate-inventory.sh|scripts/tests/\n'))
+PY
   git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm 'test: pair only'
   HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   check_inventory
@@ -2162,6 +2366,34 @@ scripts/check-gate-inventory.sh|scripts/tests/#" "$scan"
   HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
   check_inventory
   [ "$status" -ne 0 ]; [[ "$output" == *"test file outside the split changed"* ]]
+}
+
+@test "inventory rejects unrelated added changed and removed release-payload pairs" {
+  local mode scan
+  for mode in added changed removed; do
+    FIXTURE_PAYLOAD_SCAN=1 inventory_fixture
+    scan="$GIT_FIXTURE/scripts/tests/release-payload-commit.bats"
+    printf '6\tbats scripts/tests/release-payload-commit.bats\t1\t0\n' >> "$SANDBOX/inventory.tsv"
+    python3 -I - "$scan" "$mode" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1]); text = p.read_text(); mode = sys.argv[2]
+if mode == 'added':
+    text = text.replace('trellis.config.json|specs/', 'other-tool.sh|unrelated/\ntrellis.config.json|specs/')
+elif mode == 'changed':
+    text = text.replace('trellis.config.json|specs/', 'trellis.config.json|wrong/')
+else:
+    text = text.replace('core-rules/hooks/lib/spec-gate-core.sh|specs/\ntrellis.config.json|specs/',
+                        'core-rules/hooks/lib/spec-gate-core.sh|specs/')
+p.write_text(text)
+PY
+    git -C "$GIT_FIXTURE" add .; git -C "$GIT_FIXTURE" commit -qm "test: $mode pair"
+    HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
+    check_inventory
+    [ "$status" -ne 0 ] || { echo "$mode pair incorrectly passed"; false; }
+    [[ "$output" == *"test file outside the split changed"* ]]
+    mv "$GIT_FIXTURE" "$SANDBOX/fixture-$mode"
+  done
 }
 
 @test "inventory rejects an unrelated added head stage despite a complete aggregate" {

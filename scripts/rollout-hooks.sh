@@ -97,10 +97,13 @@ while [ "$#" -gt 0 ]; do
     --yes|-y)   ASSUME_YES=true ;;
     --project)
       shift
-      [ "$#" -gt 0 ] || { echo "--project requires a name" >&2; exit "$TRELLIS_EX_USAGE"; }
+      [ "$#" -gt 0 ] && [ -n "$1" ] || { echo "--project requires a name" >&2; exit "$TRELLIS_EX_USAGE"; }
       ONLY_PROJECT="$1"
       ;;
-    --project=*) ONLY_PROJECT="${1#--project=}" ;;
+    --project=*)
+      ONLY_PROJECT="${1#--project=}"
+      [ -n "$ONLY_PROJECT" ] || { echo "--project requires a name" >&2; exit "$TRELLIS_EX_USAGE"; }
+      ;;
     --home)
       shift
       [ "$#" -gt 0 ] || { echo "--home requires PATH" >&2; exit "$TRELLIS_EX_USAGE"; }

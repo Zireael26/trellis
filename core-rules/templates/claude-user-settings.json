@@ -6,7 +6,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$HOME/.claude/hooks/trellis-worktree-create.sh\"",
+            "command": "__TRELLIS_LAUNCHER__",
+            "args": [
+              "hook",
+              "event",
+              "claude",
+              "WorktreeCreate"
+            ],
             "timeout": 60
           }
         ]
@@ -17,7 +23,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"$HOME/.claude/hooks/trellis-worktree-remove.sh\"",
+            "command": "__TRELLIS_LAUNCHER__",
+            "args": [
+              "hook",
+              "event",
+              "claude",
+              "WorktreeRemove"
+            ],
             "timeout": 120
           }
         ]

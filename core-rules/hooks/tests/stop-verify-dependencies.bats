@@ -59,6 +59,252 @@ assert_block() {
   printf '%s' "$output" | jq -e --arg step "$1" '.decision == "block" and (.reason | startswith($step))' >/dev/null
 }
 
+# The local runner stubs record their invocation and fail only the selected
+# suite; cargo check/clippy and go vet remain successful.
+make_mixed_test_runners() {
+  mkdir -p "$PROJECT_DIR/.venv/bin"
+  cat > "$PROJECT_DIR/.venv/bin/pytest" <<'EOF'
+#!/bin/bash
+printf 'pytest|%s\n' "$*" >> "$CALL_LOG"
+[ "${FAIL_TARGET:-}" != pytest ] || { echo 'pytest failed'; exit 17; }
+EOF
+  cat > "$BATS_TEST_TMPDIR/bin/cargo" <<'EOF'
+#!/bin/bash
+printf 'cargo|%s\n' "$*" >> "$CALL_LOG"
+[ "${FAIL_TARGET:-}" != cargo ] || [ "$1" != test ] || { echo 'cargo test failed'; exit 18; }
+EOF
+  cat > "$BATS_TEST_TMPDIR/bin/go" <<'EOF'
+#!/bin/bash
+printf 'go|%s\n' "$*" >> "$CALL_LOG"
+[ "${FAIL_TARGET:-}" != go ] || [ "$1" != test ] || { echo 'go test failed'; exit 19; }
+EOF
+  chmod +x "$PROJECT_DIR/.venv/bin/pytest" "$BATS_TEST_TMPDIR/bin/cargo" "$BATS_TEST_TMPDIR/bin/go"
+}
+
+_r2_l4_serial_tests() {
+  local harness="$1" candidate runner name
+  if [ "$harness" = claude ]; then candidate="$HOOKS_DIR/stop-verify.sh"; else candidate="$CODEX_HOOKS_DIR/stop-verify.sh"; fi
+  export PROCESS_GATE_NO_RECEIPTS=1 LOCK_DIR="$BATS_TEST_TMPDIR/test-lock" OVERLAP="$BATS_TEST_TMPDIR/overlap"
+  printf '%s\n' '{"scripts":{"test":"echo ok"}}' > "$PROJECT_DIR/package.json"
+  touch "$PROJECT_DIR/pyproject.toml" "$PROJECT_DIR/Cargo.toml" "$PROJECT_DIR/go.mod"
+  mkdir -p "$PROJECT_DIR/node_modules" "$PROJECT_DIR/.venv/bin"
+  cat > "$BATS_TEST_TMPDIR/runner" <<'EOF'
+#!/bin/bash
+name="$(basename "$0")"
+[ "$name" != go ] || [ "$1" != vet ] || { printf 'go|vet\n' >> "$CALL_LOG"; exit 0; }
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+  printf '%s %s\n' "$name" "$*" >> "$OVERLAP"
+  exit 0
+fi
+printf '%s|%s\n' "$name" "$*" >> "$CALL_LOG"
+sleep 0.3
+rmdir "$LOCK_DIR"
+EOF
+  for name in pnpm cargo go; do cp "$BATS_TEST_TMPDIR/runner" "$BATS_TEST_TMPDIR/bin/$name"; chmod +x "$BATS_TEST_TMPDIR/bin/$name"; done
+  cp "$BATS_TEST_TMPDIR/runner" "$PROJECT_DIR/.venv/bin/pytest"
+  chmod +x "$PROJECT_DIR/.venv/bin/pytest"
+  run_hook
+  [ "$status" -eq 0 ]; [[ "$output" != *'"decision":"block"'* ]]
+  [ ! -s "$OVERLAP" ] || { printf 'overlapping checks: '; cat "$OVERLAP"; false; }
+  grep -q '^pnpm|run test$' "$CALL_LOG"
+  grep -q '^pytest|' "$CALL_LOG"
+  grep -q '^cargo|check$' "$CALL_LOG"
+  grep -q '^cargo|clippy' "$CALL_LOG"
+  grep -q '^cargo|test ' "$CALL_LOG"
+  grep -q '^go|test ' "$CALL_LOG"
+  grep -q '^go|vet$' "$CALL_LOG"
+}
+
+@test "R2 L4: Claude mixed test suites and cargo checks do not overlap" {
+  _r2_l4_serial_tests claude
+}
+
+@test "R2 L4: Codex mixed test suites and cargo checks do not overlap" {
+  _r2_l4_serial_tests codex
+}
+
+@test "143-stop package manifest without a test cannot shadow pytest" {
+  export PROCESS_GATE_NO_RECEIPTS=1 FAIL_TARGET=pytest
+  printf '{}\n' > "$PROJECT_DIR/package.json"
+  touch "$PROJECT_DIR/pyproject.toml"
+  make_mixed_test_runners
+  local candidate
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    assert_block 'test ('
+    [[ "$output" == *'pytest failed'* ]]
+    grep -q '^pytest|' "$CALL_LOG"
+  done
+}
+
+@test "143-stop package and python tests both run and a failing pytest blocks" {
+  export PROCESS_GATE_NO_RECEIPTS=1 FAIL_TARGET=pytest
+  printf '%s\n' '{"scripts":{"test":"echo ok"}}' > "$PROJECT_DIR/package.json"
+  touch "$PROJECT_DIR/pyproject.toml"
+  make_mixed_test_runners
+  local candidate
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    assert_block 'test ('
+    [[ "$output" == *'pytest failed'* ]]
+    grep -q '^pytest|' "$CALL_LOG"
+    grep -q '|pnpm|run test$' "$CALL_LOG"
+    FAIL_TARGET='' run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+    grep -q '^pytest|' "$CALL_LOG"
+    grep -q '|pnpm|run test$' "$CALL_LOG"
+  done
+}
+
+@test "143-stop mixed package cargo and go tests are independently enforced" {
+  export PROCESS_GATE_NO_RECEIPTS=1
+  printf '%s\n' '{"scripts":{"test":"echo ok"}}' > "$PROJECT_DIR/package.json"
+  touch "$PROJECT_DIR/Cargo.toml" "$PROJECT_DIR/go.mod"
+  make_mixed_test_runners
+  local candidate target
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    for target in cargo go; do
+      export FAIL_TARGET="$target"
+      run_hook
+      assert_block 'test ('
+      [[ "$output" == *"$target test failed"* ]]
+      grep -q "^$target|test" "$CALL_LOG"
+    done
+    export FAIL_TARGET=''
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+    grep -q '^cargo|test' "$CALL_LOG"
+    grep -q '^go|test' "$CALL_LOG"
+    grep -q '|pnpm|run test$' "$CALL_LOG"
+  done
+}
+
+@test "143-stop missing configured package manager blocks unless fast override replaces tests" {
+  export PROCESS_GATE_NO_RECEIPTS=1
+  printf '%s\n' '{"scripts":{"test":"echo ok"}}' > "$PROJECT_DIR/package.json"
+  mv "$BATS_TEST_TMPDIR/bin/pnpm" "$BATS_TEST_TMPDIR/pnpm.saved"
+  local candidate
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    assert_block 'test:'
+    [[ "$output" == *'pnpm'* ]] && [[ "$output" == *'not available'* ]]
+  done
+  # An absent test script is not a reason to require a package manager.
+  printf '{}\n' > "$PROJECT_DIR/package.json"
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    [ "$status" -eq 0 ]; [[ "$output" != *'"decision":"block"'* ]]
+  done
+  printf '%s\n' '{"scripts":{"test":"echo ok"}}' > "$PROJECT_DIR/package.json"
+  printf '#!/bin/bash\nprintf "fast|run\\n" >> "$CALL_LOG"\n' > "$BATS_TEST_TMPDIR/bin/fast_suite"
+  chmod +x "$BATS_TEST_TMPDIR/bin/fast_suite"
+  jq -nc --arg root "$PROJECT_DIR" '{projects:{($root):{stop_checks:{fast:"fast_suite"}}}}' > "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    [ "$status" -eq 0 ]; [[ "$output" != *'"decision":"block"'* ]]
+    grep -q '^fast|run$' "$CALL_LOG"
+  done
+  # Restoring the selected package manager restores the ordinary test step.
+  mv "$BATS_TEST_TMPDIR/pnpm.saved" "$BATS_TEST_TMPDIR/bin/pnpm"
+  mv "$TRELLIS_HOME/config.json" "$BATS_TEST_TMPDIR/config.saved"
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    [ "$status" -eq 0 ]; [ -s "$CALL_LOG" ]
+  done
+}
+
+@test "143-stop host fast override replaces all mixed-language test suites" {
+  export PROCESS_GATE_NO_RECEIPTS=1 FAIL_TARGET=''
+  printf '%s\n' '{"scripts":{"test":"echo ok"}}' > "$PROJECT_DIR/package.json"
+  touch "$PROJECT_DIR/pyproject.toml" "$PROJECT_DIR/Cargo.toml" "$PROJECT_DIR/go.mod"
+  make_mixed_test_runners
+  printf '#!/bin/bash\nprintf "fast|run\\n" >> "$CALL_LOG"\n' > "$BATS_TEST_TMPDIR/bin/fast_suite"
+  chmod +x "$BATS_TEST_TMPDIR/bin/fast_suite"
+  jq -nc --arg root "$PROJECT_DIR" '{projects:{($root):{stop_checks:{fast:"fast_suite"}}}}' > "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
+  local candidate
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'stop_checks.fast'* ]]
+    grep -q '^fast|run$' "$CALL_LOG"
+    ! grep -qE '^(pytest\||cargo\|test|go\|test)' "$CALL_LOG"
+    ! grep -q '|pnpm|run test$' "$CALL_LOG"
+    grep -q '^cargo|check' "$CALL_LOG"
+    grep -q '^go|vet' "$CALL_LOG"
+  done
+}
+
+@test "143-stop Stop lint recognizes supported flat config extensions" {
+  export PROCESS_GATE_NO_RECEIPTS=1
+  printf '{}\n' > "$PROJECT_DIR/package.json"
+  mkdir -p "$PROJECT_DIR/node_modules/.bin"
+  cat > "$PROJECT_DIR/node_modules/.bin/eslint" <<'EOF'
+#!/bin/bash
+printf 'eslint|%s\n' "$*" >> "$CALL_LOG"
+[ "$1" != --version ] || { echo v9.0.0; exit 0; }
+echo 'flat lint failed'
+exit 5
+EOF
+  chmod +x "$PROJECT_DIR/node_modules/.bin/eslint"
+  local candidate ext
+  for ext in cjs mts cts; do
+    touch "$PROJECT_DIR/eslint.config.$ext"
+    for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+      run_hook
+      assert_block 'lint (eslint):'
+      [[ "$output" == *'flat lint failed'* ]]
+    done
+    mv "$PROJECT_DIR/eslint.config.$ext" "$BATS_TEST_TMPDIR/config.$ext"
+  done
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    run_hook
+    [ "$status" -eq 0 ]
+    ! grep -q '^eslint|' "$CALL_LOG"
+  done
+}
+
+@test "143-stop broken local eslint version probe cannot silently drop lint" {
+  export PROCESS_GATE_NO_RECEIPTS=1
+  printf '{}\n' > "$PROJECT_DIR/package.json"
+  touch "$PROJECT_DIR/eslint.config.js"
+  mkdir -p "$PROJECT_DIR/node_modules/.bin"
+  cat > "$PROJECT_DIR/node_modules/.bin/eslint" <<'EOF'
+#!/bin/bash
+printf 'eslint|%s\n' "$*" >> "$CALL_LOG"
+[ "$1" != --version ] || { [ "${BROKEN_VERSION:-1}" = 0 ] && { echo v9.0.0; exit 0; }; exit 4; }
+[ "${BROKEN_LINT:-1}" = 0 ] || { echo 'lint failed'; exit 5; }
+EOF
+  chmod +x "$PROJECT_DIR/node_modules/.bin/eslint"
+  local candidate
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    export BROKEN_VERSION=1 BROKEN_LINT=1
+    run_hook
+    assert_block 'lint (eslint):'
+    [[ "$output" == *'lint failed'* ]]
+    grep -q '^eslint|\. --quiet$' "$CALL_LOG"
+    export BROKEN_VERSION=1 BROKEN_LINT=0
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" == *'eslint version probe failed'* ]]
+    grep -q '^eslint|\. --quiet$' "$CALL_LOG"
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" == *'eslint version probe failed'* ]]
+    [[ "$output" != *'checks reused'* ]]
+    grep -q '^eslint|\. --quiet$' "$CALL_LOG"
+    export BROKEN_VERSION=0 BROKEN_LINT=0
+    run_hook
+    [ "$status" -eq 0 ]
+    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'eslint version probe failed'* ]]
+  done
+}
+
 @test "U3 missing dependencies skip runner without failure counter or executed receipt" {
   export TOOL_STATUS=127 PROCESS_GATE_NO_RECEIPTS=1
   local candidate
@@ -295,7 +541,7 @@ EOF
     [ -z "$output" ]
     # Concurrent groups interleave; cargo's own members keep their order.
     # The reuse key probes `cargo --version` / `go version` for toolchain proxies.
-    [ "$(cut -d '|' -f2- "$CALL_LOG" | grep -vx -e 'cargo|--version' -e 'go|version' | sort)" = "$(printf '%s\n' 'cargo|check' 'go|vet ./...' 'cargo|clippy --quiet --message-format=short -- -D warnings' 'cargo|test --quiet' | sort)" ]
+    [ "$(cut -d '|' -f2- "$CALL_LOG" | grep -vx -e 'cargo|--version' -e 'go|version' | sort)" = "$(printf '%s\n' 'cargo|check' 'go|vet ./...' 'cargo|clippy --quiet --message-format=short -- -D warnings' 'cargo|test --quiet' 'go|test ./...' | sort)" ]
     [ "$(cut -d '|' -f2- "$CALL_LOG" | grep '^cargo|' | grep -vx 'cargo|--version' | cut -d ' ' -f1)" = $'cargo|check\ncargo|clippy\ncargo|test' ]
   done
 }

@@ -128,6 +128,36 @@ load doctor-fix-common
   [ "$(config_digest)" = "$config_before" ]
 }
 
+# Spec 074 T68: an executable .git/hooks/pre-commit, shimmed as attach does
+# with previous null.
+default_hook_shimmed() {
+  printf '#!/bin/sh\nexit 0\n' > "$PORTABLE_PROJECT/.git/hooks/pre-commit"
+  chmod 755 "$PORTABLE_PROJECT/.git/hooks/pre-commit"
+  bash --noprofile --norc -c '. "$1/scripts/lib/attachment.sh" >/dev/null 2>&1 && _attachment_hooks_default_passthrough_shim_body pre-commit' \
+    _ "$PORTABLE_HOME/releases/1.2.3/payload" > "$HF_MANAGED/pre-commit"
+  chmod 700 "$HF_MANAGED/pre-commit"
+  strict_verifies "$HF_OWNER"
+}
+
+@test "A4.4 (c'd): --adopt-husky replaces a default hooks dir shim with husky's, and a rollback restores it" {
+  local before config_before
+  adopt_husky_fixture
+  default_hook_shimmed
+  before="$(adopt_snapshot)"; config_before="$(config_digest)"
+  DOCTOR_FIX_FAULT_PHASE=adopt-husky-before-sidecar run_portable_doctor_fix --fix --adopt-husky
+  [[ "$output" == *"husky adoption rolled back"* ]] || { echo "$output"; false; }
+  assert_rolled_back_before_repair
+  [ "$(adopt_snapshot)" = "$before" ] || { diff <(printf '%s\n' "$before") <(adopt_snapshot); false; }
+  [ "$(config_digest)" = "$config_before" ]
+
+  run_portable_doctor_fix --fix --adopt-husky
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"husky adopted in"*"12 passthrough shim(s) created"* ]] || { echo "$output"; false; }
+  assert_adopted
+  cmp -s <(recorded_shim_body pre-commit) "$HF_MANAGED/pre-commit"
+  [ "$(find "$HF_MANAGED" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq $((12 + 5)) ]
+}
+
 @test "A4.4 (c'''): --adopt-husky with a normally attached linked worktree writes only the enabled record and the sidecar" {
   adopt_husky_fixture sibling
   run_portable_doctor_fix --fix --adopt-husky

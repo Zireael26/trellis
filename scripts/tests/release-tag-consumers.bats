@@ -41,14 +41,15 @@ scripts/release-payload-commit.sh|4|44ff032b8536bb6b|identity gate: resolves ref
 scripts/lib/push-test-map.py|1|c29d4f80f37d2d3d|push test selection: ancestor check between range endpoint commits, never discovers a release
 scripts/lib/worktree-migrate-classify.sh|1|8e5d9e2d3e948a28|migrate classify: merged-PR check between a head and a remote branch tip, no tag discovery
 scripts/lib/worktree-migrate-preserve.sh|1|91755fab79e70b04|migrate preserve: reads one refs/heads ref to confirm the preserve push landed, never lists tags
+scripts/lib/disk-janitor-dehydrate.sh|1|5138504fa7e2308e|dehydrate: merged-PR check between a worktree head and its PR head commit, no tag discovery
 core-rules/githooks/pre-push|4|2cc110527a78aaf2|gate dispatch: verifies only the explicitly pushed release tag before reuse; existing per-ref ranges and containment remain; never discovers a release
 core-rules/husky/pre-push|4|658cea39ec0609f9|husky twin: verifies only the explicitly pushed release tag before reuse; existing per-ref ranges and containment remain; never discovers a release
 scripts/lib/tag_push_reuse.py|1|4b7a5022032454fa|T31: validates the explicit pushed tag namespace; no latest-tag discovery or ancestry-based release choice
 scripts/tests/test_tag_push_reuse.py|2|bf6d6c6fae0f6146|T31 fixtures: one valid explicit release tag and one VERSION-mismatched tag
 scripts/tests/test_full_trace.py|2|6dd620a2450f57ea|T32 fixtures: captured fd and relative tag-path operands; no tag discovery or release choice
-core-rules/hooks/trellis-worktree-remove.sh|1|97d070632a511735|worktree remove gate: merged-branch check between HEAD and a commit, never walks tags
-core-rules/hooks/code-review-subagent.sh|1|b02b974cd3a615a3|delta review: is-ancestor between the last reviewed HEAD and HEAD, never reads a tag
-core-rules/codex/hooks/code-review-subagent.sh|1|5a01dade2475be86|codex twin: the same delta-review ancestry check between two commits
+core-rules/hooks/trellis-worktree-remove.sh|1|b1520ea92ca3ed9c|worktree remove gate: merged-branch check between HEAD and a commit, never walks tags
+core-rules/hooks/code-review-subagent.sh|3|a58ca3e4f87b1023|delta review: is-ancestor between the last reviewed HEAD and HEAD, and between reviewed commit oids, never reads a tag
+core-rules/codex/hooks/code-review-subagent.sh|3|09f01e1b758f5ba0|codex twin: the same delta-review ancestry check between two commits
 core-rules/hooks/tests/spec-gate-cache.bats|1|240120e0d4f4acb3|fixture: creates an unrelated tag ref to prove any ref change invalidates the spec-gate cache key; no release read
 core-rules/skills/herdr-foreman/scripts/accept-branch.sh|1|abcaa62ca08b5f1f|is-ancestor between two branch SHAs, no tag involved
 core-rules/skills/process-gate/scripts/lib/diff-base.sh|1|f2894e8dac5d879b|is-ancestor between two commits for base refinement, no tag involved
@@ -61,13 +62,14 @@ scripts/tests/pre-push-diff-base.bats|3|2d82a0e5e490f878|fixtures: simulated tag
 scripts/tests/sync-to-template-dry-run.bats|2|8fbb38a541f590d7|fixture: pushes a fixture tag by explicit refspec
 scripts/tests/release-payload-commit.bats|1|652b7a5664ff9f9c|fixture: points the fixture tag ref at a hand-built tag object so --verify-tag reads its header
 scripts/tests/user-surface.bats|1|506af448a3090479|fixture: checks the v1.3.9 release tag exists before archiving its shipped runtime
-.github/workflows/bats.yml|2|5d6f3d57d87a557c|CI: fetches the v1.3.6 and v1.3.9 tags by explicit refspec, depth 1, for old-runtime probes
+.github/workflows/bats.yml|3|20ea70a0780aba49|CI: fetches the v1.3.6 and v1.3.9 tags by explicit refspec, depth 1, for old-runtime probes; the T41 native-stage decision fetches the range-base commit with --no-tags, never a tag
 CHANGELOG.md|2|1ce69640c1afdd81|prose: the 1.3.11 pre-push notes name the refs/heads/* and refs/tags/* refusal, and the 1.4.0 notes name the T32 trace tools; no consumer
 docs/UPGRADING.md|3|b6deba7648e8cf62|prose: tag refs classify push ranges, not release discovery; git describe on main no longer names the newest release, which is cosmetic; the 1.3.11 unsupported-ref refusal names refs/tags/*
 AGENT_PI_SETUP.md|1|d115d46558230798|npm list --depth=0, not git
 specs/043-pi-harness-adoption/guide/SETUP.md|1|cba8efcdb8435007|npm list --depth=0, not git
 specs/019-claude-5-alignment/audit/E-rollout-surface.md|1|5d5738a672fdf831|audit prose: an ls-remote run once by hand
 specs/035-repository-debloat/dod-receipt.json|2|0433c9efd3446694|recorded receipt: is-ancestor between two fixed SHAs
+specs/074-fast-hooks/evidence/t1-tick-receipt.md|2|49ced95c6b205601|recorded T1 tick receipt: is-ancestor between two fixed SHAs and HEAD, nothing discovers a tag
 specs/047-session-efficiency-cost-transparency/|31|b69fdc0eb6c65f91|spec 047 records: captured URLs and prose about published tags, nothing executed
 specs/055-routed-defects/|9|fd1a5e0fc66683eb|this spec: the audit and the pattern list themselves'
 
@@ -255,8 +257,13 @@ tag_push_setup() {
   mkdir -p "$hooks"
   cp "$REPO_ROOT/core-rules/githooks/pre-push" "$hooks/pre-push"
   chmod 755 "$hooks/pre-push"
-  cp -R "$REPO_ROOT/core-rules/skills/process-gate" "$WORK/.claude/skills/process-gate"
-  cp -R "$REPO_ROOT/core-rules/skills/security-gate" "$WORK/.claude/skills/security-gate"
+  # The gate payload lives outside the project and is linked in, as an attached
+  # project's skills are: the Security adapter refuses a project-authored gate.
+  mkdir -p "$BATS_TEST_TMPDIR/payload"
+  cp -R "$REPO_ROOT/core-rules/skills/process-gate" "$BATS_TEST_TMPDIR/payload/process-gate"
+  cp -R "$REPO_ROOT/core-rules/skills/security-gate" "$BATS_TEST_TMPDIR/payload/security-gate"
+  ln -s "$BATS_TEST_TMPDIR/payload/process-gate" "$WORK/.claude/skills/process-gate"
+  ln -s "$BATS_TEST_TMPDIR/payload/security-gate" "$WORK/.claude/skills/security-gate"
   mkdir -p "$WORK/.claude/skills/security-gate-local"
   printf 'SECURITY_GATE_PROJECT_NAME=work\n' > "$WORK/.claude/skills/security-gate-local/local.config.sh"
   printf '/.claude/\n' >> "$WORK/.git/info/exclude"

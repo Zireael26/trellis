@@ -35,9 +35,11 @@ setup() {
   cp "$REPO_ROOT/scripts/lib/trellis.config.schema.json" "$SOURCE/scripts/lib/"
   # The mirror rebuilds the release record from the fetched tag with the
   # installers' writer, and verifies a payload tag with the shipped tool. The
-  # store library sources the release stamp beside it.
+  # store library sources the release stamp beside it, and runs the batch
+  # verifier beside it.
   cp "$REPO_ROOT/scripts/lib/release-store.sh" "$REPO_ROOT/scripts/lib/semver.sh" \
-    "$REPO_ROOT/scripts/lib/release-stamp.sh" "$REPO_ROOT/scripts/lib/release_stamp.py" "$SOURCE/scripts/lib/"
+    "$REPO_ROOT/scripts/lib/release-stamp.sh" "$REPO_ROOT/scripts/lib/release_stamp.py" \
+    "$REPO_ROOT/scripts/lib/release_verify.py" "$SOURCE/scripts/lib/"
   cp "$REPO_ROOT/scripts/release-payload-commit.sh" "$SOURCE/scripts/"
   cat > "$SOURCE/trellis.config.json" <<EOF
 {
@@ -1476,4 +1478,24 @@ tamper_installed_payload() {
   [[ "$output" == *"tag v$RELEASE_VERSION verified"* ]] || { echo "$output"; false; }
   [[ "$output" == *'simulated mirror clean.'* ]] || { echo "$output"; false; }
   [ "$(ls -A "$MIRROR")" = .git ]
+}
+
+@test "apply preserves the source mode of directly published files" {
+  local mode
+  run_sync --apply
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  mode="$(stat -f %Lp "$MIRROR/engineering-process.md" 2>/dev/null)" ||
+    mode="$(stat -c %a "$MIRROR/engineering-process.md")"
+  [ "$mode" = 644 ] || { echo "published mode is $mode, expected 644"; false; }
+}
+
+@test "apply preserves the executable mode of a directly published file" {
+  local mode
+  chmod 755 "$SOURCE/engineering-process.md"
+  reseal_source_release "executable direct file fixture"
+  run_sync --apply
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  mode="$(stat -f %Lp "$MIRROR/engineering-process.md" 2>/dev/null)" ||
+    mode="$(stat -c %a "$MIRROR/engineering-process.md")"
+  [ "$mode" = 755 ] || { echo "published mode is $mode, expected 755"; false; }
 }

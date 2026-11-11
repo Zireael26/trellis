@@ -187,15 +187,33 @@ run_removed_mode() {
     bash "$ONBOARD" "$@"
 }
 
+project_snapshot() {
+  local hp="$1" p
+  (cd "$hp" || exit 1
+   find . -path ./.git -prune -o \( -type f -print -o -type l -print \) | LC_ALL=C sort | while IFS= read -r p; do
+     if [ -L "$p" ]; then printf 'L %s -> %s\n' "$p" "$(readlink "$p")"
+     else printf 'F %s %s\n' "$p" "$(shasum -a 256 "$p" | awk '{print $1}')"
+     fi
+   done
+   [ -f .git/config ] && printf 'C %s\n' "$(shasum -a 256 .git/config | awk '{print $1}')"
+   git status --porcelain)
+}
+
 assert_project_untouched() {
-  local hp="$1"
+  local hp="$1" before="${2:-}"
   [ ! -e "$hp/.claude/rules/trellis.md" ]
   [ ! -L "$hp/.claude/rules/trellis.md" ]
   [ ! -e "$hp/.claude/skills/process-gate" ]
   [ ! -e "$hp/.trellis.json" ]
   [ ! -e "$hp/gotchas.md" ]
   if [ -f "$hp/.gitignore" ]; then
-    ! grep -Fq 'Trellis inheritance symlinks' "$hp/.gitignore"
+    if grep -Fq 'Trellis inheritance symlinks' "$hp/.gitignore"; then
+      echo 'legacy writer touched .gitignore'
+      return 1
+    fi
+  fi
+  if [ -n "$before" ]; then
+    [ "$(project_snapshot "$hp")" = "$before" ] || { echo 'project tree changed during refusal'; echo "before: $before"; echo "after: $(project_snapshot "$hp")"; false; }
   fi
 }
 
@@ -203,6 +221,8 @@ assert_project_untouched() {
   build_canonical_tree
   build_healthy_project
   write_config
+  local before
+  before="$(project_snapshot "$PROJECTS/healthy")"
 
   run_removed_mode --legacy "$PROJECTS/healthy"
   [ "$status" -eq 2 ]
@@ -210,7 +230,7 @@ assert_project_untouched() {
   [[ "$output" == *"trellis migrate --prepare"* ]] || { echo "$output"; false; }
   [[ "$output" == *"trellis attach --fleet NAME"* ]] || { echo "$output"; false; }
 
-  assert_project_untouched "$PROJECTS/healthy"
+  assert_project_untouched "$PROJECTS/healthy" "$before"
 }
 
 @test "--compatibility, --legacy-relative, and --infra-entry all refuse identically" {
@@ -218,12 +238,13 @@ assert_project_untouched() {
   build_healthy_project
   write_config
 
-  local mode
+  local mode before
+  before="$(project_snapshot "$PROJECTS/healthy")"
   for mode in --compatibility --legacy-relative --infra-entry; do
     run_removed_mode "$mode" "$PROJECTS/healthy"
     [ "$status" -eq 2 ] || { echo "$mode: $output"; false; }
     [[ "$output" == *"removed in v1.0.0-rc.25"* ]] || { echo "$mode: $output"; false; }
-    assert_project_untouched "$PROJECTS/healthy"
+    assert_project_untouched "$PROJECTS/healthy" "$before"
   done
 
   # The `=`-joined spelling must refuse before it consumes its value, so a
@@ -232,13 +253,15 @@ assert_project_untouched() {
   run_removed_mode --infra-entry="$SANDBOX/entry.yml" "$PROJECTS/healthy"
   [ "$status" -eq 2 ]
   [[ "$output" == *"removed in v1.0.0-rc.25"* ]] || { echo "$output"; false; }
-  assert_project_untouched "$PROJECTS/healthy"
+  assert_project_untouched "$PROJECTS/healthy" "$before"
 }
 
 @test "the refusal is a usage error, not a portable onboarding attempt" {
   build_canonical_tree
   build_healthy_project
   write_config
+  local before
+  before="$(project_snapshot "$PROJECTS/healthy")"
 
   # Exit 2 is the usage class. A conflict (3) or state (4) class would mean the
   # portable path ran and formed an opinion about the project, which is exactly
@@ -246,7 +269,7 @@ assert_project_untouched() {
   run_removed_mode --legacy --fleet personal "$PROJECTS/healthy"
   [ "$status" -eq 2 ]
   [[ "$output" != *"created tracked manifest"* ]] || { echo "$output"; false; }
-  assert_project_untouched "$PROJECTS/healthy"
+  assert_project_untouched "$PROJECTS/healthy" "$before"
 }
 
 # ===========================================================================

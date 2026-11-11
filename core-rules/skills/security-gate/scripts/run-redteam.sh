@@ -10,9 +10,24 @@
 #
 # Output: <project>/audits/<YYYY-MM-DD>-redteam-<project>-<target-class>.md
 
+# Inherited shell functions never answer for a tool: the same uninterceptable
+# purge as run-diff.sh (POSIX mode finds `unset`/`set` before functions).
+POSIXLY_CORRECT=y
+unset -f builtin command type set unset compgen
+set +o posix
+builtin unset POSIXLY_CORRECT
+for _sg_fn in $(builtin compgen -A function 2>/dev/null); do builtin unset -f "$_sg_fn"; done
+builtin unset _sg_fn
+# Nor does inherited startup code: no child shell reads BASH_ENV or ENV, and
+# the scanner wrappers run privileged (`-p`), which ignores both anyway.
+builtin unset BASH_ENV ENV
+
 set -uo pipefail
 
-SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+case "$0" in */*) _sg_self_dir="${0%/*}" ;; *) _sg_self_dir=. ;; esac
+SKILL_DIR="$(builtin cd "$_sg_self_dir/.." && builtin pwd)"
+builtin source "$SKILL_DIR/scripts/lib/engine.sh"
+sg_path_sanitize || exit 1
 
 PROJECT_DIR="${1:-}"
 TARGET_CLASS="${2:-}"
@@ -29,15 +44,11 @@ for arg in "$@"; do
 done
 
 if [ -z "$PROJECT_DIR" ] || [ -z "$TARGET_CLASS" ]; then
-  cat >&2 <<EOF
-usage: run-redteam.sh <project-dir> <target-class> [--confirm] [--no-llm]
-
-target-class ∈ data-exfil | priv-esc | account-takeover | tenant-break | model-jailbreak
-
-Examples:
-  run-redteam.sh /path/to/project-a tenant-break --confirm
-  run-redteam.sh /path/to/project-b account-takeover --confirm
-EOF
+  builtin printf '%s\n' \
+    'usage: run-redteam.sh <project-dir> <target-class> [--confirm] [--no-llm]' '' \
+    'target-class ∈ data-exfil | priv-esc | account-takeover | tenant-break | model-jailbreak' '' \
+    'Examples:' '  run-redteam.sh /path/to/project-a tenant-break --confirm' \
+    '  run-redteam.sh /path/to/project-b account-takeover --confirm' >&2
   exit 64
 fi
 
@@ -46,7 +57,19 @@ case "$TARGET_CLASS" in
   *) echo "fail: unknown target-class '$TARGET_CLASS'" >&2; exit 64 ;;
 esac
 
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+PROJECT_DIR="$(builtin cd "$PROJECT_DIR" && builtin pwd)" || exit 1
+if ! sg_path_sanitize "$PROJECT_DIR" || ! sg_vet_helpers "$PROJECT_DIR" bash cat basename date ls sort tail mktemp rm mkdir; then
+  echo "fail: unsafe red-team helper or project path" >&2
+  exit 1
+fi
+SG_BASH="$(sg_checked_program "$BASH" "$PROJECT_DIR")" || { echo "fail: unsafe bash at $BASH" >&2; exit 1; }
+builtin unset PYTHONPATH PYTHONHOME
+# The scanned project is untrusted: python3 must not live inside it, and every
+# parser runs isolated (-I), so a json.py or re.py in the cwd is never imported.
+PYTHON3_BIN="$(sg_resolve_python "$PROJECT_DIR")" || {
+  echo "fail: python3 is not installed, or it (or the interpreter its shim runs) resolves inside the scanned project or cannot be vouched for" >&2
+  exit 1
+}
 PROJECT_NAME="$(basename "$PROJECT_DIR")"
 AUDIT_DIR="$PROJECT_DIR/${SECURITY_GATE_AUDIT_DIR:-audits}"
 DATE_TAG="$(date +%Y-%m-%d)"
@@ -97,6 +120,21 @@ if [ -z "$BASELINE" ] || [ ! -f "$BASELINE" ]; then
   exit 1
 fi
 echo "baseline: $(basename "$BASELINE")"
+# Chains are only as complete as the baseline under them. Red-team never
+# gates, so it does not refuse an incomplete baseline; it says so everywhere
+# its findings go: here, in the narrative header and in the reasoning input.
+# lib/baseline_state.py is the schema check diff mode uses.
+STATE="$("$PYTHON3_BIN" -I "$SKILL_DIR/scripts/lib/baseline_state.py" "$BASELINE" "${BASELINE##*/}" 2>/dev/null)"
+STATE="${STATE%%$'\t'*}"
+case "$STATE" in
+  complete)     COMPLETENESS="complete" ;;
+  unknown)      COMPLETENESS="unknown (pre-1.4.2 baseline)" ;;
+  incomplete:*) COMPLETENESS="incomplete (${STATE#incomplete: })" ;;
+  *)            COMPLETENESS="unknown (baseline does not parse)" ;;
+esac
+# The state is repository data spliced into JSON and Markdown below.
+COMPLETENESS="${COMPLETENESS//[^A-Za-z0-9 ,().:\/_-]/?}"
+echo "baseline completeness: ${COMPLETENESS:-unknown}"
 
 # --- prepare LLM input ----------------------------------------------------
 WORK="$(mktemp -d)"
@@ -107,8 +145,8 @@ trap 'rm -rf "$WORK"' EXIT
 # chained-exploit reasoning even though it is excluded from baseline gating.
 INPUT="$WORK/input.jsonl"
 {
-  printf '{"_target_class":"%s","_project":"%s"}\n' "$TARGET_CLASS" "$PROJECT_NAME"
-  python3 - "$BASELINE" <<'PY'
+  printf '{"_target_class":"%s","_project":"%s","_baseline_completeness":"%s"}\n' "$TARGET_CLASS" "$PROJECT_NAME" "${COMPLETENESS:-unknown}"
+  "$PYTHON3_BIN" -I - "$BASELINE" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh: doc = json.load(fh)
 for bucket in ("findings", "historical_findings"):
@@ -126,6 +164,7 @@ mkdir -p "$AUDIT_DIR"
   printf "# Red-team narrative — %s — %s\n\n" "$PROJECT_NAME" "$TARGET_CLASS"
   printf "%s\n" "- generated: \`$(date -u +%Y-%m-%dT%H:%M:%SZ)\`"
   printf "%s\n" "- baseline:  \`$(basename "$BASELINE")\`"
+  printf "%s\n" "- completeness: ${COMPLETENESS:-unknown}"
   printf "%s\n" "- mode:      Mode 3 (chained-exploit reasoning, static)"
   printf "%s\n\n" "- scope:     local/dev only — no live DAST, no production traffic"
   printf "## Sign-off\n\n"
@@ -137,7 +176,7 @@ if [ "$NO_LLM" -eq 1 ]; then
     printf "## No-LLM mode\n\n"
     printf "Run invoked with \`--no-llm\` — no kill-chain composition performed. The baseline findings are listed below for manual analysis.\n\n"
     printf "## Baseline findings (kept)\n\n"
-    python3 - "$BASELINE" <<'PY'
+    "$PYTHON3_BIN" -I - "$BASELINE" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh: doc = json.load(fh)
 for bucket in ("findings", "historical_findings"):
@@ -152,12 +191,12 @@ PY
 fi
 
 LLM_OUT="$WORK/redteam.md"
-if ! bash "$SKILL_DIR/scripts/lib/llm-call.sh" "$SKILL_DIR/prompts/redteam.md" "$INPUT" "$LLM_OUT"; then
+if ! "$SG_BASH" -p "$SKILL_DIR/scripts/lib/llm-call.sh" "$SKILL_DIR/prompts/redteam.md" "$INPUT" "$LLM_OUT" "$PROJECT_DIR"; then
   {
     printf "## LLM unavailable\n\n"
     printf "No LLM provider was usable for this run (\`scripts/lib/llm-call.sh\` returned non-zero). Falling back to a no-LLM listing — re-run with \`LLM_PROVIDER\` set + \`llm\` plugin installed for the chain composition.\n\n"
     printf "## Baseline findings (kept)\n\n"
-    python3 - "$BASELINE" <<'PY'
+    "$PYTHON3_BIN" -I - "$BASELINE" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh: doc = json.load(fh)
 for bucket in ("findings", "historical_findings"):

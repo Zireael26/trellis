@@ -1,0 +1,3 @@
+{
+  "session_id": "bench-session-0001", "cwd": "@PROJECT@", "hook_event_name": "WorktreeCreate", "name": "bench-callback"
+}

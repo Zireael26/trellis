@@ -25,7 +25,7 @@
 use strict;
 use warnings;
 use Fcntl qw(:DEFAULT :flock F_DUPFD F_GETFD F_SETFD);
-use POSIX qw(SIGINT SIGTERM SIGHUP SIG_BLOCK SIG_UNBLOCK WNOHANG);
+use POSIX qw(SIGINT SIGTERM SIGHUP SIGQUIT SIG_BLOCK SIG_UNBLOCK WNOHANG);
 use JSON::PP ();
 use MIME::Base64 ();
 use Time::HiRes ();
@@ -34,7 +34,7 @@ my $EX_USAGE       = 2;
 my $EX_UNAVAILABLE = 5;
 my $EX_CONFIG      = 78;
 my $EX_TIMEOUT     = 124;
-my %SIGNUM         = (INT => SIGINT, TERM => SIGTERM, HUP => SIGHUP);
+my %SIGNUM         = (INT => SIGINT, TERM => SIGTERM, HUP => SIGHUP, QUIT => SIGQUIT);
 
 # Files this holder has published under its lock. Every exit that can follow
 # publication goes through fail() or an explicit unlink, so they are removed
@@ -87,10 +87,18 @@ my %POOL = (
 # (absent means 4), each a JSON integer >= 1. Re-read on every poll. Returns
 # ({heavy => N, light => L}) or (undef, one-line reason).
 sub read_slots {
+  # Only the embedded launcher metadata program defines this lexical cache
+  # accessor. The standalone supervisor still reads afresh on every poll.
+  return launcher_metadata_config() if defined &launcher_metadata_config;
   open(my $fh, '<', $config) or return (undef, "cannot read machine config $config: $!");
   my $text = do { local $/; <$fh> };
   close $fh;
   my $data = eval { JSON::PP->new->decode($text) };
+  return slot_counts($data);
+}
+
+sub slot_counts {
+  my ($data) = @_;
   return (undef, "machine config is not a JSON object: $config") unless ref $data eq 'HASH';
   my %n;
   for my $p (qw(heavy light)) {
@@ -350,7 +358,7 @@ fail($EX_USAGE, 'run process-gate outside the enclosing ordinary heavy/light wra
 my ($lock, %child_env);
 %child_env = %caller;
 
-my $block = POSIX::SigSet->new(SIGINT, SIGTERM, SIGHUP);
+my $block = POSIX::SigSet->new(SIGINT, SIGTERM, SIGHUP, SIGQUIT);
 if (!$nested) {
   my $waited_since = Time::HiRes::time();
   my $last_heartbeat = $waited_since;
@@ -378,7 +386,7 @@ if (!$nested) {
       # kernel drops the lock with the descriptor.
       my $set = POSIX::SigSet->new;
       POSIX::sigpending($set);
-      for my $name (qw(INT TERM HUP)) {
+      for my $name (qw(INT TERM HUP QUIT)) {
         POSIX::_exit(128 + $SIGNUM{$name}) if $set->ismember($SIGNUM{$name});
       }
       last;    # still blocked: they stay blocked until the launch is armed
@@ -510,7 +518,7 @@ if (!$nested && ($byte ne 's' || getpgrp($pid) != $pid)) {
 {
   my $set = POSIX::SigSet->new;
   POSIX::sigpending($set);
-  for my $name (qw(INT TERM HUP)) {
+  for my $name (qw(INT TERM HUP QUIT)) {
     $pending //= $name if $set->ismember($SIGNUM{$name});
   }
 }

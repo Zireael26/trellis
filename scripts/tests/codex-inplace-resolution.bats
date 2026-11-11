@@ -29,6 +29,10 @@ setup() {
   mkdir -p "$PAYLOAD/core-rules/skills/process-gate/scripts/lib"
   cp "$REPO/core-rules/skills/process-gate/scripts/lib/diff-base.sh" \
     "$PAYLOAD/core-rules/skills/process-gate/scripts/lib/diff-base.sh"
+  # code-review-subagent resolves its trusted Python through the payload's
+  # scripts/lib/trellis-python.sh (T29) and stays unmet without it.
+  mkdir -p "$PAYLOAD/scripts/lib"
+  cp "$REPO/scripts/lib/trellis-python.sh" "$PAYLOAD/scripts/lib/trellis-python.sh"
   printf '%s\n' '{ "template": { "branch": "main" }, "mandatory_pipeline": { "enabled": true, "spec_required_diff_lines": 80, "surgical_max_diff_lines": 400 } }' \
     > "$PAYLOAD/trellis.config.json"
   INPLACE="$PAYLOAD/core-rules/codex/hooks"

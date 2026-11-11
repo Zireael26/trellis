@@ -173,13 +173,15 @@ deterministic_review() {
   fi
 
   # --- critical: AWS access key id ---
-  if printf '%s\n' "$added" | grep -Eq 'AKIA[0-9A-Z]{16}'; then
+  # Read the whole stream: grep -q can exit early, SIGPIPE printf, and make a
+  # true match look false under the script's pipefail setting.
+  if printf '%s\n' "$added" | grep -E 'AKIA[0-9A-Z]{16}' >/dev/null; then
     findings_json="${findings_json}${sep}$(_det_finding critical "AWS access key id committed in diff")"
     sep=","
   fi
 
   # --- critical: PEM private key header ---
-  if printf '%s\n' "$added" | grep -Eq -- '-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+  if printf '%s\n' "$added" | grep -E -- '-----BEGIN [A-Z ]*PRIVATE KEY-----' >/dev/null; then
     findings_json="${findings_json}${sep}$(_det_finding critical "Private key (PEM) committed in diff")"
     sep=","
   fi
@@ -205,8 +207,10 @@ deterministic_review() {
   # precision over recall — an unquoted YAML/env secret is a tolerated miss (the
   # LLM rung catches those).
   local secret_hits
+  # Extract each assignment before filtering: an unrelated comment, env
+  # reference or placeholder elsewhere on the same line must not suppress it.
   secret_hits="$(printf '%s\n' "$added" \
-    | grep -iE "(password|passwd|secret|api[_-]?key|token|access[_-]?key)[[:space:]]*(:|=)[[:space:]]*[\"'][^\"']+[\"']" \
+    | grep -ioE "(password|passwd|secret|api[_-]?key|token|access[_-]?key)[[:space:]]*(:|=)[[:space:]]*[\"'][^\"']+[\"']" \
     || true)"
   if [ -n "$secret_hits" ]; then
     # Drop lines whose value is an env reference (not a hard-coded literal).
@@ -226,7 +230,7 @@ deterministic_review() {
   # --- important: obvious left-in debugger ---
   # Middle alternative uses a bracketed terminator so this file does not
   # self-match in a diff (DL-P8a-09); it matches the same target text.
-  if printf '%s\n' "$added" | grep -Eq 'binding\.pry|debugger[;]|import pdb'; then
+  if printf '%s\n' "$added" | grep -E 'binding\.pry|debugger[;]|import pdb' >/dev/null; then
     findings_json="${findings_json}${sep}$(_det_finding important "Left-in debugger statement")"
     sep=","
   fi
@@ -385,8 +389,10 @@ llm_review() {
 # reviewer_python
 #   Set TRELLIS_PYTHON to a real CPython, never a pyenv-style shim (~0.4 s a
 #   call). Only the payload's own resolver is trusted, found from this file's
-#   physical directory (the Codex hook reaches it as codex/hooks/../../hooks);
-#   a mapped copy keeps the PATH lookup. Status 1 when none is available.
+#   physical directory in either canonical harness tree. Mapped hook copies
+#   may carry a sibling resolver or use the supplied payload root. Status 1
+#   when none is available; the legacy PATH fallback remains for older direct
+#   library copies. The Stop wrapper instead requires its trusted resolver.
 # ---------------------------------------------------------------------------
 reviewer_python() {
   local dir
@@ -395,6 +401,21 @@ reviewer_python() {
     */core-rules/hooks/lib)
       # shellcheck source=../../../scripts/lib/trellis-python.sh disable=SC1091
       . "$dir/../../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+    */core-rules/codex/hooks/lib)
+      # shellcheck source=../../../scripts/lib/trellis-python.sh disable=SC1091
+      . "$dir/../../../../scripts/lib/trellis-python.sh" 2>/dev/null ;;
+    *)
+      if [ -f "$dir/trellis-python.sh" ]; then
+        # shellcheck disable=SC1090,SC1091
+        . "$dir/trellis-python.sh" 2>/dev/null
+      elif [ -n "${TRELLIS_ROOT:-}" ] && [ -f "$TRELLIS_ROOT/scripts/lib/trellis-python.sh" ]; then
+        # shellcheck disable=SC1090,SC1091
+        . "$TRELLIS_ROOT/scripts/lib/trellis-python.sh" 2>/dev/null
+      elif [ -z "${TRELLIS_ROOT:-}" ] && [ -f "$dir/../../../scripts/lib/trellis-python.sh" ]; then
+        # Legacy .claude/hooks/lib or .codex/hooks/lib copy, rooted at itself.
+        # shellcheck disable=SC1090,SC1091
+        . "$dir/../../../scripts/lib/trellis-python.sh" 2>/dev/null
+      fi ;;
   esac
   command -v trellis_python >/dev/null 2>&1 && trellis_python || TRELLIS_PYTHON=python3
   command -v "$TRELLIS_PYTHON" >/dev/null 2>&1
@@ -415,7 +436,7 @@ reviewer_roles_config() {
   fi
   reviewer_python || return 1
 
-  "$TRELLIS_PYTHON" - "$trellis_home" <<'PY'
+  "$TRELLIS_PYTHON" -I - "$trellis_home" <<'PY'
 import json
 import os
 import sys
@@ -478,7 +499,7 @@ resolve_reviewer_model() {
   config="$(reviewer_roles_config)" || return 1
   [ -f "$state" ] || return 1
 
-  "$TRELLIS_PYTHON" - "$state" "$config" <<'PY'
+  "$TRELLIS_PYTHON" -I - "$state" "$config" <<'PY'
 import datetime as dt
 import hashlib
 import json
@@ -1055,6 +1076,7 @@ main() {
 # suite can `source` this file and unit-test deterministic_review without the
 # top-level flow consuming stdin or running).
 if [ "${BASH_SOURCE[0]:-}" = "${0:-}" ]; then
+  export GIT_OPTIONAL_LOCKS=0
   set -euo pipefail
   main "$@"
 fi

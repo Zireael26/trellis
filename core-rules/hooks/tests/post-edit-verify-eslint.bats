@@ -54,13 +54,87 @@ EOF
 }
 
 run_claude() {
-  run env PATH="$BIN:$PATH" bash -c 'cd "$1" && exec bash "$2"' _ "$PROJECT" "$HOOKS_DIR/post-edit-verify.sh" \
-    <<<'{"tool_name":"Edit","tool_input":{"file_path":"src/a.ts"}}'
+  local event
+  event="$(jq -nc --arg target "${EDIT_TARGET:-src/a.ts}" '{tool_name:"Edit",tool_input:{file_path:$target}}')"
+  run env PATH="$BIN:$PATH" bash -c 'cd "$1" && exec bash "$2"' _ "$PROJECT" "$HOOKS_DIR/post-edit-verify.sh" <<<"$event"
 }
 
 run_codex() {
   run env PATH="$BIN:$PATH" bash "$CODEX_HOOKS_DIR/post-edit-verify.sh" \
-    <<<"$(jq -nc --arg cwd "$PROJECT" '{cwd:$cwd,tool_name:"Edit",tool_input:{file_path:"src/a.ts"},tool_response:{success:true}}')"
+    <<<"$(jq -nc --arg cwd "$PROJECT" --arg target "${EDIT_TARGET:-src/a.ts}" '{cwd:$cwd,tool_name:"Edit",tool_input:{file_path:$target},tool_response:{success:true}}')"
+}
+
+@test "143-stop supported flat eslint extensions are detected without widening absent configs" {
+  local runner config
+  local_eslint 1
+  mv "$PROJECT/eslint.config.js" "$BATS_TEST_TMPDIR/config.saved"
+  for config in cjs mts cts; do
+    cp "$BATS_TEST_TMPDIR/config.saved" "$PROJECT/eslint.config.$config"
+    for runner in run_claude run_codex; do
+      : >"$CALLS"
+      "$runner"
+      [ "$status" -eq 2 ] || { echo "$config $runner: $output"; return 1; }
+      [[ "$output" == *local-eslint-error* ]]
+      grep -q '^local --quiet ' "$CALLS"
+    done
+    mv "$PROJECT/eslint.config.$config" "$BATS_TEST_TMPDIR/config.$config"
+  done
+  for runner in run_claude run_codex; do
+    : >"$CALLS"
+    "$runner"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [ ! -s "$CALLS" ]
+  done
+}
+
+@test "143-stop nested eslint config lints from its owning workspace with hoisted binary" {
+  local runner
+  mv "$PROJECT/eslint.config.js" "$BATS_TEST_TMPDIR/config.saved"
+  mkdir -p "$PROJECT/packages/web/src"
+  cp "$BATS_TEST_TMPDIR/config.saved" "$PROJECT/packages/web/eslint.config.mjs"
+  printf 'export const nested = 1;\n' > "$PROJECT/packages/web/src/a.ts"
+  export EDIT_TARGET='packages/web/src/a.ts'
+  local_eslint 1
+  cat > "$PROJECT/node_modules/.bin/eslint" <<EOF
+#!/bin/sh
+printf 'cwd=%s\n' "\$PWD" >>"$CALLS"
+[ "\$1" = --version ] && exit 0
+printf 'workspace lint failed\n'
+exit 1
+EOF
+  chmod +x "$PROJECT/node_modules/.bin/eslint"
+  for runner in run_claude run_codex; do
+    : >"$CALLS"
+    "$runner"
+    [ "$status" -eq 2 ] || { echo "$runner: $output"; return 1; }
+    [[ "$output" == *'workspace lint failed'* ]]
+    grep -Fx "cwd=$PROJECT/packages/web" "$CALLS"
+  done
+}
+
+@test "143-stop local eslint does not depend on npx being on PATH" {
+  local runner
+  mv "$BIN/npx" "$BATS_TEST_TMPDIR/npx.saved"
+  ln -s "$(command -v jq)" "$BIN/jq"
+  export PATH="$BIN:/usr/bin:/bin"
+  ! command -v npx >/dev/null 2>&1
+  local_eslint 1
+  for runner in run_claude run_codex; do
+    : >"$CALLS"
+    "$runner"
+    [ "$status" -eq 2 ] || { echo "$runner: $output"; return 1; }
+    [[ "$output" == *local-eslint-error* ]]
+    grep -q '^local --quiet ' "$CALLS"
+  done
+  local_eslint 0
+  for runner in run_claude run_codex; do
+    : >"$CALLS"
+    "$runner"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -q '^local --quiet ' "$CALLS"
+  done
 }
 
 @test "a local eslint runs once directly and npx never starts" {
@@ -134,7 +208,11 @@ run_codex() {
     : >"$CALLS"
     NPX_ESLINT=1 "$runner"
     [ "$status" -eq 0 ] || { echo "$runner: $output"; return 1; }
-    [ -z "$output" ] || { echo "$runner: $output"; return 1; }
+    # R1 PATH ruling A (a039a8c43): a missing project tool is one labelled
+    # advisory line, never a lint run or a block.
+    [ "${#lines[@]}" -eq 1 ] || { echo "$runner: $output"; return 1; }
+    [[ "$output" == 'post-edit-verify: eslint not found (no local install and no npx eslint on PATH); JS/TS lint skipped for '*src/a.ts ]] ||
+      { echo "$runner: $output"; return 1; }
     [ "$(cat "$CALLS")" = "npx --no-install eslint --version" ] || { cat "$CALLS"; return 1; }
   done
 }

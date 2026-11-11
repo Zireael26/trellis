@@ -85,6 +85,29 @@ teardown() {
   return 0
 }
 
+@test "143-pg: bypass limitation remains visible in a passing aggregate verdict" {
+  cp "$REAL_SCRIPTS/check-bypass.sh" "$STUB/scripts/check-bypass.sh"
+  # The real check reads global Git config; isolate it as check-bypass.bats
+  # does, or a runner's own commit.gpgSign=false becomes a bypass warning.
+  printf '[user]\n  email = test@example.com\n  name = test\n' > "$BATS_TEST_TMPDIR/global.gitconfig"
+  export GIT_CONFIG_GLOBAL="$BATS_TEST_TMPDIR/global.gitconfig" GIT_CONFIG_NOSYSTEM=1
+  run_all merge
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Bypass coverage: Git reflog does not record --no-verify"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"hook execution cannot be verified post-hoc"* ]]
+  [[ "$output" == *"Husky coverage:"* && "$output" == *"heuristic"* ]]
+  [ "$(grep -c '^  Bypass coverage:' <<< "$output")" -eq 1 ]
+  [ "$(grep -c '^  Husky coverage:' <<< "$output")" -eq 1 ]
+  mkdir "$PROJECT_DIR/.husky"
+  printf '#!/bin/sh\nexit 0\n' > "$PROJECT_DIR/.husky/pre-push"
+  run_all merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* && "$output" == *"short-circuit"* ]]
+  [ "$(grep -c '^  Bypass coverage:' <<< "$output")" -eq 1 ]
+  [ "$(grep -c '^  Husky coverage:' <<< "$output")" -eq 1 ]
+}
+
 @test "render: metadata selection and exact-input reuse receipts stay visible" {
   local receipt
   for receipt in 'Tests: narrowed (release-metadata: 3 files)' \
@@ -165,6 +188,21 @@ EOF
   [[ "$output" == *"Overall: MERGEABLE"*"Tests: narrowed (docs-only: 3 files)"* ]] || { echo "$output"; false; }
 }
 
+@test "render: partial autodetected tests remain partial and warn" {
+  cat > "$STUB/scripts/check-tests.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "warn Tests & coverage"
+echo "  tests: Python (pytest) skipped; declare PROCESS_GATE_TEST_CMD"
+echo "  Tests: partial"
+exit 2
+EOF
+  run_all merge
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *'Overall: NEEDS CHANGES'* ]] || { echo "$output"; false; }
+  grep -Eq '^Tests & coverage:.* — partial$' <<< "$output" || { echo "$output"; false; }
+  grep -Fxq 'Tests: partial' <<< "$output" || { echo "$output"; false; }
+}
+
 @test "render: a full Tests row prints no narrowed receipt, even from command output" {
   cat > "$STUB/scripts/check-tests.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -186,6 +224,24 @@ EOF
   [[ "$output" == *"## Findings"* ]] || { echo "$output"; false; }
   [[ "$output" == *"### Security (diff)"* ]] || { echo "$output"; false; }
   [[ "$output" == *"### Analyze"* ]]
+}
+
+@test "unexpected gate exits and a missing hard gate fail closed" {
+  local idx failures=0
+  for idx in 0 1 2 3 4 6 7; do
+    run env "STUB_RC_$idx=42" bash -c 'cd "$1" && "$2" --mode=merge --range=main..HEAD' _ \
+      "$PROJECT_DIR" "$STUB/scripts/run-all.sh"
+    [ "$status" -eq 1 ] && [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "idx=$idx rc=$status; $output"; failures=1; }
+  done
+  for idx in 1 2 3 6; do
+    run env "STUB_RC_$idx=42" bash -c 'cd "$1" && "$2" --mode=push --range=main..HEAD' _ \
+      "$PROJECT_DIR" "$STUB/scripts/run-all.sh"
+    [ "$status" -eq 1 ] && [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "push idx=$idx rc=$status; $output"; failures=1; }
+  done
+  mv "$STUB/scripts/check-security-diff.sh" "$STUB/scripts/absent-security"
+  run_all merge
+  [ "$status" -eq 1 ] && [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "missing security: $output"; failures=1; }
+  [ "$failures" -eq 0 ]
 }
 
 # --- mode default (fail-closed) -------------------------------------------
@@ -316,7 +372,7 @@ EOF
 @test "render: check-slop exiting nonzero fails the row, it does not render n/a" {
   cat > "$STUB/scripts/check-slop.sh" <<'EOF'
 #!/usr/bin/env bash
-echo "unexpected output with no contract token"
+echo "info Anti-slop: n/a — contradictory success token"
 exit 3
 EOF
   chmod +x "$STUB/scripts/check-slop.sh"
@@ -324,7 +380,7 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Anti-slop:"*"fail"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"Anti-slop:"*"n/a"* ]] || { echo "$output"; false; }
+  ! grep -Eq '^Anti-slop:[[:space:]]+➖ n/a' <<< "$output" || { echo "$output"; false; }
 }
 
 # Real Security adapter + payload scanner; only unrelated rows stay stubbed.
@@ -432,14 +488,47 @@ EOF
   [ -f "$OSV_RAN" ]
 }
 
-@test "Security: missing project and payload scanner fails, never warn-skips" {
+@test "Security: a project gate cannot replace the missing executing payload" {
   security_payload_fixture
-  rm "$BATS_TEST_TMPDIR/security-gate/scripts/run-diff.sh"
+  mv "$BATS_TEST_TMPDIR/security-gate/scripts/run-diff.sh" "$BATS_TEST_TMPDIR/payload-saved.sh"
+  local project_gate="$PROJECT_DIR/.claude/skills/security-gate/scripts/run-diff.sh"
+  mkdir -p "${project_gate%/*}"
+  printf '#!/bin/sh\n: > "%s"\necho "Baseline:          complete — b.json"\necho "Overall: MERGEABLE"\n' \
+    "$BATS_TEST_TMPDIR/project-gate-ran" > "$project_gate"
+  run_all merge
+  [ "$status" -eq 1 ] || { echo "rc=$status; $output"; false; }
+  [[ "$output" == *"Security (diff):"*"❌ fail"*"security-gate payload unavailable"* ]] || { echo "$output"; false; }
+  [ ! -e "$BATS_TEST_TMPDIR/project-gate-ran" ] || { echo "project gate ran"; false; }
+}
+
+@test "Security: missing payload fails, never warn-skips" {
+  security_payload_fixture
+  rm "${BATS_TEST_TMPDIR:?}/security-gate/scripts/run-diff.sh"
   run_all merge
   [ "$status" -eq 1 ]
   [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
-  [[ "$output" == *"security-gate unavailable"* ]]
+  [[ "$output" == *"security-gate payload unavailable"* ]]
   [[ "$output" != *"skipped"* ]]
+}
+
+@test "Security: an incomplete committed baseline under a docs-only change blocks the merge" {
+  # Inversion (review R3/F2): the reviewers' scenario returned MERGEABLE/0
+  # through run-diff, the adapter and run-all, never naming the baseline.
+  SECURITY_FIXTURE_BASELINE=0 security_payload_fixture
+  git -C "$PROJECT_DIR" checkout -q main
+  printf '%s\n' '{"schema":"security-gate.baseline.v2","profile":"web-next","complete":false,"engines":{"semgrep":{"status":"failed","exit":2},"osv-scanner":{"status":"ok","exit":0},"gitleaks":{"status":"ok","exit":0}},"findings":[],"historical_findings":[]}' \
+    > "$PROJECT_DIR/audits/2026-01-01-baseline-project.json"
+  git -C "$PROJECT_DIR" add audits
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'chore: incomplete baseline'
+  git -C "$PROJECT_DIR" checkout -qb feature/docs-only
+  printf '# notes\n' > "$PROJECT_DIR/NOTES.md"
+  git -C "$PROJECT_DIR" add NOTES.md
+  git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'docs: notes'
+  run bash -c "cd '$PROJECT_DIR' && '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"incomplete (semgrep failed)"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
 }
 
 @test "Security: absent baseline fails instead of warn-skipping the diff scan" {

@@ -423,7 +423,10 @@ class ReceiptProvenanceTests(unittest.TestCase):
                         time.sleep(0.01)
                     # Timeout disposition without ever running the real battery.
                     os.killpg(child.pid, signal.SIGTERM)
-                out, err = child.communicate(timeout=15)
+                # The property is START and FENCED retention, not exit speed: under a
+                # full 12-shard battery the fenced teardown after the group SIGTERM
+                # outran a 15 s wait (T45 stage 05, 2026-11-10), so allow 60 s.
+                out, err = child.communicate(timeout=60)
                 self.assertNotEqual(child.returncode, 0, (out, err))
                 self.assertEqual([r["phase"] for r in self.records()[-2:]], ["start", "fenced"])
                 self.order.unlink()

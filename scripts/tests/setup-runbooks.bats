@@ -105,6 +105,8 @@ make_policy_source_clone() {
   # The SessionStart render templates and the pre-push carrier are contract
   # surfaces the attachment engine validates by content, so they are the real
   # files rather than fixtures.
+  mkdir -p "$root/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$root/core-rules/legacy-hooks/"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$root/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
@@ -113,6 +115,9 @@ make_policy_source_clone() {
   # show-config resolves the autonomy slider out of the selected payload.
   mkdir -p "$root/core-rules/hooks/lib"
   cp "$REPO_ROOT/core-rules/hooks/lib/autonomy.sh" "$root/core-rules/hooks/lib/autonomy.sh"
+  # doctor's guard-registration row reads native baseline arming through the
+  # payload's hook dependency library (spec 074 T62) and fails closed without it.
+  cp "$REPO_ROOT/core-rules/hooks/lib/deps.sh" "$root/core-rules/hooks/lib/deps.sh"
   printf '# fixture canonical policy\n' > "$root/core-rules/CLAUDE.md"
   printf '%s\n' "$version" > "$root/core-rules/VERSION"
   cat > "$root/core-rules/inheritance-manifest.json" <<'JSON'
@@ -248,9 +253,24 @@ make_project() {
   printf '%s\n' "$root"
 }
 
+# An attach starts the detached post-attach job from the installed payload. The
+# launcher runs under env -i, so the runner's TRELLIS_ATTACH_POSTJOB=off never
+# reaches it. The job holds the checkout lock while it verifies, and detach,
+# relink and recover refuse (exit 3) rather than wait for that lock. Each
+# runbook step below starts only once the previous one's job has ended, however
+# slowly it runs: its detached Perl parent already carries the path in its argv.
+wait_for_postjob() {
+  local tries=0
+  while pgrep -f "$TRELLIS_HOME/releases/.*/attach-postjob.sh" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 9000 ] || { echo 'attach postjob did not finish within 900 s'; return 1; }
+    sleep 0.1
+  done
+}
+
 # AGENT_SETUP.md §5 / AGENT_ONBOARD_PROJECT.md §3, verbatim.
 run_onboard_runbook() {
-  local root="$1"
+  local root="$1" rc=0
   "$TRELLIS" onboard \
     --home "$TRELLIS_HOME" \
     --fleet "$FLEET" \
@@ -258,18 +278,22 @@ run_onboard_runbook() {
     --project-id "$PROJECT_ID" \
     --harness claude \
     --harness codex \
-    "$root"
+    "$root" || rc=$?
+  wait_for_postjob || return 1
+  return "$rc"
 }
 
 run_attach_runbook() {
-  local root="$1" release="${2:-$RELEASE_VERSION}"
+  local root="$1" release="${2:-$RELEASE_VERSION}" rc=0
   "$TRELLIS" attach \
     --home "$TRELLIS_HOME" \
     --fleet "$FLEET" \
     --release "$release" \
     --harness claude \
     --harness codex \
-    "$root"
+    "$root" || rc=$?
+  wait_for_postjob || return 1
+  return "$rc"
 }
 
 # The documented owner step between onboarding and adoption: `.trellis.json` is

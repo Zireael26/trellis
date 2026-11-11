@@ -10,6 +10,8 @@
 # waits on them, and teardown kills every pid a test recorded.
 
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
+LAUNCHER_TEMPLATE="$REPO_ROOT/scripts/trellis-launcher.sh"
+load helpers/native-launcher
 
 setup() {
   SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/heavy.XXXXXX")"
@@ -496,6 +498,19 @@ open(d + "/leader", "w").close()
   [[ "$output" == *"slot 1: free"* ]] || { echo "$output"; false; }
 }
 
+@test "T60 F4: QUIT between acquire and fork exits 131 without launching, like INT TERM HUP" {
+  TRELLIS_HEAVY_TEST_PAUSE=after-acquire TRELLIS_HEAVY_TEST_TRACE="$SANDBOX/trace" heavy_bg paused -- touch "$SANDBOX/launched"
+  wait_for_grep 'test pause after-acquire' "$SANDBOX/paused.out"
+  kill -QUIT "$BG_PID"
+  local rc=0
+  wait "$BG_PID" || rc=$?
+  [ "$rc" -eq 131 ] || { echo "rc=$rc"; cat "$SANDBOX/paused.out"; false; }
+  [ ! -e "$SANDBOX/launched" ]
+  ! grep -qx fork "$SANDBOX/trace" 2>/dev/null || { cat "$SANDBOX/trace"; false; }
+  run "${HEAVY[@]}" --status
+  [[ "$output" == *"slot 1: free"* ]] || { echo "$output"; false; }
+}
+
 @test "H3: a signal between fork and group isolation still exits 130, without exec" {
   TRELLIS_HEAVY_TEST_PAUSE=after-fork TRELLIS_HEAVY_TEST_TRACE="$SANDBOX/trace" heavy_bg forked -- touch "$SANDBOX/launched"
   wait_for_grep 'test pause after-fork' "$SANDBOX/forked.out"
@@ -746,7 +761,7 @@ EOF
     write_config "$value" "$value"
     run bash -c '. "$1/scripts/lib/trellis-home.sh"; trellis_home_validate_config "$2"' _ "$REPO_ROOT" "$TRELLIS_HOME/config.json"
     [ "$status" -eq 0 ] || { echo "trellis-home $value: $output"; false; }
-    run bash -c 'eval "$(awk "/^launcher_validate_machine_config\\(\\) \\{/,/^\\}/" "$1/scripts/trellis-launcher.sh")"
+    run bash -c 'f=$(sed -n "/^launcher_validate_machine_config() {\$/,/^}\$/p" "$1/scripts/trellis-launcher.sh"); eval "$f"
       launcher_validate_machine_config "$2"' _ "$REPO_ROOT" "$TRELLIS_HOME/config.json"
     [ "$status" -eq 0 ] || { echo "launcher $value: $output"; false; }
     run bash -c 'for l in semver trellis-home local-registry attachment health-checks; do . "$1/scripts/lib/$l.sh"; done
@@ -795,7 +810,37 @@ make_heavy_release() {
   mkdir -p "$PAYLOAD/scripts/lib" "$SANDBOX/source" "$SANDBOX/projects" "$SANDBOX/launcher"
   cp "$REPO_ROOT/scripts/trellis" "$REPO_ROOT/scripts/heavy.sh" "$PAYLOAD/scripts/"
   cp "$REPO_ROOT/scripts/lib/heavy-supervisor.pl" "$PAYLOAD/scripts/lib/"
+  case "${1:-}" in
+    native*) printf '# trellis-payload-capability: exec-snapshot\n' > "$PAYLOAD/scripts/lib/trellis-home.sh" ;;
+  esac
+  case "${1:-}" in
+    native-custom-cli) printf '\n# custom dispatcher bytes\n' >> "$PAYLOAD/scripts/trellis" ;;
+    native-custom-heavy) printf '\n# custom argument wrapper bytes\n' >> "$PAYLOAD/scripts/heavy.sh" ;;
+    native-custom-supervisor) printf '\n# custom supervisor bytes\n' >> "$PAYLOAD/scripts/lib/heavy-supervisor.pl" ;;
+    native-same-length-heavy)
+      # Same length, different bytes: the gate must compare content (F3).
+      perl -0pi -e 's/a machine-wide slot gate/a MACHINE-wide slot gate/ or die' "$PAYLOAD/scripts/heavy.sh" ;;
+    native-fd-probe-cli)
+      # A non-heavy CLI route whose workload reports its descriptors.
+      python3 -I - "$PAYLOAD/scripts/trellis" "$FD_PROBE" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);s=p.read_text();head,rest=s.split("\n",1)
+p.write_text(head+"\n"+'[ "${1:-}" = fd-probe ] && exec /usr/bin/perl -MPOSIX -e \''+sys.argv[2]+'\'\n'+rest)
+PY
+      ;;
+    native-old-supervisor)
+      python3 -I - "$PAYLOAD/scripts/lib/heavy-supervisor.pl" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);s=p.read_text()
+for old,new in [('SIGHUP SIGQUIT SIG_BLOCK','SIGHUP SIG_BLOCK'),('HUP => SIGHUP, QUIT => SIGQUIT','HUP => SIGHUP'),('SIGINT, SIGTERM, SIGHUP, SIGQUIT','SIGINT, SIGTERM, SIGHUP')]:
+    assert s.count(old)==1
+    s=s.replace(old,new)
+p.write_text(s)
+PY
+      ;;
+  esac
   chmod 755 "$PAYLOAD/scripts/trellis" "$PAYLOAD/scripts/heavy.sh"
+  [ "${1:-}" != native-heavy-not-executable ] || chmod 644 "$PAYLOAD/scripts/heavy.sh"
   python3 "$REPO_ROOT/scripts/tests/helpers/fixture-tree-manifest.py" "$PAYLOAD" > "$manifest"
   jq -n --arg version "$version" --slurpfile tree "$manifest" '
     {schema_version: 1, version: $version, tag: ("v" + $version),
@@ -807,6 +852,362 @@ make_heavy_release() {
   LAUNCHER="$SANDBOX/launcher/trellis"
   cp "$REPO_ROOT/scripts/trellis-launcher.sh" "$LAUNCHER"
   chmod 755 "$LAUNCHER"
+}
+
+native_heavy_release() {
+  make_heavy_release native
+  pin_native_launcher
+  # A cold stamp miss deliberately keeps full canonical verification/startup.
+  run native_bounded "$LAUNCHER" heavy -- /bin/sh -c 'ps -p "$PPID" -o command='
+  [ "$status" -eq 0 ] || { echo "$status: $output"; false; }
+  [[ "$output" == *'heavy-supervisor.pl run heavy - 0'* ]] || { echo "cold path was not canonical: $output"; false; }
+}
+
+@test "T60 warm launcher starts captured Perl directly without CLI or heavy.sh hops" {
+  native_heavy_release
+  run native_bounded "$LAUNCHER" heavy --lane native-probe -- /bin/sh -c 'ps -p "$PPID" -o command='
+  [ "$status" -eq 0 ] || { echo "$status: $output"; false; }
+  [[ "$output" == *'/usr/bin/perl -- /dev/fd/'*' run heavy native-probe 0'* ]] || { echo "not direct captured supervisor: $output"; false; }
+  [[ "$output" != *'heavy-supervisor.pl'* ]] || { echo "$output"; false; }
+}
+
+@test "T60 warm launcher preserves stdin caller env child statuses and timeout" {
+  native_heavy_release
+  run native_bounded /bin/bash -c 'printf "original heavy input\n" | "$1" heavy -- cat' _ "$LAUNCHER"
+  [ "$status" -eq 0 ] && [ "$output" = 'original heavy input' ] || { echo "$status: $output"; false; }
+  run native_bounded env HEAVY_CALLER_ONLY='kept value' DOCKER_HOST=unix:///tmp/fixture.sock "$LAUNCHER" heavy -- /bin/sh -c 'printf "%s:%s:%s" "$HEAVY_CALLER_ONLY" "$DOCKER_HOST" "${TRELLIS_VERIFIED_PAYLOAD-unset}"'
+  [ "$status" -eq 0 ] && [ "$output" = 'kept value:unix:///tmp/fixture.sock:unset' ] || { echo "$status: $output"; false; }
+  run native_bounded "$LAUNCHER" heavy -- /bin/sh -c 'exit 3'
+  [ "$status" -eq 3 ] || { echo "$status: $output"; false; }
+  run native_bounded "$LAUNCHER" heavy -- no-such-t60-command
+  [ "$status" -eq 127 ] || { echo "$status: $output"; false; }
+  run native_bounded env TRELLIS_HEAVY_KILL_AFTER=0.1 "$LAUNCHER" heavy --timeout 1 -- sleep 5
+  [ "$status" -eq 124 ] || { echo "$status: $output"; false; }
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+  [ -z "$(find "$TRELLIS_HEAVY_DIR" \( -name '*.token' -o -name '*.info' \) -print)" ]
+}
+
+@test "T60 launcher queues INT TERM HUP QUIT before native spawn without running workload" {
+  native_heavy_release
+  local sig want rc launcher
+  for sig in INT TERM HUP QUIT; do
+    case "$sig" in INT) want=130 ;; TERM) want=143 ;; HUP) want=129 ;; QUIT) want=131 ;; esac
+    env TRELLIS_HEAVY_TEST_PAUSE=launcher-startup /usr/bin/perl -e '$SIG{INT}=$SIG{QUIT}="DEFAULT"; exec { $ARGV[0] } @ARGV' \
+      "$LAUNCHER" heavy -- /bin/sh -c 'echo ran > "$HOME/t60-ran"' > "$SANDBOX/pre-$sig.log" 2>&1 3>&- &
+    launcher=$!; PIDS+=("$launcher")
+    wait_for_grep 'test pause launcher-startup' "$SANDBOX/pre-$sig.log"
+    kill -s "$sig" "$launcher"
+    rc=0; wait "$launcher" || rc=$?
+    [ "$rc" -eq "$want" ] || { echo "$sig: $rc"; cat "$SANDBOX/pre-$sig.log"; false; }
+    [ ! -e "$HOME/t60-ran" ]
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+  done
+}
+
+@test "T60 queued INT TERM HUP QUIT keep their status when scratch admission fails" {
+  native_heavy_release
+  local sig want rc launcher
+  for sig in INT TERM HUP QUIT; do
+    case "$sig" in INT) want=130 ;; TERM) want=143 ;; HUP) want=129 ;; QUIT) want=131 ;; esac
+    env TRELLIS_HEAVY_TEST_PAUSE=launcher-startup /usr/bin/perl -e '$SIG{INT}=$SIG{QUIT}="DEFAULT"; exec { $ARGV[0] } @ARGV' \
+      "$LAUNCHER" heavy -- /bin/sh -c 'echo ran > "$HOME/t60-ran"' > "$SANDBOX/fail-$sig.log" 2>&1 3>&- &
+    launcher=$!; PIDS+=("$launcher")
+    wait_for_grep 'test pause launcher-startup' "$SANDBOX/fail-$sig.log"
+    chmod 777 "$TRELLIS_HOME/state/scratch"
+    kill -s "$sig" "$launcher"
+    rc=0; wait "$launcher" || rc=$?
+    chmod 700 "$TRELLIS_HOME/state/scratch"
+    grep -q 'not private' "$SANDBOX/fail-$sig.log" || { cat "$SANDBOX/fail-$sig.log"; false; }
+    [ "$rc" -eq "$want" ] || { echo "$sig: $rc (want $want)"; cat "$SANDBOX/fail-$sig.log"; false; }
+    [ ! -e "$HOME/t60-ran" ]
+  done
+}
+
+@test "T60 launcher forwards ready signals and leaves no managed process or token" {
+  native_heavy_release
+  local sig want rc launcher pgid started ended
+  for sig in INT TERM HUP QUIT; do
+    case "$sig" in INT) want=130 ;; TERM) want=143 ;; HUP) want=129 ;; QUIT) want=131 ;; esac
+    "$LAUNCHER" heavy -- /bin/sh -c 'echo $$ > "$HOME/t60-pgid"; sleep 30 & wait' > "$SANDBOX/post-$sig.log" 2>&1 3>&- &
+    launcher=$!; PIDS+=("$launcher")
+    wait_for_file "$HOME/t60-pgid"; pgid="$(cat "$HOME/t60-pgid")"; PIDS+=("$pgid")
+    started="$(now)"
+    kill -s "$sig" "$launcher"
+    rc=0; wait "$launcher" || rc=$?
+    ended="$(now)"
+    awk -v start="$started" -v end="$ended" 'BEGIN { exit ((end-start) < 5 ? 0 : 1) }' || {
+      echo "$sig managed teardown exceeded five seconds: $started -> $ended"
+      false
+    }
+    [ "$rc" -eq "$want" ] || { echo "$sig: $rc"; cat "$SANDBOX/post-$sig.log"; false; }
+    run pgrep -g "$pgid"
+    [ "$status" -eq 1 ] || {
+      echo "managed group remains: $output"
+      kill -KILL -- "-$pgid" 2>/dev/null || true
+      false
+    }
+    [ -z "$(find "$TRELLIS_HEAVY_DIR" \( -name '*.token' -o -name '*.info' \) -print)" ]
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+    rm -f "${HOME:?}/t60-pgid"
+  done
+}
+
+@test "T60 missing optional companion retains the complete canonical heavy route" {
+  make_heavy_release native
+  run native_bounded "$LAUNCHER" heavy -- /bin/sh -c 'ps -p "$PPID" -o command='
+  [ "$status" -eq 0 ] || { echo "$status: $output"; false; }
+  [[ "$output" == *'heavy-supervisor.pl run heavy - 0'* ]] || { echo "$output"; false; }
+  [[ "$output" != *'/usr/bin/perl -- /dev/fd/'* ]] || { echo "$output"; false; }
+}
+
+assert_custom_heavy_stays_canonical() {
+  make_heavy_release "$1"
+  pin_native_launcher
+  local attempt
+  for attempt in cold warm; do
+    run native_bounded "$LAUNCHER" heavy -- /bin/sh -c 'ps -p "$PPID" -o command='
+    [ "$status" -eq 0 ] || { echo "$attempt: $status: $output"; false; }
+    [[ "$output" == *'heavy-supervisor.pl run heavy - 0'* ]] || { echo "$output"; false; }
+    [[ "$output" != *'/usr/bin/perl -- /dev/fd/'* ]] || { echo "$output"; false; }
+  done
+}
+
+@test "T60 custom dispatcher retains complete canonical enforcement" {
+  assert_custom_heavy_stays_canonical native-custom-cli
+}
+
+@test "T60 custom heavy wrapper retains complete canonical enforcement" {
+  assert_custom_heavy_stays_canonical native-custom-heavy
+}
+
+@test "T60 custom supervisor retains complete canonical enforcement" {
+  assert_custom_heavy_stays_canonical native-custom-supervisor
+}
+
+@test "T60 old supervisor without QUIT handling stays canonical and its holder survives" {
+  assert_custom_heavy_stays_canonical native-old-supervisor
+  local launcher holder pgid rc route expected='' reference="$SANDBOX/pre-t60-canonical"
+  cp "$LAUNCHER" "$reference"
+  # Restore the pre-T60 heavy decision (return10) without duplicating the
+  # unchanged canonical implementation or relying on Git inside archive tests.
+  python3 -I - "$reference" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);s=p.read_text();old='launcher_native_run_if_available() {\n';assert s.count(old)==1
+p.write_text(s.replace(old,old+'  return 10 # pre-T60 canonical heavy selection\n',1))
+PY
+  for route in "$reference" "$LAUNCHER"; do
+    "$route" heavy -- /bin/sh -c 'echo "$PPID" > "$HOME/old-holder"; echo $$ > "$HOME/old-pgid"; while [ ! -e "$HOME/old-release" ]; do sleep 0.05; done' > "$SANDBOX/old-quit.log" 2>&1 3>&- &
+    launcher=$!; PIDS+=("$launcher")
+    wait_for_file "$HOME/old-holder"; wait_for_file "$HOME/old-pgid"
+    holder="$(cat "$HOME/old-holder")"; pgid="$(cat "$HOME/old-pgid")"; PIDS+=("$holder" "$pgid")
+    kill -QUIT "$launcher"
+    sleep 0.2
+    if ! kill -0 "$holder" 2>/dev/null || ! kill -0 "$launcher" 2>/dev/null; then
+      kill -KILL -- "-$pgid" 2>/dev/null || true
+      echo 'old holder was killed/abandoned by native QUIT forwarding'
+      false
+    fi
+    touch "$HOME/old-release"
+    rc=0; wait "$launcher" || rc=$?
+    if [ -z "$expected" ]; then expected="$rc"; fi
+    [ "$rc" -eq "$expected" ] || { echo "QUIT canonical=$expected native=$rc: $(cat "$SANDBOX/old-quit.log")"; false; }
+    run pgrep -g "$pgid"
+    [ "$status" -eq 1 ] || { echo "old managed group remains: $output"; false; }
+    [ -z "$(find "$TRELLIS_HEAVY_DIR" \( -name '*.token' -o -name '*.info' \) -print)" ]
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+    rm -f "${HOME:?}/old-holder" "${HOME:?}/old-pgid" "${HOME:?}/old-release"
+  done
+}
+
+@test "T60 warm and canonical heavy agree on stdin environment options and child status" {
+  native_heavy_release
+  local canonical="$SANDBOX/canonical-launcher" code expected expected_output
+  cp "$LAUNCHER" "$canonical"
+  python3 -I - "$canonical" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);s=p.read_text();old='launcher_native_run_if_available() {\n';assert s.count(old)==1
+p.write_text(s.replace(old,old+'  return 10 # test-only canonical reference, never production\n',1))
+PY
+  for code in 0 3 7 124 125 126 127 255; do
+    run native_bounded "$canonical" heavy --light --lane=paired --timeout=0 -- /bin/sh -c 'printf "%s:%s:%s" "$1" "$TRELLIS_HEAVY_POOL" "${TRELLIS_VERIFIED_PAYLOAD-unset}"; exit "$1"' _ "$code"
+    expected="$status"; expected_output="$output"
+    [ "$expected" -eq "$code" ] || { echo "canonical: $expected: $expected_output"; false; }
+    run native_bounded "$LAUNCHER" heavy --light --lane=paired --timeout=0 -- /bin/sh -c 'printf "%s:%s:%s" "$1" "$TRELLIS_HEAVY_POOL" "${TRELLIS_VERIFIED_PAYLOAD-unset}"; exit "$1"' _ "$code"
+    [ "$status" -eq "$expected" ] && [ "$output" = "$expected_output" ] || { echo "$code: $status: $output versus $expected: $expected_output"; false; }
+  done
+  for canonical in "$canonical" "$LAUNCHER"; do
+    # Preserve the existing Perl truthiness of a zero-padded timeout too:
+    # "000" is truthy but numerically zero, so it is an immediate timeout.
+    run native_bounded "$canonical" heavy --timeout=000 -- sleep 5
+    [ "$status" -eq 124 ] || { echo "$status: $output"; false; }
+    run native_bounded /bin/bash -c 'printf "paired stdin\n" | "$1" heavy -- cat' _ "$canonical"
+    [ "$status" -eq 0 ] && [ "$output" = 'paired stdin' ] || { echo "$status: $output"; false; }
+  done
+}
+
+@test "T60 native readiness failure exits 5 before any workload" {
+  native_heavy_release
+  run native_bounded env TRELLIS_HEAVY_TEST_FAIL=launcher-ready "$LAUNCHER" heavy -- /bin/sh -c 'echo ran > "$HOME/t60-ready-ran"'
+  [ "$status" -eq 5 ] || { echo "$status: $output"; false; }
+  [ ! -e "$HOME/t60-ready-ran" ]
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "T60 installed postflight failure preserves higher child status and removes scratch" {
+  native_heavy_release
+  local child expected
+  for child in 0 7; do
+    chmod a-w "$PAYLOAD/scripts/heavy.sh"
+    run native_bounded "$LAUNCHER" heavy -- true
+    [ "$status" -eq 0 ] || { echo "$status: $output"; false; }
+    run native_bounded "$LAUNCHER" heavy -- /bin/sh -c 'chmod u+w "$TRELLIS_HOME/releases/1.2.3/payload/scripts/heavy.sh"; exit "$1"' _ "$child"
+    expected=4; [ "$child" -le 4 ] || expected="$child"
+    [ "$status" -eq "$expected" ] || { echo "$status: $output"; false; }
+    [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+    [ -z "$(find "$TRELLIS_HEAVY_DIR" \( -name '*.token' -o -name '*.info' \) -print)" ]
+  done
+}
+
+# T60 F1: nested calls in production resolve `trellis` to the installed
+# launcher, so the native routes must keep the caller's descriptors (the outer
+# slot lock is usually fd 64) exactly as the shell route does.
+nested_through_launcher() {
+  printf '#!/bin/bash\nexec %q "$@"\n' "$LAUNCHER" > "$SANDBOX/bin/trellis"
+  chmod 755 "$SANDBOX/bin/trellis"
+}
+
+assert_native_nested_parity() {
+  local probe start end
+  probe="$(report_marker)"
+  write_config 2
+  run native_bounded "$LAUNCHER" heavy --timeout 10 -- trellis heavy -- sh -c "$probe"
+  [ "$status" -eq 0 ] || { echo "$1 heavy-in-heavy: $status $output"; false; }
+  [ "$output" = "$(printf '%s\n' caller-group 'pool=heavy slot=1')" ] || { echo "$1 heavy-in-heavy: $output"; false; }
+  # H7: N=1 nested call must not wait for its own outer slot.
+  write_config 1
+  start="$(now)"
+  run native_bounded "$LAUNCHER" heavy --timeout 8 -- trellis heavy -- sh -c "$probe"
+  end="$(now)"
+  [ "$status" -eq 0 ] || { echo "$1 H7 N=1: $status $output"; false; }
+  [ "$output" = "$(printf '%s\n' caller-group 'pool=heavy slot=1')" ] || { echo "$1 H7 N=1: $output"; false; }
+  perl -e 'exit(($ARGV[1] - $ARGV[0]) < 6 ? 0 : 1)' "$start" "$end" || { echo "$1 H7 waited for its own slot"; false; }
+  # T18: gate inside gate keeps the reserved slot 0.
+  run native_bounded "$LAUNCHER" heavy --lane process-gate --timeout 8 -- trellis heavy --lane process-gate -- sh -c "$probe"
+  [ "$status" -eq 0 ] || { echo "$1 gate-in-gate: $status $output"; false; }
+  [ "$output" = "$(printf '%s\n' caller-group 'pool=heavy slot=0')" ] || { echo "$1 gate-in-gate: $output"; false; }
+  # T18: gate inside an ordinary lane is refused, never admitted to slot 0.
+  run native_bounded "$LAUNCHER" heavy --timeout 8 -- trellis heavy --lane process-gate -- touch "$SANDBOX/gate-launched"
+  [ "$status" -eq 2 ] || { echo "$1 gate-in-lane: $status $output"; false; }
+  [[ "$output" == *"run process-gate outside the enclosing ordinary heavy/light wrapper"* ]] || { echo "$output"; false; }
+  [ ! -e "$SANDBOX/gate-launched" ]
+  # HA4: heavy -> light -> heavy with the only light slot held elsewhere.
+  write_config 1 1
+  hold_slot 1 30 light
+  run native_bounded "$LAUNCHER" heavy --timeout 8 -- trellis heavy --light -- trellis heavy -- sh -c "$probe"
+  [ "$status" -eq 0 ] || { echo "$1 HA4 chain: $status $output"; false; }
+  [ "$output" = "$(printf '%s\n' caller-group 'pool=heavy slot=1')" ] || { echo "$1 HA4 chain: $output"; false; }
+  kill -KILL "$HOLD_PID"
+  [ -z "$(find "$TRELLIS_HEAVY_DIR" \( -name '*.token' -o -name '*.info' \) -print)" ]
+  [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
+}
+
+@test "T60 nested heavy through the native fast-path launcher keeps verified nesting (T18 H7 HA4)" {
+  native_heavy_release
+  nested_through_launcher
+  run native_bounded "$LAUNCHER" heavy -- /bin/sh -c 'ps -p "$PPID" -o command='
+  [[ "$output" == *'run heavy - 0'* && "$output" != *'heavy-supervisor.pl'* ]] || { echo "not the fast path: $output"; false; }
+  assert_native_nested_parity fast-path
+}
+
+@test "T60 nested heavy through the native canonical fallback keeps verified nesting (T18 H7 HA4)" {
+  assert_custom_heavy_stays_canonical native-custom-supervisor
+  nested_through_launcher
+  assert_native_nested_parity native-canonical
+}
+
+# Lists every open descriptor above 2 except the supervisor's own slot lock
+# (TRELLIS_HEAVY_FD, which the workload inherits by design). The workload is
+# Perl itself, so no helper process adds descriptors of its own.
+FD_PROBE='for (3..1023) { next if $_ eq ($ENV{TRELLIS_HEAVY_FD} // ""); my $d = POSIX::dup($_); next unless defined $d; POSIX::close($d); print "$_\n" }'
+
+fd_probe_with_caller_descriptors() {
+  "$@" 3>&- 5<"$SANDBOX/fd-five" 64<"$SANDBOX/fd-sixty-four" 71<"$SANDBOX/fd-seventy-one"
+}
+
+assert_fd_parity() {
+  local family="$1" reference="$2" expected
+  shift 2
+  printf five > "$SANDBOX/fd-five"; printf lock > "$SANDBOX/fd-sixty-four"; printf seventy > "$SANDBOX/fd-seventy-one"
+  local fd route
+  # The caller's own set (bats may hold more than the three opened here).
+  run fd_probe_with_caller_descriptors native_bounded /usr/bin/perl -MPOSIX -e "$FD_PROBE"
+  expected="$output"
+  for route in caller "$reference"; do
+    [ "$route" = caller ] || run fd_probe_with_caller_descriptors native_bounded "$reference" "$@"
+    [ "$status" -eq 0 ] || { echo "$family $route: $status $output"; false; }
+    for fd in 5 64 71; do
+      grep -qx "$fd" <<<"$output" || { echo "$family $route lacks caller fd $fd: $output"; false; }
+    done
+  done
+  run fd_probe_with_caller_descriptors native_bounded "$LAUNCHER" "$@"
+  [ "$status" -eq 0 ] || { echo "$family native: $status $output"; false; }
+  [ "$output" = "$expected" ] || { echo "$family native descriptors differ from the caller's: $output"; false; }
+}
+
+shell_reference_launcher() {
+  cp "$LAUNCHER" "$SANDBOX/shell-reference"
+  python3 -I - "$SANDBOX/shell-reference" <<'PY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]);s=p.read_text();old='launcher_native_run_if_available() {\n';assert s.count(old)==1
+p.write_text(s.replace(old,old+'  return 10 # test-only shell route reference\n',1))
+PY
+}
+
+@test "T60 fd parity: native heavy fast path passes exactly the caller descriptors" {
+  native_heavy_release
+  shell_reference_launcher
+  assert_fd_parity heavy-fast "$SANDBOX/shell-reference" heavy -- /usr/bin/perl -MPOSIX -e "$FD_PROBE"
+  run native_bounded "$LAUNCHER" heavy -- /bin/sh -c 'ps -p "$PPID" -o command=' 64<"$SANDBOX/fd-sixty-four"
+  [[ "$output" == *'/usr/bin/perl -- /dev/fd/'*' run heavy'* && "$output" != *'/dev/fd/64 '* ]] || { echo "carrier must avoid a caller fd 64: $output"; false; }
+}
+
+@test "T60 fd parity: native embedded canonical body passes exactly the caller descriptors" {
+  assert_custom_heavy_stays_canonical native-custom-supervisor
+  shell_reference_launcher
+  assert_fd_parity canonical-body "$SANDBOX/shell-reference" heavy -- /usr/bin/perl -MPOSIX -e "$FD_PROBE"
+}
+
+@test "T60 fd parity: native canonical pipe transport passes exactly the caller descriptors" {
+  native_heavy_release
+  shell_reference_launcher
+  # A floating schema literal needs canonical numeric admission (run_canonical).
+  chmod u+w "$TRELLIS_HOME/config.json"
+  perl -0pi -e 's/"schema_version": 1,/"schema_version": 1.0,/ or die' "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
+  assert_fd_parity canonical-pipe "$SANDBOX/shell-reference" heavy -- /usr/bin/perl -MPOSIX -e "$FD_PROBE"
+}
+
+@test "T60 fd parity: native warm CLI route passes exactly the caller descriptors" {
+  make_heavy_release native-fd-probe-cli
+  pin_native_launcher
+  shell_reference_launcher
+  run native_bounded "$LAUNCHER" fd-probe
+  [ "$status" -eq 0 ] || { echo "cold: $status $output"; false; }
+  assert_fd_parity warm-cli "$SANDBOX/shell-reference" fd-probe
+}
+
+@test "T60 non-executable heavy wrapper keeps the canonical outcome on warm calls" {
+  make_heavy_release native-heavy-not-executable
+  pin_native_launcher
+  local attempt
+  for attempt in cold warm; do
+    run native_bounded "$LAUNCHER" heavy -- true
+    [ "$status" -ne 0 ] && [[ "$output" == *'heavy.sh'* ]] || { echo "$attempt: $status: $output"; false; }
+  done
+}
+
+@test "T60 same-length heavy wrapper edit retains complete canonical enforcement" {
+  assert_custom_heavy_stays_canonical native-same-length-heavy
 }
 
 @test "H6: the caller's variables, PATH entry and DOCKER_HOST reach the child through the launcher" {

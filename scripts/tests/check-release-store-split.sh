@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Compare names and exact bodies against the pre-split a2a8746e4 original.
+# Cases a lane added inside its own scaffolded `# BEGIN LANE <id>` ...
+# `# END LANE <id>` block are new, not part of the split: they may carry a name
+# the original lacks, and are counted separately. Every original case must still
+# appear exactly once, byte for byte, and no lane case may reuse its name.
 # The retained .txt is not a runnable suite. Reuse the quote/heredoc-aware R1
 # parser (including bash -n and bats --count), not a brace-counting shortcut.
 # Optional root supports isolated mutation probes without editing the checkout.
@@ -20,21 +24,37 @@ done
 }
 bash "$ROOT/scripts/tests/test-equivalence.sh" emit --tree "$TREE" "$ORIGINAL" > "$WORK/original.tsv"
 bash "$ROOT/scripts/tests/test-equivalence.sh" emit --tree "$TREE" "${PARTS[@]}" > "$WORK/parts.tsv"
+for part in "${PARTS[@]}"; do
+  awk -v part="$part" '
+    /^# BEGIN LANE [A-Za-z0-9]+$/ { if (lane != "") bad = 1; lane = $4; next }
+    /^# END LANE [A-Za-z0-9]+$/ { if ($4 != lane) bad = 1; lane = ""; next }
+    lane != "" && /^@test "/ {
+      name = $0; sub(/^@test "/, "", name); sub(/" \{$/, "", name); print part "\t" name
+    }
+    END { if (lane != "" || bad) { print "unbalanced lane markers" > "/dev/stderr"; exit 1 } }
+  ' "$TREE/$part"
+done > "$WORK/lane.txt"
 awk -F '\t' '
-  FNR == NR && $3 == "test" {
+  FILENAME == ARGV[1] { lane[$0] = 1; next }
+  FILENAME == ARGV[2] && $3 == "test" {
     if ($5 in original) { print "duplicate original: " $5; bad = 1 }
     original[$5] = $6; count++; next
   }
-  FILENAME == ARGV[2] && $3 == "test" {
+  FILENAME == ARGV[3] && $3 == "test" {
     if ($5 in seen) { print "doubled: " $5; bad = 1 }
-    seen[$5] = 1; total++
-    if (!($5 in original)) { print "added or renamed: " $5; bad = 1 }
+    seen[$5] = 1
+    if (!($5 in original)) {
+      if (($1 "\t" $5) in lane) { added++; next }
+      print "added or renamed: " $5; bad = 1
+    }
+    else if (($1 "\t" $5) in lane) { print "lane case reuses an original name: " $5; bad = 1 }
     else if (original[$5] != $6) { print "edited: " $5; bad = 1 }
+    total++
   }
   END {
     for (name in original) if (!(name in seen)) { print "dropped: " name; bad = 1 }
     if (!count || total != count) { print "count: original=" count ", parts=" total; bad = 1 }
-    if (!bad) print "OK: " count " release-store test names and bodies are byte-identical"
+    if (!bad) print "OK: " count " release-store test names and bodies are byte-identical (" added + 0 " lane additions)"
     exit bad
   }
-' "$WORK/original.tsv" "$WORK/parts.tsv"
+' "$WORK/lane.txt" "$WORK/original.tsv" "$WORK/parts.tsv"

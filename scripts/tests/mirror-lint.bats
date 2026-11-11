@@ -107,6 +107,96 @@ teardown() {
   [ -z "$VICTIM" ] || rm -rf "$VICTIM"
 }
 
+# T57: one synthetic structural ELF, never executed, with the manifest and
+# adapter derived from the candidate fixture. The trusted payload is separate
+# from the mirror so a forged mirror-side digest cannot certify itself.
+t57_native_fixture() {
+  export PAYLOAD_ROOT="$BATS_TEST_TMPDIR/trusted-payload"
+  rm -rf "${PAYLOAD_ROOT:?}/core-rules/native" "${MIRROR:?}/core-rules/native"
+  mkdir -p "$PAYLOAD_ROOT/core-rules/native" "$MIRROR/core-rules"
+  python3 -I - "$REPO_ROOT/core-rules/native" "$PAYLOAD_ROOT/core-rules/native" "${1:-}" <<'PY'
+import hashlib,json,pathlib,shutil,sys
+source,base=map(pathlib.Path,sys.argv[1:3]); extra=sys.argv[3].encode()
+d=json.loads((source/'artifacts.json').read_text())
+shutil.copy2(source/'hook-adapter.sh',base/'hook-adapter.sh')
+b=bytearray(120); b[:6]=b'\x7fELF\x02\x01'; b[18:20]=(62).to_bytes(2,'little')
+b[32:40]=(64).to_bytes(8,'little'); b[54:56]=(56).to_bytes(2,'little')
+b[56:58]=(1).to_bytes(2,'little'); b[64:68]=(1).to_bytes(4,'little')
+b.extend(b'\x00\x08\x08\x08\x08\xff'+extra+b'\x00')
+t='x86_64-unknown-linux-musl'; p=base/t/'trellis-hooks'
+p.parent.mkdir(); p.write_bytes(b); p.chmod(0o755)
+d['assets']={t:dict(path=t+'/trellis-hooks',size=len(b),sha256=hashlib.sha256(b).hexdigest(),
+                    format='elf-static',signature='none',minimum_os=None)}
+(base/'artifacts.json').write_text(json.dumps(d))
+PY
+  cp -R "$PAYLOAD_ROOT/core-rules/native" "$MIRROR/core-rules/native"
+}
+
+@test "T57 native: verified binary packed IPv4 bytes do not trigger text findings" {
+  t57_native_fixture
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -z "$output" ]
+}
+
+@test "T57 native: the complete signed candidate set and manifest are scanned" {
+  export PAYLOAD_ROOT="$BATS_TEST_TMPDIR/trusted-payload"
+  mkdir -p "$PAYLOAD_ROOT/core-rules" "$MIRROR/core-rules"
+  cp -R "$REPO_ROOT/core-rules/native" "$PAYLOAD_ROOT/core-rules/native"
+  cp -R "$PAYLOAD_ROOT/core-rules/native" "$MIRROR/core-rules/native"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '\n8.8.8.8\n' >> "$MIRROR/core-rules/native/artifacts.json"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'artifacts.json: routable IP literal must not publish'* ]]
+}
+
+@test "T57 native: printable binary host paths and routable addresses still refuse" {
+  t57_native_fixture 'https://8.8.8.8/path'
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'core-rules/native/x86_64-unknown-linux-musl/trellis-hooks: routable IP literal must not publish'* ]]
+  t57_native_fixture "/Users/${BATS_TEST_NUMBER:-fixture}-operator/path"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'core-rules/native/x86_64-unknown-linux-musl/trellis-hooks: absolute-path leak'* ]]
+}
+
+@test "T57 native: forged digest and unlisted files refuse without an exemption" {
+  t57_native_fixture
+  local asset="$MIRROR/core-rules/native/x86_64-unknown-linux-musl/trellis-hooks"
+  printf '\000changed\000' >> "$asset"
+  python3 -I - "$MIRROR/core-rules/native" <<'PY'
+import hashlib,json,pathlib,sys
+base=pathlib.Path(sys.argv[1]); p=base/'artifacts.json'; d=json.loads(p.read_text())
+a=d['assets']['x86_64-unknown-linux-musl']; b=(base/a['path']).read_bytes()
+a['size']=len(b); a['sha256']=hashlib.sha256(b).hexdigest(); p.write_text(json.dumps(d))
+PY
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'native'* ]]
+  cp -R "$PAYLOAD_ROOT/core-rules/native/." "$MIRROR/core-rules/native/"
+  printf '8.8.8.8\n' > "$MIRROR/core-rules/native/unlisted.txt"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'unlisted.txt: routable IP literal must not publish'* ]]
+}
+
+@test "T57 native: missing assets and wrong digest cannot buy an exemption" {
+  t57_native_fixture
+  local asset="$MIRROR/core-rules/native/x86_64-unknown-linux-musl/trellis-hooks"
+  rm "${asset:?}"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'native runtime verification failed'* ]]
+  cp "$PAYLOAD_ROOT/core-rules/native/x86_64-unknown-linux-musl/trellis-hooks" "$asset"
+  printf '\000changed\000' >> "$asset"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'native runtime verification failed'* ]]
+}
+
 @test "clean portable mirror passes without local redaction inputs" {
   printf '# Public policy\nUse $HOME/.trellis after local configure.\n' > "$MIRROR/README.md"
 
@@ -409,6 +499,240 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
   [[ "$output" != *'portable-operator'* ]] || { echo "$output"; false; }
+}
+
+@test "binary payloads cannot hide private home paths or routable addresses" {
+  local private_home="/User""s/privateaudit"
+  printf 'start\000%s/data\0008.8.8.8\000end\n' "$private_home" > "$MIRROR/payload.bin"
+  # A relative root prevents the fixture directory name from supplying the
+  # home path in a grep binary-match notice instead of the file's own bytes.
+  run bash -c 'cd "$1" && . "$2" && lint_mirror .' fixture "$MIRROR" "$LINT_LIB"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'payload.bin: absolute-path leak'* ]] || { echo "$output"; false; }
+  [[ "$output" == *'payload.bin: routable IP literal must not publish'* ]] || { echo "$output"; false; }
+
+  # A URL and a local path separated by a binary NUL are distinct tokens.
+  printf 'https://example.com/docs\000%s\000end\n' "$private_home" > "$MIRROR/payload.bin"
+  run bash -c 'cd "$1" && . "$2" && lint_mirror .' fixture "$MIRROR" "$LINT_LIB"
+  [ "$status" -eq 1 ] && [[ "$output" == *'payload.bin: absolute-path leak'* ]] || { echo "$output"; false; }
+  printf 'https://example.com/docs\000relative/home/name\000end\n' > "$MIRROR/payload.bin"
+  run bash -c 'cd "$1" && . "$2" && lint_mirror .' fixture "$MIRROR" "$LINT_LIB"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  printf 'start\000/Users/example/data\000192.0.2.1\000end\n' > "$MIRROR/payload.bin"
+  run bash -c 'cd "$1" && . "$2" && lint_mirror .' fixture "$MIRROR" "$LINT_LIB"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "invalid UTF-8 cannot hide binary home paths or routable addresses" {
+  local utf8="" candidate private_home="/User""s/privateaudit"
+  for candidate in en_IN.UTF-8 en_US.UTF-8 C.UTF-8 C.utf8; do
+    if [ "$(LC_ALL="$candidate" locale charmap 2>/dev/null)" = UTF-8 ]; then
+      utf8="$candidate"
+      break
+    fi
+  done
+  [ -n "$utf8" ] || skip "no UTF-8 locale installed"
+
+  printf '\377\376 %s/data \377 8.8.8.8 \376\n' "$private_home" > "$MIRROR/payload.bin"
+  run env LC_ALL="$utf8" bash -c 'cd "$1" && . "$2" && lint_mirror .' fixture "$MIRROR" "$LINT_LIB"
+  [ "$status" -eq 1 ] || { echo "$utf8: $output"; false; }
+  [[ "$output" == *'payload.bin: absolute-path leak'* && \
+     "$output" == *'payload.bin: routable IP literal must not publish'* ]] || { echo "$utf8: $output"; false; }
+
+  printf '\377\376 /Users/example/data 192.0.2.1 \376\n' > "$MIRROR/payload.bin"
+  run env LC_ALL="$utf8" bash -c 'cd "$1" && . "$2" && lint_mirror .' fixture "$MIRROR" "$LINT_LIB"
+  [ "$status" -eq 0 ] || { echo "$utf8: $output"; false; }
+}
+
+@test "rooted home paths after punctuation and binary bytes are rejected" {
+  local prefix private_home='/User'""'s/privateaudit'
+  for prefix in '`' '(' ')' '[' ']' '<' '>' ';' '|' '&' '@' '!' '{' '}' '*' '$('; do
+    printf '%s%s/projects\n' "$prefix" "$private_home" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed prefix $prefix: $output"; false; }
+    [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+  done
+  # Route-like or variable prefixes do not exempt other private home names.
+  for prefix in 'app/(dashboard)' 'docs/[group]' '**' '${OTHER}'; do
+    printf '%s%s\n' "$prefix" "$private_home" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "route-like prefix $prefix hid a home: $output"; false; }
+  done
+  printf 'docs/(group)/ho''me/privateaudit\n' > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "route-like prefix hid a home: $output"; false; }
+  for prefix in '\001' '\010' '\037' '\177' '\377'; do
+    printf '%b%s\n' "$prefix" "$private_home" > "$MIRROR/payload.bin"
+    rm -f "${MIRROR:?}/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed bare byte boundary $prefix: $output"; false; }
+  done
+  for prefix in '\001' '\010' '\037' '\177' '\377' '\012\052' 'A' '/'; do
+    printf '%b%s/projects\000' "$prefix" "$private_home" > "$MIRROR/payload.bin"
+    rm -f "${MIRROR:?}/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed binary prefix $prefix: $output"; false; }
+    [[ "$output" == *'payload.bin: absolute-path leak'* ]] || { echo "$output"; false; }
+  done
+  # A generic name must not consume the slash starting a later private home.
+  printf 'prefixA/User''s/example%s/projects\000' "$private_home" > "$MIRROR/payload.bin"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] && [[ "$output" == *'payload.bin: absolute-path leak'* ]] || { echo "$output"; false; }
+  printf 'prefixA/User''s/example/User''s/test/projects\000' > "$MIRROR/payload.bin"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "generic binary homes blocked: $output"; false; }
+  printf 'relative%s/projects\n' "$private_home" > "$MIRROR/payload.bin"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "relative text was blocked: $output"; false; }
+}
+
+@test "punctuation-only home placeholders are not usernames" {
+  local name prefix
+  for prefix in '/User'""'s/' '/ho'""'me/'; do
+    for name in '...' '…' '---' '._-' '—' '。' '……'; do
+      printf '%s%s/projects\n' "$prefix" "$name" > "$MIRROR/README.md"
+      run lint_mirror "$MIRROR"
+      [ "$status" -eq 0 ] || { echo "placeholder $name blocked: $output"; false; }
+    done
+    printf '%s.hidden/projects\n' "$prefix" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "real username missed: $output"; false; }
+  done
+}
+
+@test "bytewise home scanning retains non-ASCII usernames" {
+  local text non_ascii_home='/User'""'s/élise'
+  for text in "$non_ascii_home/projects" "$non_ascii_home" \
+              '/ho'""'me/नमस्ते/docs' "vscode://file$non_ascii_home/projects/x"; do
+    printf '%s\n' "$text" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed $text: $output"; false; }
+    [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+  done
+  printf '%s\n' '/Users/example/élise' > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "bare non-generic home paths are rejected without rejecting examples" {
+  local private_home="/User""s/privateaudit" private_linux_home="/ho""me/privateaudit"
+  printf 'HOME=%s\nHOME2=%s\n' "$private_home" "$private_linux_home" > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+  printf 'HOME=/Users/example\nHOME2=/home/user\nA descriptive absolute/home/parent phrase\n' > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "nested home directory segments cannot hide operator paths" {
+  local username="privateaudit" path
+  for path in "/System/Volumes/Data/User""s/$username/projects/x" \
+              "/var/ho""me/$username/work/" \
+              "~/sync/User""s/$username/notes/" \
+              "/System/Volumes/Data/User""s/$username" \
+              "/var/ho""me/$username" \
+              "~/sync/User""s/$username"; do
+    printf 'leak: %s\n' "$path" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed $path: $output"; false; }
+    [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+  done
+  # An unrooted bare relative string is indistinguishable from benign prose.
+  printf '%s\n' 'No home path: /docs/guide/index.md, absolute/home/parent and relative/home/name.' \
+    'CACHE="$WORK/home/.trellis"' 'CONFIG="${SANDBOX}/home/config.json"' \
+    "relative/User""s/$username/data" > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "single and double quoted paths retain spaces before a bare home segment" {
+  local username="privateaudit" path
+  for path in "\"/Volumes/Work Disk/User""s/$username\"" "'~/sync folder/User""s/$username'"; do
+    printf '%s\n' "$path" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed $path: $output"; false; }
+    [[ "$output" == *'README.md: absolute-path leak'* ]]
+  done
+}
+
+@test "backslash-escaped whitespace stays within a rooted home path" {
+  local username="privateaudit"
+  printf '%s\n' "/Volumes/Work\\ Disk/User""s/$username" > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'README.md: absolute-path leak'* ]]
+}
+
+@test "unquoted whitespace separates a rooted token from relative prose" {
+  local username="privateaudit"
+  printf '%s\n' "/Volumes/Work Disk/User""s/$username" > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "route segments and non-home URL paths remain publishable" {
+  local text
+  for text in 'app/(dashboard)/home/page.tsx' 'app/[locale]/home/page.tsx' \
+              'src/app/(dashboard)/home/page.ts' 'app/[locale]/home/page.jsx' \
+              'apps/admin/app/(tenant)/home/fixture.ts' \
+              '**/home/node' 'https://example.com/docs/home/intro' \
+              'https://api.example.com/v1/Users/12345' \
+              '"/usr/bin/node apps/home/index.js --port 3000"' \
+              '"--dir=/srv relative/home/name x"' \
+              "'No home path: /docs/guide/index.md, relative/home/name.'" \
+              "'HOME=/Users/example\\nOrdinary relative/home/name'"; do
+    printf '%s\n' "$text" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 0 ] || { echo "false home path in $text: $output"; false; }
+  done
+}
+
+@test "ambiguous quoted home endings fail closed as rooted paths" {
+  # Indistinguishable from a quoted rooted path with spaces in a directory.
+  local text='"/usr/bin/node apps/ho'""'me/index.js"'
+  printf '%s\n' "$text" > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+}
+
+@test "home paths embedded in URLs and adjacent to URLs are rejected" {
+  local text private_home='/User'""'s/privateaudit' private_linux_home='/ho'""'me/privateaudit'
+  for text in "vscode://file$private_home/projects/x.ts:12" \
+              "http://localhost:5173/@fs$private_home/projects/app/src/main.ts" \
+              "ssh://laptop$private_linux_home/repo.git" \
+              "git+ssh://host$private_linux_home/repo.git" \
+              "https://example.com$private_linux_home/path/" \
+              "https://example.com$private_linux_home" \
+              "https://x.com/a,$private_home" \
+              "https://example.com/docs?path=$private_home/projects/y" \
+              "https://x.com/docs$private_home/projects/x" \
+              "http://localhost:5173/@fs$private_home" \
+              "http://localhost:5173/@fs$private_home#L14" \
+              "https://host/x#${private_linux_home}" \
+              "file://$private_home"; do
+    printf '%s\n' "$text" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed $text: $output"; false; }
+    [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+  done
+}
+
+@test "quoted path prefixes and suffixes cannot hide a home directory" {
+  local text private_home='/User'""'s/privateaudit'
+  for text in '"HOME=/Volumes/Work Disk/User'""'s/privateaudit"' \
+              '"/Volumes/Work Disk/User'""'s/privateaudit:/usr/bin"' \
+              "\"/Volumes/Work Disk/User""s/privateaudit's notes\"" \
+              "file://$private_home" \
+              "https://example.com/home/example $private_home" \
+              "\"https://example.com/home/example and $private_home\""; do
+    printf '%s\n' "$text" > "$MIRROR/README.md"
+    run lint_mirror "$MIRROR"
+    [ "$status" -eq 1 ] || { echo "missed $text: $output"; false; }
+    [[ "$output" == *'README.md: absolute-path leak'* ]] || { echo "$output"; false; }
+  done
 }
 
 @test "generic documentation home examples remain portable" {

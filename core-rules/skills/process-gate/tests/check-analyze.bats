@@ -220,3 +220,26 @@ commit_and_check() {
     "specs/002-ok/analyze.md"  $'## Verdict: PASS\n'
   [ "$status" -eq 0 ]
 }
+
+@test "143-pg-r2: quoted and multiline spec paths still resolve their analyze verdicts" {
+  local special=$'050-café\nmore' file
+  mkdir -p "$PROJECT_DIR/specs/$special" "$PROJECT_DIR/specs/051-clean"
+  printf '## Verdict: NEEDS-REVISION\n' > "$PROJECT_DIR/specs/$special/analyze.md"
+  printf '## Verdict: PASS\n' > "$PROJECT_DIR/specs/051-clean/analyze.md"
+  git -C "$PROJECT_DIR" add specs
+  git -C "$PROJECT_DIR" commit -qm 'seed analyze reports'
+  git -C "$PROJECT_DIR" config core.quotePath true
+  file="$PROJECT_DIR/specs/$special/notes-é.md"
+  printf 'changed\n' > "$file"
+  git -C "$PROJECT_DIR" add specs
+  git -C "$PROJECT_DIR" commit -qm 'change quoted spec path'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"NEEDS-REVISION"* && "$output" != *"no spec dir touched"* ]]
+  printf 'clean change\n' > "$PROJECT_DIR/specs/051-clean/notes.md"
+  git -C "$PROJECT_DIR" add specs/051-clean/notes.md
+  git -C "$PROJECT_DIR" commit -qm 'change passing spec'
+  run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"analyze verdict is PASS"* ]]
+}

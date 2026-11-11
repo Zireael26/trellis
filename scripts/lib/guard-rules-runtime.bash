@@ -238,3 +238,62 @@ _gr_now() {
     ''|*[!0-9]*) GR_NOW=$(date +%s 2>/dev/null) ;;
   esac
 }
+
+# Reread override records (decision 3, option c). `trellis reread override
+# --session <id> --reason <why>` writes $TRELLIS_HOME/state/reread-overrides/<key>
+# as one line "<expires>\t<created>\t<reason>"; <key> is _se_state_key of the
+# session. The record is honoured only while unexpired and never for longer
+# than GR_REREAD_OVERRIDE_TTL from now, so a hand-written far-future expiry
+# buys nothing. The native evaluator (read_state.rs) applies the same reading.
+GR_REREAD_OVERRIDE_TTL=600
+
+# _gr_trellis_home — GR_TRELLIS_HOME = $TRELLIS_HOME, else $HOME/.trellis, else empty.
+_gr_trellis_home() {
+  GR_TRELLIS_HOME=${TRELLIS_HOME:-}
+  [ -n "$GR_TRELLIS_HOME" ] || { [ -z "${HOME:-}" ] || GR_TRELLIS_HOME=${HOME%/}/.trellis; }
+}
+
+# _gr_reread_override_active <state-key> — succeeds when an unexpired override
+# record exists for that key. The record must be exactly the CLI's one row:
+# "<expires>\t<created>\t<reason>\n", decimal fields without leading zeros,
+# expires = created + GR_REREAD_OVERRIDE_TTL, a nonempty reason of at most 2000
+# bytes without control characters, and nothing after the row. Any doubt
+# (missing, symlinked, malformed, extra data, expired, over-long) is "no
+# override": the guard then runs as usual. read_state.rs applies the same rules.
+_gr_reread_override_active() {
+  local key=$1 file line extra="" expires created reason rest field LC_ALL=C
+  case $key in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#key}" -eq 16 ] || return 1
+  _gr_trellis_home
+  [ -n "$GR_TRELLIS_HOME" ] || return 1
+  file=$GR_TRELLIS_HOME/state/reread-overrides/$key
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  { IFS= read -r line && ! IFS= read -r extra; } < "$file" 2>/dev/null || return 1
+  [ -z "$extra" ] && [ "${#line}" -le 4095 ] || return 1
+  case $line in *$'\t'*$'\t'*) ;; *) return 1 ;; esac
+  expires=${line%%$'\t'*} rest=${line#*$'\t'}
+  created=${rest%%$'\t'*} reason=${rest#*$'\t'}
+  for field in "$expires" "$created"; do
+    case $field in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#field}" -le 12 ] || return 1
+  done
+  case $reason in ''|*[[:cntrl:]]*) return 1 ;; esac
+  [ "${#reason}" -le 2000 ] || return 1
+  [ $((created + GR_REREAD_OVERRIDE_TTL)) -eq "$expires" ] || return 1
+  _gr_now
+  case $GR_NOW in ''|*[!0-9]*) return 1 ;; esac
+  [ "$expires" -gt "$GR_NOW" ] && [ $((expires - GR_NOW)) -le "$GR_REREAD_OVERRIDE_TTL" ]
+}
+
+# _gr_reread_override_path <normalized-path> — succeeds when the path is an
+# override record or its directory, in any letter case (macOS volumes usually
+# fold case). Edits there are refused: only the CLI writes overrides.
+_gr_reread_override_path() {
+  local folded=0 rc=1
+  shopt -q nocasematch && folded=1 || shopt -s nocasematch
+  case $1 in
+    */state/reread-overrides|*/state/reread-overrides/*) rc=0 ;;
+  esac
+  [ "$folded" -eq 1 ] || shopt -u nocasematch
+  return "$rc"
+}

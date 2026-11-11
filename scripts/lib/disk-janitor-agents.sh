@@ -233,10 +233,15 @@ dj_agent_matches() {
 #   match     a .plist equal to the installer's expected agent
 #   mismatch  a .plist that differs in any way (launchd loads it)
 #   disabled  any name not ending in .plist (renamed aside, never loaded)
+#   unreadable  the directory exists but cannot be enumerated
 # An absent directory prints nothing.
 dj_agent_scan() {
   local dir="$1" user_home="$2" trellis_home="$3" entry name
   [ -d "$dir" ] || return 0
+  if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+    printf 'unreadable\t%q\t%s\n' "$dir" 'directory cannot be read or searched'
+    return 0
+  fi
   for entry in "$dir"/org.trellis.disk-janitor* "$dir"/org.trellis.pi-spill-watchdog*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     name="${entry##*/}"
@@ -249,7 +254,7 @@ dj_agent_scan() {
     elif [ ! -f "$entry" ]; then
       printf 'mismatch\t%q\t%s\n' "$entry" 'is not a regular file'
     elif dj_agent_matches "$entry" "${name%.plist}" "$user_home" "$trellis_home"; then
-      if [ "${name%.plist}" = "$DJ_AGENT_APPLY_LABEL" ] && [ "${TRELLIS_TEST_SKIP_JANITOR_DRY_RUN:-0}" != "1" ]; then
+      if [ "${name%.plist}" = "$DJ_AGENT_APPLY_LABEL" ]; then
         local dj_script=""
         if [ -n "${SCRIPT_DIR:-}" ] && [ -f "$SCRIPT_DIR/disk-janitor.sh" ]; then
           dj_script="$SCRIPT_DIR/disk-janitor.sh"
@@ -259,6 +264,9 @@ dj_agent_scan() {
         local dry_run_rc=0 dry_run_out=""
         if [ -n "$dj_script" ] && [ -x "$dj_script" ]; then
           dry_run_out="$(TRELLIS_HOME="$trellis_home" HOME="$user_home" "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker" --dry-run 2>&1)" || dry_run_rc=$?
+        else
+          dry_run_rc=126
+          dry_run_out="janitor script is missing or not executable: ${dj_script:-not found}"
         fi
         if [ "$dry_run_rc" -ne 0 ]; then
           printf 'degraded\t%q\t%s\n' "$entry" "nightly argv dry-run failed (exit $dry_run_rc): ${dry_run_out//$'\n'/ }"
@@ -422,7 +430,7 @@ if [ -z "$active_release" ] && command -v jq >/dev/null 2>&1; then
   active_release="$(jq -r '.active_cli_release // empty' "$config" 2>/dev/null || true)"
 fi
 if [ -z "$active_release" ] && command -v python3 >/dev/null 2>&1; then
-  active_release="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("active_cli_release") or "")' "$config" 2>/dev/null || true)"
+  active_release="$(python3 -I -c 'import json, sys; print(json.load(open(sys.argv[1])).get("active_cli_release") or "")' "$config" 2>/dev/null || true)"
 fi
 
 if [ -z "$active_release" ]; then
@@ -483,7 +491,7 @@ if command -v jq >/dev/null 2>&1; then
   expected_oid="$(jq -r '.tree[]? | select(.path == "scripts/pi-spill-watchdog.sh") | .oid // empty' "$release_json" 2>/dev/null || true)"
 fi
 if [ -z "$expected_oid" ] && command -v python3 >/dev/null 2>&1; then
-  expected_oid="$(python3 -c 'import json, sys; print(next((e.get("oid") for e in json.load(open(sys.argv[1])).get("tree", []) if e.get("path") == sys.argv[2]), ""))' "$release_json" "scripts/pi-spill-watchdog.sh" 2>/dev/null || true)"
+  expected_oid="$(python3 -I -c 'import json, sys; print(next((e.get("oid") for e in json.load(open(sys.argv[1])).get("tree", []) if e.get("path") == sys.argv[2]), ""))' "$release_json" "scripts/pi-spill-watchdog.sh" 2>/dev/null || true)"
 fi
 
 if [ -z "$expected_oid" ]; then
@@ -496,7 +504,7 @@ if command -v git >/dev/null 2>&1; then
   actual_oid="$(git hash-object --no-filters "$watchdog_script" 2>/dev/null || true)"
 fi
 if [ -z "$actual_oid" ] && command -v python3 >/dev/null 2>&1; then
-  actual_oid="$(python3 -c 'import hashlib, sys; c = open(sys.argv[1], "rb").read(); print(hashlib.sha1(b"blob " + str(len(c)).encode() + c).hexdigest())' "$watchdog_script" 2>/dev/null || true)"
+  actual_oid="$(python3 -I -c 'import hashlib, sys; c = open(sys.argv[1], "rb").read(); print(hashlib.sha1(b"blob " + str(len(c)).encode() + c).hexdigest())' "$watchdog_script" 2>/dev/null || true)"
 fi
 
 if [ -z "$actual_oid" ] || [ "$actual_oid" != "$expected_oid" ]; then

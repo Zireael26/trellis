@@ -58,6 +58,118 @@ review() {
   fi
 }
 
+@test "143-stop review includes staged source files before the first commit" {
+  teardown_project_dir
+  PROJECT_DIR="$BATS_TEST_TMPDIR/unborn"
+  mkdir -p "$PROJECT_DIR"
+  git -C "$PROJECT_DIR" init -q
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR"
+  local f h n=0
+  for f in alpha beta gamma; do printf 'UNBORN_%s = 1\n' "$f" > "$PROJECT_DIR/$f.py"; done
+  git -C "$PROJECT_DIR" add alpha.py beta.py gamma.py
+  for h in claude codex; do
+    review "$h"
+    [ "$status" -eq 0 ]
+    n=$((n + 1))
+    [ "$(calls)" -eq "$n" ]
+    payload_diff "$n" | grep -q 'UNBORN_gamma'
+    [ "$(markers "$h")" -eq 1 ]
+    review "$h"
+    [ "$(calls)" -eq "$n" ]
+  done
+}
+
+@test "143-stop review from a subdirectory covers untracked files throughout the worktree" {
+  mkdir -p "$PROJECT_DIR/pkg" "$PROJECT_DIR/other"
+  local f h n=0
+  for f in one two three; do printf 'local_%s = 1\n' "$f" > "$PROJECT_DIR/pkg/$f.py"; done
+  printf 'outside_marker = 42\n' > "$PROJECT_DIR/other/new.py"
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR/pkg" CODEX_PROJECT_DIR="$PROJECT_DIR/pkg"
+  for h in claude codex; do
+    review "$h"
+    [ "$status" -eq 0 ]
+    n=$((n + 1))
+    [ "$(calls)" -eq "$n" ]
+    payload_diff "$n" | grep -q 'outside_marker = 42'
+    payload_diff "$n" | grep -q 'local_one = 1'
+    [ "$(markers "$h")" -eq 1 ]
+  done
+}
+
+@test "143-stop quoted untracked paths count lines and reach the reviewer" {
+  teardown_project_dir
+  PROJECT_DIR="$BATS_TEST_TMPDIR/unicode"
+  mkdir -p "$PROJECT_DIR/src"
+  git -C "$PROJECT_DIR" init -q
+  git -C "$PROJECT_DIR" commit --allow-empty -qm init
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR"
+  local f="$PROJECT_DIR/src/café.ts" h n=0
+  printf 'unicode_marker = 42\n' > "$f"
+  awk 'BEGIN { for(i=0;i<210;i++) print "ordinary line" }' >> "$f"
+  for h in claude codex; do
+    review "$h"
+    [ "$status" -eq 0 ]
+    n=$((n + 1))
+    [ "$(calls)" -eq "$n" ]
+    payload_diff "$n" | grep -q 'unicode_marker = 42'
+    [ "$(markers "$h")" -eq 1 ]
+  done
+}
+
+@test "143-stop review preserves quote backslash and newline path bytes" {
+  teardown_project_dir
+  PROJECT_DIR="$BATS_TEST_TMPDIR/unusual"
+  mkdir -p "$PROJECT_DIR/src"
+  git -C "$PROJECT_DIR" init -q
+  git -C "$PROJECT_DIR" commit --allow-empty -qm init
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR"
+  printf 'quoted_path_marker\n' > "$PROJECT_DIR/src/quote\".ts"
+  printf 'backslash_path_marker\n' > "$PROJECT_DIR/src/\\literal.ts"
+  printf 'newline_path_marker\n' > "$PROJECT_DIR/src/"$'line\nbreak.ts'
+  local h n=0
+  for h in claude codex; do
+    review "$h"
+    [ "$status" -eq 0 ]
+    n=$((n + 1))
+    [ "$(calls)" -eq "$n" ]
+    payload_diff "$n" | grep -q 'quoted_path_marker'
+    payload_diff "$n" | grep -q 'backslash_path_marker'
+    payload_diff "$n" | grep -q 'newline_path_marker'
+  done
+}
+
+@test "143-stop review skips documentation-only untracked unicode paths" {
+  teardown_project_dir
+  PROJECT_DIR="$BATS_TEST_TMPDIR/unicode-docs"
+  mkdir -p "$PROJECT_DIR"
+  git -C "$PROJECT_DIR" init -q
+  git -C "$PROJECT_DIR" commit --allow-empty -qm init
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR"
+  local i h
+  for i in 1 2 3; do printf '# notes\n' > "$PROJECT_DIR/café$i.md"; done
+  for h in claude codex; do
+    review "$h"
+    [ "$status" -eq 0 ]
+    [ "$(calls)" -eq 0 ]
+  done
+}
+
+@test "143-stop review still skips small untracked changes" {
+  teardown_project_dir
+  PROJECT_DIR="$BATS_TEST_TMPDIR/small"
+  mkdir -p "$PROJECT_DIR"
+  git -C "$PROJECT_DIR" init -q
+  git -C "$PROJECT_DIR" commit --allow-empty -qm init
+  export CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR"
+  printf 'small = true\n' > "$PROJECT_DIR/café.ts"
+  local h
+  for h in claude codex; do
+    review "$h"
+    [ "$status" -eq 0 ]
+    [ "$(calls)" -eq 0 ]
+  done
+}
+
 @test "after a completed review the next one sees only the delta (claude)" {
   review claude
   [ "$status" -eq 0 ]
@@ -110,6 +222,69 @@ review() {
   review claude
   [ "$(calls)" -eq 3 ]
   payload_diff 3 | grep -q 'def alpha'
+}
+
+@test "a changed completion reference invalidates exact and covered captures on either adapter" {
+  local h state n head tree context
+  for h in claude codex; do
+    review "$h"
+    n=$(calls)
+    state=$(find "$TRELLIS_HOME/state/code-review" -type f -name "reviewed.$h")
+    [ -n "$state" ]
+    read -r head tree context < "$state"
+    printf '%s %s %s\n' "$head" 0123456789012345678901234567890123456789 "$context" > "$state"
+    review "$h"
+    [ "$status" -eq 0 ]
+    [ "$(calls)" -eq "$((n + 1))" ]
+    payload_diff "$((n + 1))" | grep -q 'def alpha'
+  done
+}
+
+@test "unreadable coverage cannot reuse an exact capture or an older completed base on either adapter" {
+  local h state n tmp
+  for h in claude codex; do
+    review "$h"
+    n=$(calls)
+    state=$(find "$TRELLIS_HOME/state/code-review" -type f -name "covered.$h.json")
+    [ -n "$state" ]
+    tmp="$state.test-tmp"
+    jq '.tree = "0123456789012345678901234567890123456789"' "$state" > "$tmp"
+    mv "$tmp" "$state"
+    # No worktree change: a still-valid exact capture must not hide the fault.
+    review "$h"
+    [ "$status" -eq 0 ]
+    [ "$(calls)" -eq "$((n + 1))" ]
+    payload_diff "$((n + 1))" | grep -q 'def alpha'
+  done
+}
+
+# This guards fallback/reference bookkeeping, not the rewrite heuristic in
+# 28239f6e. Its load-bearing scope oracle is dispatch's B10 D2 R7 M-1 case
+# (test12 in the review's focused filter), plus the explicit R8 L-k cases.
+@test "unrelated covered history falls back to HEAD rather than attributing another branch on either adapter" {
+  local h state n tmp tree unrelated
+  tree=$(git -C "$PROJECT_DIR" rev-parse 'HEAD^{tree}')
+  unrelated=$(git -C "$PROJECT_DIR" commit-tree "$tree" -m 'unrelated review coverage')
+  for h in claude codex; do
+    review "$h"
+    n=$(calls)
+    state=$(find "$TRELLIS_HOME/state/code-review" -type f -name "covered.$h.json")
+    [ -n "$state" ]
+    tmp="$state.test-tmp"
+    jq --arg head "$unrelated" '.head = $head' "$state" > "$tmp"
+    mv "$tmp" "$state"
+    review "$h"
+    [ "$status" -eq 0 ]
+    [ "$(calls)" -eq "$((n + 1))" ]
+    payload_diff "$((n + 1))" | grep -q 'def alpha'
+    printf 'new_after_history = 1\n' >> "$PROJECT_DIR/beta.py"
+    review "$h"
+    [ "$status" -eq 0 ]
+    [ "$(calls)" -eq "$((n + 2))" ]
+    payload_diff "$((n + 2))" | grep -q '+new_after_history'
+    run payload_diff "$((n + 2))"
+    [[ "$output" != *'def alpha'* ]]
+  done
 }
 
 @test "a failed review is retried at most three times, then every Stop says it is unreviewed" {

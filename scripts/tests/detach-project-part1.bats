@@ -93,6 +93,8 @@ make_release() {
   printf '# generated primer index\n' > "$repo/core-rules/commands/templates/primer-index-template.md"
   # The contextual SessionStart renders are validated against the real shipped
   # templates by path, so the fixture release carries the real bytes.
+  mkdir -p "$repo/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/"
   cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" \
     "$repo/core-rules/templates/claude-settings.local.json"
   cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" \
@@ -296,6 +298,34 @@ run_detach() {
 }
 
 
+@test "duplicate exclude refusal leaves attachment state unchanged" {
+  local owner managed exclude block owner_sha registry_sha exclude_sha hook_sha runtime_target rule_target
+  run_attach
+  [ "$status" -eq 0 ]
+  owner="$(owner_for_root "$PROJECT")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  exclude="$PROJECT/.git/info/exclude"
+  block="$SANDBOX/duplicate-block"
+  sed -n '/^# --- Trellis local attachment exclude block ---$/,/^# --- end Trellis local attachment exclude block ---$/p' "$exclude" > "$block"
+  cat "$block" >> "$exclude"
+  owner_sha="$(sha256_file "$owner")"
+  registry_sha="$(sha256_file "$TRELLIS_HOME/registry.json")"
+  exclude_sha="$(sha256_file "$exclude")"
+  hook_sha="$(sha256_file "$managed/post-checkout")"
+  runtime_target="$(readlink "$PROJECT/.trellis/runtime")"
+  rule_target="$(readlink "$PROJECT/.claude/rules/trellis.md")"
+  run_detach
+  [ "$status" -eq 3 ]
+  [ "$(sha256_file "$owner")" = "$owner_sha" ]
+  [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$registry_sha" ]
+  [ "$(sha256_file "$exclude")" = "$exclude_sha" ]
+  [ "$(sha256_file "$managed/post-checkout")" = "$hook_sha" ]
+  [ -L "$PROJECT/.trellis/runtime" ]
+  [ "$(readlink "$PROJECT/.trellis/runtime")" = "$runtime_target" ]
+  [ -L "$PROJECT/.claude/rules/trellis.md" ]
+  [ "$(readlink "$PROJECT/.claude/rules/trellis.md")" = "$rule_target" ]
+}
+
 @test "full detach accepts an authentic dispatcher from a copied older payload" {
   local old_release old_payload manifest owner managed legacy_post legacy_pre
   make_copied_older_release
@@ -340,7 +370,10 @@ run_detach() {
 }
 
 
-@test "checkout lock rejects concurrent detach without common-state drift and releases on signal" {
+# A held checkout lock used to fail a second detach at once with a bare exit 3,
+# which stranded interrupted detach journals on a busy checkout. The second
+# detach now waits, as attach and adoption do, and touches nothing meanwhile.
+@test "a concurrent detach waits for the checkout lock without common-state drift" {
   run_attach
   [ "$status" -eq 0 ]
   owner="$(owner_for_root "$PROJECT")"
@@ -353,9 +386,11 @@ run_detach() {
   wait_for_checkout_lock "$background_pid"
   holder_pid="$(checkout_lock_pid)"
 
-  run_detach
-
-  [ "$status" -eq 3 ]
+  "$ATTACH" detach --home "$TRELLIS_HOME" "$PROJECT" >"$SANDBOX/waiting-detach.log" 2>&1 &
+  waiting_pid=$!
+  sleep 2
+  kill -0 "$waiting_pid" || { cat "$SANDBOX/waiting-detach.log"; false; }
+  [ "$(checkout_lock_pid)" = "$holder_pid" ]
   [ "$(sha256_file "$owner")" = "$owner_hash" ]
   [ "$(sha256_file "$PROJECT/.git/info/exclude")" = "$exclude_hash" ]
   [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$registry_hash" ]
@@ -365,13 +400,13 @@ run_detach() {
   held_status=0
   wait "$background_pid" || held_status=$?
   [ "$held_status" -eq 5 ]
+
+  waiting_status=0
+  wait "$waiting_pid" || waiting_status=$?
+  [ "$waiting_status" -eq 0 ] || { cat "$SANDBOX/waiting-detach.log"; false; }
+  [ -z "$(owner_for_root "$PROJECT")" ]
   [ ! -e "$(checkout_lock_path)" ]
   [ ! -L "$(checkout_lock_path)" ]
-
-  run_detach
-
-  [ "$status" -eq 0 ]
-  [ -z "$(owner_for_root "$PROJECT")" ]
 }
 
 @test "checkout lock signals return interrupted after releasing the lock" {
@@ -408,6 +443,55 @@ run_detach() {
   [ ! -e "$(checkout_lock_path)" ]
   [ ! -L "$(checkout_lock_path)" ]
   [ -z "$(owner_for_root "$PROJECT")" ]
+}
+
+run_raw_checkout_reclaim() {
+  local common checkout
+  common="$(canonical_dir "$PROJECT/.git")"
+  checkout="$(printf '%s' "$common" | shasum -a 256 | cut -d ' ' -f 1)"
+  run bash -c '. "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/attachment.sh"; _attachment_checkout_lock_reclaim "$2" "$3" "$4"' _ \
+    "$REPO_ROOT" "$TRELLIS_HOME" "$checkout" "$common"
+}
+
+@test "checkout reclaim leaves a foreign-prefix holder untouched" {
+  local link holder target before
+  mkdir -p "$TRELLIS_HOME/state/locks"
+  stage_dead_checkout_lock
+  link="$(checkout_lock_path)"
+  holder="$TRELLIS_HOME/state/locks/$(readlink "$link")"
+  target="$TRELLIS_HOME/state/locks/foreign-holder"
+  mv "$holder" "$target"
+  rm "${link:?}"
+  ln -s "${target##*/}" "$link"
+  before="$(sha256_file "$target/owner.json")"
+  run_raw_checkout_reclaim
+  [ "$status" -eq 4 ] || { echo "status $status: $output"; false; }
+  [ -L "$link" ]
+  [ "$(readlink "$link")" = "${target##*/}" ]
+  [ "$(sha256_file "$target/owner.json")" = "$before" ]
+}
+
+@test "checkout reclaim refuses unsafe permissions malformed and mismatched metadata" {
+  local fault link holder before
+  mkdir -p "$TRELLIS_HOME/state/locks"
+  for fault in mode checkout json; do
+    stage_dead_checkout_lock
+    link="$(checkout_lock_path)"
+    holder="$TRELLIS_HOME/state/locks/$(readlink "$link")"
+    case "$fault" in
+      mode) chmod 644 "$holder/owner.json" ;;
+      checkout) jq '.checkout_id = ("0" * 64)' "$holder/owner.json" > "$holder/next"; mv "$holder/next" "$holder/owner.json"; chmod 600 "$holder/owner.json" ;;
+      json) printf 'not json\n' > "$holder/owner.json" ;;
+    esac
+    before="$(sha256_file "$holder/owner.json")"
+    run_raw_checkout_reclaim
+    [ "$status" -eq 4 ] || { echo "$fault: status $status: $output"; false; }
+    [ -L "$link" ]
+    [ -d "$holder" ]
+    [ "$(sha256_file "$holder/owner.json")" = "$before" ]
+    rm "${link:?}" "${holder:?}/owner.json"
+    rmdir "${holder:?}"
+  done
 }
 
 @test "per-harness detach inverse-merges only selected render keys" {

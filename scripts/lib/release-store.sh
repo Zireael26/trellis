@@ -21,6 +21,19 @@ release_store_err() {
   printf 'trellis release: %s\n' "$*" >&2
 }
 
+# Native assets are ordinary Git blobs covered by the full release verifier.
+# A native-bearing payload must be packaged, never an unfiltered source tree.
+# Historical releases without the manifest retain their existing layout.
+release_store_assert_native_payload_layout() {
+  local payload="$1"
+  if [ -e "$payload/core-rules/native/artifacts.json" ] || [ -L "$payload/core-rules/native/artifacts.json" ]; then
+    if [ -e "$payload/native" ] || [ -L "$payload/native" ]; then
+      release_store_err "native-bearing payload contains root build sources"
+      return 4
+    fi
+  fi
+}
+
 release_store_trim_trailing_slashes() {
   local path="${1:-}"
   while [ "$path" != "/" ] && [ "${path%/}" != "$path" ]; do
@@ -215,10 +228,23 @@ release_store_locate() {
 # list the ACL entries themselves with -e; where ls has no -e (GNU), the mode
 # column's "+" is reliable. A stamp cannot vouch for what that verify misses,
 # so this runs on every call, stamp hit or not.
+#
+# release_verify.py's acl form answers first when it reaches a verdict (spec 074
+# T5): it asks for each entry's ACL directly, in one process. Only when it
+# decides nothing does the listing below run.
 release_store_release_has_no_acl() {
   local release_dir="${1:-}" listing
-  listing="$(find "$release_dir" -print0 | LC_ALL=C /usr/bin/xargs -0 /bin/ls -lde 2>/dev/null)" ||
-    listing="$(find "$release_dir" -print0 | LC_ALL=C /usr/bin/xargs -0 /bin/ls -ld 2>/dev/null)" || return 1
+  release_store_verify_batch "$release_dir" acl
+  case "$?" in
+    0) return 0 ;;
+    4) return 1 ;;
+  esac
+  # Do not fall back to an ACL-blind listing after a Darwin read error. find
+  # propagates enumeration failures instead of hiding them behind a pipeline.
+  case "$(uname -s)" in
+    Darwin) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -lde {} + 2>/dev/null)" || return 1 ;;
+    *) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -ld {} + 2>/dev/null)" || return 1 ;;
+  esac
   printf '%s\n' "$listing" |
     /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }'
 }
@@ -226,7 +252,8 @@ release_store_release_has_no_acl() {
 # Spec 072 D-A for release_store_locate: a release stamp left by a full verify
 # and unchanged since (release-stamp.sh) answers without a re-hash, and counts
 # as this shell's verify for release_store_verify_path's memo, as the full
-# verify would. Any miss runs the full verify, whose verdict decides; a missing
+# verify would -- recorded as a stamp entry, which release_store_audit never
+# accepts. Any miss runs the full verify, whose verdict decides; a missing
 # stamp never passes. locate only reads stamps: the stable launcher writes this
 # same stamp before any payload runs, so every launched route finds it, while
 # read-only callers (doctor, show-config) and a refused attach leave no new
@@ -234,20 +261,41 @@ release_store_release_has_no_acl() {
 # verify`, doctor's integrity rows) stays a full verify in every fresh process.
 # The in-memory command bundle carries no stamp program, so there
 # release_stamp_check is undefined and every locate verifies in full.
+#
+# The ACL refusal runs first on every call, memo hit or not: an entry left by
+# the shell pass of a full verify proves nothing about an ACL "@" hid from it.
+# After it, an entry this shell already holds answers before any stamp sweep.
 release_store_verify_installed() {
   local release_dir="${1:-}" version="${2:-}" key
   release_store_release_has_no_acl "$release_dir" || {
     release_store_err "release content carries an ACL: $release_dir"
     return 4
   }
+  if key="$(release_store_verify_memo_key "$release_dir" "$version" 0 0)" &&
+    release_store_verify_memo_hit "$key"; then
+    return 0
+  fi
   if declare -F release_stamp_check >/dev/null &&
     release_stamp_check "${release_dir%/releases/*}" "$release_dir"; then
     if key="$(release_store_verify_memo_key "$release_dir" "$version" 0 0)"; then
-      _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}${key}"$'\n'
+      _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}${key}"$'\t'stamp$'\n'
     fi
     return 0
   fi
   release_store_verify_path "$release_dir" "$version"
+}
+
+# A failed -e/-L test is not evidence of absence if an ancestor cannot be
+# searched or listed. Walk up to a visible ancestor before accepting no store.
+release_store_absence_is_provable() {
+  local ancestor="${1%/*}"
+  [ -n "$ancestor" ] || ancestor=/
+  while [ ! -e "$ancestor" ] && [ ! -L "$ancestor" ]; do
+    [ "$ancestor" != / ] || return 1
+    ancestor="${ancestor%/*}"
+    [ -n "$ancestor" ] || ancestor=/
+  done
+  [ -d "$ancestor" ] && (CDPATH='' cd "$ancestor" && /bin/ls -a . >/dev/null 2>&1)
 }
 
 release_store_list() {
@@ -255,11 +303,24 @@ release_store_list() {
   local -a versions=()
   raw_releases="$(release_store_releases_dir)" || return $?
   if [ ! -e "$raw_releases" ] && [ ! -L "$raw_releases" ]; then
+    release_store_absence_is_provable "$raw_releases" || {
+      release_store_err "cannot inspect release store: $raw_releases"
+      return 4
+    }
     return 0
   fi
   releases="$(release_store_canonical_releases_dir)" || return $?
+  if ! /bin/ls -a "$releases" >/dev/null 2>&1; then
+    release_store_err "cannot list release store: $releases"
+    return 4
+  fi
   for dir in "$releases"/*; do
-    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+      [ "$dir" != "$releases/*" ] || continue
+      release_store_err "cannot inspect release store entry: $dir"
+      rc=4
+      continue
+    fi
     base="$(basename "$dir")"
     case "$base" in
       *.lock)
@@ -315,9 +376,10 @@ release_store_path_is_safe() {
 }
 
 release_store_symlink_target_is_safe() {
-  local link_path="${1:-}" target="${2:-}" parent="" rest component resolved=""
+  local link_path="${1:-}" target="${2:-}" root="${3:-}" parent="" rest component resolved=""
+  local candidate followed=0
   release_store_path_is_safe "$link_path" || return 1
-  [ -n "$target" ] || return 1
+  [ -n "$root" ] && [ -d "$root" ] && [ -n "$target" ] || return 1
   case "$target" in
     /*|*'//'*) return 1 ;;
     *$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
@@ -345,10 +407,20 @@ release_store_symlink_target_is_safe() {
         esac
         ;;
       *)
-        if [ -n "$resolved" ]; then
-          resolved="$resolved/$component"
+        candidate="${resolved:+$resolved/}$component"
+        if [ -L "$root/$candidate" ]; then
+          followed=$((followed + 1))
+          [ "$followed" -le 40 ] || return 1
+          target="$(readlink "$root/$candidate")" || return 1
+          [ -n "$target" ] || return 1
+          case "$target" in
+            /*|*'//'*|*$'\t'*|*$'\n'*|*$'\r'*) return 1 ;;
+          esac
+          # Resolve the target relative to the link's parent before processing
+          # any remaining components, exactly as a filesystem traversal does.
+          rest="$target${rest:+/$rest}"
         else
-          resolved="$component"
+          resolved="$candidate"
         fi
         ;;
     esac
@@ -495,7 +567,7 @@ release_store_atomic_rename() {
   fi
   python_bin="$(command -v python3)"
 
-  "$python_bin" - "$operation" "$source" "$destination" <<'PY'
+  "$python_bin" -I - "$operation" "$source" "$destination" <<'PY'
 import ctypes
 import errno
 import os
@@ -687,7 +759,9 @@ release_store_json_valid() {
 # exec'd or spawned child -- which would otherwise carry an arbitrarily old
 # success verdict across a fresh process boundary -- starts empty and
 # re-verifies. Every key is also prefixed with that shell's `$$`. Failure is
-# never recorded.
+# never recorded. Each entry ends in its provenance: "full" when the full
+# verify passed, "stamp" when release_store_locate took a stamp hit. A plain
+# verify accepts either; release_store_audit (show-config, doctor) only "full".
 # Key: canonical release dir, sha256(release.json) from
 # release_store_release_json_sha256_no_follow, plus skip_writable, allow_stage,
 # and expected_version.
@@ -716,28 +790,64 @@ release_store_verify_memo_key() {
 }
 
 release_store_verify_memo_hit() {
-  local key="${1:-}" line
+  local key="${1:-}" provenance="${2:-}" line tab=$'\t'
   [ -n "$key" ] || return 1
   while IFS= read -r line; do
-    [ "$line" = "$key" ] && return 0
+    case "$provenance:$line" in
+      full:"$key${tab}full") return 0 ;;
+      :"$key${tab}full"|:"$key${tab}stamp") return 0 ;;
+    esac
   done <<EOF
 ${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}
 EOF
   return 1
 }
 
+# A fifth argument "full" accepts only a memo entry a full verify left.
 release_store_verify_path() {
   local release_dir="${1:-}" expected_version="${2:-}" skip_writable="${3:-0}" allow_stage="${4:-0}"
-  local key="" rc=0
+  local provenance="${5:-}" key="" rc=0
+  # A memo does not prove the absence of ACLs installed after verification.
+  if [ "$skip_writable" != 1 ] && ! release_store_release_has_no_acl "$release_dir"; then
+    release_store_err "release content carries an ACL or cannot be inspected: $release_dir"
+    return 4
+  fi
   key="$(release_store_verify_memo_key "$release_dir" "$expected_version" "$skip_writable" "$allow_stage")" || key=""
-  if [ -n "$key" ] && release_store_verify_memo_hit "$key"; then
+  if [ -n "$key" ] && release_store_verify_memo_hit "$key" "$provenance"; then
     return 0
   fi
   release_store_verify_path_body "$release_dir" "$expected_version" "$skip_writable" "$allow_stage" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$key" ]; then
-    _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}${key}"$'\n'
+    _TRELLIS_RELEASE_STORE_VERIFY_MEMO="${_TRELLIS_RELEASE_STORE_VERIFY_MEMO}${key}"$'\t'full$'\n'
   fi
   return "$rc"
+}
+
+# The full inventory audit of release_store_verify_path_body, run by
+# release_verify.py in one process instead of a shell pass over each entry
+# (second argument the skip_writable flag), or its ACL question (second
+# argument "acl", for release_store_release_has_no_acl). 0: verified. 4: refused, findings on stderr. 1: decided nothing (no program
+# beside this library, as in the in-memory command bundle; no python3; or the
+# program did not reach a verdict), so the caller runs the shell pass.
+_RELEASE_STORE_VERIFY_PROGRAM=""
+if [ -n "${_RELEASE_STORE_LIB_DIR:-}" ]; then
+  _RELEASE_STORE_VERIFY_PROGRAM="$_RELEASE_STORE_LIB_DIR/release_verify.py"
+fi
+
+release_store_verify_batch() {
+  local release_canon="$1" skip_writable="$2" python_bin="${TRELLIS_PYTHON:-}" verdict="" rc=0
+  [ -n "$_RELEASE_STORE_VERIFY_PROGRAM" ] && [ -f "$_RELEASE_STORE_VERIFY_PROGRAM" ] || return 1
+  case "$python_bin" in /*) [ -x "$python_bin" ] || python_bin="" ;; *) python_bin="" ;; esac
+  if [ -z "$python_bin" ]; then
+    python_bin="$(command -v python3)" || return 1
+    case "$python_bin" in /*) ;; *) return 1 ;; esac
+  fi
+  verdict="$(LC_ALL=C "$python_bin" -I "$_RELEASE_STORE_VERIFY_PROGRAM" "$release_canon" "$skip_writable")" || rc=$?
+  if [ "$rc" -eq 0 ] && [ "$verdict" = ok ]; then
+    return 0
+  fi
+  [ "$rc" -eq 4 ] && return 4
+  return 1
 }
 
 release_store_verify_path_body() (
@@ -805,6 +915,14 @@ release_store_verify_path_body() (
     release_store_err "release payload escapes release directory: $payload_dir -> $payload_canon"
     return 4
   fi
+
+  # Spec 074 T5: the rest of this body in one process. Its verdict stands when
+  # it gives one; when it decides nothing, the shell pass below runs instead.
+  release_store_verify_batch "$release_canon" "$skip_writable"
+  case "$?" in
+    0) return 0 ;;
+    4) return 4 ;;
+  esac
 
   # Match launcher_verify_release_body's canonical store-adjacent scratch.
   # The launcher drops TMPDIR under `env -i`; this does not disable global /tmp.
@@ -1010,7 +1128,7 @@ release_store_verify_path_body() (
             tree_ok=0
             break
           fi
-          if ! release_store_symlink_target_is_safe "$path" "$link_target"; then
+          if ! release_store_symlink_target_is_safe "$path" "$link_target" "$payload_canon"; then
             exec 3<&-
             exec 4<&-
             release_store_err "unsafe release symlink target: $path"
@@ -1208,6 +1326,9 @@ release_store_verify_path_body() (
   return "$rc"
 )
 
+# With a version, a memo entry of either provenance answers. Without one (the
+# whole store: `trellis release verify`, doctor's store row) every release is
+# fully audited unless this shell's own full verify already proved it.
 release_store_verify() {
   local version="${1:-}" path raw_releases releases dir base normalized status rc=0
   if [ -n "$version" ]; then
@@ -1227,11 +1348,24 @@ release_store_verify() {
 
   raw_releases="$(release_store_releases_dir)" || return $?
   if [ ! -e "$raw_releases" ] && [ ! -L "$raw_releases" ]; then
+    release_store_absence_is_provable "$raw_releases" || {
+      release_store_err "cannot inspect release store: $raw_releases"
+      return 4
+    }
     return 0
   fi
   releases="$(release_store_canonical_releases_dir)" || return $?
+  if ! /bin/ls -a "$releases" >/dev/null 2>&1; then
+    release_store_err "cannot list release store: $releases"
+    return 4
+  fi
   for dir in "$releases"/*; do
-    [ -e "$dir" ] || [ -L "$dir" ] || continue
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then
+      [ "$dir" != "$releases/*" ] || continue
+      release_store_err "cannot inspect release store entry: $dir"
+      rc=4
+      continue
+    fi
     base="$(basename "$dir")"
     case "$base" in
       *.lock)
@@ -1261,7 +1395,7 @@ release_store_verify() {
       rc=4
       continue
     fi
-    if release_store_verify_path "$dir" "$base"; then
+    if release_store_verify_path "$dir" "$base" 0 0 full; then
       :
     else
       status=$?
@@ -1271,6 +1405,25 @@ release_store_verify() {
     fi
   done
   return "$rc"
+}
+
+# The full audit of one installed release: release_store_verify's checks, but
+# the memo answers only with an entry its own full verify left in this shell,
+# never with a stamp hit a release_store_locate recorded. Diagnostics that
+# print "verified" (show-config, doctor's release rows) call this.
+release_store_audit() {
+  local version="${1:-}" path raw_releases
+  raw_releases="$(release_store_releases_dir)" || return $?
+  if [ ! -e "$raw_releases" ] && [ ! -L "$raw_releases" ]; then
+    release_store_err "release not installed: $version"
+    return 5
+  fi
+  path="$(release_store_release_path "$version")" || return $?
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    release_store_err "release not installed: $version"
+    return 5
+  fi
+  release_store_verify_path "$path" "$version" 0 0 full
 }
 
 # Pinned copies of `trellis_process_birth_python` and `trellis_process_birth`
@@ -1446,7 +1599,7 @@ release_store_write_snapshot_owner() {
     return 5
   }
   python_bin="$(command -v python3)" || return 5
-  if ! "$python_bin" - "$owner" "$owner_json" 2>/dev/null <<'PY'
+  if ! "$python_bin" -I - "$owner" "$owner_json" 2>/dev/null <<'PY'
 import os
 import sys
 
@@ -1494,7 +1647,7 @@ release_store_release_json_sha256_no_follow() {
   }
   python_bin="$(command -v python3)" || return 5
 
-  "$python_bin" - "$releases" "$entry" <<'PY'
+  "$python_bin" -I - "$releases" "$entry" <<'PY'
 import hashlib
 import os
 import stat
@@ -1632,7 +1785,7 @@ release_store_copy_snapshot_no_follow() {
   }
   python_bin="$(command -v python3)" || return 5
 
-  "$python_bin" - "$releases" "$version" "$snapshot_base" "$digest" <<'PY'
+  "$python_bin" -I - "$releases" "$version" "$snapshot_base" "$digest" <<'PY'
 import hashlib
 import os
 import stat
@@ -2039,7 +2192,7 @@ release_store_remove_snapshot() {
   }
   python_bin="$(command -v python3)" || return 5
 
-  "$python_bin" - "$releases" "$base" "${base}.owner.json" <<'PY'
+  "$python_bin" -I - "$releases" "$base" "${base}.owner.json" <<'PY'
 import errno
 import os
 import stat
@@ -2610,6 +2763,655 @@ raise SystemExit(4 if totals["refused"] or totals["failed"] else 0)
 PY
 }
 
+# release_store_remove_entries plan|finish VERSION [STAGE staged|created]
+#
+# What `trellis release remove` deletes for VERSION: the installed release
+# directory, its launcher execution snapshots (releases/.exec/VERSION-<sha256>)
+# with their flock files (releases/.exec/.lock.VERSION-<sha256>), and their
+# release and exec stamps (state/release-stamps and state/exec-stamps,
+# VERSION-<sha256>.json). `plan` prints one `KIND<TAB>PATH<TAB>BYTES` row per
+# entry and writes nothing. A single validated dead-owner removal stage is a
+# `remove-stage` row, even without installed entries. `finish` runs once the
+# caller has renamed the release to STAGE (`staged`), found a recoverable stage
+# (`resumed`, ownership revalidated), or found no release left to rename
+# (`created`: STAGE is made here). It moves each snapshot into STAGE, unlinks the stamps,
+# deletes STAGE and then its owner file, and prints the same rows for what it
+# removed. Lock and stamp files are single unlinks. Every step is descriptor-relative and never follows a link: a
+# symlinked or wrong-type entry is refused, and a link inside a tree goes as a
+# link. STAGE is a direct `.tmp.*` child of the release store with an owner
+# record, so `trellis release reap-tmp --fix` collects an interrupted finish.
+#
+# Status: 0; 4 when an entry is refused or a step fails; 5 without python3.
+release_store_remove_entries() {
+  local mode="${1:-}" input_version="${2:-}" stage="${3:-}" how="${4:-}" version releases python_bin
+  case "$mode" in
+    plan) [ "$#" -eq 2 ] ;;
+    finish)
+      [ "$#" -eq 4 ] &&
+        case "$how" in staged|created|resumed) true ;; *) false ;; esac &&
+        case "$stage" in .tmp.remove."$input_version".?*) true ;; *) false ;; esac
+      ;;
+    *) false ;;
+  esac || {
+    release_store_err "remove entries requires plan VERSION or finish VERSION STAGE staged|created|resumed"
+    return 2
+  }
+  version="$(release_store_normalize_version "$input_version")" || return $?
+  [ "$version" = "$input_version" ] || {
+    release_store_err "remove entries requires a normalized version: $input_version"
+    return 2
+  }
+  releases="$(release_store_canonical_releases_dir)" || return $?
+  command -v python3 >/dev/null 2>&1 || {
+    release_store_err "python3 with descriptor-relative filesystem support is required for release removal"
+    return 5
+  }
+  python_bin="$(command -v python3)" || return 5
+  "$python_bin" -I - "${releases%/releases}" "$mode" "$version" "$stage" "$how" <<'PY'
+import os
+import re
+import stat
+import sys
+import json
+
+home, mode, version, stage, how = sys.argv[1:6]
+O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+FLAGS = os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW
+KEY = re.escape(version) + r"-[0-9a-f]{64}"
+SNAPSHOT = re.compile(KEY)
+LOCK = re.compile(r"\.lock\." + KEY)
+STAMP = re.compile(KEY + r"\.json")
+STAMPS = (("release-stamps", "release-stamp"), ("exec-stamps", "exec-stamp"))
+
+
+class Refused(Exception):
+    status = 4
+
+
+class InUse(Refused):
+    status = 3
+
+
+def lstat_at(fd, name):
+    try:
+        return os.stat(name, dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def same(a, b):
+    return a is not None and b is not None and (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino)
+
+
+def open_dir(fd, name, expected, path):
+    child = os.open(name, FLAGS, dir_fd=fd)
+    if not same(os.fstat(child), expected):
+        os.close(child)
+        raise Refused("directory changed while opening: " + path)
+    return child
+
+
+def open_area(*names):
+    """A no-follow fd for home/NAMES, or None when a component is absent."""
+    fd, path = os.open(home, FLAGS), home
+    for name in names:
+        path += "/" + name
+        info = lstat_at(fd, name)
+        if info is None:
+            os.close(fd)
+            return None
+        if not stat.S_ISDIR(info.st_mode):
+            os.close(fd)
+            raise Refused("not a real directory: " + path)
+        try:
+            child = open_dir(fd, name, info, path)
+        finally:
+            os.close(fd)
+        fd = child
+    return fd
+
+
+def walk(fd, device, remove, path):
+    """Allocated bytes below fd; with remove, unlink everything bottom-up."""
+    if remove:
+        os.fchmod(fd, 0o700)  # releases and snapshots are sealed read-only
+    total = 0
+    # Sizing may have exhausted fd's directory cursor before snapshots move in.
+    # A fresh description of the same directory sees those new entries on Linux.
+    scan_fd = os.open(".", FLAGS, dir_fd=fd)
+    try:
+        names = os.listdir(scan_fd)
+    finally:
+        os.close(scan_fd)
+    for name in names:
+        info = lstat_at(fd, name)
+        if info is None:
+            continue
+        if stat.S_ISDIR(info.st_mode):
+            if info.st_dev != device:
+                raise Refused("contains a mount point: " + path + "/" + name)
+            child = open_dir(fd, name, info, path + "/" + name)
+            try:
+                total += walk(child, device, remove, path + "/" + name)
+            finally:
+                os.close(child)
+            if remove:
+                os.rmdir(name, dir_fd=fd)
+        elif remove:
+            os.unlink(name, dir_fd=fd)
+        total += info.st_blocks * 512
+    return total
+
+
+def tree_bytes(fd, name, info, path):
+    child = open_dir(fd, name, info, path)
+    try:
+        return info.st_blocks * 512 + walk(child, info.st_dev, False, path)
+    finally:
+        os.close(child)
+
+
+def directory(fd, name, path, what):
+    info = lstat_at(fd, name)
+    if info is not None and not stat.S_ISDIR(info.st_mode):
+        raise Refused(what + " is a symlink or not a directory: " + path)
+    return info
+
+
+def snapshots(exec_fd):
+    for name in sorted(os.listdir(exec_fd)) if exec_fd is not None else ():
+        if SNAPSHOT.fullmatch(name):
+            path = home + "/releases/.exec/" + name
+            info = directory(exec_fd, name, path, "execution snapshot")
+            if info is not None:
+                yield name, path, info
+
+
+def regular(fd, name, path, what):
+    info = lstat_at(fd, name)
+    if info is not None and not stat.S_ISREG(info.st_mode):
+        raise Refused(what + " is a symlink or not a regular file: " + path)
+    return info
+
+
+def files(exec_fd):
+    """(fd, name, kind, path, stat) for each snapshot flock file and stamp."""
+    for name in sorted(os.listdir(exec_fd)) if exec_fd is not None else ():
+        if LOCK.fullmatch(name):
+            path = home + "/releases/.exec/" + name
+            info = regular(exec_fd, name, path, "snapshot lock")
+            if info is not None:
+                yield exec_fd, name, "exec-lock", path, info
+    for area, kind in STAMPS:
+        fd = open_area("state", area)
+        if fd is None:
+            continue
+        try:
+            for name in sorted(os.listdir(fd)):
+                if not STAMP.fullmatch(name):
+                    continue
+                path = home + "/state/" + area + "/" + name
+                info = regular(fd, name, path, "stamp")
+                if info is not None:
+                    yield fd, name, kind, path, info
+        finally:
+            os.close(fd)
+
+
+def resume_stage(fd, name):
+    """Only a private, current-UID stage with a provably dead owner is ours."""
+    path = home + "/releases/" + name
+    info = directory(fd, name, path, "removal stage")
+    if info is None or info.st_uid != os.getuid():
+        raise Refused("removal stage is missing or has another owner: " + path)
+    owner_name = name + ".owner.json"
+    owner_path = path + ".owner.json"
+    owner = regular(fd, owner_name, owner_path, "removal stage owner")
+    if owner is None or owner.st_uid != os.getuid() or stat.S_IMODE(owner.st_mode) != 0o600:
+        raise Refused("removal stage owner is missing or not private: " + owner_path)
+    owner_fd = os.open(owner_name, os.O_RDONLY | O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    try:
+        if not same(os.fstat(owner_fd), owner):
+            raise Refused("removal stage owner changed while opening: " + owner_path)
+        with os.fdopen(owner_fd, "rb", closefd=False) as source:
+            data = source.read(4097)
+        try:
+            record = json.loads(data)
+        except (ValueError, UnicodeError):
+            raise Refused("removal stage owner is malformed: " + owner_path)
+    finally:
+        os.close(owner_fd)
+    if not (isinstance(record, dict)
+            and sorted(record) == ["pid", "process_birth", "schema_version"]
+            and type(record["schema_version"]) is int and record["schema_version"] == 1
+            and type(record["pid"]) is int and 0 < record["pid"] <= 2147483647
+            and isinstance(record["process_birth"], str) and record["process_birth"].strip()):
+        raise Refused("removal stage owner is malformed: " + owner_path)
+    try:
+        os.kill(record["pid"], 0)
+    except ProcessLookupError:
+        pass  # ESRCH is proof of death; EPERM and every other failure refuse.
+    except OSError as error:
+        raise Refused("removal stage owner cannot be checked: %s (%s)" % (owner_path, error))
+    else:
+        # Even a reused PID is kept: recovery requires proof, not a guess.
+        raise InUse("removal stage owner is still live: " + owner_path)
+    if not same(lstat_at(fd, name), info) or not same(lstat_at(fd, owner_name), owner):
+        raise Refused("removal stage or owner changed while checking: " + path)
+    return info
+
+
+def plan():
+    rows = []
+    releases_fd = open_area("releases")
+    exec_fd = open_area("releases", ".exec")
+    try:
+        path = home + "/releases/" + version
+        info = directory(releases_fd, version, path, "release")
+        if info is not None:
+            rows.append(("release", path, tree_bytes(releases_fd, version, info, path)))
+        prefix = ".tmp.remove." + version + "."
+        stages = [name for name in os.listdir(releases_fd)
+                  if name.startswith(prefix) and not name.endswith(".owner.json")]
+        if len(stages) > 1 or (stages and info is not None):
+            raise Refused("ambiguous removal stages or installed release: " + home + "/releases/" + version)
+        for name in stages:
+            if not re.fullmatch(re.escape(prefix) + r"[A-Za-z0-9]+", name):
+                raise Refused("unrecognised removal stage: " + home + "/releases/" + name)
+            info = resume_stage(releases_fd, name)
+            path = home + "/releases/" + name
+            rows.append(("remove-stage", path, tree_bytes(releases_fd, name, info, path)))
+        for name, path, info in snapshots(exec_fd):
+            rows.append(("exec-snapshot", path, tree_bytes(exec_fd, name, info, path)))
+        for _, _, kind, path, info in files(exec_fd):
+            rows.append((kind, path, info.st_blocks * 512))
+    finally:
+        os.close(releases_fd)
+        if exec_fd is not None:
+            os.close(exec_fd)
+    return rows
+
+
+def finish():
+    rows = []
+    releases_fd = open_area("releases")
+    exec_fd = open_area("releases", ".exec")
+    stage_path = home + "/releases/" + stage
+    try:
+        if how == "created":
+            os.mkdir(stage, 0o700, dir_fd=releases_fd)
+        if how == "resumed":
+            resume_stage(releases_fd, stage)  # Revalidate before the first mutation.
+        stage_info = directory(releases_fd, stage, stage_path, "removal stage")
+        if stage_info is None:
+            raise Refused("removal stage is missing: " + stage_path)
+        stage_fd = open_dir(releases_fd, stage, stage_info, stage_path)
+        try:
+            if how in ("staged", "resumed"):
+                rows.append(("remove-stage" if how == "resumed" else "release",
+                             stage_path if how == "resumed" else home + "/releases/" + version,
+                             stage_info.st_blocks * 512 + walk(stage_fd, stage_info.st_dev, False, stage_path)))
+            os.fchmod(stage_fd, 0o700)
+            for name, path, info in list(snapshots(exec_fd)):
+                if info.st_dev != stage_info.st_dev:
+                    raise Refused("execution snapshot is on another device: " + path)
+                if lstat_at(stage_fd, name) is not None:
+                    raise Refused("removal stage already holds " + name + ": " + stage_path)
+                child = open_dir(exec_fd, name, info, path)
+                try:
+                    size = info.st_blocks * 512 + walk(child, info.st_dev, False, path)
+                    os.fchmod(child, 0o700)  # moving a directory rewrites its ".."
+                finally:
+                    os.close(child)
+                if not same(lstat_at(exec_fd, name), info):
+                    raise Refused("execution snapshot changed before staging: " + path)
+                os.rename(name, name, src_dir_fd=exec_fd, dst_dir_fd=stage_fd)
+                rows.append(("exec-snapshot", path, size))
+            for fd, name, kind, path, info in files(exec_fd):
+                os.unlink(name, dir_fd=fd)
+                rows.append((kind, path, info.st_blocks * 512))
+            walk(stage_fd, stage_info.st_dev, True, stage_path)
+        finally:
+            os.close(stage_fd)
+        if not same(lstat_at(releases_fd, stage), stage_info):
+            raise Refused("removal stage changed before its final removal: " + stage_path)
+        os.rmdir(stage, dir_fd=releases_fd)
+        # Directory first, then its owner file: an interrupted finish leaves an
+        # orphan reap-tmp collects, never an ownerless stage.
+        owner = lstat_at(releases_fd, stage + ".owner.json")
+        if owner is not None:
+            if not stat.S_ISREG(owner.st_mode):
+                raise Refused("removal stage owner is not a regular file: " + stage_path + ".owner.json")
+            os.unlink(stage + ".owner.json", dir_fd=releases_fd)
+    finally:
+        os.close(releases_fd)
+        if exec_fd is not None:
+            os.close(exec_fd)
+    return rows
+
+
+if not O_DIRECTORY or not O_NOFOLLOW or os.path.realpath(home) != home:
+    sys.stderr.write("trellis release: release removal requires a canonical TRELLIS_HOME and no-follow opens\n")
+    raise SystemExit(4)
+try:
+    rows = plan() if mode == "plan" else finish()
+except (Refused, OSError, RecursionError) as error:
+    if mode == "plan":
+        sys.stderr.write("trellis release: refusing to remove %s: %s\n" % (version, error))
+    else:
+        sys.stderr.write("trellis release: could not finish removing %s: %s; `trellis release reap-tmp --fix` "
+                         "collects %s/releases/%s once this process has exited for 1 h\n" % (version, error, home, stage))
+    raise SystemExit(getattr(error, "status", 4))
+for kind, path, size in rows:
+    print("%s\t%s\t%d" % (kind, path, size))
+PY
+}
+
+# release_store_live_handles PATH...
+#
+# Prints `PID<TAB>PATH` for each process holding PATH, or anything below it, as
+# its working directory, root, executable, mapped file or open descriptor. macOS
+# reads one host-wide `lsof -n -P -Fpun` snapshot; Linux reads /proc, which needs
+# no lsof package. A probe that cannot answer fails (status 4) and is never "no
+# process": a caller must refuse on it. Linux names an unlinked path with a
+# trailing " (deleted)", which still counts as held.
+#
+# Only the invoking user's inspectable processes are checked: a release lives
+# under that user's TRELLIS_HOME, and no unprivileged user can read root's
+# /proc/1/fd. A process another uid owns (the /proc/PID owner, lsof's u field)
+# is skipped and counted. So is one of ours on which Linux refuses an entry
+# with EACCES or EPERM: reading another process's links needs ptrace-read
+# access, which fails when its credentials, capabilities or dumpability differ
+# from ours (systemd --user, ssh-agent, sshd-session). stderr lists those by
+# pid and comm; such a process can still use the release unseen. A normal
+# process of ours, such as one Trellis launched, is always readable. A PID that
+# exited, a zombie or dead one (stat state Z or X, no other thread left) whose
+# links are gone, a kernel thread, or a descriptor closed between listing and
+# readlink, is benign; a PID still alive with a link gone is re-read over a
+# bounded window before it refuses. Any other error, and an unreadable or unlistable /proc root, fails.
+release_store_live_handles() {
+  local python_bin
+  [ "$#" -gt 0 ] || {
+    release_store_err "live handle check requires PATH"
+    return 2
+  }
+  command -v python3 >/dev/null 2>&1 || {
+    release_store_err "python3 is required to check for running processes"
+    return 5
+  }
+  python_bin="$(command -v python3)" || return 5
+  "$python_bin" -I - "${TRELLIS_TEST_RELEASE_PROC_ROOT:-}" "${TRELLIS_TEST_RELEASE_LSOF:-}" "$@" <<'PY'
+import errno
+import json
+import os
+import subprocess
+import sys
+import time
+
+proc, lsof_override, paths = sys.argv[1], sys.argv[2], sys.argv[3:]
+# Test seam, honoured only with a fake proc root: this fd entry closes between
+# listing and readlink.
+closed = os.environ.get("TRELLIS_TEST_RELEASE_PROC_CLOSED", "") if proc else ""
+# Test seam, same condition: PATH:ERRNO makes the exit probe of PATH (a PID's
+# stat or task) fail with that errno, such as EPERM, which no file mode gives.
+fault_path, _, fault_errno = (os.environ.get("TRELLIS_TEST_RELEASE_PROC_FAULT", "") if proc else "").rpartition(":")
+# Test seam, same condition: before each exit-probe retry, every entry of the
+# PID directory named NAME+SUFFIX replaces NAME (a stat turning Z, a link
+# appearing, or a dangling link standing in for a vanished stat).
+step = os.environ.get("TRELLIS_TEST_RELEASE_PROC_STEP", "") if proc else ""
+PF_KTHREAD = 0x00200000
+# A process between dropping its mm or fs and becoming a zombie still shows
+# R, S or D with its links gone; on a busy host that lasts milliseconds.
+EXIT_RETRY_DELAYS = (0.01, 0.02, 0.04, 0.08)
+held = set()
+uid = os.geteuid()
+other_users = 0
+uninspectable = []
+
+
+def check(pid, name):
+    if name.endswith(" (deleted)"):
+        name = name[: -len(" (deleted)")]
+    # Ignoring case: a case-insensitive volume names one directory many ways.
+    name = name.casefold()
+    for path in paths:
+        if name == path.casefold() or name.startswith(path.casefold() + "/"):
+            held.add((int(pid), path))
+
+
+def fail(message):
+    sys.stderr.write("trellis release: cannot check for running processes: %s\n" % message)
+    raise SystemExit(4)
+
+
+def probe_fault(path):
+    if fault_path and path == fault_path:
+        code = getattr(errno, fault_errno)
+        raise OSError(code, os.strerror(code), path)
+
+
+def read_link(name):
+    if name == closed:
+        raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), name)
+    return os.readlink(name)
+
+
+def read_stat(base):
+    # (state, flags), or None once the stat is gone. Both follow the last ")",
+    # since comm may hold one: state is field 3 and flags field 9 of proc(5).
+    # A PID reaped between listing and reading answers ESRCH, not ENOENT.
+    try:
+        probe_fault(base + "/stat")
+        with open(base + "/stat", "rb") as stat:
+            _, comm_end, rest = stat.read().rpartition(b")")
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except PermissionError:
+        raise
+    except OSError as error:
+        fail("%s/stat is unreadable (%s)" % (base, error))
+    fields = rest.split()
+    if not comm_end or len(fields) < 7 or not fields[6].isdigit():
+        fail("%s/stat is malformed" % base)
+    return fields[0], int(fields[6])
+
+
+def others_alive(pid, base):
+    try:
+        probe_fault(base + "/task")
+        return bool([tid for tid in os.listdir(base + "/task") if tid != pid])
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except PermissionError:
+        raise
+    except OSError as error:
+        fail("%s/task is unreadable (%s)" % (base, error))
+
+
+def exited(pid, base, link=None):
+    # Linux drops a task's fs and mm before it is reaped, so a zombie's cwd,
+    # root and exe give ENOENT while /proc/PID remains. A vanished stat, or
+    # state Z or X with no other thread left, means it exited; a Z leader
+    # whose other threads still run shares their files and mm. A kernel
+    # thread has no exe and cannot hold a release. Any other state is retried
+    # over a bounded window, re-reading LINK too: "read" if it resolved and
+    # was checked, otherwise "live" while the PID stays alive.
+    # EACCES/EPERM propagates: the caller skips and counts the PID.
+    for delay in (0,) + EXIT_RETRY_DELAYS:
+        if delay:
+            time.sleep(delay)
+            if step:
+                for name in os.listdir(base):
+                    if name.endswith(step):
+                        os.replace(base + "/" + name, base + "/" + name[: -len(step)])
+        stat = read_stat(base)
+        if stat is None:
+            return "exited"
+        state, flags = stat
+        if flags & PF_KTHREAD:
+            return "exited"
+        if state in (b"Z", b"X"):
+            if not others_alive(pid, base):
+                return "exited"
+        elif delay and link:
+            try:
+                target = read_link(link)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except PermissionError:
+                raise
+            except OSError as error:
+                fail("%s is unreadable (%s)" % (link, error))
+            check(pid, target)
+            return "read"
+    return "live"
+
+
+def proc_error(pid, base, path, error, link=None):
+    # ENOENT, or ESRCH from a PID reaped mid-read, is benign only if the PID
+    # itself demonstrably exited. A missing member of a live PID is
+    # indeterminate, just like EIO. True means LINK resolved on a retry and the
+    # PID's scan goes on.
+    if isinstance(error, (FileNotFoundError, ProcessLookupError)):
+        try:
+            outcome = exited(pid, base, link)
+            if outcome != "live":
+                return outcome == "read"
+        except PermissionError as probe_error:
+            error = probe_error
+    if isinstance(error, PermissionError):
+        # EACCES/EPERM: the kernel will not let us inspect this process.
+        try:
+            with open(base + "/comm", encoding="utf-8", errors="replace", newline="") as comm:
+                name = comm.read()
+            # proc appends one newline; all remaining whitespace is the name.
+            if name.endswith("\n"):
+                name = name[:-1]
+            name = name or "?"
+        except OSError:
+            name = "?"
+        uninspectable.append((int(pid), name))
+        return
+    fail("%s is unreadable (%s)" % (path, error))
+
+
+def read_proc(root):
+    global other_users
+    try:
+        pids = [name for name in os.listdir(root) if name.isdigit()]
+    except OSError as error:
+        fail("%s is unreadable (%s)" % (root, error))
+    if not os.access(root, os.X_OK):
+        fail("%s is unreadable (not searchable)" % root)
+    for pid in pids:
+        base = root + "/" + pid
+        try:
+            owner = os.stat(base).st_uid
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            proc_error(pid, base, base, error)
+            continue
+        if owner != uid:
+            other_users += 1
+            continue
+        names = []
+        for link in ("cwd", "root", "exe"):
+            names.append(base + "/" + link)
+        try:
+            probe_fault(base + "/fd")
+            names += [base + "/fd/" + fd for fd in os.listdir(base + "/fd")]
+        except OSError as error:
+            proc_error(pid, base, base + "/fd", error)
+            continue
+        exited = False
+        for name in names:
+            try:
+                check(pid, read_link(name))
+            except OSError as error:
+                # A descriptor closed after the listing names nothing now.
+                if isinstance(error, FileNotFoundError) and name.startswith(base + "/fd/"):
+                    continue
+                if proc_error(pid, base, name, error, name):
+                    continue
+                exited = True
+                break
+        if exited:
+            continue
+        try:
+            with open(base + "/maps", encoding="utf-8", errors="surrogateescape") as maps:
+                for line in maps:
+                    fields = line.rstrip("\n").split(None, 5)
+                    if len(fields) == 6:
+                        check(pid, fields[5])
+        except OSError as error:
+            proc_error(pid, base, base + "/maps", error)
+
+
+def read_lsof():
+    global other_users
+    lsof = lsof_override or next((d + "/lsof" for d in ("/usr/sbin", "/usr/bin", "/sbin", "/bin")
+                                 if os.access(d + "/lsof", os.X_OK)), None)
+    if lsof is None:
+        fail("lsof is unavailable")
+    try:
+        result = subprocess.run([lsof, "-n", "-P", "-Fpun"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)
+    except (OSError, subprocess.SubprocessError) as error:
+        fail("%s failed (%s)" % (lsof, error))
+    if result.returncode != 0 or not result.stdout:
+        fail("%s exited %d with %d bytes" % (lsof, result.returncode, len(result.stdout)))
+    if result.stderr:
+        fail("%s reported an incomplete process snapshot: %s" %
+             (lsof, result.stderr.decode("utf-8", "replace").strip()))
+    pid = owner = None
+    names = 0
+    for line in result.stdout.decode("utf-8", "surrogateescape").splitlines():
+        if line.startswith("p") and line[1:].isdigit() and int(line[1:]) > 0:
+            if pid is not None and owner is None:
+                fail("%s returned malformed process records" % lsof)
+            pid, owner = line[1:], None
+        elif line.startswith("u") and line[1:].isdigit() and pid is not None and owner is None:
+            owner = int(line[1:])
+            if owner != uid:
+                other_users += 1
+        elif line.startswith("f") and len(line) > 1 and owner is not None:
+            # lsof always emits descriptor boundaries, even with -Fpun.
+            continue
+        elif line.startswith("n") and owner is not None:
+            # Unnamed pipes/kqueues legitimately have an empty n field.
+            if len(line) > 1 and owner == uid:
+                check(pid, line[1:])
+                names += 1
+        else:
+            fail("%s returned malformed process records" % lsof)
+    if pid is not None and owner is None:
+        fail("%s returned malformed process records" % lsof)
+    if not names:
+        fail("%s returned no process paths for uid %d" % (lsof, uid))
+
+
+if proc:
+    read_proc(proc)
+elif sys.platform.startswith("linux") and not lsof_override:
+    read_proc("/proc")
+else:
+    read_lsof()
+if other_users or uninspectable:
+    counts = ["%d of other users" % other_users] if other_users else []
+    if uninspectable:
+        counts.append("%d of uid %d the kernel will not let it inspect: %s" %
+                      (len(uninspectable), uid, ", ".join("%d %s" % (pid, json.dumps(name, ensure_ascii=True))
+                                                       for pid, name in sorted(uninspectable))))
+    sys.stderr.write("trellis release: process check could not inspect %d processes (%s); "
+                     "it covers uid %d's inspectable processes only\n" %
+                     (other_users + len(uninspectable), "; ".join(counts), uid))
+for pid, path in sorted(held):
+    print("%d\t%s" % (pid, path))
+PY
+}
+
 release_store_snapshot_verified_release() (
   set +e
   local input_version="${1:-}" version releases source pinned_digest current_digest snapshot="" snapshot_base copied_digest final_digest rc
@@ -2716,7 +3518,7 @@ release_store_emit_verified_attachment_bundle() {
   }
   python_bin="$(command -v python3)" || return 5
 
-  "$python_bin" - "$releases" "$base" "$expected_digest" <<'PY'
+  "$python_bin" -I - "$releases" "$base" "$expected_digest" <<'PY'
 import hashlib
 import json
 import os
@@ -2726,6 +3528,8 @@ import sys
 releases, snapshot_name, expected_digest = sys.argv[1:4]
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+# attachment.sh skips sourcing settings-hooks-merge.sh under the preload flag,
+# so its owned-render checks need it here, as in the launcher's LIBRARIES.
 REQUIRED_SOURCES = (
     "scripts/lib/semver.sh",
     "scripts/lib/trellis-home.sh",
@@ -2733,6 +3537,7 @@ REQUIRED_SOURCES = (
     "scripts/lib/local-registry.sh",
     "scripts/lib/skill-roots.sh",
     "scripts/lib/surface-plan.sh",
+    "scripts/lib/settings-hooks-merge.sh",
     "scripts/lib/attachment.sh",
     "scripts/attach-project.sh",
 )
@@ -3093,6 +3898,7 @@ release_store_install() (
     release_store_err "could not extract release tree: $tag"
     return 4
   fi
+  release_store_assert_native_payload_layout "$payload" || return 4
   release_store_write_manifest_json "$manifest_tsv" "$stage/release.json" "$version" "$tag" "$commit" "$remote" || return 4
 
   release_store_verify_path "$stage" "$version" 1 1 || return 4
@@ -3255,7 +4061,7 @@ release_store_adopt_runtime_anchor_pinned() (
   }
   python_bin="$(command -v python3)"
 
-  "$python_bin" - "$root" "$root_dev" "$root_inode" "$trellis_dev" "$trellis_inode" "$target" "$expected_old" <<'PY'
+  "$python_bin" -I - "$root" "$root_dev" "$root_inode" "$trellis_dev" "$trellis_inode" "$target" "$expected_old" <<'PY'
 import ctypes
 import errno
 import os

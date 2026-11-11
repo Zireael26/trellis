@@ -135,7 +135,17 @@ release_fixture_prototype_build() {
   mkdir -p "$user" "$home" "$source" || return 1
   release_fixture_bootstrap "$user" "$home" "$proto" || return 1
   cp -R "$REPO_ROOT/core-rules" "$REPO_ROOT/scripts" "$source/" || return 1
+  # T34: a 9.9.9 fixture release cannot carry the 1.5.0 native manifest; as a
+  # legacy-only release it renders the complete pinned legacy surface. The
+  # native render is covered by events.rs (T34) and native-hooks-delivery.
+  rm -rf "${source:?}/core-rules/native" || return 1
   printf '9.9.9\n' > "$source/core-rules/VERSION" || return 1
+  # The source tree's native manifest names the source's release, not 9.9.9,
+  # and a native-bearing active release also requires the pinned launcher and
+  # installed companion that only the native bootstrap provides (doctor's
+  # launcher-currency row). The prototype installs the plain launcher, so it
+  # is a legacy, non-native release.
+  rm -rf "${source:?}/core-rules/native" || return 1
   release_fixture_install "$user" "$home" 9.9.9 "$source" || return 1
   jq '.active_cli_release = "9.9.9"' "$home/config.json" > "$home/config.next" || return 1
   mv "$home/config.next" "$home/config.json" || return 1

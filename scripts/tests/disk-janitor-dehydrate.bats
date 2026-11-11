@@ -8,7 +8,8 @@
 # survivors are asserted with `[ -e ]`, removals with `[ ! -e ]`.
 #
 # Hermetic: HOME, TRELLIS_HOME, the worktree root and every repository live in
-# a fresh sandbox under BATS_TEST_TMPDIR. Merge checks use DJ_MERGED_OVERRIDE.
+# a fresh sandbox under BATS_TEST_TMPDIR. Git is fenced and gh/launchctl are
+# stubbed; merged PR evidence is generated from the fixture worktree tip.
 # Idle time is git activity, so fixtures backdate the per-worktree HEAD, index
 # and logs/HEAD; nothing here runs `git status` on a backdated tree without
 # GIT_OPTIONAL_LOCKS=0, which would refresh the index and reset the clock.
@@ -26,8 +27,26 @@ setup() {
   PROJECTS="$SANDBOX/projects"
   OUTSIDE="$SANDBOX/outside"
   mkdir -p "$HOME" "$TRELLIS_HOME" "$CANON/audits" "$PROJECTS" "$OUTSIDE"
-  chmod 700 "$TRELLIS_HOME"
-  export HOME TRELLIS_HOME
+  chmod 700 "$HOME" "$TRELLIS_HOME"
+  # Keep every Git mutation in the runner's fence and never invoke live gh or
+  # launchctl, even when a case exercises the janitor's apply path.
+  local fenced_git stub_bin="$SANDBOX/bin"
+  fenced_git="$(command -v git)"
+  mkdir -p "$stub_bin"
+  printf '#!/bin/bash\nexec %q "$@"\n' "$fenced_git" > "$stub_bin/git"
+  printf '#!/bin/sh\nexit 99\n' > "$stub_bin/launchctl"
+  cat > "$stub_bin/gh" <<'SH'
+#!/bin/bash
+if [ "${DJ_MERGED_OVERRIDE:-}" = merged ] && [ -d "${FIXTURE_CC:-}" ]; then
+  oid="$(git -C "$FIXTURE_CC" rev-parse HEAD)" || exit 1
+  printf '[{"number":1,"state":"MERGED","headRefOid":"%s"}]\n' "$oid"
+else
+  printf '[]\n'
+fi
+SH
+  chmod 700 "$stub_bin/git" "$stub_bin/gh" "$stub_bin/launchctl"
+  PATH="$stub_bin:$PATH"
+  export PATH HOME TRELLIS_HOME
   export TRELLIS_WORKTREE_ROOT="$HOME/projects/worktrees"
   export GIT_CONFIG_NOSYSTEM=1
   unset TRELLIS_CONFIG_PATH
@@ -48,7 +67,9 @@ teardown() {
 # write_config DISK_JANITOR_JSON [WORKTREES_JSON] — portable policy, machine
 # home and an empty registry.
 write_config() {
-  jq -n --argjson dj "$1" --argjson wt "${2:-{\}}" \
+  local wt='{}'
+  [ -n "${2:-}" ] && wt="$2"
+  jq -n --argjson dj "$1" --argjson wt "$wt" \
     '{schema_version: 2, maintainer_name: "T", github_user: "t", harnesses: ["claude"],
       disk_janitor: $dj, worktrees: $wt}' > "$CANON/trellis.config.json"
   cat > "$TRELLIS_HOME/config.json" <<JSON
@@ -70,7 +91,7 @@ register() {
 
 run_dj() {
   run env TRELLIS_CONFIG="$CANON/trellis.config.json" DJ_BUILD_ACTIVE_OVERRIDE=0 \
-    bash "$DJ" "$@" </dev/null
+    FIXTURE_CC="${CC:-}" bash "$DJ" "$@" </dev/null
 }
 
 # A JS project: package.json, a tracked lockfile and the usual ignores.

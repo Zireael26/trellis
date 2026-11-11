@@ -36,6 +36,18 @@ assert_scratch_clean() {
   [ -z "$(ls -A "$TMPDIR")" ]
 }
 
+@test "T57 preseal stages and validates the complete native asset set" {
+  cp -R "$REPO_ROOT/core-rules/native" "$SOURCE/core-rules/native"
+  run bash "$CHECK" "$SOURCE"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+  [[ "$output" == *'mirror-preseal: staged public policy clean'* ]]
+  printf '\000changed\000' >> "$SOURCE/core-rules/native/aarch64-apple-darwin/trellis-hooks"
+  run bash "$CHECK" "$SOURCE"
+  [ "$status" -eq 4 ] || { printf '%s\n' "$output"; return 1; }
+  [[ "$output" == *'native runtime verification failed'* ]]
+  assert_scratch_clean
+}
+
 @test "preseal uses publisher exclusions and replaces private data with public shells" {
   local path
   for path in dependency-baseline.json audits/fleet-remediation-ledger.json trellis.config.json \
@@ -57,6 +69,24 @@ assert_scratch_clean() {
   [ "$(< "$SOURCE/audits/fleet-remediation-ledger.json")" = fixtureproj ]
   [ -f "$SOURCE/scripts/tests/herdr-task-routing.bats" ]
   assert_scratch_clean
+}
+
+@test "preseal refuses binary and bare operator home paths" {
+  local cwd="$BATS_TEST_TMPDIR/relative-stage" private_home="/User""s/privateaudit"
+  mkdir -p "$cwd/tmp"
+  printf 'start\000%s/secret\000end\n' "$private_home" > "$SOURCE/docs/adr/payload.bin"
+  run bash -c 'cd "$1" && TMPDIR=tmp bash "$2" "$3"' fixture "$cwd" "$CHECK" "$SOURCE"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *'payload.bin: absolute-path leak'* ]] || { echo "$output"; false; }
+
+  printf 'HOME=%s\n' "$private_home" > "$SOURCE/docs/adr/payload.bin"
+  run bash -c 'cd "$1" && TMPDIR=tmp bash "$2" "$3"' fixture "$cwd" "$CHECK" "$SOURCE"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *'payload.bin: absolute-path leak'* ]] || { echo "$output"; false; }
+
+  printf 'HOME=/Users/example\n' > "$SOURCE/docs/adr/payload.bin"
+  run bash -c 'cd "$1" && TMPDIR=tmp bash "$2" "$3"' fixture "$cwd" "$CHECK" "$SOURCE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "preseal real lint refuses fleet identifiers in a published historical record" {

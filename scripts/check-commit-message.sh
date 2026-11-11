@@ -26,12 +26,49 @@ done < "$MSG_FILE"
 
 [ -n "$HEADER" ] || exit 0
 
-# Git-generated/replayed headers are not authored Conventional Commit
-# subjects, so leave them to Git's own machinery.
+# Git-shaped subjects are exempt only with corresponding repository evidence.
+# This is kept in sync with the standalone githooks and husky templates.
+git_operation_marker() (
+  marker="$(git rev-parse --git-path "$1" 2>/dev/null)" || return 1
+  [ -f "$marker" ]
+)
+
+generated_header_allowed() (
+  git rev-parse --git-dir >/dev/null 2>&1 || return 1
+  case "$HEADER" in
+    "Merge "*)
+      git_operation_marker MERGE_HEAD || return 1
+      marker="$(git rev-parse --git-path MERGE_MSG 2>/dev/null)" || return 1
+      [ -f "$marker" ] || return 1
+      generated=""
+      IFS= read -r generated < "$marker" || [ -n "$generated" ] || return 1
+      [ "$HEADER" = "$generated" ] ;;
+    'Revert "'*'"')
+      git_operation_marker REVERT_HEAD && return 0
+      while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+          'This reverts commit '*)
+            sha="${line#This reverts commit }"
+            case "$sha" in *.) sha="${sha%.}" ;; *) continue ;; esac
+            case "$sha" in ''|*[!0-9a-fA-F]*) continue ;; esac
+            [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 64 ] || continue
+            git cat-file -e "${sha}^{commit}" 2>/dev/null && return 0 ;;
+        esac
+      done < "$MSG_FILE"
+      return 1 ;;
+    'fixup! '*|'squash! '*|'amend! '*)
+      target="${HEADER#*! }"
+      [ -n "$target" ] || return 1
+      git log --format='%s' HEAD 2>/dev/null | grep -Fx -- "$target" >/dev/null ;;
+    'Applying '*)
+      [ -n "${HEADER#Applying }" ] && git_operation_marker rebase-apply/applying ;;
+    *) return 1 ;;
+  esac
+)
+
 case "$HEADER" in
-  "Merge "*|"Revert "*|"fixup!"*|"squash!"*|"amend!"*|"Applying "*)
-    exit 0
-    ;;
+  'Merge '*|'Revert '*|'fixup!'*|'squash!'*|'amend!'*|'Applying '*)
+    if generated_header_allowed; then exit 0; fi ;;
 esac
 
 TYPES='build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test|draft|merge'

@@ -80,7 +80,7 @@ local_registry_schema_path() {
 
 local_registry_require_project_id() {
   local project_id="${1:-}"
-  if ! printf '%s' "$project_id" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+  if [[ "$project_id" == *$'\n'* ]] || ! printf '%s' "$project_id" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
     local_registry_err "invalid project ID $project_id; expected ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
     return "$TRELLIS_EX_USAGE"
   fi
@@ -184,7 +184,7 @@ local_registry_sha256() {
     local_registry_err "a SHA-256 command (sha256sum, openssl, or shasum) is required"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
-  if ! printf '%s' "$digest" | LC_ALL=C grep -Eq '^[a-f0-9]{64}$'; then
+  if ! trellis_is_sha256_hex "$digest"; then
     local_registry_err "could not calculate a SHA-256 identity"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
@@ -353,7 +353,7 @@ local_registry_require_attachment_id() {
 # `jq` is intentionally the validation engine used by all local-state writers.
 local_registry_json_is_valid() {
   local registry_json="${1:-}"
-  jq -e '
+  jq -e -s '
     def safe_text:
       type == "string" and all(explode[]; . >= 32 and (. < 127 or . > 159));
     def safe_path:
@@ -422,6 +422,7 @@ local_registry_json_is_valid() {
       $left == $right
       or ($left | startswith($right + "/"))
       or ($right | startswith($left + "/"));
+    (if length == 1 then .[0] else null end) |
     closed(["schema_version", "projects"]; ["$schema", "discovery_ignores"])
     and ((has("$schema") | not) or (."$schema" | safe_text))
     and .schema_version == 1
@@ -435,12 +436,12 @@ local_registry_json_is_valid() {
                   and ((map(.path) | unique | length) == length))))
     and (checkouts as $checkouts | roots as $roots | unavailable as $unavailable | ignored as $ignored
       | (($checkouts | map(.checkout_id) | unique | length) == ($checkouts | length))
-      | (($checkouts | map(.common) | unique | length) == ($checkouts | length))
-      | ($roots | group_by(.root) | all(.[]; ((map(.owner) | unique | length) == 1)))
-      | (($unavailable | map(.root) | unique | length) == ($unavailable | length))
-      | ([ $unavailable[] as $unavailable_root | $roots[]
+      and (($checkouts | map(.common) | unique | length) == ($checkouts | length))
+      and ($roots | group_by(.root) | all(.[]; ((map(.owner) | unique | length) == 1)))
+      and (($unavailable | map(.root) | unique | length) == ($unavailable | length))
+      and ([ $unavailable[] as $unavailable_root | $roots[]
            | select(.root == $unavailable_root.root) ] | length == 0)
-      | ([ $ignored[] as $ignore | ($roots + $unavailable)[] as $owned
+      and ([ $ignored[] as $ignore | ($roots + $unavailable)[] as $owned
            | select(overlaps($ignore; $owned.root)) ] | length == 0)
     )
   ' "$registry_json" >/dev/null 2>&1
@@ -1019,6 +1020,62 @@ local_registry_read_diagnostic_state() {
   else
     local_registry_empty_json | jq -S .
   fi
+}
+
+# A stat-only change detector for an operation's diagnostic registry snapshot.
+# It is not a registry validity check. Bind both the registry and its parent,
+# including the absent-file case, so rename/create/remove cannot go unnoticed.
+# Coarse or unavailable ctime cannot support this optimization: the caller
+# must instead re-read and compare the validated state. No path is followed.
+_local_registry_diagnostic_token() {
+  _local_registry_file_token "$1" "$1/registry.json"
+}
+
+# Also used for the operation-local owner snapshot. Bind every directory from
+# ROOT to the parent, not just the leaf: a renamed-and-restored ancestor can
+# otherwise redirect a read while leaving the immediate parent inode unchanged.
+_local_registry_file_token() {
+  local parent="$1" file="$2" root="${3:-$1}" cursor present=0 os stat_bin rows
+  local dev ino size mode mt ct fraction count=0
+  local -a paths
+  [ "${file%/*}" = "$parent" ] || return 1
+  case "$parent" in "$root"|"$root"/*) ;; *) return 1 ;; esac
+  paths=()
+  cursor="$parent"
+  while :; do
+    [ -d "$cursor" ] && [ ! -L "$cursor" ] || return 1
+    paths+=("$cursor")
+    [ "$cursor" = "$root" ] && break
+    cursor="${cursor%/*}"
+    [ -n "$cursor" ] || return 1
+  done
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || return 1
+    present=1
+    paths+=("$file")
+  fi
+  os="$(/usr/bin/uname -s 2>/dev/null)" || return 1
+  if [ -x /usr/bin/stat ]; then stat_bin=/usr/bin/stat
+  elif [ -x /bin/stat ]; then stat_bin=/bin/stat
+  else return 1
+  fi
+  case "$os" in
+    Darwin) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" -f $'%d\t%i\t%z\t%p\t%Fm\t%Fc' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
+    Linux) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" --printf='%d\t%i\t%s\t%f\t%y\t%z\n' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
+  esac
+  while IFS=$'\t' read -r dev ino size mode mt ct; do
+    [ -n "$dev" ] && [ -n "$ino" ] && [ -n "$size" ] && [ -n "$mode" ] && [ -n "$mt" ] || return 1
+    fraction="${ct##*.}"
+    fraction="${fraction%% *}"
+    case "$fraction" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#fraction}" -eq 9 ] && [ "${fraction#???}" != 000000 ] || return 1
+    count=$((count + 1))
+  done <<EOF
+$rows
+EOF
+  [ "$count" -eq "${#paths[@]}" ] || return 1
+  printf '%s\n%s\n' "$present" "$rows"
 }
 
 # Proposal primitive for CLIs and later attachment transactions. It does not
@@ -1957,9 +2014,20 @@ local_registry_list_row_availability() {
 # matrix pass over every consumer found no row needing cross-fleet state
 # visibility, so the contract stands as documented rather than being widened.
 local_registry_list_json() {
-  local home="${1:-}" fleet="${2:-}" state rows output row availability label rc
-  local checkout_classes row_project_key row_checkout_id checkout_class
   [ "$#" -le 2 ] || return "$TRELLIS_EX_USAGE"
+  _local_registry_list_json "${1:-}" "${2:-}" 0
+}
+
+# Internal diagnostic entry: SNAPSHOT is the already validated, migrated state
+# captured for this operation. Public callers retain the ordinary fresh read.
+_local_registry_list_json_from_snapshot() {
+  [ "$#" -eq 3 ] || return "$TRELLIS_EX_USAGE"
+  _local_registry_list_json "$1" "$2" 1 "$3"
+}
+
+_local_registry_list_json() {
+  local home="$1" fleet="$2" use_snapshot="$3" snapshot="${4:-}" state rows output row availability label rc
+  local checkout_classes row_project_key row_checkout_id checkout_class
   [ -z "$fleet" ] || trellis_home_require_fleet_name "$fleet" || return "$?"
   # ENVIRONMENT before rows: without a hash command EVERY row would classify the
   # same way, which is a fact about the machine and not about the registry.
@@ -1967,8 +2035,11 @@ local_registry_list_json() {
   state="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.state.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   rows="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.rows.XXXXXX")" || { rm -f "$state"; return "$TRELLIS_EX_UNAVAILABLE"; }
   output="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.output.XXXXXX")" || { rm -f "$state" "$rows"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  local_registry_read_diagnostic_state "$home" > "$state"
-  rc="$?"
+  if [ "$use_snapshot" = 1 ]; then
+    printf '%s\n' "$snapshot" > "$state"; rc="$?"
+  else
+    local_registry_read_diagnostic_state "$home" > "$state"; rc="$?"
+  fi
   if [ "$rc" -ne 0 ]; then rm -f "$state" "$rows" "$output"; return "$rc"; fi
   # Checkout-row coverage pre-pass. It CLASSIFIES over the WHOLE file, not the
   # fleet-filtered rows, for the same reason the whole-file validator does: the
@@ -2169,8 +2240,18 @@ local_registry_resolve_project() {
 # unrelated broken row cannot hide a resolvable one; mutations still revalidate
 # globally under the registry lock.
 local_registry_resolve_root() {
-  local home="${1:-}" root_input="${2:-}" identity root checkout_root common checkout_id worktree_id state matches rc
   [ "$#" -eq 2 ] || return "$TRELLIS_EX_USAGE"
+  _local_registry_resolve_root "$1" "$2" 0
+}
+
+_local_registry_resolve_root_from_snapshot() {
+  [ "$#" -eq 3 ] || return "$TRELLIS_EX_USAGE"
+  _local_registry_resolve_root "$1" "$2" 1 "$3"
+}
+
+_local_registry_resolve_root() {
+  local home="$1" root_input="$2" use_snapshot="$3" snapshot="${4:-}"
+  local identity root checkout_root common checkout_id worktree_id state matches rc
   identity="$(local_registry_identity_for_root "$root_input")" || return "$?"
   root="$(printf '%s\n' "$identity" | jq -r '.root')"
   checkout_root="$(printf '%s\n' "$identity" | jq -r '.checkout_root')"
@@ -2178,8 +2259,11 @@ local_registry_resolve_root() {
   checkout_id="$(printf '%s\n' "$identity" | jq -r '.checkout_id')"
   worktree_id="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
   state="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.state.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  local_registry_read_diagnostic_state "$home" > "$state"
-  rc="$?"
+  if [ "$use_snapshot" = 1 ]; then
+    printf '%s\n' "$snapshot" > "$state"; rc="$?"
+  else
+    local_registry_read_diagnostic_state "$home" > "$state"; rc="$?"
+  fi
   if [ "$rc" -ne 0 ]; then rm -f "$state"; return "$rc"; fi
   matches="$(jq -c -S --arg root "$root" --arg checkout_root "$checkout_root" --arg common "$common" \
     --arg checkout_id "$checkout_id" --arg worktree_id "$worktree_id" '
@@ -2207,7 +2291,7 @@ local_registry_manifest_project_id() {
     local_registry_err "project manifest must be a regular file: $manifest"
     return "$TRELLIS_EX_STATE"
   fi
-  if ! jq -e '
+  if ! jq -e -s '
     def safe: type == "string" and all(explode[]; . >= 32 and (. < 127 or . > 159));
     def project: safe and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$");
     def preset: type == "string" and test("^[a-z0-9][a-z0-9-]*[a-z0-9]$") and length >= 2 and length <= 64;
@@ -2233,6 +2317,7 @@ local_registry_manifest_project_id() {
     def security_gate:
       type == "object" and ((keys_unsorted - ["semgrep_timeout"]) | length == 0)
       and ((has("semgrep_timeout") | not) or (.semgrep_timeout | type == "number" and floor == . and . >= 1 and . <= 600));
+    (if length == 1 then .[0] else null end) |
     type == "object"
     and ((keys_unsorted - ["$schema", "schema_version", "project_id", "presets", "autonomy", "package_manager", "loop_safety", "mandatory_pipeline", "gate", "security_gate", "gate_profiles"]) | length == 0)
     and .schema_version == 1 and (.project_id | project)
@@ -2322,7 +2407,9 @@ local_registry_parse_legacy_markdown() {
     }
     END {
       if (!seen || !header) exit 1
-      if (rejected) exit 2
+      # awk implementations also use exit 2 for fatal I/O errors. Reserve a
+      # distinct status for the successfully parsed, row-rejected case.
+      if (rejected) exit 42
     }
   ' "$registry_file" > "$output"
   status="$?"
@@ -2336,7 +2423,7 @@ local_registry_parse_legacy_markdown() {
     return 0
   fi
   # Rejected rows are the caller's to classify once it asked for the records.
-  if [ "$status" -eq 2 ] && [ -n "$rejects" ]; then
+  if [ "$status" -eq 42 ] && [ -n "$rejects" ]; then
     return 0
   fi
   rm -f "$output"

@@ -195,7 +195,7 @@ dj_dehydrate_classify() {
   # directory holding only ignored content (`pkg/` for pkg/mod/__pycache__)
   # into one opaque entry.
   if ! _hy_git -C "$tree" status --porcelain -z --ignored=matching \
-      --untracked-files=normal >"$status_file" 2>/dev/null; then
+      --untracked-files=all >"$status_file" 2>/dev/null; then
     rm -f "$status_file"
     printf 'hold\ttree\t%s\tgit error\n' "$tree"
     return 0
@@ -521,27 +521,59 @@ _dw_worktree_rows() {
   rm -f "$listing"
 }
 
+# _dw_cc_pr_evidence MAIN BRANCH — latest PR state and most recent merged head.
+# Multiple PRs mean the branch name was reused; a merged PR's name alone is
+# never proof that today's tip was merged. The latest 100 results
+# include the newest PR (gh lists them newest first).
+_dw_cc_pr_evidence() {
+  local main="$1" branch="$2" prs
+  case "$branch" in ''|detached|HEAD) return 1 ;; esac
+  command -v gh >/dev/null 2>&1 || return 1
+  prs="$(cd "$main" && gh pr list --head "$branch" --state all --limit 100 \
+    --json number,state,headRefOid 2>/dev/null)" || return 1
+  printf '%s\n' "$prs" | jq -er '
+    if type != "array" or
+       (all(.[]; type == "object" and (.number | type == "number" and . > 0 and floor == .) and
+         (.state == "OPEN" or .state == "CLOSED" or .state == "MERGED")) | not) or
+       (([.[].number] | unique | length) != length) then error("invalid PR list")
+    elif length == 0 then ["none", "-", "-", "-"] | @tsv
+    else
+      sort_by(.number) as $prs | $prs[-1] as $latest |
+      ([$prs[:-1][] | select(.state == "MERGED")] | last // null) as $prior_merged |
+      [(if ($prs | length) > 1 then "REUSED" else $latest.state end),
+       ($latest.number | tostring), ($latest.headRefOid // "-"),
+       ($prior_merged.headRefOid // "-")] | @tsv
+    end
+  ' 2>/dev/null
+}
+
+_dw_cc_is_oid() {
+  case "$1" in ''|*[!0-9a-fA-F]*) return 1 ;; esac
+  [ "${#1}" -eq 40 ]
+}
+
 # _dw_cc_verdict PATH BRANCH MAIN LOCKED
 #
 # The A7 sweep predicate for a Claude Code worktree (`cc-*` under the central
-# root). Prints `sweep\t<merged 0|1>\t<why>` when PATH may be removed with
+# root). Prints `sweep\t<merged 0|1>\t<proved tip or ->\t<why>` when PATH may be removed with
 # `git worktree remove`, else `hold\t\t<reason>`. Removable means all of:
 # unlocked; no tracked or untracked change and every ignored path regenerable
 # (git worktree remove deletes ignored content); no live handle; idle more
 # than cc_worktree_idle_days by git activity; no attachment owner record names
 # it (removing an attached worktree would orphan its record); and the branch is
-# merged (dj_branch_merged) or HEAD has no commit outside every other branch
-# and remote. Under --safe-only only a merged branch qualifies.
+# merged with its tip contained in the newest merged PR head, or HEAD has no
+# commit outside every other branch and remote (the branch stays). Under
+# --safe-only only a commit-proven merged branch qualifies.
 _dw_cc_verdict() {
   local path="$1" branch="$2" main="$3" locked="$4" idle rows reason="" in_use activity
-  local owners unique merged=1 why tab dirty
+  local owners unique merged=1 why tab dirty evidence pr_state pr_number pr_head last_merged head proof_tip=-
   tab="$(printf '\t')"
   [ "$locked" = 0 ] || { printf 'hold\t\tlocked\n'; return 0; }
   idle="$(cfg_num '.disk_janitor.cc_worktree_idle_days' 1)"
   rows="$(dj_dehydrate_classify "$path" "$idle" "$NOW_EPOCH" "$LSOF_SNAPSHOT_TMP")" ||
     reason="classification failed"
   if [ -z "$reason" ] && [ -z "$rows" ]; then
-    if dirty="$(_hy_git -C "$path" status --porcelain 2>/dev/null)"; then
+    if dirty="$(_hy_git -C "$path" status --porcelain --untracked-files=all 2>/dev/null)"; then
       [ -z "$dirty" ] || reason="tracked or untracked changes"
     else
       reason="git error"
@@ -571,29 +603,55 @@ _dw_cc_verdict() {
     rm -f "$owners"
   fi
   if [ -z "$reason" ]; then
-    if dj_branch_merged "$main" "$branch"; then
-      merged=0
-      why="merged"
-    elif [ "$SAFE_ONLY" -eq 1 ]; then
-      reason="safe-only: not merged"
-    else
-      if [ "$branch" = detached ]; then
-        unique="$(_hy_git -C "$path" rev-list --count HEAD --not --branches --remotes 2>/dev/null)" || unique=""
+    evidence="$(_dw_cc_pr_evidence "$main" "$branch")" || evidence=""
+    IFS="$tab" read -r pr_state pr_number pr_head last_merged <<EOF
+${evidence:-unknown	-	-	-}
+EOF
+    if [ "$pr_state" = MERGED ]; then
+      head="$(_hy_git -C "$path" rev-parse --verify 'HEAD^{commit}' 2>/dev/null)" || head=""
+      if ! _dw_cc_is_oid "$pr_head" || ! _dw_cc_is_oid "$head"; then
+        reason="merged PR head or local tip unavailable (unknown unique commit count)"
+      elif [ "$head" = "$pr_head" ] || _hy_git -C "$path" merge-base --is-ancestor "$head" "$pr_head" >/dev/null 2>&1; then
+        merged=0
+        proof_tip="$head"
+        why="merged"
       else
-        unique="$(_hy_git -C "$path" rev-list --count HEAD --not --exclude="$branch" --branches \
-          --remotes 2>/dev/null)" || unique=""
+        unique="$(_hy_git -C "$path" rev-list --count "$pr_head..$head" 2>/dev/null)" || unique=""
+        case "$unique" in
+          ''|*[!0-9]*|0) reason="merged PR head unavailable or ancestry unknown (unknown unique commit count)" ;;
+          *) reason="merged PR excludes $unique unique commit(s)" ;;
+        esac
       fi
-      case "$unique" in
-        0) why="no unique commits" ;;
-        ''|*[!0-9]*) reason="git error" ;;
-        *) reason="unmerged with $unique unique commit(s)" ;;
-      esac
+    elif [ "$pr_state" = REUSED ]; then
+      unique=unknown
+      if _dw_cc_is_oid "$last_merged"; then
+        unique="$(_hy_git -C "$path" rev-list --count "$last_merged..HEAD" 2>/dev/null)" || unique=""
+        case "$unique" in ''|*[!0-9]*) unique=unknown ;; esac
+      fi
+      reason="branch reused by newer PR #$pr_number ($unique unique commit(s))"
+    fi
+    if [ -z "$reason" ] && [ "$merged" -ne 0 ]; then
+      if [ "$SAFE_ONLY" -eq 1 ]; then
+        reason="safe-only: not merged"
+      else
+        if [ "$branch" = detached ]; then
+          unique="$(_hy_git -C "$path" rev-list --count HEAD --not --branches --remotes 2>/dev/null)" || unique=""
+        else
+          unique="$(_hy_git -C "$path" rev-list --count HEAD --not --exclude="$branch" --branches \
+            --remotes 2>/dev/null)" || unique=""
+        fi
+        case "$unique" in
+          0) why="no unique commits" ;;
+          ''|*[!0-9]*) reason="git error" ;;
+          *) reason="unmerged with $unique unique commit(s)" ;;
+        esac
+      fi
     fi
   fi
   if [ -n "$reason" ]; then
     printf 'hold\t\t%s\n' "$reason"
   else
-    printf 'sweep%s%s%s%s, idle > %sd\n' "$tab" "$((1 - merged))" "$tab" "$why" "$idle"
+    printf 'sweep%s%s%s%s%s%s, idle > %sd\n' "$tab" "$((1 - merged))" "$tab" "$proof_tip" "$tab" "$why" "$idle"
   fi
 }
 
@@ -615,6 +673,47 @@ EOF
     "gitdir $gitdir is gone; repair it (git worktree repair) or hold it with \`trellis worktree migrate\`; never removed whole$detail"
 }
 
+# _dw_registry_path_status PATH SNAPSHOT — 0 means a registry row may own
+# PATH, 1 means no row matches, 2 means ownership could not be checked. Compare
+# both the physical root and the persisted worktree ID, even for rows omitted
+# from TARGETS_TMP because they are excluded, unavailable or non-canonical.
+_dw_registry_path_status() {
+  local path="$1" snapshot="$2" path_id rows row root id canonical
+  _DW_REGISTRY_PROBE_ERROR="registry snapshot $snapshot"
+  path_id="$(local_registry_sha256 "$path" 2>/dev/null)" || return 2
+  rows="$(jq -c '.entries[] | select((.root // "") != "") | {root,worktree_id}' "$snapshot" 2>/dev/null)" || return 2
+  while IFS= read -r row; do
+    [ -n "$row" ] || continue
+    root="$(printf '%s\n' "$row" | jq -er '.root | strings' 2>/dev/null)" || return 2
+    id="$(printf '%s\n' "$row" | jq -r '.worktree_id // ""' 2>/dev/null)" || return 2
+    _dw_has_control "$root" && return 2
+    [ "$id" != "$path_id" ] || return 0
+    [ "$root" != "$path" ] || return 0
+    if ! canonical="$(_hy_canon "$root" 2>/dev/null)"; then
+      printf -v _DW_REGISTRY_PROBE_ERROR 'registry root %q' "$root"
+      return 2
+    fi
+    [ "$canonical" != "$path" ] || return 0
+  done <<EOF
+$rows
+EOF
+  return 1
+}
+
+# Re-read all fleets under the caller's registry lock immediately before an
+# unregistered-tree mutation; a failed read is not proof of non-ownership.
+_dw_registry_current_unregistered() {
+  local path="$1" snapshot rc=2
+  [ -f "$TRELLIS_HOME/registry.json" ] && [ ! -L "$TRELLIS_HOME/registry.json" ] &&
+    [ -r "$TRELLIS_HOME/registry.json" ] || return 1
+  snapshot="$(mktemp "${TMPDIR:-/tmp}/dj-registry-owner.XXXXXX")" || return 1
+  if local_registry_list_json "$TRELLIS_HOME" > "$snapshot" 2>/dev/null; then
+    if _dw_registry_path_status "$path" "$snapshot"; then rc=0; else rc=$?; fi
+  fi
+  rm -f "${snapshot:?}"
+  [ "$rc" -eq 1 ]
+}
+
 # _dw_enumerate LISTING — A11, A8, the A7 cc-* sweep and the D5 orphan pass. LISTING is 1 when
 # the worktrees scope enumerates; orphans need only the orphans scope. Every repository reached by _dw_seed_dirs is
 # listed once (by git common dir); each linked worktree that is not a registry
@@ -624,7 +723,16 @@ EOF
 # dehydrate. A repository git cannot read is reported and left alone.
 _dw_enumerate() {
   local listing="$1" root pi legacy seen="" nl dir common rows main path branch is_main
-  local prunable locked bytes summary count planned held detail tab gitdir cc cc_note
+  local prunable locked bytes summary count planned held detail tab gitdir cc cc_note registry_view registry_rc registry_warned=0
+  registry_view="$(mktemp "${TMPDIR:-/tmp}/dj-registry-all.XXXXXX")" || return 1
+  if [ ! -f "$TRELLIS_HOME/registry.json" ] || [ -L "$TRELLIS_HOME/registry.json" ] ||
+      [ ! -r "$TRELLIS_HOME/registry.json" ] ||
+      ! local_registry_list_json "$TRELLIS_HOME" > "$registry_view" 2>/dev/null; then
+    rm -f "${registry_view:?}"
+    printf 'disk-janitor: could not check registry %s; unregistered-tree scan withheld\n' "$TRELLIS_HOME/registry.json" >&2
+    EXIT_STATUS=1
+    return 0
+  fi
   tab="$(printf '\t')"
   nl="$(printf '\nx')"; nl="${nl%x}"
   root="$(hy_root)" || root=""
@@ -633,7 +741,14 @@ _dw_enumerate() {
   while IFS= read -r dir; do
     [ -d "$dir" ] || continue
     if gitdir="$(_dw_orphan_gitdir "$dir")"; then
-      ! scope_enabled orphans || _dw_plan_orphan "$dir" "$gitdir"
+      if _dw_registry_path_status "$dir" "$registry_view"; then registry_rc=0; else registry_rc=$?; fi
+      if [ "$registry_rc" -eq 2 ] && [ "$registry_warned" -eq 0 ]; then
+        printf 'disk-janitor: could not check registry ownership: %s; affected trees withheld\n' "$_DW_REGISTRY_PROBE_ERROR" >&2
+        registry_warned=1
+      fi
+      if [ "$registry_rc" -eq 1 ]; then
+        ! scope_enabled orphans || _dw_plan_orphan "$dir" "$gitdir"
+      fi
       continue
     fi
     [ "$listing" -eq 1 ] || continue
@@ -653,7 +768,12 @@ _dw_enumerate() {
     while IFS="$tab" read -r path branch is_main prunable locked; do
       [ "$is_main" = 0 ] && [ "$prunable" = 0 ] || continue
       path="$(_hy_canon "$path")" || continue
-      cut -f5 "$TARGETS_TMP" | grep -Fxq -- "$path" && continue
+      if _dw_registry_path_status "$path" "$registry_view"; then registry_rc=0; else registry_rc=$?; fi
+      if [ "$registry_rc" -eq 2 ] && [ "$registry_warned" -eq 0 ]; then
+        printf 'disk-janitor: could not check registry ownership: %s; affected trees withheld\n' "$_DW_REGISTRY_PROBE_ERROR" >&2
+        registry_warned=1
+      fi
+      [ "$registry_rc" -eq 1 ] || continue
       if _dw_under_root "$path" "$pi" || _dw_under_root "$path" "$legacy"; then
         continue
       fi
@@ -695,6 +815,7 @@ EOF
 $rows
 EOF
   done < <(_dw_seed_dirs | awk '!seen[$0]++')
+  rm -f "${registry_view:?}"
 }
 
 dj_dehydrate_scan() {
@@ -782,6 +903,39 @@ dj_dehydrate_render() {
   _dw_render_dehydrate
 }
 
+# Delete only the exact proved tip, and never a branch currently checked out in
+# another worktree. A failed worktree listing or ref comparison keeps the ref.
+# Return 2 when the ref was deleted but its Git config could not be cleaned.
+_dw_cc_delete_merged_branch() {
+  local main="$1" branch="$2" expected="$3" listing token checked=false config_error
+  _dw_cc_is_oid "$expected" || { echo "invalid proved branch tip" >&2; return 1; }
+  _hy_git -C "$main" check-ref-format "refs/heads/$branch" >/dev/null 2>&1 || return 1
+  listing="$(mktemp "${TMPDIR:-/tmp}/dj-cc-branch.XXXXXX")" || return 1
+  if ! _hy_git -C "$main" worktree list --porcelain -z > "$listing" 2>/dev/null; then
+    rm -f "${listing:?}"
+    echo "could not inspect checked-out branches" >&2
+    return 1
+  fi
+  while IFS= read -r -d '' token; do
+    [ "$token" != "branch refs/heads/$branch" ] || checked=true
+  done < "$listing"
+  rm -f "${listing:?}"
+  if "$checked"; then
+    echo "branch $branch is checked out in a worktree" >&2
+    return 1
+  fi
+  if ! _hy_git -C "$main" update-ref --no-deref -d "refs/heads/$branch" "$expected" 2>/dev/null; then
+    echo "branch $branch changed or could not be deleted" >&2
+    return 1
+  fi
+  if config_error="$(LC_ALL=C _hy_git -C "$main" config --local --remove-section "branch.$branch" 2>&1)"; then
+    :
+  elif [ "$config_error" != "fatal: no such section: branch.$branch" ]; then
+    printf 'branch %s was deleted but its config could not be removed: %s\n' "$branch" "$config_error" >&2
+    return 2
+  fi
+}
+
 # _dw_apply_sweep — remove the planned cc-* worktrees. Each one is re-checked
 # under the registry lock with a fresh lsof snapshot: same git common dir, still
 # a linked, unmissing worktree of MAIN, and _dw_cc_verdict still says sweep.
@@ -789,7 +943,7 @@ dj_dehydrate_render() {
 # is then deleted only when it is the worktree's branch and verified merged.
 # shellcheck disable=SC2034  # EXIT_STATUS is the janitor's exit class
 _dw_apply_sweep() {
-  local us tab path bytes common main rows line cc branch locked merged reclaimed=0
+  local us tab path bytes common main rows line cc branch locked merged proof_tip proof_rest delete_rc reclaimed=0
   us="$(printf '\037')"
   tab="$(printf '\t')"
   awk -F'\t' '$1=="worktrees" && $2=="sweep" { f = 1 } END { exit !f }' "$PLAN_TMP" || return 0
@@ -816,6 +970,11 @@ _dw_apply_sweep() {
     fi
     cc=""
     branch=""
+    if ! _dw_registry_current_unregistered "$path"; then
+      echo "  skipped (plan changed): $path — registry ownership present or unknown"
+      trellis_home_lock_release >/dev/null 2>&1 || EXIT_STATUS=1
+      continue
+    fi
     if [ "$(_hy_common_dir "$path" 2>/dev/null)" = "$common" ] &&
         rows="$(_dw_worktree_rows "$main")"; then
       line="$(printf '%s\n' "$rows" | awk -F'\t' -v p="$path" '$1==p && $3==0 && $4==0')"
@@ -832,13 +991,20 @@ EOF
     elif _hy_git -C "$main" worktree remove "$path" >/dev/null 2>&1; then
       reclaimed=$((reclaimed + bytes))
       echo "  removed worktree: $path"
-      merged="${cc#sweep"$tab"}"
-      merged="${merged%%"$tab"*}"
+      proof_rest="${cc#sweep"$tab"}"
+      merged="${proof_rest%%"$tab"*}"
+      proof_rest="${proof_rest#*"$tab"}"
+      proof_tip="${proof_rest%%"$tab"*}"
       if [ "$merged" = 1 ] && [ "$branch" = "worktree-${path##*/cc-}" ]; then
-        if _hy_git -C "$main" branch -D "$branch" >/dev/null 2>&1; then
+        if _dw_cc_delete_merged_branch "$main" "$branch" "$proof_tip"; then
           echo "  deleted merged branch: $branch"
         else
-          echo "  REFUSED/failed: could not delete merged branch $branch" >&2
+          delete_rc=$?
+          if [ "$delete_rc" -eq 2 ]; then
+            echo "  deleted merged branch: $branch (config cleanup failed)" >&2
+          else
+            echo "  REFUSED/failed: could not delete merged branch $branch" >&2
+          fi
           EXIT_STATUS=1
         fi
       fi
@@ -860,7 +1026,7 @@ EOF
 # O_NOFOLLOW, and the leaf must still be a symlink when it is unlinked. The
 # link's target is never touched.
 _dw_unlink_link() {
-  python3 - "$1" "$2" <<'PY'
+  python3 -I - "$1" "$2" <<'PY'
 import os
 import stat
 import sys
@@ -901,6 +1067,7 @@ _dw_owner_unchanged() {
       "$checkout_id" "$worktree_id" "$common" "$root" >/dev/null 2>&1
     return
   fi
+  _dw_registry_current_unregistered "$tree" || return 1
   if [ -z "$common" ]; then
     _dw_orphan_gitdir "$tree" >/dev/null
     return

@@ -27,25 +27,22 @@ for p in ${paths[@]+"${paths[@]}"}; do
   while IFS= read -r md; do
     file_count=$((file_count + 1))
     # Extract bash/sh blocks. awk state machine: enter on ```bash / ```sh,
-    # exit on ```. For each block, write to a temp file, bash -n, report.
-    awk '
-      /^```(bash|sh)([[:space:]]|$)/ { in_block=1; block=""; next }
-      /^```/ && in_block { print "---END---\n" block; in_block=0; next }
-      in_block { block = block $0 "\n" }
-    ' "$md" | awk -v file="$md" '
-      /^---END---$/ { close_block=1; next }
-      { buf = buf $0 "\n" }
-      END { if (length(buf)) printf "%s", buf }
-    ' > /tmp/_prompt_block_$$.sh
-
-    if [ -s /tmp/_prompt_block_$$.sh ]; then
+    # exit on ```. Each block is emitted NUL-terminated and checked on its own;
+    # joining blocks would let a later one close an earlier broken snippet.
+    while IFS= read -r -d '' block; do
+      [ -n "$block" ] || continue
       block_count=$((block_count + 1))
+      printf '%s\n' "$block" > /tmp/_prompt_block_$$.sh
       if ! bash -n /tmp/_prompt_block_$$.sh 2>/tmp/_prompt_err_$$; then
         echo "fail: $md — bash -n syntax error:" >&2
         sed 's/^/  /' /tmp/_prompt_err_$$ >&2
         fail_count=$((fail_count + 1))
       fi
-    fi
+    done < <(awk '
+      /^```(bash|sh)([[:space:]]|$)/ { in_block=1; block=""; next }
+      /^```/ && in_block { printf "%s%c", block, 0; in_block=0; next }
+      in_block { block = block $0 "\n" }
+    ' "$md")
     rm -f /tmp/_prompt_block_$$.sh /tmp/_prompt_err_$$
   done < <(find "$p" -name '*.md' -type f)
 done

@@ -178,6 +178,11 @@ pg_apply_config_data() {
           value="$tok"
         fi
         [[ "$rest" =~ $re_tail ]] || { pg_config_not_data "$label" "$n" "$line"; return 1; }
+        # Scalar printf on an array only replaces element zero. Clear arrays,
+        # but retain scalar attributes such as an inherited export flag.
+        if [[ $(declare -p "$name" 2>/dev/null) =~ ^declare[[:space:]]+-[^[:space:]]*[aA] ]]; then
+          unset -v "$name"
+        fi
         printf -v "$name" '%s' "$value"
         continue
       else
@@ -393,10 +398,10 @@ pg_diff_files() {
   git diff --name-only --diff-filter=ACMR "$range" 2>/dev/null
 }
 
-# Lockfile / generated detection. Echoes 1 if the path is excluded for size purposes.
+# Lockfile detection for size purposes; only exact basenames are exempt.
 pg_is_lockfile() {
-  case "$1" in
-    *pnpm-lock.yaml|*package-lock.json|*yarn.lock|*Cargo.lock|*go.sum|*poetry.lock|*uv.lock|*Pipfile.lock|*Gemfile.lock|*composer.lock) return 0 ;;
+  case "${1##*/}" in
+    pnpm-lock.yaml|package-lock.json|yarn.lock|Cargo.lock|go.sum|poetry.lock|uv.lock|Pipfile.lock|Gemfile.lock|composer.lock) return 0 ;;
     *) return 1 ;;
   esac
 }

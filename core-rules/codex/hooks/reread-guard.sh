@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # reread-guard.sh — Codex PreToolUse on Edit|MultiEdit|Write.
 # Source: Trellis / core-rules / codex hooks. Phase 5b (E2 re-read-before-edit
 # guard, Codex mirror of the Claude Phase 5a hook).
@@ -31,9 +32,9 @@
 #   - PERMIT = exit 0, empty stdout.
 #   - FAIL-OPEN: any STATE error (missing/corrupt state, shasum/mkdir failure,
 #     empty/odd target — e.g. a TAB/NEWLINE in the path) → PERMIT silently (no
-#     decision). A state error must NEVER block all edits. jq-missing follows the
-#     shared _se_require_jq P1.5 convention (rc!=0 + install help unless
-#     TRELLIS_NO_JQ_DEGRADE=1). (DL-P5-11)
+#     decision). A state error must NEVER block all edits. A missing jq refuses
+#     (_se_require_jq block mode: exit 2), TRELLIS_NO_JQ_DEGRADE=1 included.
+#     (DL-P5-11)
 #
 # State contract (identical across reread-guard / track-read / stamp-turn):
 #   ROOT      = _se_repo_root "$(_se_project_dir)"   (canonical, worktree-aware)
@@ -60,7 +61,7 @@ INPUT=$(cat)
 
 # Source shared lib (sibling to this script) + enforce jq dependency.
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
-[ -f "$__se_lib" ] || { echo "reread-guard: missing sibling lib at $__se_lib — re-run sync-codex-hooks" >&2; exit 1; }
+[ -f "$__se_lib" ] || { echo "reread-guard: missing sibling lib at $__se_lib — re-run sync-codex-hooks" >&2; exit 2; }
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
 _se_require_jq "reread-guard" block
@@ -68,12 +69,12 @@ _se_require_jq "reread-guard" block
 # Source the shared autonomy resolver. It owns canonical project, legacy
 # project, immutable runtime, and built-in precedence.
 __se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
-[ -f "$__se_autonomy_lib" ] || { echo "reread-guard: missing sibling autonomy lib at $__se_autonomy_lib — re-run sync-codex-hooks" >&2; exit 1; }
+[ -f "$__se_autonomy_lib" ] || { echo "reread-guard: missing sibling autonomy lib at $__se_autonomy_lib — re-run sync-codex-hooks" >&2; exit 2; }
 # shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
 . "$__se_autonomy_lib"
 
 __gr_lib="$(dirname "${BASH_SOURCE[0]}")/lib/guard-rules.sh"
-[ -f "$__gr_lib" ] || { echo "reread-guard: missing sibling lib at $__gr_lib — re-run sync-codex-hooks" >&2; exit 1; }
+[ -f "$__gr_lib" ] || { echo "reread-guard: missing sibling lib at $__gr_lib — re-run sync-codex-hooks" >&2; exit 2; }
 # shellcheck source=lib/guard-rules.sh disable=SC1090
 . "$__gr_lib"
 
@@ -85,9 +86,15 @@ __ta_lib="$__h_dir/lib/action-normalize.sh"
 if [ ! -f "$__ta_lib" ] && [ -n "$__h_rt" ] && [ "$__h_dir" = "$__h_rt/core-rules/codex/hooks" ]; then
   __ta_lib="$__h_dir/../../hooks/lib/action-normalize.sh"
 fi
-[ -f "$__ta_lib" ] || { echo "reread-guard: missing action normalizer — permitting" >&2; exit 0; }
+# Without the normalizer the edit's targets are unknown: refuse, never permit.
+_rg_normalizer_unavailable() {
+  printf '{"decision":"block","reason":"reread-guard: missing action normalizer; refusing"}\n'
+  echo "reread-guard: missing action normalizer; refusing — re-run sync-codex-hooks" >&2
+  exit 2
+}
+[ -r "$__ta_lib" ] || _rg_normalizer_unavailable
 # shellcheck source=../../hooks/lib/action-normalize.sh disable=SC1090
-. "$__ta_lib"
+. "$__ta_lib" || _rg_normalizer_unavailable
 
 # One jq run normalizes the event and yields every field this guard reads.
 _ta_guard_fields pre_action "$INPUT" "$GR_EDIT_FAILURE_RE" "$GR_EDIT_FAILURE_FLAGS" || exit 0
@@ -134,6 +141,16 @@ esac
 # this fixes the Codex relative-path IN_SET self-block.
 T=$(_se_normpath "$T")
 [ -n "$T" ] || return 0
+
+# --- override records are written only by `trellis reread override` ---
+# Checked before any override, so an override can never permit writing one.
+if _gr_reread_override_path "$T"; then
+  GR_MSG="reread-guard: BLOCKED edit of $T — reread override records are written only by trellis reread override --session <id> --reason <why>."
+  _gr_json_str "$GR_MSG"
+  printf '{"decision":"block","reason":%s}\n' "$GR_JSON"
+  printf '%s\n' "$GR_MSG" >&2
+  exit 2
+fi
 
 # --- override escape: logged, never silent ---
 if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then
@@ -198,9 +215,27 @@ fi
 
 # --- T exists, NOT in the known-set: resolve autonomy, apply warn budget ---
 
+# A live `trellis reread override` record for this session is a logged
+# escape, like TRELLIS_REREAD_OVERRIDE=1 above. It is read only here, where
+# the guard would otherwise warn or block, so ordinary edits pay nothing.
+if _gr_reread_override_active "$KEY"; then
+  if { [ -d "$STATE_DIR" ] || mkdir -p "$STATE_DIR" 2>/dev/null; } && _gr_now &&
+     printf '%s\t%s\n' "${GR_NOW:-0}" "OVERRIDE:$T" >> "$STATE_DIR/$KEY.warns.tsv" 2>/dev/null; then
+    :
+  else
+    echo "reread-guard: reread override record logged-escape for $T (state dir unwritable)" >&2
+  fi
+  return 0
+fi
+
 # The shared resolver owns canonical-project, legacy-project, immutable-runtime,
 # and built-in precedence. Reread state handling remains local and fail-open.
-_se_resolve_autonomy "$ROOT"
+if ! _se_resolve_autonomy "$ROOT"; then
+  _gr_json_str "reread-guard: autonomy policy unavailable; restore read access and retry"
+  printf '{"decision":"block","reason":%s}\n' "$GR_JSON"
+  printf '%s\n' 'reread-guard: autonomy policy unavailable; restore read access and retry' >&2
+  exit 2
+fi
 
 # warn-budget(level) from rules/reread.json: L1=2, L2=2, L3=2, L4=1, L5=1. NEVER 0.
 _gr_reread_budget "$AUTONOMY_LEVEL"
@@ -241,7 +276,17 @@ exit 2
 __i=0
 while [ "$__i" -lt "${#TA_OPS[@]}" ]; do
   case "${TA_OPS[__i]}" in
-    create|update|delete|rename) guard_target "${TA_PATHS[__i]}" ;;
+    create|update|delete) guard_target "${TA_PATHS[__i]}" ;;
+    rename)
+      guard_target "${TA_PATHS[__i]}"
+      # apply_patch can overwrite an existing destination. Avoid charging two
+      # warnings when the two lexical spellings resolve to the same target.
+      __from=$(_ta_resolve_path "$ACTION_CWD" "${TA_PATHS[__i]}" 2>/dev/null || true)
+      __to=$(_ta_resolve_path "$ACTION_CWD" "${TA_DESTS[__i]}" 2>/dev/null || true)
+      if [ -z "$__from" ] || [ "$__from" != "$__to" ]; then
+        guard_target "${TA_DESTS[__i]}"
+      fi
+      ;;
   esac
   __i=$((__i + 1))
 done

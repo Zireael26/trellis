@@ -16,7 +16,7 @@
 # Source: https://learn.chatgpt.com/docs/hooks plus the schemas in the binary.
 #
 # Every hook registered under the four events in core-rules/codex/hooks.json
-# or core-rules/templates/codex-hooks.local.json (union by basename)
+# or core-rules/legacy-hooks/codex-hooks.local.json (union by basename)
 # runs from a deployed .codex/hooks layout (libs per inheritance-manifest.json)
 # with an isolated HOME, so a newly registered hook is covered automatically.
 
@@ -30,7 +30,10 @@ setup() {
   export TRELLIS_HOME="$HOME/.trellis"
   mkdir -p "$TRELLIS_HOME"
   DEPLOY="$BATS_TEST_TMPDIR/deploy/.codex/hooks"
-  mkdir -p "$DEPLOY/lib"
+  mkdir -p "$DEPLOY/lib" "$DEPLOY/../../scripts/lib"
+  # Model the installation-root resolver used by legacy copied hooks with an
+  # empty TRELLIS_ROOT; this is the real payload helper, not a PATH stub.
+  cp "$CODEX_DIR/../../scripts/lib/trellis-python.sh" "$DEPLOY/../../scripts/lib/trellis-python.sh"
   cp "$CODEX_DIR"/hooks/*.sh "$DEPLOY/"
   cp "$CODEX_DIR"/hooks/lib/* "$DEPLOY/lib/"
   local src
@@ -112,7 +115,10 @@ registered_hooks() {
   if [ "$#" -gt 0 ]; then
     manifests=("$@")
   else
-    manifests=("$CODEX_DIR/hooks.json" "$CODEX_DIR/../templates/codex-hooks.local.json")
+    # T34: the project template registers the native entry (its outputs are
+    # covered by the native contract tests); the shell hooks stay registered
+    # in the pinned legacy surface that hosts without a native asset render.
+    manifests=("$CODEX_DIR/hooks.json" "$CODEX_DIR/../legacy-hooks/codex-hooks.local.json")
   fi
   hooks="$(jq -r --arg ev "$event" '
     .hooks[$ev][]?.hooks[].command |
@@ -350,7 +356,7 @@ no_jq_path() {
 @test "R8: every jq-dependent Stop hook fails closed or explicitly degrades with no jq" {
   local path hook degrade
   path="$(no_jq_path)"
-  # All nine registered Stop hooks invoke the shared jq dependency helper.
+  # Mandatory T27 policy members block; advisory members may explicitly degrade.
   for hook in $(registered_hooks Stop); do
     for degrade in 0 1; do
       if [ "$degrade" -eq 1 ]; then
@@ -360,14 +366,26 @@ no_jq_path() {
         run --separate-stderr env -u TRELLIS_NO_JQ_DEGRADE PATH="$path" \
           /bin/bash "$DEPLOY/$hook" <<<"$(stop_payload)"
       fi
-      [ "$status" -eq "$((1 - degrade))" ] || {
-        echo "$hook degrade=$degrade rc=$status stdout=$output stderr=$stderr" >&2; return 1;
-      }
-      [ -z "$output" ]
-      if [ "$degrade" -eq 1 ]; then
-        [[ "$stderr" == *'degrading to no-op'* ]]
-      else
+      if [ "$hook" = spec-gate.sh ] || [ "$hook" = decision-receipt.sh ]; then
+        [ "$status" -eq 0 ]
+        assert_codex_output Stop "$output"
+        printf '%s' "$output" | jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null
+        [[ "$output$stderr" == *jq* ]]
+      elif [ "$degrade" -eq 0 ] && [ "$hook" = stop-verify.sh ]; then
+        [ "$status" -eq 0 ]
+        assert_codex_output Stop "$output"
+        printf '%s' "$output" | jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null
         [[ "$stderr" == *'jq required but not found'* ]]
+      else
+        [ "$status" -eq "$((1 - degrade))" ] || {
+          echo "$hook degrade=$degrade rc=$status stdout=$output stderr=$stderr" >&2; return 1;
+        }
+        [ -z "$output" ]
+        if [ "$degrade" -eq 1 ]; then
+          [[ "$stderr" == *'degrading to no-op'* ]]
+        else
+          [[ "$stderr" == *'jq required but not found'* ]]
+        fi
       fi
     done
   done

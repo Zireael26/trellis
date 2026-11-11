@@ -20,13 +20,22 @@ set -euo pipefail
 PROJECT_DIR="${1:?project-dir required}"
 OUT="${2:?out-jsonl required}"
 
-GITLEAKS_BIN="$(builtin type -P gitleaks)" || GITLEAKS_BIN=""
-PYTHON3_BIN="$(builtin type -P python3)" || PYTHON3_BIN=""
+case "$0" in */*) _sg_lib_dir="${0%/*}" ;; *) _sg_lib_dir=. ;; esac
+builtin source "$_sg_lib_dir/engine.sh"
+GITLEAKS_BIN="$(sg_resolve_engine gitleaks "$PROJECT_DIR")" || GITLEAKS_BIN=""
+# The real python3 behind any shim, never one the project picks (engine.sh).
+PYTHON3_BIN="$(sg_resolve_python "$PROJECT_DIR")" || PYTHON3_BIN=""
 if [ -z "$GITLEAKS_BIN" ] || [ -z "$PYTHON3_BIN" ]; then
-  echo "warn: gitleaks or python3 not installed — skipping secrets stage" >&2
+  echo "warn: gitleaks or python3 unavailable or unsafe — skipping secrets stage" >&2
   : > "$OUT"
   exit 2
 fi
+if ! sg_path_sanitize "$PROJECT_DIR" || ! sg_vet_helpers "$PROJECT_DIR" bash mktemp rm git mkdir tar cat mv; then
+  echo "gitleaks did not complete: unsafe helper" >&2
+  : > "$OUT"
+  exit 2
+fi
+builtin unset BASH_ENV ENV PYTHONPATH PYTHONHOME
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

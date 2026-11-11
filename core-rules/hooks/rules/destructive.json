@@ -18,7 +18,7 @@
       "effect": "deny",
       "reason": "Blocked destructive rm targeting absolute path, ~, $HOME, or .. — run manually if intentional.",
       "match": [
-        "rm[ \t\n\u000b\f\r]+(-[a-zA-Z]*f[a-zA-Z]*[ \t\n\u000b\f\r]+|(-[a-zA-Z]+[ \t\n\u000b\f\r]+)*)[\"]?((/|~|\\$HOME)[^ \t\n\u000b\f\r]*|\\.\\.(/[^ \t\n\u000b\f\r]*)?)([ \t\n\u000b\f\r]|$)"
+        "rm[ \t\n\u000b\f\r]+([^;&|<>]*[ \t\n\u000b\f\r])?['\"]?\\\\*((/|~|\\$HOME|\\$\\{HOME[}])[^ \t\n\u000b\f\r]*|(\\./)*\\.\\.(/[^ \t\n\u000b\f\r]*)?)([ \t\n\u000b\f\r]|$)"
       ]
     },
     {
@@ -26,7 +26,7 @@
       "effect": "deny",
       "reason": "Blocked force push — run manually if intentional.",
       "match": [
-        "git[ \t\n\u000b\f\r]+push([ \t\n\u000b\f\r]+[^ \t\n\u000b\f\r]+)*[ \t\n\u000b\f\r]+(--force(-with-lease)?(=[^ \t\n\u000b\f\r]+)?|-f)([ \t\n\u000b\f\r]|$)"
+        "git[ \t\n\u000b\f\r]+(-C[ \t\n\u000b\f\r]+[^ \t\n\u000b\f\r]+[ \t\n\u000b\f\r]+)*push([ \t\n\u000b\f\r]+[^ \t\n\u000b\f\r;&|]+)*[ \t\n\u000b\f\r]+(--force(-with-lease)?(=[^ \t\n\u000b\f\r]+)?|-[a-zA-Z]*f[a-zA-Z]*|\\+[^ \t\n\u000b\f\r]+)([ \t\n\u000b\f\r]|$)"
       ]
     },
     {
@@ -42,17 +42,27 @@
       "effect": "deny",
       "reason": "Blocked max/ultra effort on the sandboxless codex hatch — forbidden compound (docs/codex-routing.md §3); run at xhigh or restore the sandbox.",
       "match": [
-        "codex[ \t\n\u000b\f\r]([^|;&]*)?(--dangerously-bypass-approvals-and-sandbox|-s[ \t\n\u000b\f\r]+danger-full-access|--sandbox[ \t\n\u000b\f\r]+danger-full-access)",
+        "codex[ \t\n\u000b\f\r]([^|;&]*)?(--dangerously-bypass-approvals-and-sandbox|(-s|--sandbox)[ \t\n\u000b\f\r]*=?[ \t\n\u000b\f\r]*danger-full-access|sandbox_mode[ \t\n\u000b\f\r]*=[ \t\n\u000b\f\r]*danger-full-access)",
         "model_reasoning_effort[\"'= \t\n\u000b\f\r]*(max|ultra)"
       ]
     },
     {
-      "id": "sql-drop-truncate",
+      "id": "sql-drop",
       "effect": "deny",
-      "reason": "Blocked destructive SQL (DROP/TRUNCATE) — run manually if intentional.",
+      "reason": "Blocked destructive SQL DROP (TABLE/DATABASE) — run manually if intentional.",
       "ignore_case": true,
       "match": [
-        "DROP[ \t\n\u000b\f\r]+(TABLE|DATABASE)|TRUNCATE[ \t\n\u000b\f\r]+TABLE"
+        "DROP[ \t\n\u000b\f\r]+(TABLE|DATABASE)"
+      ]
+    },
+    {
+      "id": "sql-truncate",
+      "effect": "deny",
+      "reason": "Blocked destructive SQL TRUNCATE in a client invocation — run manually if intentional.",
+      "ignore_case": true,
+      "match": [
+        "((psql|mysql|sqlite3|duckdb|clickhouse)[ \t\n\u000b\f\r][^;&|]*(-c|--command|-e|--execute|--query|<<)|[^|][|][ \t\n\u000b\f\r]*([^ \t\n\u000b\f\r|;&]*/)?(psql|mysql|sqlite3|duckdb|clickhouse)([ \t\n\u000b\f\r]|$))",
+        "TRUNCATE[ \t\n\u000b\f\r]+(TABLE[ \t\n\u000b\f\r]+)?\\\\?[\"`]?[a-zA-Z_]"
       ]
     },
     {
@@ -83,7 +93,7 @@
       "effect": "deny",
       "reason": "Blocked piping sensitive file (.env or /secrets/) into network tool — prompt-injection exfil vector.",
       "match": [
-        "(cat|less|head|tail|more|source|grep|sed|awk|bat)[ \t\n\u000b\f\r]+[^|]*(\\.env([^A-Za-z0-9/]|$)|/secrets/)[^\n]*[|][ \t\n\u000b\f\r]*(curl|wget|nc|netcat|ncat|xargs|ssh|scp|rsync|base64|openssl|sh|bash)([ \t\n\u000b\f\r]|$)"
+        "(cat|less|head|tail|more|source|grep|sed|awk|bat)[ \t\n\u000b\f\r]+([^|]*\\.env([^A-Za-z0-9/]|$)|(([^|]*[ /\"'`<@=])?secrets/([^ \t\n\u000b\f\r|;&]|$)))[^\n]*[|][ \t\n\u000b\f\r]*(curl|wget|nc|netcat|ncat|xargs|ssh|scp|rsync|base64|openssl|sh|bash)([ \t\n\u000b\f\r]|$)"
       ]
     },
     {
@@ -91,7 +101,7 @@
       "effect": "deny",
       "reason": "Blocked curl/wget uploading sensitive file (.env or /secrets/) as body — prompt-injection exfil vector.",
       "match": [
-        "(curl|wget)[ \t\n\u000b\f\r][^;&|]*(--data|--data-raw|--data-binary|--data-urlencode|--data-ascii|--form|-F[ \t\n\u000b\f\r]|-d[ \t\n\u000b\f\r]|--post-file|--upload-file|-T[ \t\n\u000b\f\r])[ \t\n\u000b\f\r=]*@?[^ \t\n\u000b\f\r]*(\\.env([^A-Za-z0-9/]|$)|/secrets/)"
+        "(curl|wget)[ \t\n\u000b\f\r][^;&|]*(--data|--data-raw|--data-binary|--data-urlencode|--data-ascii|--form|-[A-Za-z]*F([ \t\n\u000b\f\r=/]|@|$)|-[A-Za-z]*d([ \t\n\u000b\f\r=/]|@|$)|--post-file|--upload-file|-[A-Za-z]*T([ \t\n\u000b\f\r=/]|@|$))[ \t\n\u000b\f\r=]*@?([^ \t\n\u000b\f\r]*\\.env([^A-Za-z0-9/]|$)|(([^ \t\n\u000b\f\r]*[ /\"'`<@=])?secrets/([^ \t\n\u000b\f\r|;&]|$)))"
       ]
     },
     {
@@ -99,7 +109,7 @@
       "effect": "deny",
       "reason": "Blocked curl/wget with command-substituted sensitive file in body — prompt-injection exfil vector.",
       "match": [
-        "(curl|wget)[ \t\n\u000b\f\r][^;&|]*([$]\\(|`)[ \t\n\u000b\f\r]*(cat|less|head|tail|more|grep|sed|awk|bat)[ \t\n\u000b\f\r]+[^)`]*(\\.env|/secrets/)"
+        "(curl|wget)[ \t\n\u000b\f\r][^;&|]*([$]\\(|`)[ \t\n\u000b\f\r]*(cat|less|head|tail|more|grep|sed|awk|bat)[ \t\n\u000b\f\r]+[^)`]*((([^)`]*[ /\"'`<@=])?secrets/([^ \t\n\u000b\f\r|;&]|$))|\\.env)"
       ]
     },
     {
@@ -107,7 +117,7 @@
       "effect": "deny",
       "reason": "Blocked read under **/secrets/** — credentials must not be exposed to the agent.",
       "match": [
-        "(^|[ \t\n\u000b\f\r|;&(`])([^ \t\n\u000b\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\u000b\f\r]+[^|;&]*/secrets/"
+        "(^|[ \t\n\u000b\f\r|;&(`])([^ \t\n\u000b\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\u000b\f\r]+(([^|;&]*[ /\"'`<@=])?secrets/([^ \t\n\u000b\f\r|;&]|$))"
       ],
       "exempt": {
         "engines": [
@@ -142,6 +152,16 @@
         "identifier_boundary": "[^A-Za-z0-9_./~-]",
         "replacement": "<exempt-identifier>"
       }
+    },
+    {
+      "id": "reread-override-direct-write",
+      "effect": "deny",
+      "ignore_case": true,
+      "reason": "Blocked direct write to a reread override record — only `trellis reread override --session <id> --reason <why>` writes these, with a logged breadcrumb.",
+      "match": [
+        "state/reread-overrides",
+        "(^|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))|(^|[ \t\n\u000b\f\r|;&(`])(tee|cp|mv|ln|install|touch|dd|rsync|mkdir|chmod|truncate|perl|python[0-9]*|ruby|node|osascript)([ \t\n\u000b\f\r]|$)|sed[^|;&]*[ \t\n\u000b\f\r]-i"
+      ]
     }
   ]
 }

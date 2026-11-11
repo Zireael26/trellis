@@ -7,8 +7,8 @@
     "by_level": { "4": 1, "5": 1 }
   },
   "messages": {
-    "warn": "reread-guard: about to edit {path} not Read this turn (warn {count}/{budget}). Read it first, or export TRELLIS_REREAD_OVERRIDE=1. Repeated FAILED stale edits will BLOCK.",
-    "block": "reread-guard: BLOCKED edit of {path} — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or export TRELLIS_REREAD_OVERRIDE=1 to override."
+    "warn": "reread-guard: about to edit {path} not Read this turn (warn {count}/{budget}). Read it first, or have the operator run trellis reread override --session <id> --reason <why> (legacy shell hooks also accept TRELLIS_REREAD_OVERRIDE=1). Repeated FAILED stale edits will BLOCK.",
+    "block": "reread-guard: BLOCKED edit of {path} — it was not Read this turn and the re-read warn budget is exhausted. Read it first, or have the operator run trellis reread override --session <id> --reason <why> (legacy shell hooks also accept TRELLIS_REREAD_OVERRIDE=1)."
   },
   "edit_failure_markers": {
     "why": "An edit-family tool response that is a string is an error string; one of these markers means the edit failed and must not count as a read. A Read response is file content and is never tested.",

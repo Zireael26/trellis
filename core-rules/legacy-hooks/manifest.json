@@ -1,0 +1,17 @@
+{
+  "capture_commit": "b8b0a6ae0e04100cb37cb69f338e2bcb29825048",
+  "files": {
+    "claude-settings.local.json": "a6dc1464d3651ac2c14a75b12369c17c8101ab1e2673ff9009de2b5106e2433d",
+    "claude-shell-hooks.json": "c97045432585fdaaea0b967baa78ce8982d137e9d6416d2b8f35a6c68960b5bd",
+    "claude-user-settings.json": "9dc79bd4c431c9e155218b450039c8f8858765569640df4a40c71b04a9cf5ba2",
+    "codex-hooks.local.json": "1f226ba74ea762c76d0e9720176fb186af77924056b23825ce1763a57aad57db",
+    "declared-deltas.json": "d047da7bad2959307d4fc3c3d49194499fedc6daf19a1f560588d88e537caddf"
+  },
+  "schema_version": 1,
+  "source_paths": {
+    "claude-settings.local.json": "core-rules/templates/claude-settings.local.json",
+    "claude-shell-hooks.json": "scripts/lib/attachment.sh#attachment_claude_legacy_hooks",
+    "claude-user-settings.json": "core-rules/templates/claude-user-settings.json",
+    "codex-hooks.local.json": "core-rules/templates/codex-hooks.local.json"
+  }
+}

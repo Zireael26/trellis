@@ -105,6 +105,8 @@ build_template_release() {
   }
 }
 JSON
+  mkdir -p "$repo/core-rules/legacy-hooks" || return 1
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$repo/core-rules/legacy-hooks/" || return 1
   cp "$template_src" "$repo/core-rules/templates/claude-settings.local.json" || return 1
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/core-rules/githooks/pre-push"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$repo/scripts/seed-inheritance-symlinks.sh"

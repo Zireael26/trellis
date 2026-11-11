@@ -12,7 +12,10 @@ import sys
 CORE = {"scripts/tests/" + name + ".bats" for name in (
     "posix-bootstrap-prologue", "suite-coverage", "push-test-map", "release-tag-consumers",
     "check-process-liveness", "test-fencing", "release-payload-commit", "live-model-roster",
-    "gpt6-roster-sweep", "diff-base-sync", "no-legacy-herdr")}
+    "gpt6-roster-sweep", "diff-base-sync", "no-legacy-herdr",
+    # T39: its Bash 3.2 compatibility scan reads every shipped shell source,
+    # including the narrowing leaf entrypoints, so no narrowed push may skip it.
+    "native-hooks-delivery")}
 LEAVES = {
     "check-decisions-log": ("check-decisions-log",),
     "install-pi-web-search": ("install-pi-web-search",),

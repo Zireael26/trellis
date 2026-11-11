@@ -109,5 +109,28 @@ registry_with() {
 }
 
 @test "portable doctor reports the row only when it is not healthy" {
-  grep -q 'if pi_row="$(hc_pi_version "$REGISTRY_PATH")"; then :; else' "$REPO/scripts/doctor.sh"
+  # Run the doctor's own report() and pi block (extracted verbatim) against
+  # the real hc_pi_version, so a neutered else branch fails behaviorally.
+  local report_fn pi_block
+  report_fn="$(awk '/^report\(\) \{/,/^}/' "$REPO/scripts/doctor.sh")"
+  [ -n "$report_fn" ] || { echo 'report function not found in doctor.sh'; false; }
+  pi_block="$(awk '/if pi_row=/,/^fi$/' "$REPO/scripts/doctor.sh")"
+  [[ "$pi_block" == *"report '  ' \"\$?\" \"\$pi_row\""* ]] || { echo "pi block missing report: $pi_block"; false; }
+  eval "$report_fn"
+  GLYPH_OK='✓'; GLYPH_WARN='⚠'; GLYPH_ERR='✗'; GLYPH_INFO='i'; N_WARN=0; N_ERROR=0; N_INFO=0
+  REGISTRY_PATH="$REG"
+  stub_pi "echo '1.1.0'"
+  registry_with '["pi"]'
+  output="$(eval "$pi_block")"
+  [ -z "$output" ] || { echo "healthy pi reported: $output"; false; }
+  rm -f "$SANDBOX/bin/pi"
+  registry_with '["claude","pi"]'
+  output="$(eval "$pi_block")"
+  [[ "$output" == *"not found"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"1.1.0"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"⚠"* ]] || { echo "$output"; false; }
+  registry_with '["claude","codex"]'
+  output="$(eval "$pi_block")"
+  [[ "$output" == *"not found"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"  i pi version:"* ]] || { echo "$output"; false; }
 }

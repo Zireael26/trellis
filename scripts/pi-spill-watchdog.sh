@@ -13,6 +13,7 @@ set -euo pipefail
 DRY_RUN=false
 ROOTS=()
 TWO_GIB=2147483648
+failed=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -101,11 +102,17 @@ for root in "${ROOTS[@]}"; do
       if [ "$DRY_RUN" = true ]; then
         printf 'pi-spill-watchdog: [dry-run] would truncate %s (%s bytes, pids: %s)\n' "$file" "$size" "$pids"
       else
-        truncate -s 0 "$file" 2>/dev/null || : > "$file"
-        printf 'pi-spill-watchdog: truncated %s (%s bytes, pids: %s)\n' "$file" "$size" "$pids"
+        if truncate -s 0 "$file" 2>/dev/null || { : > "$file"; } 2>/dev/null; then
+          printf 'pi-spill-watchdog: truncated %s (%s bytes, pids: %s)\n' "$file" "$size" "$pids"
+        else
+          # One unwritable log must not abort the scan: report it, keep guarding
+          # every other root and file, and still signal failure to launchd.
+          printf 'pi-spill-watchdog: could not truncate %s (%s bytes, pids: %s)\n' "$file" "$size" "$pids" >&2
+          failed=1
+        fi
       fi
     fi
   done
 done
 
-exit 0
+exit "$failed"

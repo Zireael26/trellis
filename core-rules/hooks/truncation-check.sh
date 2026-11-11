@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # truncation-check.sh — PostToolUse on Grep|Bash|Read. Advisory only; never blocks.
 # Source: Trellis / core-rules / hooks.md
 #

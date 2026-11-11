@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import extension from '../extensions/trellis.ts';
+import { realDispatchExec } from './dispatch-test-transport.mjs';
 
 const dispatcher = new URL('../hooks/dispatch.sh', import.meta.url);
 const library = new URL('../../hooks/lib/task-context.sh', import.meta.url);
@@ -59,21 +60,21 @@ function fixture(t, { lib = true, primitive = true } = {}) {
   const event = (native_event, extra = {}) => ({
     schema_version: 1, harness: 'pi', cwd, session_id: 'scratch', phase: 'lifecycle', native_event, ...extra,
   });
-  const run = (payload) => {
+  const run = (payload, env = {}) => {
     const result = spawnSync('bash', [script, '--base64', Buffer.from(JSON.stringify(payload)).toString('base64')],
-      { cwd, env: process.env, encoding: 'utf8' });
-    return { ...result, decision: JSON.parse(result.stdout) };
+      { cwd, env: { ...process.env, ...env }, encoding: 'utf8' });
+    return { ...result, decision: JSON.parse(result.stdout.split('\n')[0]) };
   };
   const handlers = new Map(), messages = [], notifications = [];
   const pi = {
     on: (name, handler) => handlers.set(name, name === 'before_agent_start' ? (event, ctx) => handler({ messageType: 'user', ...event }, ctx) : handler),
     getAllTools: () => [],
     sendMessage: (...args) => messages.push(args),
-    exec: async (_script, args) => {
+    exec: realDispatchExec(async (_script, args, options) => {
       const event = args[0] === '--event-file' ? JSON.parse(readFileSync(args[1], 'utf8')) : JSON.parse(Buffer.from(args[1], 'base64').toString());
-      const result = run(event);
+      const result = run(event, options.env);
       return { stdout: result.stdout, stderr: result.stderr, code: result.status, killed: false };
-    },
+    }),
   };
   extension(pi);
   const ctx = { cwd, ui: { notify: (...args) => notifications.push(args) },
@@ -105,6 +106,14 @@ function compact(f) {
   assert.doesNotMatch(observed.decision.reason, new RegExp(HEADER));
   return observed.decision.context;
 }
+
+test('compact never launches the startup-only primer no-op', t => {
+  const f = fixture(t);
+  f.protocol(JSON.stringify({ status: 'no_records', documents: [], foreign_records: 0 }));
+  f.hook('inject-primer-index.sh', 'echo unexpected-primer-child >&2; exit 99');
+  const context = compact(f);
+  assert.doesNotMatch(context, /unexpected-primer-child/);
+});
 
 test('a current capture reports only bounded counts on native compaction, with the actual cwd', t => {
   const f = fixture(t);

@@ -1381,8 +1381,8 @@ EOF
 #!/bin/sh
 "$DJ_REAL_PYTHON" "$@"
 rc=$?
-if [ "$rc" -eq 0 ] && [ "${1:-}" = "-" ] &&
-   [ "${2:-}" = "$DJ_RACE_ROOT" ] && [ ! -e "$DJ_RACE_HOME/raced" ]; then
+if [ "$rc" -eq 0 ] && [ "${1:-}" = "-I" ] && [ "${2:-}" = "-" ] &&
+   [ "${3:-}" = "$DJ_RACE_ROOT" ] && [ ! -e "$DJ_RACE_HOME/raced" ]; then
   : > "$DJ_RACE_HOME/raced"
   rm -f "$DJ_RACE_HOME/registry.json"
 fi
@@ -1408,8 +1408,8 @@ EOF
 #!/bin/sh
 "$DJ_REAL_PYTHON" "$@"
 rc=$?
-if [ "$rc" -eq 0 ] && [ "${1:-}" = "-" ] &&
-   [ "${2:-}" = "$DJ_RACE_ROOT" ] && [ ! -e "$DJ_RACE_HOME/status-raced" ]; then
+if [ "$rc" -eq 0 ] && [ "${1:-}" = "-I" ] && [ "${2:-}" = "-" ] &&
+   [ "${3:-}" = "$DJ_RACE_ROOT" ] && [ ! -e "$DJ_RACE_HOME/status-raced" ]; then
   : > "$DJ_RACE_HOME/status-raced"
   proposal="$DJ_RACE_HOME/registry.detached"
   jq --arg key "$DJ_RACE_KEY" '.projects[$key].status = "detached"' \

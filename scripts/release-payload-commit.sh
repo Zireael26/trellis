@@ -25,7 +25,10 @@
 
 set -euo pipefail
 
+RPC_SCRIPT="${BASH_SOURCE[0]}"
+case "$RPC_SCRIPT" in /*) ;; *) RPC_SCRIPT="$PWD/$RPC_SCRIPT" ;; esac
 RPC_LIST=core-rules/payload-exclude.txt
+RPC_NATIVE_MANIFEST=core-rules/native/artifacts.json
 RPC_VERSION_FILE=core-rules/VERSION
 RPC_MAIN_REF=refs/remotes/origin/main
 # The release version shape, as trellis_home_is_valid_semver (lib/trellis-home.sh)
@@ -40,8 +43,18 @@ rpc_refuse() {
 }
 
 rpc_usage() {
-  sed -n '12,20p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+  sed -n '12,20p' "$RPC_SCRIPT" | sed 's/^# \{0,1\}//' >&2
   exit 2
+}
+
+# Both ls-tree pathspecs and update-index input are relative to the current
+# directory. Work from the tree root so neither can silently miss exclusions.
+rpc_enter_repository() {
+  local bare root
+  bare="$(git rev-parse --is-bare-repository 2>/dev/null)" || rpc_refuse 'not a Git repository'
+  [ "$bare" != true ] || return 0
+  root="$(git rev-parse --show-toplevel)" || rpc_refuse 'cannot locate the repository root'
+  cd "$root" || rpc_refuse 'cannot enter the repository root'
 }
 
 rpc_commit() {
@@ -79,6 +92,25 @@ rpc_entries() {
 $content
 EOF
   [ -n "$entries" ] || rpc_refuse "$RPC_LIST in $commit lists no paths"
+  # Runtime assets must survive the deletion-only packaging step; the root
+  # Rust workspace must not. Old release commits without assets are unchanged.
+  if git cat-file -e "$commit:$RPC_NATIVE_MANIFEST" 2>/dev/null; then
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      case "$RPC_NATIVE_MANIFEST" in
+        "$line"*) rpc_refuse "exclusion would drop native runtime assets: $line" ;;
+      esac
+      case "$line" in core-rules/native/*) rpc_refuse "exclusion would drop native runtime assets: $line" ;; esac
+    done <<EOF
+$entries
+EOF
+    if [ "$(git cat-file -t "$commit:native" 2>/dev/null)" = tree ]; then
+      case $'\n'"$entries" in
+        *$'\n'native/$'\n'*) ;;
+        *) rpc_refuse "native-bearing release must exclude root native/ build sources" ;;
+      esac
+    fi
+  fi
   printf '%s' "$entries"
 }
 
@@ -129,8 +161,9 @@ rpc_build() {
   scratch="$RPC_SCRATCH"
   trap rpc_cleanup EXIT
   GIT_INDEX_FILE="$scratch/index" git read-tree "$release"
-  rpc_listed_files "$release" "$entries" |
-    GIT_INDEX_FILE="$scratch/index" git update-index -z --force-remove --stdin
+  rpc_listed_files "$release" "$entries" > "$scratch/listed" || rpc_refuse 'cannot list excluded files'
+  [ -s "$scratch/listed" ] || rpc_refuse 'exclusion list contains no files'
+  GIT_INDEX_FILE="$scratch/index" git update-index -z --force-remove --stdin < "$scratch/listed"
   tree="$(GIT_INDEX_FILE="$scratch/index" git write-tree)"
   git cat-file -e "$tree:$RPC_VERSION_FILE" 2>/dev/null ||
     rpc_refuse "payload tree lost $RPC_VERSION_FILE"
@@ -170,7 +203,8 @@ rpc_verify_candidate() {
     rpc_refuse "approved commit $approved is not on the fetched origin/main ($main)"
 
   entries="$(rpc_entries "$approved")"
-  expected="$(rpc_listed_files "$approved" "$entries" | tr '\0' '\n')"
+  expected="$(rpc_listed_files "$approved" "$entries" | tr '\0' '\n')" || rpc_refuse 'cannot list excluded files'
+  [ -n "$expected" ] || rpc_refuse 'exclusion list contains no files'
   actual=""
   while IFS= read -r -d '' status && IFS= read -r -d '' path; do
     [ "$status" = D ] || rpc_refuse "payload changes more than deletions: $status $path"
@@ -216,8 +250,8 @@ rpc_verify_tag() {
 }
 
 case "${1:-}" in
-  --verify-candidate) shift; rpc_verify_candidate "$@" ;;
-  --verify-tag) shift; rpc_verify_tag "$@" ;;
+  --verify-candidate) shift; rpc_enter_repository; rpc_verify_candidate "$@" ;;
+  --verify-tag) shift; rpc_enter_repository; rpc_verify_tag "$@" ;;
   ''|-h|--help|-*) rpc_usage ;;
-  *) rpc_build "$@" ;;
+  *) rpc_enter_repository; rpc_build "$@" ;;
 esac

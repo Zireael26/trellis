@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # ui-verify.sh — Codex Stop. Screenshot verification on UI-touching turns.
 # Source: Trellis / core-rules / codex hooks.
 #
@@ -40,7 +41,7 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 . "$__se_lib"
 _se_require_jq "ui-verify"
 
-STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
+STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active == true')
 if [ "$STOP_ACTIVE" = "true" ]; then
   exit 0
 fi
@@ -83,11 +84,34 @@ elif [ -f "${PROJECT_DIR}/.claude/hooks/config.sh" ]; then
   set +a
 fi
 
+# Load the UI-specific copy of the prompt baseline. stop-verify consumes its
+# own copy earlier, so it cannot supply committed paths to this separate hook.
+UI_TURN_STATUS=unarmed UI_TURN_HEADS="" UI_FILE=""
+UI_HARNESS=codex
+[ "${TRELLIS_HARNESS:-codex}" = pi ] && UI_HARNESS=pi
+if _se_turn_baseline_armed "$PROJECT_DIR" "$UI_HARNESS"; then
+  UI_TURN_STATUS=unknown
+  UI_SID=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || UI_SID=""
+  if [ -n "$UI_SID" ] && UI_KEY=$(_se_state_key "" "$UI_SID") \
+     && UI_DIR=$(_se_turn_state_dir "$PROJECT_DIR"); then
+    UI_FILE="$UI_DIR/ui.$UI_HARNESS.$UI_KEY"
+    _se_ui_baseline_load "$UI_FILE"
+  fi
+fi
+export UI_TURN_STATUS UI_TURN_HEADS
+
 # --- Delegate to the decision core. ---
-# The core ignores stdin; redirect from /dev/null so it never blocks on a tty.
-# Discard stderr and `|| true` so a core infra failure surfaces as empty output
-# (→ fail-open below), never a non-zero abort under `set -u`.
-VERDICT_JSON=$(bash "$CORE" "$PROJECT_DIR" </dev/null 2>/dev/null || true)
+# Source it inside the capture subshell rather than starting a second Bash.
+# Match the core's executable-mode flags and keep stdin closed; a core failure
+# still yields its captured output (if any), or an empty fail-open result.
+VERDICT_JSON=$(
+  {
+    set -euo pipefail
+    # shellcheck source=/dev/null disable=SC1091
+    . "$CORE"
+    ui_verify_decision "$PROJECT_DIR"
+  } </dev/null 2>/dev/null
+) || true
 
 # Fail-open: no output (broken core) → never block.
 [ -n "$VERDICT_JSON" ] || exit 0
@@ -98,6 +122,15 @@ ARTIFACT=$(printf '%s' "$VERDICT_JSON" | jq -r '.artifacts[0] // ""' 2>/dev/null
 
 # Unparseable verdict (jq failed → empty VERDICT) → fail-open.
 [ -n "$VERDICT" ] || exit 0
+
+# A block must retain the prompt state for a retry. Successful/advisory Stops
+# consume it so a later prompt starts with a fresh baseline.
+case "$VERDICT" in
+  skip|advisory|pass)
+    if [ -n "$UI_FILE" ] && [ ! -d "$UI_FILE.lock" ]; then
+      rm -f "${UI_FILE:?}" "${UI_FILE:?}.nonces" "${UI_FILE:?}.ambiguous" 2>/dev/null
+    fi ;;
+esac
 
 case "$VERDICT" in
   skip)

@@ -5,6 +5,7 @@ import { mkdirSync, writeFileSync, copyFileSync, unlinkSync, readFileSync } from
 import { resolve, relative } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import extension from '../extensions/trellis.ts';
+import { realDispatchExec } from './dispatch-test-transport.mjs';
 
 const [id, scratch] = process.argv.slice(2);
 const cwd = resolve(scratch, id);
@@ -31,7 +32,7 @@ function run(script, args, options) {
   const stdoutPath = relative(scratch, resolve(cwd, `dispatch-${n}.stdout`));
   const stderrPath = relative(scratch, resolve(cwd, `dispatch-${n}.stderr`));
   const result = spawnSync(process.env.CONFORMANCE_BASH, [script, ...args], {
-    cwd: options.cwd, env: process.env, encoding: 'utf8', timeout: 30000,
+    cwd: options.cwd, env: { ...process.env, ...options.env }, encoding: 'utf8', timeout: 30000,
   });
   writeFileSync(resolve(scratch, stdoutPath), result.stdout ?? '');
   writeFileSync(resolve(scratch, stderrPath), (result.stderr ?? '') + (result.error ? `\n${result.error.message}` : ''));
@@ -40,7 +41,7 @@ function run(script, args, options) {
     stdout_path: stdoutPath, stderr_path: stderrPath });
   envelopes.push(args[0] === '--event-file' ? JSON.parse(readFileSync(args[1], 'utf8')) : JSON.parse(Buffer.from(args[1], 'base64').toString()));
   if (result.error) throw result.error;
-  decisions.push(JSON.parse(result.stdout));
+  decisions.push(JSON.parse(result.stdout.split('\n')[0]));
   return { stdout: result.stdout, stderr: result.stderr, code: result.status, killed: false };
 }
 const pi = {
@@ -52,7 +53,7 @@ const pi = {
       sourceInfo: { path: '/fixture/pi-subagents/dist/index.js', source: 'local', scope: 'temporary', origin: 'top-level', baseDir: '/fixture/pi-subagents/dist' } })),
   ],
   sendMessage: (...args) => messages.push(args),
-  exec: async (script, args, options) => run(script, args, options),
+  exec: realDispatchExec(run),
 };
 extension(pi);
 const ctx = { cwd, signal: new AbortController().signal, ui: { notify: (...args) => notifications.push(args) },
@@ -76,17 +77,19 @@ try {
       break;
     }
     case 'pi.post-advisory': {
+      // Spec 074 T31: Pi read results are native content-block arrays, which
+      // the legacy truncation checker ignores, so a read result gets no post
+      // fork and no content patch, even with a hook that would advise. The
+      // native blocks, binary included, reach the model untouched.
       hook('truncation-check.sh', `printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"context sentinel"},"reason":"reason sentinel"}'\nprintf '%s\\n' 'stderr sentinel' >&2`);
       const original = [{ type: 'text', text: 'original result' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
       observations.original = structuredClone(original);
-      observations.response = await fire('tool_result', { toolCallId: 'read', toolName: 'read', input: { path: 'file' }, content: original, details: { retained: true }, isError: true });
-      assert.deepEqual(observations.response.content.slice(0, 2), observations.original);
-      assert.deepEqual(Object.keys(observations.response), ['content']);
-      assert.equal(observations.response.content.length, 3);
-      for (const sentinel of ['context sentinel', 'reason sentinel', 'stderr sentinel']) assert.ok(observations.response.content[2].text.includes(sentinel));
+      observations.response = (await fire('tool_result', { toolCallId: 'read', toolName: 'read', input: { path: 'file' }, content: original, details: { retained: true }, isError: true })) ?? null;
+      assert.equal(observations.response, null);
       assert.deepEqual(original, observations.original);
-      assert.equal(decisions[0].capability_status, 'advisory');
-      assert.equal(commands[0].exit_code, 0);
+      assert.deepEqual(envelopes, []);
+      assert.equal(commands.length, 0);
+      assert.deepEqual(decisions, []);
       break;
     }
     case 'pi.compact-missing': {

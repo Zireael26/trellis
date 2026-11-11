@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # SessionStart: advisory-only scan for oversized and ambiguous Skill roots.
 
 set -u

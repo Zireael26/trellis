@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # inject-primer-index.sh — Codex SessionStart. Inject primer INDEX
 # with deterministic drift flags so every new session sees the available
 # primers and which need /primer-refresh.

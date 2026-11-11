@@ -4,10 +4,32 @@
 # optionally pipes through the LLM triage prompt; writes <project>/audits/<date>-baseline-<project>.{md,json}.
 #
 # Usage: run-baseline.sh [<project-dir>] [--profile=<name>] [--no-llm]
+#
+# Exit 0: every engine completed, or its scanner proved there was nothing to
+# scan (OSV exit 128 with no package sources: not applicable). Exit 2: the baseline was
+# written but is incomplete, because an engine failed, was skipped, or left
+# output that does not parse; it is never reported clean. Exit 1: aggregation failed, and no
+# valid baseline was written.
+
+# Inherited shell functions never answer for a tool: the same uninterceptable
+# purge as run-diff.sh (POSIX mode finds `unset`/`set` before functions).
+POSIXLY_CORRECT=y
+unset -f builtin command type set unset compgen
+set +o posix
+builtin unset POSIXLY_CORRECT
+for _sg_fn in $(builtin compgen -A function 2>/dev/null); do builtin unset -f "$_sg_fn"; done
+builtin unset _sg_fn
+# Nor does inherited startup code: no child shell reads BASH_ENV or ENV, and
+# the scanner wrappers run privileged (`-p`), which ignores both anyway.
+builtin unset BASH_ENV ENV
 
 set -uo pipefail
 
-SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+case "$0" in */*) _sg_self_dir="${0%/*}" ;; *) _sg_self_dir=. ;; esac
+SKILL_DIR="$(builtin cd "$_sg_self_dir/.." && builtin pwd)"
+builtin source "$SKILL_DIR/scripts/lib/engine.sh"
+# No relative PATH entry may be consulted even before the project is known.
+sg_path_sanitize || exit 1
 
 # --- arg parse -------------------------------------------------------------
 PROJECT_DIR=""
@@ -29,7 +51,7 @@ if [ -z "$PROJECT_DIR" ]; then
   elif [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
     PROJECT_DIR="$CLAUDE_PROJECT_DIR"
   else
-    PROJECT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    PROJECT_DIR="$(sg_project_from_cwd)" || exit 1
   fi
 fi
 
@@ -38,7 +60,26 @@ if [ ! -d "$PROJECT_DIR" ]; then
   exit 1
 fi
 
-PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+PROJECT_DIR="$(builtin cd "$PROJECT_DIR" && builtin pwd)"
+# Capture the first selected scanners before dropping project PATH entries, so
+# an unsafe candidate is recorded failed rather than silently substituted.
+SG_SEMGREP_RC=0; SG_OSV_RC=0; SG_GITLEAKS_RC=0
+SG_SEMGREP_BIN="$(sg_resolve_engine semgrep "$PROJECT_DIR")" || SG_SEMGREP_RC=$?
+SG_OSV_BIN="$(sg_resolve_engine osv-scanner "$PROJECT_DIR")" || SG_OSV_RC=$?
+SG_GITLEAKS_BIN="$(sg_resolve_engine gitleaks "$PROJECT_DIR")" || SG_GITLEAKS_RC=$?
+if ! sg_path_sanitize "$PROJECT_DIR" || ! sg_vet_helpers "$PROJECT_DIR" \
+    bash git basename date mkdir mktemp rm ls sort tail cp cat wc tr head awk; then
+  echo "fail: unsafe baseline helper or project path" >&2
+  exit 1
+fi
+SG_BASH="$(sg_checked_program "$BASH" "$PROJECT_DIR")" || { echo "fail: unsafe bash at $BASH" >&2; exit 1; }
+builtin unset PYTHONPATH PYTHONHOME
+# The scanned project is untrusted: python3 must not live inside it, and every
+# parser here runs isolated (-I), so a json.py in the cwd is never imported.
+PYTHON3_BIN="$(sg_resolve_python "$PROJECT_DIR")" || {
+  echo "fail: python3 is not installed, or it (or the interpreter its shim runs) resolves inside the scanned project or cannot be vouched for" >&2
+  exit 1
+}
 # The project key names the REPOSITORY, not the directory the run happened in.
 # `basename $PROJECT_DIR` is the worktree name inside a linked worktree, so a
 # worktree could never match its own repo's baseline and every diff scan there
@@ -50,35 +91,70 @@ if _sg_common="$(git -C "$PROJECT_DIR" rev-parse --path-format=absolute --git-co
   _sg_repo="$(cd "$_sg_common/.." 2>/dev/null && pwd)" || _sg_repo=""
   [ -n "$_sg_repo" ] && PROJECT_NAME="$(basename "$_sg_repo")"
 fi
-PROJECT_NAME="${SECURITY_GATE_PROJECT_NAME:-$PROJECT_NAME}"
 
 # --- load project-local config --------------------------------------------
 CFG_LOADED=0
-_SG_ALLEXPORT_WAS_OFF=1
-case $- in *a*) _SG_ALLEXPORT_WAS_OFF=0;; esac
-export -n _SG_ALLEXPORT_WAS_OFF 2>/dev/null || true
-set -a
 for cfg in \
   "$PROJECT_DIR/.claude/skills/security-gate-local/local.config.sh" \
   "$PROJECT_DIR/.agents/skills/security-gate-local/local.config.sh"; do
   if [ -f "$cfg" ]; then
-    # shellcheck source=/dev/null
-    . "$cfg"
+    if ! sg_parse_local_config "$cfg"; then
+      echo "fail: local config is not allowed data: $cfg line $SG_CONFIG_BAD_LINE" >&2
+      exit 1
+    fi
     CFG_LOADED=1
   fi
 done
-if [ "$_SG_ALLEXPORT_WAS_OFF" -eq 1 ]; then set +a; fi
-unset _SG_ALLEXPORT_WAS_OFF
+# A configured name is held to a strict alphabet. The derived name is the
+# repository directory's own basename, which diff and red-team look up as is;
+# it is already one component, so only an unusable one is refused.
+if [ -n "${SECURITY_GATE_PROJECT_NAME:-}" ]; then
+  PROJECT_NAME="$SECURITY_GATE_PROJECT_NAME"
+  case "$PROJECT_NAME" in
+    .|..|*[!A-Za-z0-9._-]*) echo "fail: SECURITY_GATE_PROJECT_NAME is not a safe path component: $PROJECT_NAME" >&2; exit 1 ;;
+  esac
+else
+  case "$PROJECT_NAME" in
+    ''|.|..|*/*) echo "fail: cannot name reports after the project directory '$PROJECT_NAME'; set SECURITY_GATE_PROJECT_NAME" >&2; exit 1 ;;
+  esac
+fi
 
 PROFILE="${PROFILE_OVERRIDE:-${SECURITY_GATE_STACK_PROFILE:-web-next}}"
 AUDIT_DIR_REL="${SECURITY_GATE_AUDIT_DIR:-audits}"
-AUDIT_DIR="$PROJECT_DIR/$AUDIT_DIR_REL"
+case "$AUDIT_DIR_REL" in
+  /*) echo "fail: SECURITY_GATE_AUDIT_DIR must be relative: $AUDIT_DIR_REL" >&2; exit 1 ;;
+esac
+case "/$AUDIT_DIR_REL/" in
+  */../*) echo "fail: SECURITY_GATE_AUDIT_DIR contains a parent segment: $AUDIT_DIR_REL" >&2; exit 1 ;;
+esac
+# Resolve and check each existing directory before creating its next child:
+# mkdir -p on a project symlink could otherwise create directories outside.
+AUDIT_DIR="$(builtin cd -P "$PROJECT_DIR" && builtin pwd -P)" || exit 1
+IFS=/ builtin read -r -a _sg_audit_parts <<< "$AUDIT_DIR_REL"
+for _sg_part in ${_sg_audit_parts[@]+"${_sg_audit_parts[@]}"}; do
+  case "$_sg_part" in ''|.) continue ;; esac
+  _sg_audit_next="$AUDIT_DIR/$_sg_part"
+  if [ ! -d "$_sg_audit_next" ]; then
+    if [ -e "$_sg_audit_next" ] || [ -L "$_sg_audit_next" ] || ! mkdir "$_sg_audit_next"; then
+      echo "fail: cannot create audit directory: $_sg_audit_next" >&2; exit 1
+    fi
+  fi
+  _sg_audit_physical="$(builtin cd -P "$_sg_audit_next" && builtin pwd -P)" || exit 1
+  if ! sg_inside "$_sg_audit_physical" "$PROJECT_DIR"; then
+    echo "fail: audit directory resolves outside project: $_sg_audit_next -> $_sg_audit_physical" >&2
+    exit 1
+  fi
+  AUDIT_DIR="$_sg_audit_physical"
+done
 DATE_TAG="$(date +%Y-%m-%d)"
 TS_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-
-mkdir -p "$AUDIT_DIR"
 OUT_MD="$AUDIT_DIR/${DATE_TAG}-baseline-${PROJECT_NAME}.md"
 OUT_JSON="$AUDIT_DIR/${DATE_TAG}-baseline-${PROJECT_NAME}.json"
+for _sg_report in "$OUT_MD" "$OUT_JSON"; do
+  if [ -L "$_sg_report" ]; then
+    echo "fail: report path is a symlink: $_sg_report" >&2; exit 1
+  fi
+done
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
@@ -116,19 +192,46 @@ echo
 SEMGREP_RC=0; OSV_RC=0; GITLEAKS_RC=0; GARAK_RC=0; GARAK_USED=0
 TOTAL_STAGES=3
 [ "$PROFILE" = "web-rag-llm" ] && TOTAL_STAGES=4
-echo "[1/$TOTAL_STAGES] Semgrep…";  bash "$SKILL_DIR/scripts/lib/semgrep.sh"  "$PROJECT_DIR" "$PROFILE" "$SEMGREP_OUT"  || SEMGREP_RC=$?
-echo "[2/$TOTAL_STAGES] OSV…";      bash "$SKILL_DIR/scripts/lib/osv.sh"      "$PROJECT_DIR" "$OSV_OUT" --status "$WORK/osv.status" || OSV_RC=$?
-echo "[3/$TOTAL_STAGES] Gitleaks…"; bash "$SKILL_DIR/scripts/lib/gitleaks.sh" "$PROJECT_DIR" "$GITLEAKS_RAW_OUT"      || GITLEAKS_RC=$?
+# Each wrapper's stderr is kept so the narrative can say why a stage did not
+# complete; it is still shown as the stage ends.
+echo "[1/$TOTAL_STAGES] Semgrep…"
+if [ "$SG_SEMGREP_RC" -eq 3 ]; then
+  echo "semgrep did not complete: unsafe selected engine" > "$WORK/semgrep.err"; : > "$SEMGREP_OUT"; SEMGREP_RC=2
+else
+  "$SG_BASH" -p "$SKILL_DIR/scripts/lib/semgrep.sh" "$PROJECT_DIR" "$PROFILE" "$SEMGREP_OUT" 2>"$WORK/semgrep.err" || SEMGREP_RC=$?
+fi
+cat "$WORK/semgrep.err" >&2
+echo "[2/$TOTAL_STAGES] OSV…"
+if [ "$SG_OSV_RC" -eq 3 ]; then
+  echo "osv-scanner did not complete: unsafe selected engine" > "$WORK/osv.err"; : > "$OSV_OUT"; OSV_RC=2
+else
+  "$SG_BASH" -p "$SKILL_DIR/scripts/lib/osv.sh" "$PROJECT_DIR" "$OSV_OUT" --status "$WORK/osv.status" 2>"$WORK/osv.err" || OSV_RC=$?
+fi
+cat "$WORK/osv.err" >&2
+# Not applicable only on the wrapper's own proof: exit 3 AND a status file
+# saying the scanner ran, exited 128 with no package sources, scanned nothing.
+if [ "$OSV_RC" -eq 3 ] && [ "$(cat "$WORK/osv.status" 2>/dev/null)" = "osv-scanner: ran=1 exit=128 parsed=0 scanned=0
+osv-scanner: not-applicable: scanner found no package sources and scanned nothing" ]; then
+  OSV_RC=not-applicable
+fi
+echo "[3/$TOTAL_STAGES] Gitleaks…"
+if [ "$SG_GITLEAKS_RC" -eq 3 ]; then
+  echo "gitleaks did not complete: unsafe selected engine" > "$WORK/gitleaks.err"; : > "$GITLEAKS_RAW_OUT"; GITLEAKS_RC=2
+else
+  "$SG_BASH" -p "$SKILL_DIR/scripts/lib/gitleaks.sh" "$PROJECT_DIR" "$GITLEAKS_RAW_OUT" 2>"$WORK/gitleaks.err" || GITLEAKS_RC=$?
+fi
+cat "$WORK/gitleaks.err" >&2
 :> "$GARAK_OUT"
 if [ "$PROFILE" = "web-rag-llm" ]; then
   GARAK_USED=1
   echo "[4/4] Garak (LLM probes)…"
-  bash "$SKILL_DIR/scripts/lib/garak.sh" "$PROJECT_DIR" "$GARAK_OUT" || GARAK_RC=$?
+  "$SG_BASH" -p "$SKILL_DIR/scripts/lib/garak.sh" "$PROJECT_DIR" "$GARAK_OUT" 2>"$WORK/garak.err" || GARAK_RC=$?
+  cat "$WORK/garak.err" >&2
 fi
 
 # Keep history out of the gating scanner stream. The JSONL bucket marker is
 # the boundary used by the standalone scanner proof and by this aggregator.
-python3 - "$GITLEAKS_RAW_OUT" "$GITLEAKS_OUT" "$HISTORICAL_OUT" <<'PY'
+"$PYTHON3_BIN" -I - "$GITLEAKS_RAW_OUT" "$GITLEAKS_OUT" "$HISTORICAL_OUT" <<'PY'
 import json, sys
 source, current_path, history_path = sys.argv[1:]
 with open(current_path, "w") as current, open(history_path, "w") as history:
@@ -163,7 +266,7 @@ LLM_MODEL_USED=""
 
 # Previously triaged historical findings retain their disposition and never
 # re-enter LLM triage. Current-tree findings always follow the existing flow.
-python3 - "$MERGED" "$HISTORICAL_OUT" "$PREVIOUS_BASELINE" > "$TRIAGE_INPUT" <<'PY'
+"$PYTHON3_BIN" -I - "$MERGED" "$HISTORICAL_OUT" "$PREVIOUS_BASELINE" > "$TRIAGE_INPUT" <<'PY'
 import json, os, sys
 current_path, history_path, previous_path = sys.argv[1:]
 
@@ -199,7 +302,7 @@ TRIAGE_COUNT="$(wc -l < "$TRIAGE_INPUT" | tr -d ' ')"
 if [ "$NO_LLM" -eq 1 ] || [ "$TRIAGE_COUNT" -eq 0 ]; then
   : > "$TRIAGE_OUT"
 else
-  if bash "$SKILL_DIR/scripts/lib/llm-call.sh" "$SKILL_DIR/prompts/triage.md" "$TRIAGE_INPUT" "$TRIAGE_OUT"; then
+  if "$SG_BASH" -p "$SKILL_DIR/scripts/lib/llm-call.sh" "$SKILL_DIR/prompts/triage.md" "$TRIAGE_INPUT" "$TRIAGE_OUT" "$PROJECT_DIR"; then
     TRIAGE_USED=1
     LLM_PROVIDER_USED="${LLM_PROVIDER:-anthropic}"
     LLM_MODEL_USED="${LLM_MODEL:-claude-opus-5}"
@@ -211,19 +314,95 @@ else
 fi
 
 # --- merge findings + decisions, write JSON + Markdown --------------------
-SEMGREP_VER="$(semgrep --version 2>/dev/null | tail -1)"
-OSV_VER="$(osv-scanner --version 2>/dev/null | head -1 | awk '{print $NF}')"
-GITLEAKS_VER="$(gitleaks version 2>/dev/null | head -1)"
+SEMGREP_VER=""; OSV_VER=""; GITLEAKS_VER=""
+[ "$SG_SEMGREP_RC" -ne 0 ] || SEMGREP_VER="$("$SG_SEMGREP_BIN" --version 2>/dev/null | tail -1)"
+[ "$SG_OSV_RC" -ne 0 ] || OSV_VER="$("$SG_OSV_BIN" --version 2>/dev/null | head -1 | awk '{print $NF}')"
+[ "$SG_GITLEAKS_RC" -ne 0 ] || GITLEAKS_VER="$("$SG_GITLEAKS_BIN" version 2>/dev/null | head -1)"
 
-python3 - "$MERGED" "$HISTORICAL_OUT" "$TRIAGE_OUT" "$PREVIOUS_BASELINE" "$OUT_JSON" "$OUT_MD" \
+# Engines: name, wrapper exit, the wrapper's own output before any split, and
+# its stderr.
+ENGINES=(semgrep "$SEMGREP_RC" "$SEMGREP_OUT" "$WORK/semgrep.err"
+         osv-scanner "$OSV_RC" "$OSV_OUT" "$WORK/osv.err"
+         gitleaks "$GITLEAKS_RC" "$GITLEAKS_RAW_OUT" "$WORK/gitleaks.err")
+[ "$GARAK_USED" = "1" ] && ENGINES+=(garak "$GARAK_RC" "$GARAK_OUT" "$WORK/garak.err")
+
+AGG_RC=0
+"$PYTHON3_BIN" -I - "$MERGED" "$HISTORICAL_OUT" "$TRIAGE_OUT" "$PREVIOUS_BASELINE" "$OUT_JSON" "$OUT_MD" \
   "$PROJECT_NAME" "$PROFILE" "$TS_ISO" \
   "${SEMGREP_VER:-unknown}" "${OSV_VER:-unknown}" "${GITLEAKS_VER:-unknown}" \
-  "$LLM_PROVIDER_USED" "$LLM_MODEL_USED" "$TRIAGE_USED" <<'PY'
-import json, sys, os
+  "$LLM_PROVIDER_USED" "$LLM_MODEL_USED" "$TRIAGE_USED" "${ENGINES[@]}" <<'PY' || AGG_RC=$?
+import json, sys, os, tempfile
 merged_p, historical_p, triage_p, previous_p, json_p, md_p = sys.argv[1:7]
+
+
+def write_report(path, content):
+    # Replace the directory entry, never truncate a pre-existing hardlink or
+    # follow a report symlink introduced after the shell's initial check.
+    fd, temp = tempfile.mkstemp(prefix=".security-gate-", dir=os.path.dirname(path))
+    try:
+        # mkstemp creates 0600; reports keep the umask mode open() gave them.
+        umask = os.umask(0)
+        os.umask(umask)
+        os.fchmod(fd, 0o666 & ~umask)
+        with os.fdopen(fd, "w") as fh:
+            fh.write(content)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
 project, profile, ts = sys.argv[7:10]
 sg_ver, osv_ver, gl_ver = sys.argv[10:13]
 llm_provider, llm_model, triage_used = sys.argv[13], sys.argv[14], sys.argv[15] == "1"
+
+# An engine completed only when its wrapper exited 0 AND every line it wrote is
+# a finding object. A failure, a skip, or output that does not parse makes
+# the whole baseline incomplete; zero findings from it then prove nothing.
+engines = {}
+args = sys.argv[16:]
+
+
+def reason(err_p, marker=" did not complete: "):
+    # The wrapper's last "<engine> did not complete: <why>" line, if any.
+    found = ""
+    try:
+        with open(err_p, encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                if marker in ln:
+                    found = ln.split(marker, 1)[1].strip()[:200]
+    except OSError:
+        pass
+    return found
+
+
+for name, rc, out_p, err_p in zip(args[0::4], args[1::4], args[2::4], args[3::4]):
+    if rc == "not-applicable":
+        # The wrapper proved there was nothing to scan; it never ran a scanner.
+        engines[name] = {"status": "not_applicable", "exit": 3,
+                         "detail": reason(err_p, ": not applicable: ") or "nothing to scan"}
+        continue
+    engine = {"status": "ok", "exit": int(rc)}
+    if engine["exit"] != 0:
+        engine["status"] = "failed"
+        if reason(err_p):
+            engine["detail"] = reason(err_p)
+    elif not os.path.isfile(out_p):
+        engine.update(status="invalid_output", detail="no output file")
+    else:
+        with open(out_p, encoding="utf-8", errors="replace") as fh:
+            for n, ln in enumerate(fh, 1):
+                if not ln.strip():
+                    continue
+                try:
+                    row = json.loads(ln)
+                except json.JSONDecodeError:
+                    row = None
+                if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                    engine.update(status="invalid_output", detail=f"line {n} is not a finding object")
+                    break
+    engines[name] = engine
+complete = all(e["status"] in ("ok", "not_applicable") for e in engines.values())
+not_applicable = [n for n, e in engines.items() if e["status"] == "not_applicable"]
 
 def load_jsonl(p):
     out = []
@@ -341,6 +520,8 @@ doc = {
     "generated_at": ts,
     "tools": {"semgrep": sg_ver, "osv-scanner": osv_ver, "gitleaks": gl_ver},
     "llm": {"provider": llm_provider, "model": llm_model, "triage_used": triage_used},
+    "complete": complete,
+    "engines": engines,
     "findings": findings,
     "historical_findings": historical_findings,
     "summary": {
@@ -358,7 +539,7 @@ doc = {
         },
     },
 }
-with open(json_p, "w") as fh: json.dump(doc, fh, indent=2)
+write_report(json_p, json.dumps(doc, indent=2))
 
 # --- markdown narrative ---
 sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
@@ -373,6 +554,18 @@ line(f"- profile:   `{profile}`")
 line(f"- tools:     semgrep `{sg_ver}` · osv-scanner `{osv_ver}` · gitleaks `{gl_ver}`")
 line(f"- triage:    " + (f"`{llm_provider}` ({llm_model})" if triage_used else "skipped (no LLM)"))
 line()
+line("## Engines")
+line()
+for name, e in engines.items():
+    if e["status"] == "ok":
+        line(f"- {name}: completed")
+    elif e["status"] == "not_applicable":
+        line(f"- {name}: not applicable ({e['detail']})")
+    elif e["status"] == "failed":
+        line(f"- {name}: **failed** (exit {e['exit']})" + (f": {e['detail']}" if e.get("detail") else ""))
+    else:
+        line(f"- {name}: **invalid output** ({e['detail']})")
+line()
 line("## Summary")
 line()
 line(f"- current-tree raw findings (gating): **{doc['summary']['total_raw']}**")
@@ -386,8 +579,12 @@ line()
 line(f"- severity (kept + no-llm-pass): " + " · ".join(f"**{k}**: {v}" for k, v in sev_count.items()))
 line(f"- historical severity (kept + no-llm-pass): " + " · ".join(f"**{k}**: {v}" for k, v in historical_sev_count.items()))
 line()
-if doc['summary']['total_raw'] == 0:
-    line("Verdict: **clean current tree** — no gating findings produced by any scanner.")
+na_note = (" Not applicable: " + ", ".join(not_applicable) + ".") if not_applicable else ""
+if not complete:
+    missing = ", ".join(n for n, e in engines.items() if e["status"] not in ("ok", "not_applicable"))
+    line(f"Verdict: **incomplete** — {missing} did not complete, so the findings below are partial and cannot show that the current tree has none.{na_note}")
+elif doc['summary']['total_raw'] == 0:
+    line("Verdict: **clean current tree** — no gating findings produced by any scanner." + na_note)
 elif doc['summary']['kept'] == 0 and triage_used:
     fp_rate = doc['summary']['dropped'] / max(doc['summary']['total_raw'], 1)
     line(f"Verdict: **clean (after triage)** — all {doc['summary']['total_raw']} raw findings dropped as false positives. FP rate: {fp_rate:.0%}.")
@@ -456,10 +653,18 @@ if triage_used:
             line(f"- `{f['id']}` `{f['tool']}/{f['rule']}` @ `{loc}` — {f['triage_reason']}")
         line()
 
-with open(md_p, "w") as fh: fh.write("\n".join(out_lines) + "\n")
+write_report(md_p, "\n".join(out_lines) + "\n")
+if not complete:
+    print("baseline incomplete: " + "; ".join(
+        f"{n} {e['status'].replace('_', ' ')} (exit {e['exit']})" for n, e in engines.items() if e["status"] not in ("ok", "not_applicable")))
+    sys.exit(2)
 PY
 
+case "$AGG_RC" in
+  0|2) ;;
+  *) echo "fail: baseline aggregation exited $AGG_RC; no valid baseline was written" >&2; exit 1 ;;
+esac
 echo
 echo "wrote: $OUT_MD"
 echo "wrote: $OUT_JSON"
-exit 0
+exit "$AGG_RC"

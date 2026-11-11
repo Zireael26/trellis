@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # stop-verify.sh — Stop. TodoWrite → typecheck → lint → test, auto-detected.
 # Source: Trellis / core-rules / hooks.md
 #
 # Contract:
 #   - TRELLIS_REVIEW_IN_PROGRESS=1: exit 0 immediately (nested-review guard).
-#   - stop_hook_active guard: if set, exit 0 immediately (infinite-loop guard).
+#   - stop_hook_active: consume any seen baseline/nonce, then exit 0 without
+#     checks or carry (infinite-loop guard).
 #   - Pure chat / no edits: exit 0 (skip).
 #   - Receipt trigger (C01): the DoD receipt is owed only when this turn
 #     mutated the tree, judged against the turn-entry baseline turn-baseline.sh
@@ -13,8 +15,9 @@
 #     committed and left the tree clean still owes one, and in a project that
 #     registers turn-baseline.sh so does a clean turn with no usable baseline.
 #     Todos and checks are not narrowed.
-#   - Runs checks concurrently (cargo's members in order) and blocks on the
-#     first failure in plan order: emit
+#   - Runs independent groups concurrently, with all test suites and cargo
+#     build checks in one serial group; blocks on the first failure in plan
+#     order: emit
 #     {"decision":"block","reason":"<step>: <sliced output>"} and exit 2.
 #   - Reuse (spec 072 U8): a pass receipt whose key matches the tree
 #     fingerprint, planned commands, tools, environment and policy skips the
@@ -32,7 +35,9 @@
 # of repo root. Cuts wall time + noise on monorepos. Escape hatch:
 # PROCESS_GATE_FORCE_ROOT=1 → always run at repo root (legacy behaviour).
 #
-# Dependencies: jq (required). Toolchains are detected; absence → skip that step.
+# Dependencies: jq (required). Optional toolchains are detected; absence skips
+# their steps. A configured JS test with a missing selected manager blocks unless
+# the trusted host fast-suite override replaces the detected test steps.
 #
 # Todo state: read from $CLAUDE_PROJECT_DIR/.claude/todos.json. A missing file
 # means no persisted todos; a present but malformed file blocks because its open
@@ -55,11 +60,89 @@ fi
 
 INPUT=$(cat)
 
-# Source shared lib (sibling to this script) + enforce jq dependency.
+# The loop guard must work even when jq or a sibling library is unavailable.
+# Parse the whole envelope, not a regex that could match a nested key or text.
+# This self-contained fallback is repeated in the Stop wrappers deliberately:
+# it cannot depend on the library whose absence it has to handle.
+# Never run a project-supplied python shim while deciding whether to suppress a
+# block. Resolve a native interpreter owned by root or this user, not writable
+# by others, and outside the configured project and current working directory.
+_stop_trusted_python() {
+  local candidate="$1" resolve resolved info uid mode magic root physical me
+  [ -n "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ] || return 1
+  if [ -x /bin/realpath ]; then resolve=/bin/realpath
+  elif [ -x /usr/bin/realpath ]; then resolve=/usr/bin/realpath
+  else return 1; fi
+  resolved=$("$resolve" "$candidate" 2>/dev/null) || return 1
+  for root in "${CLAUDE_PROJECT_DIR:-}" "${CODEX_PROJECT_DIR:-}" "$PWD"; do
+    [ -n "$root" ] || continue
+    physical=$("$resolve" "$root" 2>/dev/null) || continue
+    if [ "$physical" = / ]; then
+      if [ "$root" = "$PWD" ] && [ -n "${CLAUDE_PROJECT_DIR:-}${CODEX_PROJECT_DIR:-}" ] \
+         && [ "${CLAUDE_PROJECT_DIR:-}" != "$root" ] && [ "${CODEX_PROJECT_DIR:-}" != "$root" ]; then continue; fi
+      return 1
+    fi
+    case "$resolved/" in "$physical/"*) return 1 ;; esac
+  done
+  info=$(/usr/bin/stat -c '%u %a' "$resolved" 2>/dev/null) \
+    || info=$(/usr/bin/stat -f '%u %Lp' "$resolved" 2>/dev/null) || return 1
+  [[ "$info" =~ ^([0-9]+)[[:space:]]+([0-7]+)$ ]] || return 1
+  uid=${BASH_REMATCH[1]}; mode=${BASH_REMATCH[2]}
+  me=$(/usr/bin/id -u 2>/dev/null) || return 1
+  [ "$uid" = 0 ] || [ "$uid" = "$me" ] || return 1
+  [ "$((8#$mode & 022))" -eq 0 ] || return 1
+  magic=$(/usr/bin/od -An -tx1 -N4 "$resolved" 2>/dev/null | /usr/bin/tr -d ' \n') || return 1
+  case "$magic" in 7f454c46|cffaedfe|cefaedfe|feedfacf|feedface|cafebabe|bebafeca|cafebabf|bfbafeca) ;; *) return 1 ;; esac
+  printf '%s' "$resolved"
+}
+
+_stop_active_raw() {
+  local rc candidate python selected=""
+  if [ -x /usr/bin/perl ]; then
+    ( unset PERL5OPT PERL5LIB PERLLIB PERL5DB
+      printf '%s' "$1" | /usr/bin/perl -MJSON::PP -0777 -e '
+        my $data = eval { decode_json(<STDIN>) };
+        exit 1 if $@ || ref($data) ne "HASH";
+        my $active = $data->{stop_hook_active};
+        exit !(defined($active) && JSON::PP::is_bool($active) && $active);
+      ' 2>/dev/null
+    )
+    rc=$?
+    case "$rc" in 0) return 0 ;; 1) return 1 ;; esac
+  fi
+  selected=$(type -P python3 2>/dev/null) || selected=""
+  for candidate in "$selected" /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3; do
+    python=$(_stop_trusted_python "$candidate") || continue
+    printf '%s' "$1" | "$python" -I -c '
+import json, sys
+def reject_constant(_):
+    raise ValueError("invalid JSON constant")
+try:
+    data = json.loads(sys.stdin.buffer.read().decode("utf-8"), parse_constant=reject_constant)
+except (ValueError, UnicodeError, RecursionError):
+    sys.exit(1)
+sys.exit(0 if isinstance(data, dict) and data.get("stop_hook_active") is True else 1)
+' 2>/dev/null
+    rc=$?
+    case "$rc" in 0) return 0 ;; 1) return 1 ;; esac
+  done
+  # No usable parser: only this exact, unambiguous envelope is recognized.
+  [ "$1" = '{"stop_hook_active":true}' ]
+}
+
+# Stop infrastructure failures must use the harness's blocking transport.
+_sv_infrastructure_block() {
+  _stop_active_raw "$INPUT" && exit 0
+  echo "stop-verify: $1" >&2
+  exit 2
+}
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
-[ -f "$__se_lib" ] || { echo "stop-verify: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
+[ -r "$__se_lib" ] || _sv_infrastructure_block "missing sibling lib at $__se_lib — re-run sync-hooks"
 # shellcheck source=lib/deps.sh disable=SC1090
-. "$__se_lib"
+. "$__se_lib" || _sv_infrastructure_block "unable to load sibling lib at $__se_lib — re-run sync-hooks"
+if ! command -v jq >/dev/null 2>&1 && [ "${TRELLIS_NO_JQ_DEGRADE:-0}" != 1 ]; then
+  _sv_infrastructure_block "jq required but not found — install jq (brew install jq | apt-get install -y jq)"
+fi
 _se_require_jq "stop-verify"
 
 # Optional: package-manager resolver (config-driven, lockfile fallback). Absent
@@ -103,11 +186,42 @@ fi
 # --- Guard 1: stop_hook_active ---
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
 if [ "$STOP_ACTIVE" = "true" ]; then
+  _se_turn_discard_reentrant "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}" claude "$INPUT" || true
   exit 0
 fi
 
 PROJECT_DIR="${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}"
 cd "$PROJECT_DIR" 2>/dev/null || exit 0
+# Inspect once: unknown native wiring is an error, not legacy unarmed.
+__se_arming=$(_se_turn_baseline_arming "$PROJECT_DIR" claude) || __se_arming=unknown
+case "$__se_arming" in unarmed|legacy|native|unknown) ;; *) __se_arming=unknown ;; esac
+# The native proof-bound bridge supplies its independent arming result. This
+# comparison can only turn a disagreement into unknown; an inherited value
+# can never make an unsafe or unknown shell inspection look armed or unarmed.
+if [ -n "${TRELLIS_NATIVE_STOP_ARMING:-}" ] && [ "$TRELLIS_NATIVE_STOP_ARMING" != "$__se_arming" ]; then
+  __se_arming=unknown
+fi
+# This per-call hint is not part of the environment of project checks or any
+# nested hook/session they launch.
+unset TRELLIS_NATIVE_STOP_ARMING
+# The bridge may give this wrapper an owned scratch root; project checks must
+# still inherit the adapter's unset TMPDIR and never see the bridge-only path.
+__se_tmp_root="${TRELLIS_NATIVE_STOP_TMP_ROOT:-${TMPDIR:-/tmp}}"
+unset TRELLIS_NATIVE_STOP_TMP_ROOT
+# T30's non-routed native bridge alone supplies a random per-call token and
+# an owned scratch root. In this mode success state is staged, never published
+# by this wrapper; the aggregate coordinator decides whether to commit it.
+# An inherited hint can only suppress publication, not authorize a pass.
+__se_defer_token="${TRELLIS_NATIVE_STOP_DEFER:-}"
+__se_force_reverify="${TRELLIS_NATIVE_STOP_FORCE_REVERIFY:-0}"
+unset TRELLIS_NATIVE_STOP_DEFER TRELLIS_NATIVE_STOP_FORCE_REVERIFY
+__se_defer_dir=""
+if [ -n "$__se_defer_token" ]; then
+  case "$__se_defer_token" in *[!0-9a-f]*) _sv_infrastructure_block "invalid deferred Stop token" ;; esac
+  [ "${#__se_defer_token}" -eq 32 ] || _sv_infrastructure_block "invalid deferred Stop token"
+  __se_defer_dir="$__se_tmp_root/t30-deferred.$__se_defer_token"
+  ( umask 077 && mkdir "$__se_defer_dir" ) || _sv_infrastructure_block "cannot stage deferred Stop"
+fi
 
 # Fail-counter state: absolute under the canonical project root (NOT a subtree —
 # emit_block fires both before and after the subtree cd). A clean pass removes it.
@@ -126,17 +240,48 @@ __se_blocked=0
 __se_harness=claude
 __se_sdir=""
 __se_now=""
-if command -v git >/dev/null 2>&1; then
+__se_key=""
+__se_carry=0
+__se_consumed=0
+__se_baseline=""
+__se_nonces=""
+__se_generation=none
+__se_degraded=0
+# Reuse only index visibility candidates within this Stop. A private cache is
+# optional; an unavailable temp directory falls back to uncached scans.
+__se_flag_cache=$(umask 077; mktemp -d "$__se_tmp_root/trellis-stop-flags.XXXXXX") || __se_flag_cache=""
+__se_cache_epoch=$(date +%s 2>/dev/null) || __se_cache_epoch=""
+case "$(/usr/bin/uname -s 2>/dev/null)" in Darwin) __se_stat_style=bsd ;; Linux) __se_stat_style=gnu ;; *) __se_stat_style=auto ;; esac
+# shellcheck disable=SC2329 # invoked by the EXIT trap
+_se_stop_exit() {
+  local rc="$1"
+  if [ "$rc" -eq 0 ] && [ "$__se_blocked" = 0 ] && [ "$__se_carry" = 1 ]; then
+    if [ -n "$__se_defer_dir" ]; then
+      _se_turn_carry_write "$__se_defer_dir" "claude.$__se_key" "$PROJECT_DIR" stage
+    else
+      _se_turn_carry_write "$__se_sdir" "claude.$__se_key" "$PROJECT_DIR"
+    fi
+  fi
+  [ -z "$__se_defer_dir" ] || rm -f "$__se_defer_dir/fp-cache" 2>/dev/null
+  [ -z "$__se_flag_cache" ] || rm -rf "${__se_flag_cache:?}" 2>/dev/null
+}
+trap '_se_stop_exit "$?"' EXIT
+if [ "$__se_arming" != unknown ] && command -v git >/dev/null 2>&1; then
   __se_sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || __se_sid=""
   __se_key=""
   [ -z "$__se_sid" ] || __se_key=$(_se_state_key "" "$__se_sid") || __se_key=""
   __se_consumed=0
   if [ -n "$__se_key" ] && __se_sdir=$(_se_turn_state_dir "$PROJECT_DIR"); then
-    if [ -f "$__se_sdir/claude.$__se_key" ]; then
-      __se_consumed=1
-      __se_baseline=$(cat "$__se_sdir/claude.$__se_key" 2>/dev/null) || __se_baseline=""
-      rm -f "$__se_sdir/claude.$__se_key" || __se_baseline=""
-      __se_nonces=$(_se_turn_nonce_take "$__se_sdir" "claude.$__se_key")
+    if [ "$__se_arming" != unarmed ] || [ -f "$__se_sdir/claude.$__se_key" ]; then
+      if ! _se_turn_consume "$__se_sdir" "claude.$__se_key"; then
+        __se_degraded=1; __se_generation=degraded
+        printf 'stop-verify: nonce state degraded; re-verification required; armed unknown turn requires a receipt; lock %s/.nonces.lock\n' "$__se_sdir" >&2
+      fi
+    elif [ -d "$__se_sdir" ] && ! _se_turn_observe_unarmed "$__se_sdir" "claude.$__se_key"; then
+      __se_degraded=1; __se_generation=degraded
+      printf 'stop-verify: nonce state degraded; re-verification required; armed unknown turn requires a receipt; lock %s/.nonces.lock\n' "$__se_sdir" >&2
+    fi
+    if [ "$__se_consumed" = 1 ] && [ "$__se_degraded" = 0 ]; then
       if __se_now=$(_se_tree_fingerprint "$PROJECT_DIR" "$__se_sdir/fp-cache"); then
         TURN_STATE=$(_se_turn_baseline_state "$__se_baseline" "$__se_now" "$__se_nonces")
       fi
@@ -153,12 +298,11 @@ if command -v git >/dev/null 2>&1; then
     # next Stop then finds no baseline and reads unknown, so a re-Stop with no
     # change still owes the receipt. Only where the mechanism is live, so an
     # unattached project gets no state written.
-    if [ "$__se_consumed" = "1" ] || _se_turn_baseline_armed "$PROJECT_DIR" claude; then
-      trap '[ "$?" -eq 0 ] && [ "$__se_blocked" = "0" ] \
-        && _se_turn_carry_write "$__se_sdir" "claude.$__se_key" "$PROJECT_DIR"' EXIT
+    if [ "$__se_degraded" = 0 ] && { [ "$__se_consumed" = "1" ] || [ "$__se_arming" != unarmed ]; }; then
+      __se_carry=1
     fi
   fi
-  if [ "$TURN_STATE" = "unknown" ] && _se_turn_baseline_armed "$PROJECT_DIR" claude; then
+  if [ "$TURN_STATE" = "unknown" ] && [ "$__se_arming" != unarmed ]; then
     # Missing, unreadable or uncomputable baseline: whatever the turn did,
     # including commits that left the tree clean, is unknown, never docs.
     TURN_STATE=changed
@@ -166,17 +310,26 @@ if command -v git >/dev/null 2>&1; then
   fi
 fi
 
-# _se_changed_files — echo the full set of files changed this turn, one per line:
-# tracked diff-vs-HEAD UNION untracked (not-yet-`git add`ed). Mirrors the union
-# in _se_find_subtree. cwd-independent (git -C PROJECT_DIR) so it's stable on
-# both sides of the subtree cd. `git diff HEAD --name-only` alone OMITS untracked
-# new files — a turn that only Writes new code files would otherwise look empty.
-# The shared Git pathspec filters checkout-local hook state even when tracked;
-# real settings and rule edits remain visible.
+# Preserve the exact nonce list the wrapper consumed, including the empty
+# armed/missing-baseline case. These files stay inside the private workspace.
+if [ -n "$__se_defer_dir" ]; then
+  if ! ( umask 077 && printf '%s\n%s\n%s\n%s\n%s\n' "$__se_defer_token" "$__se_harness" "$__se_key" "$__se_consumed" "$__se_generation" > "$__se_defer_dir/binding" \
+         && printf '%s' "$__se_nonces" > "$__se_defer_dir/consumed" ); then
+    __se_blocked=1
+    _sv_infrastructure_block "cannot record deferred Stop binding"
+  fi
+fi
+
+# _se_changed_files — staged, unstaged and untracked paths, including both
+# sides of renames. --cached works even before the first commit. Preserve every
+# Git error: an unreadable set is not an empty or documentation-only set.
 _se_changed_files() {
-  { _se_hook_state_git -C "$PROJECT_DIR" diff HEAD --name-only 2>/dev/null; \
-    _se_hook_state_git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null; } \
-    | sort -u
+  local tracked untracked flagged
+  tracked=$({ _se_hook_state_git -C "$PROJECT_DIR" diff --ignore-submodules=none --cached --no-renames --name-only 2>/dev/null && \
+    _se_hook_state_git -C "$PROJECT_DIR" diff --ignore-submodules=none --no-renames --name-only 2>/dev/null; }) || return 1
+  untracked=$(_se_hook_state_git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null) || return 1
+  flagged=$(_se_flagged_changed_lines "$PROJECT_DIR") || return 1
+  printf '%s\n%s\n%s\n' "$tracked" "$untracked" "$flagged" | awk 'NF' | sort -u
 }
 
 emit_block() {
@@ -187,8 +340,12 @@ emit_block() {
   # File-set hash is cwd-independent (git -C PROJECT_DIR) so it's stable whether
   # emit_block fires before or after the subtree cd. cksum is POSIX-portable
   # (macOS has no sha256sum); we key off the set of changed paths, not contents.
-  local fileset_hash prevhash prevcount count
-  fileset_hash=$(_se_changed_files | cksum | awk '{print $1}')
+  local fileset fileset_hash prevhash prevcount count
+  if fileset=$(_se_changed_files); then
+    fileset_hash=$(printf '%s' "$fileset" | cksum | awk '{print $1}')
+  else
+    fileset_hash="git-unreadable"
+  fi
   prevhash=""
   prevcount=0
   if [ -f "$STATE_FILE" ]; then
@@ -215,6 +372,12 @@ STOP: re-read top-down, state the wrong assumption before retrying (same files f
   exit 2
 }
 
+# Never reuse a receipt or publish carry when native wiring could not be
+# established, even when a prior baseline happened to match.
+if [ "$__se_arming" = unknown ]; then
+  emit_block "turn-baseline" "native registration could not be verified"
+fi
+
 # _se_find_subtree — echo the deepest subtree (relative to PROJECT_DIR) that
 # contains every changed file in this turn AND carries its own manifest. Echo
 # nothing if changed files span multiple subtrees, none have a nested manifest,
@@ -223,7 +386,8 @@ _se_find_subtree() {
   command -v git >/dev/null 2>&1 || return 0
   git rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
 
-  local file dir found common=""
+  local file dir found common="" changed_files
+  changed_files=$(_se_changed_files) || return 1
 
   while IFS= read -r file; do
     [ -z "$file" ] && continue
@@ -249,9 +413,7 @@ _se_find_subtree() {
       # Changed files span multiple subtrees → fall back to repo root.
       return 0
     fi
-  done < <(
-    _se_changed_files
-  )
+  done <<< "$changed_files"
 
   printf '%s' "$common"
 }
@@ -261,8 +423,21 @@ _se_find_subtree() {
 # manufacturing executed verification evidence.
 VERIFICATION_UNAVAILABLE=""
 VERIFICATION_NOTE=""
+ESLINT_PROBE_NOTE=""
+# R1 PATH ruling: a check whose project tool cannot be found is named in one
+# labelled advisory line, never skipped silently.
+TOOL_MISSING_NOTE=""
+_se_tool_missing() {
+  TOOL_MISSING_NOTE="${TOOL_MISSING_NOTE}${TOOL_MISSING_NOTE:+$'\n'}stop-verify: $2 not found on PATH; $1 skipped."
+}
 _se_verification_advisory() {
   local message="$1"
+  if [ -n "$ESLINT_PROBE_NOTE" ]; then
+    message="${ESLINT_PROBE_NOTE}${message:+$'\n'}${message}"
+  fi
+  if [ -n "$TOOL_MISSING_NOTE" ]; then
+    message="${TOOL_MISSING_NOTE}${message:+$'\n'}${message}"
+  fi
   if [ -n "$VERIFICATION_NOTE" ]; then
     message="${VERIFICATION_NOTE}${message:+$'\n'}${message}"
   fi
@@ -287,7 +462,10 @@ _se_receipt_gate() {
     # logic, but over the diff-UNION-untracked set (a turn that only Writes new
     # code files has an empty `git diff HEAD` — those must NOT read as doc-only).
     # The set includes paths this turn committed (TURN_RANGE_FILES, C01).
-    NONDOC_COUNT=$({ _se_changed_files; printf '%s\n' "$TURN_RANGE_FILES"; } \
+    if ! CHANGED_FILES=$(_se_changed_files); then
+      emit_block "git changed files" "could not inspect staged, unstaged and untracked changes"
+    fi
+    NONDOC_COUNT=$(printf '%s\n%s\n' "$CHANGED_FILES" "$TURN_RANGE_FILES" \
       | grep -v '^$' \
       | grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
       | awk 'END{print NR}')
@@ -374,6 +552,17 @@ _se_receipt_gate() {
   fi
 }
 
+# --- Step 0: attachment checks (spec 074 T14, amended 2026-11-10). Attach no
+# longer waits for its checks job; that verdict gates this Stop, before the
+# pure-chat skip, because it binds the worktree, not this turn's edits. ---
+__se_av_lib="$(dirname "${BASH_SOURCE[0]}")/lib/attach-verdict.sh"
+[ -r "$__se_av_lib" ] || emit_block "attachment-checks" "missing sibling lib at $__se_av_lib — re-run sync-hooks"
+# shellcheck source=lib/attach-verdict.sh disable=SC1090,SC1091
+. "$__se_av_lib" || emit_block "attachment-checks" "unable to load sibling lib at $__se_av_lib — re-run sync-hooks"
+if ! __se_av_reason="$(trellis_attach_verdict_stop "$PROJECT_DIR")"; then
+  emit_block "attachment-checks" "$__se_av_reason"
+fi
+
 # --- Step 1: TodoWrite check (runs before the dirty-tree skip — pure-chat turns
 # can close todos via TodoWrite without touching files; receipts-required must
 # still hold). ---
@@ -412,8 +601,9 @@ _se_all_doc_paths() {
 }
 
 # --- Guard 2: no file edits this turn → pure chat; skip typecheck/lint/test.
-# Best-effort: check git worktree dirtiness. If git isn't here, fall through
-# and let downstream steps no-op when no config files exist.
+# The shortcut applies only to an inspectable Git worktree. Otherwise the
+# downstream receipt gate blocks when it cannot inspect changes (unless receipt
+# checks were explicitly disabled), even when no project checks are configured.
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   # Porcelain output is empty iff worktree matches HEAD (no staged, unstaged, or untracked changes).
   # NOTE: earlier versions used `grep -c '^' || echo 0` here — that doubles output to "0\n0"
@@ -427,6 +617,14 @@ ${WORKTREE_STATUS}"
     # already covers its bytes and the index. Todos were checked above.
     _se_receipt_gate
     exit 0
+  fi
+  # Git's ordinary status intentionally hides flagged tracked files. Include
+  # their actual content changes before applying the clean/doc-only shortcuts.
+  if ! FLAGGED_CHANGED=$(_se_flagged_changed_lines "$PROJECT_DIR"); then
+    emit_block "git changed files" "could not inspect flagged tracked files"
+  fi
+  if [ -n "$FLAGGED_CHANGED" ]; then
+    WORKTREE_STATUS="${WORKTREE_STATUS}${WORKTREE_STATUS:+$'\n'}$(printf '%s\n' "$FLAGGED_CHANGED" | awk '{print " M " $0}')"
   fi
   if [ -z "$WORKTREE_STATUS" ] && [ -z "$TURN_RANGE_FILES" ]; then
     # Preserve the clean-tree fallback only when no committed range is known.
@@ -453,7 +651,9 @@ fi
 # manifest, run scoped checks there instead of repo-root. Opt-out:
 # PROCESS_GATE_FORCE_ROOT=1.
 if [ "${PROCESS_GATE_FORCE_ROOT:-0}" != "1" ]; then
-  SUBTREE="$(_se_find_subtree)"
+  if ! SUBTREE="$(_se_find_subtree)"; then
+    emit_block "git changed files" "could not inspect staged, unstaged and untracked changes"
+  fi
   if [ -n "$SUBTREE" ] && [ -d "$SUBTREE" ]; then
     if ! cd "$SUBTREE" 2>/dev/null; then
       emit_block "subtree" "could not enter selected verification subtree: ${SUBTREE}"
@@ -466,8 +666,9 @@ CHECKS_RUN=0
 # Steps 2–4 plan their checks instead of running them one by one. The plan is
 # the input of the reuse key (spec 072 U8): a pass receipt for the same key
 # skips the run. Otherwise every check runs, groups concurrently and the
-# members of a group in order (cargo serializes on its build lock anyway), and
-# the first planned check that failed blocks with the same reason and slicing
+# members of a group in order. Test suites share one group with cargo's
+# build checks to avoid shared-fixture and cargo-lock contention; the first
+# planned check that failed blocks with the same reason and slicing
 # the sequential run gave.
 __se_ck_id=(); __se_ck_form=(); __se_ck_label=(); __se_ck_slice=()
 __se_ck_group=(); __se_ck_dir=(); __se_ck_cmd=()
@@ -548,7 +749,9 @@ _se_mypy_pyproject_files() {
 # TypeScript
 if [ -f "tsconfig.json" ] && [ "$JS_AVAILABLE" -eq 0 ]; then
   _se_js_unavailable
-elif [ -f "tsconfig.json" ] && command -v npx >/dev/null 2>&1; then
+elif [ -f "tsconfig.json" ] && ! command -v npx >/dev/null 2>&1; then
+  _se_tool_missing "typecheck (tsc)" npx
+elif [ -f "tsconfig.json" ]; then
   # The node_modules/.bin copy npx --no-install would resolve, run directly
   # (same argv, no npx startup, and a closure the reuse key can bind). With
   # none inside the worktree, npx runs it and that Stop is never reused.
@@ -561,6 +764,9 @@ fi
 
 # Python (mypy)
 MYPY_CMD="$(_se_resolve_python_tool mypy)"
+if [ -z "$MYPY_CMD" ] && { [ -f "mypy.ini" ] || grep -q '\[tool.mypy\]' pyproject.toml 2>/dev/null; }; then
+  _se_tool_missing "typecheck (mypy)" mypy
+fi
 if [ -n "$MYPY_CMD" ]; then
   HAS_MYPY_CFG=0
   [ -f "mypy.ini" ] && HAS_MYPY_CFG=1
@@ -579,11 +785,17 @@ if [ -n "$MYPY_CMD" ]; then
 fi
 
 # Rust
+if [ -f "Cargo.toml" ] && ! command -v cargo >/dev/null 2>&1; then
+  _se_tool_missing "Rust typecheck, clippy and tests" cargo
+fi
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-  _se_plan_check typecheck.cargo-check argv "typecheck (cargo check)" head cargo "$PWD" cargo check
+  _se_plan_check typecheck.cargo-check argv "typecheck (cargo check)" head test "$PWD" cargo check
 fi
 
 # Go
+if [ -f "go.mod" ] && ! command -v go >/dev/null 2>&1; then
+  _se_tool_missing "Go vet and tests" go
+fi
 if [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
   _se_plan_check typecheck.go-vet argv "typecheck (go vet)" head go-vet "$PWD" go vet ./...
 fi
@@ -593,27 +805,34 @@ fi
 ESLINT_VERSION=""
 if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
    || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
-   || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.ts" ]; then
+   || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.cjs" ] \
+   || [ -f "eslint.config.ts" ] || [ -f "eslint.config.mts" ] || [ -f "eslint.config.cts" ]; then
   if [ "$JS_AVAILABLE" -eq 0 ]; then
     _se_js_unavailable
   elif ! command -v npx >/dev/null 2>&1; then
-    :
+    _se_tool_missing "lint (eslint)" npx
   elif __se_bin=$(_se_node_bin eslint "$PWD"); then
-    ESLINT_VERSION=$("$__se_bin" --version 2>/dev/null) \
-      && _se_plan_check lint.eslint argv "lint (eslint)" head eslint "$PWD" "$__se_bin" . --quiet
+    if ! ESLINT_VERSION=$("$__se_bin" --version 2>/dev/null); then
+      ESLINT_VERSION=""
+      ESLINT_PROBE_NOTE="stop-verify: eslint version probe failed; lint ran without pass reuse."
+    fi
+    _se_plan_check lint.eslint argv "lint (eslint)" head eslint "$PWD" "$__se_bin" . --quiet
   elif ESLINT_VERSION=$(npx --no-install eslint --version 2>/dev/null); then
     _se_plan_check lint.eslint argv "lint (eslint)" head eslint "$PWD" npx --no-install eslint . --quiet
   fi
 fi
 
 # ruff
+if ! command -v ruff >/dev/null 2>&1 && { [ -f "ruff.toml" ] || [ -f ".ruff.toml" ] || grep -q '\[tool.ruff' pyproject.toml 2>/dev/null; }; then
+  _se_tool_missing "lint (ruff)" ruff
+fi
 if command -v ruff >/dev/null 2>&1 && { [ -f "pyproject.toml" ] || [ -f "ruff.toml" ] || [ -f ".ruff.toml" ]; }; then
   _se_plan_check lint.ruff argv "lint (ruff)" head ruff "$PWD" ruff check .
 fi
 
 # clippy
 if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-  _se_plan_check lint.clippy argv "lint (clippy)" head cargo "$PWD" cargo clippy --quiet --message-format=short -- -D warnings
+  _se_plan_check lint.clippy argv "lint (clippy)" head test "$PWD" cargo clippy --quiet --message-format=short -- -D warnings
 fi
 
 # golangci-lint
@@ -621,11 +840,14 @@ if [ -f "go.mod" ] && command -v golangci-lint >/dev/null 2>&1; then
   _se_plan_check lint.golangci-lint argv "lint (golangci-lint)" head golangci-lint "$PWD" golangci-lint run
 fi
 
-# Resolve Python's test runner before selecting a manifest branch so mixed
-# Python/Rust/Go repositories still fall through when pytest is unavailable.
+# Resolve Python's runner independently: each detected language's tests must
+# run in a mixed repository, not just the first manifest's suite.
 PYTEST_CMD=""
 if [ -f "pyproject.toml" ] || [ -f "pytest.ini" ] || [ -f "setup.cfg" ]; then
   PYTEST_CMD="$(_se_resolve_python_tool pytest)"
+  if [ -z "$PYTEST_CMD" ] && { [ -f "pytest.ini" ] || grep -q '\[tool.pytest' pyproject.toml 2>/dev/null; }; then
+    _se_tool_missing "test (pytest)" pytest
+  fi
   if [ -n "$PYTEST_CMD" ]; then
     PYTEST_CMD="$PYTEST_CMD --tb=short -q"
   fi
@@ -634,6 +856,7 @@ fi
 # --- Step 4: Test (fast suite; skip e2e unless explicitly configured) ---
 TEST_CMD=""
 _PM=""
+MISSING_PM=""
 if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
   if [ -n "$HAS_TEST" ] && [ "$HAS_TEST" != "echo \"Error: no test specified\" && exit 1" ]; then
     if [ "$JS_AVAILABLE" -eq 0 ] && [ "$JS_HAS_DEPS" = true ]; then
@@ -643,17 +866,14 @@ if [ -f "package.json" ] && command -v jq >/dev/null 2>&1; then
     else
       _PM="npm"
     fi
-    # Configured-but-missing PM → skip the test step rather than hard-fail.
-    if [ -n "${_PM:-}" ] && command -v "$_PM" >/dev/null 2>&1; then
-      TEST_CMD="$_PM run test"
+    if [ -n "${_PM:-}" ]; then
+      if command -v "$_PM" >/dev/null 2>&1; then
+        TEST_CMD="$_PM run test"
+      else
+        MISSING_PM="$_PM"
+      fi
     fi
   fi
-elif [ -n "$PYTEST_CMD" ]; then
-  TEST_CMD="$PYTEST_CMD"
-elif [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
-  TEST_CMD="cargo test --quiet"
-elif [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
-  TEST_CMD="go test ./..."
 fi
 
 # A faster Stop suite comes only from machine config:
@@ -675,12 +895,22 @@ case $? in
 esac
 if [ -n "$STOP_FAST_CMD" ]; then
   _se_plan_check test.fast shell "test (stop_checks.fast: ${STOP_FAST_CMD})" tail test "$PROJECT_DIR" "$STOP_FAST_CMD"
-elif [ -n "$TEST_CMD" ]; then
-  case "$TEST_CMD" in
-    cargo\ *) __se_test_group=cargo ;;
-    *) __se_test_group='test' ;;
-  esac
-  _se_plan_check test shell "test (${TEST_CMD})" tail "$__se_test_group" "$PWD" "$TEST_CMD"
+else
+  if [ -n "$MISSING_PM" ]; then
+    emit_block "test" "configured package manager ${MISSING_PM} is not available; install it or configure stop_checks.fast in TRELLIS_HOME"
+  fi
+  if [ -n "$TEST_CMD" ]; then
+    _se_plan_check test shell "test (${TEST_CMD})" tail test "$PWD" "$TEST_CMD"
+  fi
+  if [ -n "$PYTEST_CMD" ]; then
+    _se_plan_check test.pytest shell "test (${PYTEST_CMD})" tail test "$PWD" "$PYTEST_CMD"
+  fi
+  if [ -f "Cargo.toml" ] && command -v cargo >/dev/null 2>&1; then
+    _se_plan_check test.cargo argv "test (cargo test --quiet)" tail test "$PWD" cargo test --quiet
+  fi
+  if [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
+    _se_plan_check test.go argv "test (go test ./...)" tail test "$PWD" go test ./...
+  fi
 fi
 
 # _se_stop_key <fingerprint> — print the sha256 reuse key for the planned
@@ -714,7 +944,8 @@ fi
 #     reuse too (_se_env_moves_code): its text is not the code it selects.
 #   - every git-ignored input, recursively (_se_ignored_digest).
 _se_stop_key() {
-  local i prog n sum top checks="" progs=() words=() closure kind path roots pkgroots=() pkg="" pmcfg="" envsum ignored stats shells=()
+  local i prog n sum key_input top checks="" progs=() words=() closure kind path roots pkgroots=() pkg="" pmcfg="" envsum ignored stats shells=()
+  [ -z "$ESLINT_PROBE_NOTE" ] || return 1
   # perl polices the rest, so nothing may reach into perl itself: any perl
   # setting, or BASH_ENV, refuses before the first perl runs.
   for n in $(compgen -e); do
@@ -810,9 +1041,12 @@ _se_stop_key() {
   stats=$(_se_stat_lines "s:${BASH_SOURCE[0]}" "s:$__se_lib" "s:$__se_vr_lib" "s:$__se_pm_lib" \
     "s:$PROJECT_DIR/.trellis.json" "s:${HOME:-/nonexistent}/.pyenv/version" \
     "s:${RUSTUP_HOME:-${HOME:-/nonexistent}/.rustup}/settings.toml") || return 1
-  sum=$(printf '%s\n' 'trellis-stop-key v2' "fp $1" "cwd $(pwd -P) $PWD" "$checks" "$closure" "pkg $pkg" "pmcfg $pmcfg" \
-    "eslint $ESLINT_VERSION" "env ${envsum%% *}" "ignored $ignored" "$stats" | shasum -a 256) || return 1
-  sum=${sum%% *}
+  # Retain every trailing newline that the legacy printf hashed. Command
+  # substitution strips newlines, so remove a non-newline sentinel instead.
+  key_input=$(printf '%s\n' 'trellis-stop-key v2' "fp $1" "cwd $(pwd -P) $PWD" "$checks" "$closure" "pkg $pkg" "pmcfg $pmcfg" \
+    "eslint $ESLINT_VERSION" "env ${envsum%% *}" "ignored $ignored" "$stats" && printf '\001') || return 1
+  key_input=${key_input%?}
+  sum=$(_se_stop_sha256_text "$key_input") || return 1
   [ "${#sum}" -eq 64 ] || return 1
   printf '%s' "$sum"
 }
@@ -856,13 +1090,16 @@ _se_check_abort() {
     _se_kill_tree $live
     # shellcheck disable=SC2086
     wait $live 2>/dev/null
+    # wait reaps only the job shells; their signalled checks may still be
+    # shutting down (npm forwards TERM and waits for its child).
+    _se_kill_wait 5
   fi
   rm -rf "$__se_ck_out"
 }
 _se_run_checks() {
   local i j rc out
-  __se_ck_out=$(mktemp -d "${TMPDIR:-/tmp}/trellis-stop.XXXXXX") \
-    || emit_block "checks" "could not create a private directory for check output under ${TMPDIR:-/tmp}"
+  __se_ck_out=$(mktemp -d "$__se_tmp_root/trellis-stop.XXXXXX") \
+    || emit_block "checks" "could not create a private directory for check output under $__se_tmp_root"
   for (( i = 0; i < CHECKS_RUN; i++ )); do
     __se_ck_lead[i]=$i
     for (( j = 0; j < i; j++ )); do
@@ -905,7 +1142,7 @@ _se_run_checks() {
 
 if [ "$CHECKS_RUN" -gt 0 ]; then
   STOP_RECEIPT="" STOP_KEY="" STOP_FP=""
-  if [ -z "$VERIFICATION_UNAVAILABLE" ] && [ -z "$STOP_FAST_CMD" ] \
+  if [ "$__se_degraded" = 0 ] && [ "$__se_force_reverify" != 1 ] && [ -z "$VERIFICATION_UNAVAILABLE" ] && [ -z "$STOP_FAST_CMD" ] \
      && STOP_RECEIPT=$(_se_stop_receipt_file "$PROJECT_DIR" "$__se_harness") \
      && { [ -n "$__se_now" ] && STOP_FP="$__se_now" \
           || STOP_FP=$(_se_tree_fingerprint "$PROJECT_DIR" "${__se_sdir:+$__se_sdir/fp-cache}"); } \
@@ -920,7 +1157,9 @@ if [ "$CHECKS_RUN" -gt 0 ]; then
       # or another process did, means no receipt (the next Stop runs again).
       if STOP_FP2=$(_se_tree_fingerprint "$PROJECT_DIR" "${__se_sdir:+$__se_sdir/fp-cache}") \
          && [ "$(_se_stop_key "$STOP_FP2")" = "$STOP_KEY" ]; then
-        _se_stop_receipt_write "$STOP_RECEIPT" "$STOP_KEY" "$(
+        __se_receipt_target="$STOP_RECEIPT"
+        [ -z "$__se_defer_dir" ] || __se_receipt_target="$__se_defer_dir/receipt"
+        _se_stop_receipt_write "$__se_receipt_target" "$STOP_KEY" "$(
           printf 'harness %s\nwritten %s\n' "$__se_harness" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           for (( __se_i = 0; __se_i < CHECKS_RUN; __se_i++ )); do
             printf 'check %s %s\n' "${__se_ck_id[$__se_i]}" "${__se_ck_cmd[$__se_i]}"

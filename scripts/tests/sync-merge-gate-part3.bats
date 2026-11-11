@@ -99,13 +99,17 @@ build_installed_release() {
     "$SOURCE/core-rules/hooks" \
     "$SOURCE/core-rules/codex/hooks" \
     "$SOURCE/core-rules/githooks" \
+    "$SOURCE/core-rules/husky" \
     "$SOURCE/scripts"
   cp "$REPO/core-rules/CLAUDE.md" "$SOURCE/core-rules/CLAUDE.md"
+  mkdir -p "$SOURCE/core-rules/legacy-hooks"
+  cp -R "$REPO/core-rules/legacy-hooks/." "$SOURCE/core-rules/legacy-hooks/"
   cp "$REPO/core-rules/templates/claude-settings.local.json" \
     "$SOURCE/core-rules/templates/claude-settings.local.json"
   cp "$REPO/core-rules/templates/codex-hooks.local.json" \
     "$SOURCE/core-rules/templates/codex-hooks.local.json"
   cp "$REPO/core-rules/githooks/pre-push" "$SOURCE/core-rules/githooks/pre-push"
+  cp "$REPO/core-rules/husky/pre-push" "$SOURCE/core-rules/husky/pre-push"
   cp "$REPO/core-rules/hooks/"*.sh "$SOURCE/core-rules/hooks/"
   cp -R "$REPO/core-rules/hooks/lib" "$SOURCE/core-rules/hooks/"
   cp "$REPO/core-rules/codex/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"
@@ -468,6 +472,33 @@ remove_claude_owner_artifacts() {
   [ "$status" -eq 5 ] || { cat -v <<<"$output"; false; }
   grep -qF 'attachment relink failed (5)' <<<"$output"
   assert_terminal_safe "$output"
+}
+
+@test "merge sync repairs drift with readable previous husky hooks without caller payload" {
+  build_installed_release
+  create_project
+  mkdir -p "$PROJECT/.husky"
+  printf '#!/bin/sh\nexit 0\n' > "$PROJECT/.husky/pre-commit"
+  chmod 700 "$PROJECT/.husky/pre-commit"
+  git -C "$PROJECT" config --local core.hooksPath .husky
+  attach_project
+  make_movable_runner
+  OWNER="$(owner_path)"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$OWNER")"
+  rm -f "${managed:?}/pre-push"
+  run env -u TRELLIS_CONFIG -u TRELLIS_VERIFIED_PAYLOAD TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$managed/pre-push" ]
+  [ -f "$managed/pre-commit" ]
+
+  # Empty previous hooks force the scanner and exercise its verified payload.
+  rm -f "${PROJECT:?}/.husky/pre-commit" "${managed:?}/pre-commit" "${managed:?}/pre-push"
+  run env -u TRELLIS_CONFIG -u TRELLIS_VERIFIED_PAYLOAD TRELLIS_HOME="$HOME_PATH" \
+    bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$managed/pre-push" ]
+  [ ! -e "$managed/pre-commit" ]
 }
 
 @test "merge sync executes the immutable bundle after active carrier and library swap" {

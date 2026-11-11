@@ -747,9 +747,9 @@ NODE
   [ "$status" -eq 0 ]
 }
 
-# --- fail-open on a broken environment --------------------------------------
+# --- SC11: mandatory decisions block on broken infrastructure ----------------
 
-@test "failed numstat diff is advisory rather than a zero-line pass" {
+@test "T27 SC11: failed numstat diff blocks rather than passing or warning" {
   _config true 80 400
   _write_lines src/f.js 20
   git checkout -q -b feat/numstat-failure
@@ -757,10 +757,10 @@ NODE
 
   run _verdict_with_git_diff_failure --numstat
   [ "$status" -eq 0 ]
-  [[ "$output" == $'advisory\t'* ]] || { echo "$output"; false; }
+  [[ "$output" == $'block\t'* ]] || { echo "$output"; false; }
 }
 
-@test "failed git triad discovery is advisory rather than no-triad block" {
+@test "T27 SC11: failed git triad discovery blocks with an infrastructure reason" {
   _config true 80 400
   _write_lines src/f.js 200
   git checkout -q -b feat/triad-git-failure
@@ -768,10 +768,10 @@ NODE
 
   run _verdict_with_git_diff_failure --name-only
   [ "$status" -eq 0 ]
-  [[ "$output" == $'advisory\t'* ]] || { echo "$output"; false; }
+  [[ "$output" == $'block\t'* ]] || { echo "$output"; false; }
 }
 
-@test "failed grep triad discovery is advisory rather than no-triad block" {
+@test "T27 SC11: failed grep triad discovery blocks with an infrastructure reason" {
   _config true 80 400
   _write_lines src/f.js 200
   git checkout -q -b feat/triad-grep-failure
@@ -779,7 +779,7 @@ NODE
 
   run _verdict_with_triad_grep_failure
   [ "$status" -eq 0 ]
-  [[ "$output" == $'advisory\t'* ]] || { echo "$output"; false; }
+  [[ "$output" == $'block\t'* ]] || { echo "$output"; false; }
 }
 
 @test "failed grep triad discovery preserves status 2 without leaking producer stderr" {
@@ -796,14 +796,15 @@ NODE
   [ -z "$output" ] || { echo "$output"; false; }
 }
 
-@test "detached HEAD -> advisory (fail-open, exit 0)" {
+@test "T27 SC11: enabled pipeline with detached HEAD blocks uncertain branch identity" {
   _config true 80 400
   _write_lines src/f.js 200
   git checkout -q -b feat/detach
   git add -A && git commit -qm "feat: big" >/dev/null
   git checkout -q --detach HEAD
   run _gate
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *detached-or-unknown-branch* ]]
 }
 
 # --- determinism (SC2) -------------------------------------------------------
@@ -824,6 +825,165 @@ NODE
 # --- harness parity ----------------------------------------------------------
 
 # --- Stop-hook mode (the harness-facing early-warning) ----------------------
+
+@test "T27: strict Boolean input cannot be bypassed by a cached disabled-policy pass" {
+  local gate active cdir="$SANDBOX/codex/hooks"
+  mkdir -p "$cdir/lib"
+  cp "$CODEX_GATE" "$cdir/spec-gate.sh"
+  cp "$CORE" "$cdir/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
+  _config false
+  for gate in "$GATE" "$cdir/spec-gate.sh"; do
+    run bash "$gate" <<< '{}'
+    [ "$status" -eq 0 ]
+    for active in '"true"' '"false"' 'null' '1' '[]' '{}' '"true\\u0000\\n"'; do
+      run bash "$gate" <<< "{\"stop_hook_active\":$active}"
+      if [ "$gate" = "$GATE" ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+      printf '%s' "$output" | jq -e '.decision == "block" and (.reason | contains("stop_hook_active") and contains("Boolean"))' >/dev/null
+    done
+    run bash "$gate" <<< '{"stop_hook_active":true}'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+}
+
+_t27_no_jq_path() {
+  local bin="$1" cmd executable
+  mkdir -p "$bin"
+  for cmd in bash sh git cat dirname grep sed awk shasum tr cut sort head tail date id stat mktemp rm mkdir find wc readlink; do
+    executable=$(command -v "$cmd")
+    ln -s "$executable" "$bin/$cmd"
+  done
+}
+
+@test "T27 SC11: missing jq blocks both Stop transports even with warning-only degradation requested" {
+  local gate active cdir="$SANDBOX/codex/hooks" nojq="$SANDBOX/no-jq"
+  mkdir -p "$cdir/lib" "$nojq"
+  cp "$CODEX_GATE" "$cdir/spec-gate.sh"
+  cp "$CORE" "$cdir/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
+  _t27_no_jq_path "$nojq"
+  _config true
+  for gate in "$GATE" "$cdir/spec-gate.sh"; do
+    run env PATH="$nojq" TRELLIS_NO_JQ_DEGRADE=1 /bin/bash "$gate" <<< '{"stop_hook_active":true}'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    for active in '{}' '{"stop_hook_active":false}' '{"stop_hook_active":"true"}'; do
+      run env PATH="$nojq" TRELLIS_NO_JQ_DEGRADE=1 /bin/bash "$gate" <<< "$active"
+      if [ "$gate" = "$GATE" ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+      printf '%s' "$output" | jq -e '.decision == "block" and (.reason | contains("jq required but not found")) and (.reason | contains("must be a JSON Boolean") | not)' >/dev/null
+    done
+  done
+}
+
+@test "T27 R1 O1/L2: no-jq verdict and pre-push gate refuse with the missing tool named" {
+  local nojq="$SANDBOX/no-jq" gate cdir="$SANDBOX/cli-codex/hooks"
+  _t27_no_jq_path "$nojq"
+  _config false
+  # This reaches sg_verdict's nojq arm, not Stop's envelope guard.
+  run env PATH="$nojq" /bin/bash -c '. "$1"; sg_verdict "$2"' _ "$CORE" "$REPO_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == $'block\t'*'jq required but not found'* ]]
+  mkdir -p "$cdir/lib"
+  cp "$CODEX_GATE" "$cdir/spec-gate.sh"
+  cp "$CORE" "$cdir/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
+  for gate in "$GATE" "$cdir/spec-gate.sh"; do
+    run env PATH="$nojq" /bin/bash "$gate" --gate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'jq required but not found'* ]]
+  done
+}
+
+@test "T27 R1 O2/L1: non-Git state passes readable disabled policy but blocks enabled or unreadable policy" {
+  local nongit="$SANDBOX/not-git" enabled gate cdir="$SANDBOX/nongit-codex/hooks"
+  mkdir -p "$nongit" "$cdir/lib"
+  cp "$CODEX_GATE" "$cdir/spec-gate.sh"
+  cp "$CORE" "$cdir/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
+  for enabled in false true; do
+    _config "$enabled"
+    run bash -c '. "$1"; sg_verdict "$2"' _ "$CORE" "$nongit"
+    [ "$status" -eq 0 ]
+    if [ "$enabled" = false ]; then [[ "$output" == $'pass\t'* ]]; else [[ "$output" == $'block\t'*not-a-git-worktree* ]]; fi
+    for gate in "$GATE" "$cdir/spec-gate.sh"; do
+      run bash -c 'cd "$1" && printf "{}" | bash "$2"' _ "$nongit" "$gate"
+      if [ "$enabled" = false ]; then [ "$status" -eq 0 ]; [ -z "$output" ];
+      else
+        if [ "$gate" = "$GATE" ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+        printf '%s' "$output" | jq -e '.decision == "block" and (.reason | contains("not-a-git-worktree"))' >/dev/null
+      fi
+    done
+  done
+  rm -f "$TRELLIS_FIXTURE/trellis.config.json"
+  run bash -c '. "$1"; sg_verdict "$2"' _ "$CORE" "$nongit"
+  [[ "$output" == $'pass\t'* ]]
+  printf '{broken\n' > "$TRELLIS_FIXTURE/trellis.config.json"
+  run bash -c '. "$1"; sg_verdict "$2"' _ "$CORE" "$nongit"
+  [[ "$output" == $'block\t'*malformed* ]]
+}
+
+@test "T27 R1 O3: missing diff resolver is a block verdict, not an advisory" {
+  _config true
+  git checkout -q -b feature/no-resolver
+  run bash -c '. "$1"; sg_find_resolver() { return 1; }; sg_verdict "$2"' _ "$CORE" "$REPO_DIR"
+  [ "$status" -eq 0 ]
+  [[ "$output" == $'block\t'*'diff-base resolver missing'* ]]
+}
+
+@test "T27 R1: emergency audit runs before Boolean reentry on both shell transports" {
+  local gate cdir="$SANDBOX/audit-codex/hooks"
+  mkdir -p "$cdir/lib"
+  cp "$CODEX_GATE" "$cdir/spec-gate.sh"
+  cp "$CORE" "$cdir/lib/spec-gate-core.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
+  _config true
+  _write_lines src/emergency.js 500
+  git checkout -q -b feature/reentry-audit
+  git add -A && git commit -qm 'feature requiring emergency declaration'
+  for gate in "$GATE" "$cdir/spec-gate.sh"; do
+    rm -f "$REPO_DIR/.claude/spec-gate-audit.log"
+    run bash "$gate" --mark-emergency 'fixture-only emergency'
+    [ "$status" -eq 0 ]
+    run bash "$gate" <<< '{"stop_hook_active":true}'
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    grep -q emergency-override "$REPO_DIR/.claude/spec-gate-audit.log"
+  done
+}
+
+@test "T27: malformed or multiple Stop envelopes cannot reuse a cached pass" {
+  _config false
+  local input
+  run bash "$GATE" <<< '{}'
+  [ "$status" -eq 0 ]
+  for input in '{' '[]' '{} {}' '{"stop_hook_active":true} {}'; do
+    run bash "$GATE" <<< "$input"
+    [ "$status" -eq 2 ]
+    printf '%s' "$output" | jq -e '.decision == "block" and (.reason | contains("invalid Stop envelope"))' >/dev/null
+  done
+}
+
+@test "T27 SC11: enabled mandatory pipeline blocks broken diff and triad infrastructure" {
+  _config true 80 400
+  _write_lines src/f.js 200
+  git checkout -q -b feat/t27-infrastructure
+  git add -A && git commit -qm 'feat: policy fixture'
+  local kind
+  for kind in --numstat --name-only; do
+    run _verdict_with_git_diff_failure "$kind"
+    [ "$status" -eq 0 ]
+    [[ "$output" == $'block\t'* ]]
+  done
+  run _verdict_with_triad_grep_failure
+  [ "$status" -eq 0 ]
+  [[ "$output" == $'block\t'* ]]
+}
 
 @test "Stop-hook mode: over-floor no-spec -> block JSON + exit 2 (Claude)" {
   _config true 80 400

@@ -123,6 +123,73 @@ mutate_rules() {
   done
 }
 
+@test "parity: destructive generator rejects unknown fields and malformed shapes" {
+  local mutation
+  cp "$REPO/scripts/gen-guard-rules.py" "$RT/scripts/"
+  cp "$REPO/scripts/lib/guard-rules-runtime.bash" "$RT/scripts/lib/"
+  cp "$PARITY_RULES/destructive.json" "$PARITY_TMP/destructive.orig.json"
+  for mutation in '.future_bypass = true' '.rules[0].future_bypass = true' \
+    '.rules[6].message_by_engine.future_bypass = "message"' '.rules[10].exempt.future_bypass = true' \
+    '.semantics = null' '.rules = []' '.rules[0].match = "rm"' '.rules[0].unless = null' \
+    '.rules[0].ignore_case = "yes"' '.rules[10].exempt.engines = "claude"'; do
+    jq "$mutation" "$PARITY_TMP/destructive.orig.json" > "$PARITY_RULES/destructive.json"
+    run python3 -I "$RT/scripts/gen-guard-rules.py" --write --root "$RT"
+    [ "$status" -eq 1 ] || { echo "accepted $mutation: $output"; return 1; }
+    [[ "$output" == gen-guard-rules:* ]] || { echo "unhandled schema error $mutation: $output"; return 1; }
+    [[ "$output" != *Traceback* ]]
+  done
+}
+
+@test "parity: generator refuses unshared patterns and invalid identifier boundaries" {
+  local pattern boundary location filter
+  cp "$REPO/scripts/gen-guard-rules.py" "$RT/scripts/"
+  cp "$REPO/scripts/lib/guard-rules-runtime.bash" "$RT/scripts/lib/"
+  cp "$PARITY_RULES/destructive.json" "$PARITY_TMP/destructive.orig.json"
+  cp "$RT/core-rules/hooks/lib/guard-rules.sh" "$PARITY_TMP/claude.orig.sh"
+  cp "$RT/core-rules/codex/hooks/lib/guard-rules.sh" "$PARITY_TMP/codex.orig.sh"
+  for location in match unless identifier refusal; do
+    case $location in
+      match) filter='.rules[0].match[0] = $p' ;;
+      unless) filter='.rules[0].unless = [$p]' ;;
+      identifier) filter='.rules[10].exempt.identifier = $p' ;;
+      refusal) filter='.rules[10].exempt.refuse_if_line_matches[0] = $p' ;;
+    esac
+    for pattern in 'rm.*' '(?i)rm' 'rm\d' 'a*' 'x{256}' '[a-Z]x'; do
+      jq --arg p "$pattern" "$filter" "$PARITY_TMP/destructive.orig.json" > "$PARITY_RULES/destructive.json"
+      run python3 -I "$RT/scripts/gen-guard-rules.py" --write --root "$RT"
+      [ "$status" -eq 1 ] || { echo "generator accepted $pattern at $location: $output"; return 1; }
+      [[ "$output" == gen-guard-rules:* ]] && [[ "$output" != *Traceback* ]]
+      cmp "$RT/core-rules/hooks/lib/guard-rules.sh" "$PARITY_TMP/claude.orig.sh"
+      cmp "$RT/core-rules/codex/hooks/lib/guard-rules.sh" "$PARITY_TMP/codex.orig.sh"
+    done
+  done
+  for boundary in 'x' '[x][y]' '([x])' '[x]|[y]'; do
+    jq --arg p "$boundary" '.rules[10].exempt.identifier_boundary = $p' "$PARITY_TMP/destructive.orig.json" > "$PARITY_RULES/destructive.json"
+    run python3 -I "$RT/scripts/gen-guard-rules.py" --write --root "$RT"
+    [ "$status" -eq 1 ] || { echo "generator accepted boundary $boundary: $output"; return 1; }
+    [[ "$output" == gen-guard-rules:* ]] && [[ "$output" != *Traceback* ]]
+    cmp "$RT/core-rules/hooks/lib/guard-rules.sh" "$PARITY_TMP/claude.orig.sh"
+    cmp "$RT/core-rules/codex/hooks/lib/guard-rules.sh" "$PARITY_TMP/codex.orig.sh"
+  done
+  cp "$PARITY_TMP/destructive.orig.json" "$PARITY_RULES/destructive.json"
+  run python3 -I "$RT/scripts/gen-guard-rules.py" --write --root "$RT"
+  [ "$status" -eq 0 ]
+  cmp "$RT/core-rules/hooks/lib/guard-rules.sh" "$PARITY_TMP/claude.orig.sh"
+  cmp "$RT/core-rules/codex/hooks/lib/guard-rules.sh" "$PARITY_TMP/codex.orig.sh"
+}
+
+@test "parity: latent ignore-case exemption behavior in the generated Claude guard" {
+  # Synthetic future policy only: the shipped secrets-read exemption does NOT
+  # set ignore_case. Bash folds its identifier while today's native exemption
+  # does not; native's companion unit test records the corresponding denial.
+  mutate_rules destructive.json '(.rules[] | select(.id == "secrets-read") | .ignore_case) = true'
+  parity_destructive_tables claude
+  run parity_destructive_decision claude "$(claude_hook block-destructive)" \
+    'kubectl get secret tail -n NAMESPACES/n/SECRETS/s'
+  [ "$status" -eq 0 ]
+  [ "$output" = allow ]
+}
+
 @test "parity: a warn budget raised by one fails the escalation cases" {
   mutate_rules reread.json '.warn_budget.default += 1 | .warn_budget.by_level |= map_values(. + 1)'
   run parity_reread_run claude "$(claude_hook reread-guard)"

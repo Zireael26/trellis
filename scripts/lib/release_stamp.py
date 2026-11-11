@@ -214,7 +214,51 @@ def private_directory(path, create):
         os.chmod(path, 0o700)
 
 
-def check(home, release_dir):
+def memo_rows(release_dir, directory, name, entries, directory_info, stamp_info):
+    """Known paths and fingerprints from a verified check, for one shell only.
+
+    Ancestor anchors are checked for directory identity, not child membership;
+    release-tree and stamp entries retain their full schema-2 fingerprints.
+    Unsafe line-protocol names merely disable reuse, never the stamp check.
+    """
+    rows = []
+    seen = set()
+
+    def add(path, info, anchor=False):
+        if any(c in path for c in "\t\r\n"):
+            raise Refuse()
+        if path in seen:
+            return
+        seen.add(path)
+        if anchor:
+            if not stat.S_ISDIR(info.st_mode):
+                raise Refuse()
+            rows.append(("A", path, info.st_dev, info.st_ino, 0, 0, 0, info.st_mode))
+        else:
+            kind, mode, size, mtime, ctime, ino, dev = describe(info)
+            rows.append(("E", path, dev, ino, size, mtime, ctime, mode))
+
+    for rel in sorted(entries):
+        kind, mode, size, mtime, ctime, ino, dev = entries[rel]
+        path = release_dir if rel == "." else release_dir + "/" + rel
+        if any(c in path for c in "\t\r\n"):
+            raise Refuse()
+        seen.add(path)
+        rows.append(("E", path, dev, ino, size, mtime, ctime, mode))
+    if directory is not None:
+        add(directory, directory_info)
+        add(directory + "/" + name, stamp_info)
+    for path in (release_dir,) if directory is None else (release_dir, directory):
+        parent = os.path.dirname(path)
+        while parent not in seen:
+            add(parent, os.lstat(parent), anchor=True)
+            if parent == "/":
+                break
+            parent = os.path.dirname(parent)
+    return rows
+
+
+def check(home, release_dir, memo=False):
     directory, name, raw, entries = locate(home, release_dir)
     if not fine_ctime(entries):
         return 1
@@ -223,11 +267,23 @@ def check(home, release_dir):
         private_directory(directory, False)
         fd = open_directory(directory)
         try:
+            directory_info = os.fstat(fd)
             info, recorded = read_regular(name, fd, STAMP_LIMIT)
         finally:
             os.close(fd)
         if info.st_uid == os.geteuid() and stat.S_IMODE(info.st_mode) == 0o600 and recorded == expected:
-            print("hit")
+            rows = None
+            if memo:
+                try:
+                    rows = memo_rows(release_dir, directory, name, entries, directory_info, info)
+                except (OSError, Refuse):
+                    pass
+            if rows is None:
+                print("hit")
+            else:
+                print("hit\t%d" % len(rows))
+                for row in rows:
+                    print("\t".join(str(part) for part in row))
             return 0
     except (OSError, Refuse):
         pass
@@ -318,10 +374,16 @@ def write(home, release_dir, token):
 
 
 def main(argv):
-    if len(argv) == 3 and argv[0] == "check":
-        return check(argv[1], argv[2])
-    if len(argv) == 4 and argv[0] == "write":
-        return write(argv[1], argv[2], argv[3])
+    if len(argv) == 3 and argv[0] in ("check", "check-memo"):
+        return check(argv[1], argv[2], memo=argv[0] == "check-memo")
+    if len(argv) == 4 and argv[0] in ("write", "write-memo"):
+        result = write(argv[1], argv[2], argv[3])
+        if result == 0 and argv[0] == "write-memo":
+            try:
+                check(argv[1], argv[2], memo=True)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError, Refuse):
+                pass
+        return result
     return 2
 
 

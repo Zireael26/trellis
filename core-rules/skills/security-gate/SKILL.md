@@ -43,7 +43,7 @@ OSS-only engines. Pin versions for reproducibility — re-running an unchanged t
 | [Garak](https://github.com/NVIDIA/garak) | LLM-app probes (prompt injection / jailbreak / leakage) — `web-rag-llm` only | optional | `pipx install garak` |
 | [simonw/llm](https://github.com/simonw/llm) | Provider-neutral LLM driver | `0.31` (≥ 0.31) | `pipx install llm` |
 
-If a host tool is missing the corresponding scanner stage emits `warn` and is skipped — the run still produces a partial baseline so the rest of the pipeline keeps moving.
+If a host tool is missing the corresponding scanner stage emits `warn` and is skipped. The run still writes a baseline, but marks it incomplete and exits 2 (see Mode 1).
 
 ## Modes
 
@@ -53,7 +53,7 @@ If a host tool is missing the corresponding scanner stage emits `warn` and is sk
 bash core-rules/skills/security-gate/scripts/run-baseline.sh [<project-dir>] [--profile=<name>] [--no-llm]
 ```
 
-- `<project-dir>` — defaults to the harness project dir (`CLAUDE_PROJECT_DIR` / `CODEX_PROJECT_DIR`) or `git rev-parse --show-toplevel`.
+- `<project-dir>` — defaults to the harness project dir (`CLAUDE_PROJECT_DIR` / `CODEX_PROJECT_DIR`), otherwise the nearest ancestor containing `.git`, or the cwd if none exists. Discovery does not execute Git before the project boundary is known.
 - `--profile=<name>` — overrides `SECURITY_GATE_STACK_PROFILE`. Phase 1 supports `web-next`. Other profiles ship in Phases 4–5.
 - `--no-llm` — skips the triage and adversarial pass; emits raw findings only.
 
@@ -61,6 +61,8 @@ Outputs:
 
 - `<project>/audits/<YYYY-MM-DD>-baseline-<project>.md` — narrative.
 - `<project>/audits/<YYYY-MM-DD>-baseline-<project>.json` — schema v2 machine-readable output. `findings` is the current-tree gating set; `historical_findings` is separate history visibility with fingerprint-persisted dispositions. Diff mode dedupes against `findings` only.
+
+An engine completed only when its wrapper exited 0 and every line it wrote parses as a finding. A Semgrep report that parses but lists errors, such as a Timeout or a partial parse, did not complete: its findings are kept and the stage is `failed`, with the reason. Baseline does not run ShellCheck, so shell parse errors are incomplete too. Diff mode exempts shell parse errors only while its ShellCheck stage is enabled; the eligible file must be `.sh` or `.bash`, or have no `.` in its name and a sh/bash/dash/ksh shebang. A shebang on any other name (`evil.ts`, `evil.cgi`, `.foo`, `..ts`) earns no exemption. Garak completed only when its report (garak's own format, checked against 0.17.1) is one run (a start_run setup and init naming one run id, closed by a completion record for that run, after which only garak's digest may follow) in which every attempt UUID goes started (status 1) then evaluated (status 2), once each, with the same attempt identity, and every evaluated attempt carries at least one non-null detector score (a skipped or gracefully failed detector leaves `{}` or `[null]`, which is no coverage); a finding is a status-2 attempt with a detector score of 0.5 or more, garak's default threshold. OSV completed only when every tracked lockfile it reads, as diff mode names them, has a scan receipt. `engines` records each one as `ok`, `not_applicable`, `failed` (with the wrapper's exit) or `invalid_output`, and `complete` is true only when every engine is `ok` or `not_applicable`. Otherwise the narrative's verdict is **incomplete**, never clean, and `run-baseline.sh` exits 2. `not_applicable` comes only from the scanner's own proof that there was nothing to scan: today that is OSV when osv-scanner ran a failure-free no-source run (exit 128, no stdout, "0 Extract calls", no receipt, and no stderr beyond its progress lines and one "No package sources found"), and the tree tracks no recognized dependency input, including `*.cdx.json` and `*.deps.json` (a recognized input keeps the stage incomplete). The filename list is conservative but not a guarantee that every possible dependency format is recognized. In a baseline, any extraction, read or walk error osv-scanner reports leaves the stage incomplete with that line as the reason, whatever else it found. That reading of osv-scanner's output is qualified on 2.6.0, so a baseline requires osv-scanner 2.x: any other major version (or an unreadable `--version`) leaves the OSV stage incomplete with "unsupported osv-scanner version for diagnostic parsing". Diff mode is not version-gated; its coverage rests on receipts for the changed manifests. The narrative lists not-applicable engines in its Engines section and its verdict. A scanner that ran and failed is never `not_applicable`, and Garak on a `web-rag-llm` profile with no `SECURITY_GATE_GARAK_TARGET` is a configuration gap, so that baseline stays incomplete. Exit 0 means every engine completed or was not applicable; exit 1 means no valid baseline was written.
 
 Wall-clock: 10–60 min depending on project size and LLM provider.
 
@@ -72,6 +74,7 @@ bash core-rules/skills/security-gate/scripts/run-diff.sh [<project-dir>] [--rang
 
 - Scopes scanners to files changed in the range. Without `--range`, the process-gate diff-base resolver (`process-gate/scripts/lib/diff-base.sh`, spec 067) picks the base; an explicit `--range` is used verbatim. The verdict block carries one `diff-base:` receipt line naming the range.
 - Reads the latest `<audit dir>/*-baseline-<project>.json` **from the range base commit** (never the worktree) to skip already-known current-tree findings; a baseline the range adds or edits is not used. `--baseline=<path>` names a repository file instead (relative to the repo root, or absolute inside it). It is also read from the base, missing there means BLOCKED, and a change to it is a gate-config change. A path outside the repository is refused. New finding = `(tool, rule, file, line)` not present in `findings` (excluding baseline `dropped` entries); v2 `historical_findings` never suppress a new diff finding.
+- The verdict block carries one `Baseline:` row with the baseline's completeness, judged by `scripts/lib/baseline_state.py`, the one schema check diff mode, red-team mode and process-gate's adapter share. A baseline is complete only when its engine set is exactly the one its `profile` runs (Garak for `web-rag-llm`), each engine's status and exit agree (`ok`/0, `failed`/non-zero, `invalid_output`/0, `not_applicable` only for osv-scanner with exit 3), and `complete` is true. A baseline with `complete: false`, records that break that schema, or a file that does not parse BLOCKS on every path, an empty range included, because its findings do not stand for the whole tree; re-run `run-baseline.sh` until it completes and commit that baseline. A baseline written before 1.4.2 has no completion fields: it is used as before, and the row says `baseline completeness unknown (pre-1.4.2 baseline)`. process-gate's adapter fails a MERGEABLE or NEEDS CHANGES verdict that lacks one such complete-or-unknown row; it runs the validator under the same real python3 binary as every security-gate script (`sg_resolve_python` in `scripts/lib/engine.sh`: the binary a PATH shim such as pyenv's would run, asked once from `/` under `env -i` with only a sanitized PATH, HOME and LANG=C, so no inherited variable such as PYENV_VERSION or PYENV_HOOK_PATH can steer it; then required to be a native ELF or Mach-O executable outside the project, judged by filesystem identity rather than path spelling. A shim that cannot work in that minimal environment fails closed. The interpreter's own report of its path is trusted, as is any executable outside the project the caller puts on PATH) and accepts only the validator's exact `baseline-row: accepted` line, so an empty validator fails closed.
 - OSV runs only when a manifest changed in the range (deps changed). Gitleaks scopes via `--log-opts`.
 - Yarn Classic monorepos BLOCK member manifest changes that rely on an ancestor `yarn.lock`: it does not record workspace membership.
 - Emits a verdict block in the same shape as `process-gate`. Exit codes:
@@ -91,7 +94,7 @@ bash core-rules/skills/security-gate/scripts/run-redteam.sh <project-dir> <targe
 
 `target-class` ∈ `data-exfil | priv-esc | account-takeover | tenant-break | model-jailbreak`.
 
-Static chained-exploit reasoning. Loads retained entries from both `findings` and `historical_findings` in the latest baseline JSON, asks the LLM to compose its primitives into kill chains targeting the named class, and skips dropped dispositions. Writes a narrative — chains, reproduction PoCs, cheapest-break patches — to `<project>/audits/<YYYY-MM-DD>-redteam-<project>-<target-class>.md`.
+Static chained-exploit reasoning. Loads retained entries from both `findings` and `historical_findings` in the latest baseline JSON, asks the LLM to compose its primitives into kill chains targeting the named class, and skips dropped dispositions. It does not refuse an incomplete baseline, but prints its completeness, puts it in the narrative header and hands it to the reasoning input, so chains built on partial findings say so. Writes a narrative — chains, reproduction PoCs, cheapest-break patches — to `<project>/audits/<YYYY-MM-DD>-redteam-<project>-<target-class>.md`.
 
 **Per-run sign-off required.** Output is sensitive (concrete attacker steps). Interactive runs prompt for `yes`; non-interactive runs must pass `--confirm`. Full discipline + runbook: [`references/redteam-runbook.md`](references/redteam-runbook.md).
 
@@ -105,6 +108,12 @@ Static chained-exploit reasoning. Loads retained entries from both `findings` an
   "generated_at": "2026-05-08T12:34:56Z",
   "tools": {"semgrep": "1.142.0", "osv-scanner": "1.9.2", "gitleaks": "8.21.0"},
   "llm": {"provider": "anthropic", "model": "claude-opus-5"},
+  "complete": true,
+  "engines": {
+    "semgrep": {"status": "ok", "exit": 0},
+    "osv-scanner": {"status": "ok", "exit": 0},
+    "gitleaks": {"status": "ok", "exit": 0}
+  },
   "findings": [
     {
       "id": "semgrep-001",
@@ -166,7 +175,7 @@ The skill loads `security-gate-local/local.config.sh` from `<project>/.claude/sk
 
 ### Diff mode: config comes from the range base
 
-What follows is diff mode (`run-diff.sh`). `run-baseline.sh` still sources `local.config.sh` from the worktree; that is open backlog, and only the repo owner runs it.
+What follows is diff mode (`run-diff.sh`). Baseline reads the worktree's local config as allowlisted data, not shell; unsupported keys or syntax are refused with a path and line number.
 
 - **Base copies only.** Both `local.config.sh` files, root `.gitleaks.toml`, root `.gitleaksignore`, root `osv-scanner.toml` and the baseline (default or `--baseline`) are read from the range **base** (`git show <base>:<path>`), never the worktree. A file present only in the worktree is not loaded, and the output says so. The base is `A` for `A..B` and `merge-base(A, B)` for `A...B`. Any other range spec, or a base that does not resolve, is BLOCKED. Merge mode never derives a range: without `--range` it BLOCKS with `merge mode requires --range/--base`.
 - **Gitleaks** gets `--config` (the base `.gitleaks.toml`, else its built-in rules), `--gitleaks-ignore-path` (the base `.gitleaksignore`, else none) and `--source` set to the git dir, so no worktree copy is read. A base `.gitleaks.toml` that extends a file is BLOCKED, because gitleaks resolves that path against the invocation directory, which is the worktree. The check is a real TOML parse (`tomllib`). It matches keys case-insensitively, as gitleaks' config loader does, and covers quoted and dotted spellings (`[Extend] Path`, `"path"`, `extend.path`). Without `tomllib` (Python < 3.11) a base `.gitleaks.toml` cannot be verified and BLOCKS. `[extend] useDefault = true` is fine. `--gitleaks-ignore-path` needs a gitleaks recent enough to have it; an older binary fails the stage closed.
@@ -174,12 +183,12 @@ What follows is diff mode (`run-diff.sh`). `run-baseline.sh` still sources `loca
 - **Semgrep.** `.semgrepignore` is not loaded from the base. Diff mode passes explicit file targets, which semgrep does not filter through ignore files, so the file has no effect on this scan. A change to it is still treated as a config change.
 - **Engines** (semgrep, ShellCheck, gitleaks, osv-scanner, gh, python3, git) are absolute PATH binaries:
   - Relative PATH entries and PATH entries inside the project are removed.
-  - An engine whose real path is inside the project BLOCKS. Symlinks are followed with the system `readlink` at a fixed path, never one found on PATH.
-  - git is vetted before its first use.
+  - Every symlink component and script shebang interpreter must remain outside the project, including an `env` interpreter resolved on the sanitized PATH. The actual shebang interpreter must be native: a script shim could otherwise choose a project-owned executable from the cwd or environment. Unsafe engines and gate-invoked helpers are refused with their name and path. External engine scripts with native interpreters remain supported; a shim-backed script interpreter is refused.
+  - Symlinks are followed with the system `readlink` at a fixed path, never one found on PATH. Git and the other gate-invoked helpers are vetted before use.
 - **Functions and startup code.** Every script first purges inherited shell functions. The purge starts with an assignment, `POSIXLY_CORRECT=y`, which turns on POSIX mode, where `unset` is found before any function, so an exported `builtin`, `unset` or `set` function cannot intercept it. process-gate launches the gate, and the gate launches osv.sh, with `bash -p`, which imports no functions and reads no `BASH_ENV`.
 - **Python.** Every gate-owned Python helper runs isolated (`python3 -I`), so a module the range commits (a root `json.py`) is never imported. Each parser must also leave a completion marker; exit 0 alone is not completion, and a dedupe that did not complete BLOCKS.
 
-`local.config.sh` is parsed as **data**, not sourced. Allowed lines: blanks, comments, and `NAME=value` where `NAME` is `SECURITY_GATE_*` or `LLM_*`. `SECURITY_GATE_*` values are applied, and a plain assignment overrides the environment. `LLM_*` lines are validated but never applied in diff mode. `value` must be a literal: a bare word, `'single-quoted'`, `"double-quoted"` without `$`, `` ` `` or `\`, or exactly `"${NAME:-literal}"` naming its own key (the environment wins when set). Nothing else is ever expanded. A trailing `# comment` is fine. CRLF line endings are accepted (the CR is dropped), and a repeated key is last-wins. Anything else BLOCKS with `security-gate local config is not data`: functions, `export`, arrays, `source`, `$(…)` or backticks, `$NAME`, nested or other `${…}` forms, a default naming another key, non-ASCII outside quotes, or a `PATH` change.
+In diff mode, `local.config.sh` is parsed as **data**, not sourced. Allowed lines: blanks, comments, and `NAME=value` where `NAME` is `SECURITY_GATE_*` or `LLM_*`. `SECURITY_GATE_*` values are applied, and a plain assignment overrides the environment. `LLM_*` lines are validated but never applied in diff mode. `value` must be a literal: a bare word, `'single-quoted'`, `"double-quoted"` without `$`, `` ` `` or `\`, or exactly `"${NAME:-literal}"` naming its own key (the environment wins when set). Nothing else is ever expanded. A trailing `# comment` is fine. CRLF line endings are accepted (the CR is dropped), and a repeated key is last-wins. Anything else BLOCKS with `security-gate local config is not data`: functions, `export`, arrays, `source`, `$(…)` or backticks, `$NAME`, nested or other `${…}` forms, a default naming another key, non-ASCII outside quotes, or a `PATH` change.
 
 ### Gate-config changes need the owner at merge
 
@@ -204,6 +213,8 @@ A range that adds, edits or deletes any of these is scanned under the base copie
   - That PR carries a comment or non-dismissed review whose author is exactly the repository owner login (`gh repo view`) and which contains the line `gate-config-approved: <head SHA>`. The SHA must be exact lowercase hex of the repository's object format. A trailing CR is stripped, so CRLF bodies match. A full page of 100 comments or reviews is refused as possibly truncated.
 
   The matching line and its author are quoted in the output. No `gh`, an unreadable owner, zero or several open PRs for the head, an approval from anyone else, or an approval for another SHA all BLOCK. Every verdict, including the zero-commit early return, passes through this check. Only the repository owner posts that line; agents never post or script it. There is no environment override.
+
+Baseline applies the same literal-value grammar but accepts only the documented shared security-gate keys and `LLM_PROVIDER` / `LLM_MODEL`; unlike diff, it applies those LLM keys. Unknown keys, commands, substitutions and other shell syntax are refused before any config code can run. Its `SECURITY_GATE_AUDIT_DIR` must be relative, with no `..` path segment, and its physical directory must stay inside the project; symlinks resolving inside are allowed. A configured `SECURITY_GATE_PROJECT_NAME` must be one nonempty ASCII component containing only letters, digits, `.`, `_` or `-`, but not `.` or `..`. Without one, reports are named after the repository directory's basename as is (spaces, `+` and non-ASCII included), which is the name diff and red-team look up. Existing report symlinks are refused; reports replace their directory entries atomically so a hardlinked output cannot overwrite an outside file, and keep the umask-derived mode (0644 under umask 022).
 
 Minimal config:
 
@@ -236,7 +247,7 @@ Two limits are deliberate. The stage is **opt-in per project** (`SECURITY_GATE_S
 
 ## Provider neutrality
 
-All LLM calls go through `scripts/lib/llm-call.sh`, which honors `LLM_PROVIDER` and `LLM_MODEL`. The default backend is the OSS `llm` CLI ([simonw/llm](https://github.com/simonw/llm)) which supports Anthropic, OpenAI, Gemini, Ollama, llama.cpp, and others via plugins. A project may swap to direct provider APIs by replacing the wrapper — interface contract is `llm_call <prompt-path> <input-path> <out-path>`.
+All LLM calls go through `scripts/lib/llm-call.sh`, which honors `LLM_PROVIDER` and `LLM_MODEL`. The default backend is the OSS `llm` CLI ([simonw/llm](https://github.com/simonw/llm)) which supports Anthropic, OpenAI, Gemini, Ollama, llama.cpp, and others via plugins. A project may swap to direct provider APIs by replacing the wrapper — wrapper contract is `llm-call.sh <prompt-path> <input-path> <out-path> [project-dir]`; the optional project directory sets the executable trust boundary.
 
 Prompts live under `prompts/` as plain markdown. No model-specific syntax. Reproducible from CI, headless shell, or interactive session.
 

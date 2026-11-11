@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # post-compact-context.sh — Codex SessionStart (source=compact). Re-inject context-log.md.
 # Source: Trellis / core-rules / codex hooks.
 #

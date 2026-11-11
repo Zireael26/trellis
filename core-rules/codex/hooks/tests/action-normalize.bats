@@ -211,13 +211,15 @@ SH
 @test "Codex hooks source the one shared normalizer and never carry a copy" {
   local hook n=0
   # A function of the normalizer defined anywhere else is a copy that can drift.
-  run grep -rlE '^_ta_[a-z_]+\(\)' "$REPO_ROOT/core-rules" "$REPO_ROOT/scripts"
+  # The shipped native binaries embed the normalizer source at build time;
+  # T71's verify --source binds them to these exact bytes, so they cannot drift.
+  run grep -rlE --exclude-dir=native '^_ta_[a-z_]+\(\)' "$REPO_ROOT/core-rules" "$REPO_ROOT/scripts"
   [ "$status" -eq 0 ]
   [ "$output" = "$NORMALIZER" ] || { echo "$output"; false; }
   for hook in "$HOOKS_DIR"/*.sh; do
     grep -qE '_ta_(normalize_action|guard_fields)' "$hook" || continue
     grep -qF '__ta_lib="$__h_dir/lib/action-normalize.sh"' "$hook" || { echo "$hook"; return 1; }
-    grep -qxF '. "$__ta_lib"' "$hook" || { echo "$hook"; return 1; }
+    grep -qE '^\. "\$__ta_lib"($|[[:space:]]+\|\|)' "$hook" || { echo "$hook"; return 1; }
     n=$((n + 1))
   done
   [ "$n" -ge 5 ]

@@ -1,0 +1,18 @@
+{
+  "base_commit": "b5991781d89d24cf45498debea4910535b92c328",
+  "capture_commit": "b8b0a6ae0e04100cb37cb69f338e2bcb29825048",
+  "deltas": [
+    {
+      "after_sha256": "b94bb1bb57261b2ce9f3acb47e1ac123b36875136f3c263a6b3723461430f4b7",
+      "before_sha256": "91079185a8c7c0a7e0c179eb991af4b09570511276d4825b80d1974bc2c97989",
+      "description": "E6 guard-supervise.pl, timeout 30, onFailure block; retain merged fail-closed supervision.",
+      "file": "claude-settings.local.json",
+      "id": "T67",
+      "json_path": [
+        "hooks",
+        "UserPromptExpansion"
+      ]
+    }
+  ],
+  "schema_version": 1
+}

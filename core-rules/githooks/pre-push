@@ -409,9 +409,10 @@ fi
 # --- spec-gate (mandatory-pipeline, spec 006) — LOAD-BEARING teeth ---
 # Blocks a push whose branch carries over-floor feature code with no spec triad,
 # no size-capped /surgical declaration, and no emergency override. Deterministic
-# (git/fs state only) => equal on Claude + Codex. No-op unless policy enables
-# mandatory_pipeline. Locate the harness-neutral entrypoint: .claude first,
-# .agents fallback.
+# (git/fs state only) => equal on Claude + Codex. Readable disabled/absent
+# mandatory_pipeline policy is a no-op; unreadable policy (including missing jq)
+# fails closed rather than guessing it is disabled. Locate the harness-neutral
+# entrypoint: .claude first, .agents fallback.
 #
 # An attached checkout owns one immutable runtime anchor. Do not let a stale or
 # broken anchor silently downgrade its policy: it must resolve to a runtime

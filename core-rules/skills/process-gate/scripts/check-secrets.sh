@@ -157,7 +157,8 @@ is_allowed() {
   for entry in ${ALLOW_ENTRIES[@]+"${ALLOW_ENTRIES[@]}"}; do
     pat="${entry#*:}"
     epath="${entry%%:*}"
-    if [ "$file" = "$epath" ] && printf "%s" "$hit" | grep -qE "$pat"; then
+    if [[ "$entry" == *:* ]] && [ -n "$epath" ] && [ -n "$pat" ] &&
+       [ "$file" = "$epath" ] && printf "%s" "$hit" | grep -qE "$pat"; then
       return 0
     fi
   done
@@ -175,7 +176,51 @@ LOOKUP="$_cs_work/lookup"
 _cs_paths="$_cs_work/paths"
 umask 077
 # shellcheck disable=SC2154  # assigned inside the trap
-trap 'rc=$?; (cd "$_cs_work" && rm -f ./lookup ./paths ./err ./diff ./numstat); rmdir "$_cs_work"; exit "$rc"' EXIT
+trap 'rc=$?; rm -f "${_cs_work:?}/lookup" "${_cs_work:?}/paths" "${_cs_work:?}/err" "${_cs_work:?}/diff" "${_cs_work:?}/numstat" "${_cs_work:?}/raw" "${_cs_work:?}/blob" "${_cs_work:?}/hits"; rmdir "${_cs_work:?}"; exit "$rc"' EXIT
+
+# Binary diffs have no added-line hunks. Read the new Git blob, not the
+# working tree, and scan its bytes with the same patterns and allowlist.
+scan_binary_blob() {
+  local file="$1" expected="$2" rec count=0 meta="" raw_path=""
+  local old_mode new_mode old_oid new_oid status pattern name regex grep_rc hit
+  if ! git diff --raw --no-renames --no-abbrev -z "$RANGE" -- ":(top,literal)$file" > "$_cs_work/raw"; then
+    pg_log fail "Secrets (range=$RANGE): scan incomplete; cannot identify binary blob: $file"
+    return 1
+  fi
+  while IFS= read -r -d '' rec; do
+    count=$((count + 1))
+    case "$count" in 1) meta="$rec" ;; 2) raw_path="$rec" ;; esac
+  done < "$_cs_work/raw"
+  if [ "$count" -ne 2 ] || [ "$raw_path" != "$file" ]; then
+    pg_log fail "Secrets (range=$RANGE): scan incomplete; cannot identify binary blob: $file"
+    return 1
+  fi
+  IFS=' ' read -r old_mode new_mode old_oid new_oid status <<< "$meta"
+  if [[ ! "$old_mode" =~ ^:(000000|100644|100755|120000|160000)$ ]] ||
+     [[ ! "$new_mode" =~ ^(100644|100755|120000)$ ]] ||
+     [[ ! "$old_oid" =~ ^[a-f0-9]{40}([a-f0-9]{24})?$ ]] ||
+     [[ ! "$new_oid" =~ ^[a-f0-9]{40}([a-f0-9]{24})?$ ]] || [ "$status" != "$expected" ] ||
+     ! git cat-file blob "$new_oid" > "$_cs_work/blob"; then
+    pg_log fail "Secrets (range=$RANGE): scan incomplete; cannot read binary blob: $file"
+    return 1
+  fi
+  for pattern in "${PATTERNS[@]}"; do
+    name="${pattern%%|*}"; regex="${pattern#*|}"
+    grep_rc=0
+    LC_ALL=C grep -aoE -- "$regex" "$_cs_work/blob" > "$_cs_work/hits" || grep_rc=$?
+    case "$grep_rc" in
+      0|1) ;;
+      *) pg_log fail "Secrets (range=$RANGE): scan incomplete; cannot scan binary blob: $file"; return 1 ;;
+    esac
+    while IFS= read -r hit; do
+      [ -n "$hit" ] || continue
+      is_allowed "$file" "$hit" && continue
+      findings+=("$file:binary — $name")
+      worst=fail
+      break
+    done < "$_cs_work/hits"
+  done
+}
 
 # Invariant: diff failure must never be reported as an empty clean scan; unresolvable
 # range or misrouted repository aborts with a preflight failure. Capture exit status before lookup.
@@ -224,20 +269,24 @@ git diff --no-color --unified=0 "$RANGE" -- ":(top,literal)$file" \
   > "$_cs_work/diff" || _cs_lookup_pipeline_rc=$?
 if [ "$_cs_lookup_pipeline_rc" -eq 0 ]; then
   case "$_cs_change" in
-    A|M)
+    A|M|T)
+      # Binary diffs have headers but no text hunks. Check numstat even when
+      # the diff is non-empty; treating an opaque blob as clean skips secrets.
+      if ! git diff --no-renames --numstat -z "$RANGE" -- ":(top,literal)$file" > "$_cs_work/numstat"; then
+        pg_log fail "Secrets (range=$RANGE): scan incomplete; cannot classify $file"
+        exit 1
+      fi
+      _cs_binary=false
+      while IFS= read -r -d '' _cs_numstat; do
+        case "$_cs_numstat" in $'-\t-\t'*) _cs_binary=true ;; esac
+      done < "$_cs_work/numstat"
+      if $_cs_binary; then
+        scan_binary_blob "$file" "$_cs_change" || exit 1
+        continue
+      fi
       if [ ! -s "$_cs_work/diff" ]; then
-        # Metadata-only/empty-text changes still have diff headers. Only a
-        # positively identified binary path may lack a text diff here.
-        if ! git diff --numstat -z "$RANGE" -- ":(top,literal)$file" > "$_cs_work/numstat"; then
-          pg_log fail "Secrets (range=$RANGE): scan incomplete; cannot classify $file"
-          exit 1
-        fi
-        _cs_numstat=""
-        IFS= read -r -d '' _cs_numstat < "$_cs_work/numstat" || _cs_numstat=""
-        case "$_cs_numstat" in
-          $'-\t-\t'*) ;;
-          *) pg_log fail "Secrets (range=$RANGE): scan incomplete; added/modified path has no diff: $file"; exit 1 ;;
-        esac
+        pg_log fail "Secrets (range=$RANGE): scan incomplete; added/modified path has no diff: $file"
+        exit 1
       fi
       ;;
   esac

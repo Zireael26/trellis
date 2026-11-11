@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # slop-tripwire.sh — PostToolUse on Edit|Write|MultiEdit. Advisory only; never blocks.
 # Source: Trellis / core-rules / hooks.md
 #
@@ -120,7 +121,7 @@ __st_added_lines > "$PAIRS"
 [ -s "$PAIRS" ] || exit 0
 
 # slop_scan_text is grep-like: status 1 means the added lines are clean.
-FINDINGS=$(cut -f2- "$PAIRS" | slop_scan_text "$SLOP_LANG") || exit 0
+FINDINGS=$(slop_scan_text "$SLOP_LANG" --numbered < "$PAIRS") || exit 0
 [ -n "$FINDINGS" ] || exit 0
 
 TOTAL=$(printf '%s\n' "$FINDINGS" | grep -c '^')

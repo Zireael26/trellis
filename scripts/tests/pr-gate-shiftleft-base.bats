@@ -165,6 +165,54 @@ head_table() {
   done
 }
 
+@test "unquoted command substitution never redirects the PR-base cache" {
+  local hook n=0
+  for hook in "${HOOKS[@]}"; do
+    n=$((n + 1))
+    fixture "head-substitution-$n"
+    git -C "$SESSION" config branch.session.trellisPrBase preserved
+    invoke "$hook" 'gh pr create --base feature/a --title $(printf T) --head pr'
+    [ "$(git -C "$SESSION" config --get branch.session.trellisPrBase)" = preserved ]
+    [ -z "$(git -C "$SESSION" config --get branch.pr.trellisPrBase || true)" ]
+    [[ "$output" == *"advisory skipped"* ]]
+    # Single-quoted substitution is literal data and must not suppress caching.
+    invoke "$hook" "gh pr create --base feature/a --title '\$(printf T)' --head pr"
+    [ "$(git -C "$SESSION" config --get branch.pr.trellisPrBase)" = feature/a ]
+    [ "$(git -C "$SESSION" config --get branch.session.trellisPrBase)" = preserved ]
+    invoke "$hook" 'gh pr create --base main --head pr; echo $(printf T)'
+    [ "$(git -C "$SESSION" config --get branch.pr.trellisPrBase)" = main ]
+  done
+}
+
+process_substitution_cache() {
+  local hook="$1" name="$2" substitution command
+  fixture "$name"
+  git -C "$SESSION" config branch.session.trellisPrBase preserved
+  for substitution in '<(printf T)' '>(cat)'; do
+    command="gh pr create --base feature/a --body-file $substitution --head pr"
+    invoke "$hook" "$command"
+    [ "$(git -C "$SESSION" config --get branch.session.trellisPrBase)" = preserved ] || return 1
+    [ -z "$(git -C "$SESSION" config --get branch.pr.trellisPrBase || true)" ] || return 1
+    [[ "$output" == *"advisory skipped"* ]] || return 1
+  done
+  # Quoted text and ordinary redirection are not process substitutions.
+  invoke "$hook" "gh pr create --base feature/a --body-file '<(literal)' --head pr"
+  [ "$(git -C "$SESSION" config --get branch.pr.trellisPrBase)" = feature/a ] || return 1
+  invoke "$hook" 'gh pr create --base main --head pr < README.md'
+  [ "$(git -C "$SESSION" config --get branch.pr.trellisPrBase)" = main ] || return 1
+  invoke "$hook" 'gh pr create --base feature/a --head pr; cat <(printf T)'
+  [ "$(git -C "$SESSION" config --get branch.pr.trellisPrBase)" = feature/a ] || return 1
+  [ "$(git -C "$SESSION" config --get branch.session.trellisPrBase)" = preserved ]
+}
+
+@test "process substitution in PR flags cannot redirect Claude base cache" {
+  process_substitution_cache "${HOOKS[0]}" process-sub-claude
+}
+
+@test "process substitution in PR flags cannot redirect Codex base cache" {
+  process_substitution_cache "${HOOKS[1]}" process-sub-codex
+}
+
 @test "T12b: PR-base cache belongs to the resolved head branch" {
   local hook n=0
   for hook in "${HOOKS[@]}"; do

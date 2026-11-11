@@ -71,8 +71,47 @@ pg_validator_source() {
 # checkout under review, or inline code (`bash -c`, stdin) a validator started.
 # A program from the toolchain outside all of those, such as the bash program
 # behind a pyenv shim sourcing its own pyenv.d hooks, is left alone.
+# pg_validator_self_bash3: print this process's script path from its argv.
+# Bash 3.2 sets $0 to the shell itself while BASH_ENV runs, so the script is
+# read from `ps`. Inline code (-c) or stdin (-s, no script) prints nothing and
+# fails, which keeps the guard on. Unparseable argv also fails (guarded).
+pg_validator_self_bash3() {
+  local args i n tok candidate
+  local -a toks
+  args="$(ps -o args= -p "$$" 2>/dev/null)" || return 1
+  read -r -a toks <<< "$args"
+  n=${#toks[@]}
+  i=1
+  while [ "$i" -lt "$n" ]; do
+    tok=${toks[$i]}
+    case "$tok" in
+      --) i=$((i + 1)); break ;;
+      -o|+o|-O|+O) i=$((i + 2)) ;;
+      --*) i=$((i + 1)) ;;
+      [-+]*c*|[-+]*s*) return 1 ;;
+      [-+]*) i=$((i + 1)) ;;
+      *) break ;;
+    esac
+  done
+  candidate=""
+  while [ "$i" -lt "$n" ]; do
+    candidate="${candidate:+$candidate }${toks[$i]}"
+    [ -f "$candidate" ] && { printf '%s\n' "$candidate"; return 0; }
+    i=$((i + 1))
+  done
+  return 1
+}
+
 pg_validator_guarded() {
   local self="$0" phys root
+  # Inline code (`bash -c`) is guarded however bash was named, and so is a
+  # shell reading stdin, whose $0 is the shell itself.
+  [ -z "${BASH_EXECUTION_STRING+x}" ] || return 0
+  if [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+    self="$(pg_validator_self_bash3)" || return 0
+  elif [ "$self" = "${BASH:-}" ]; then
+    return 0
+  fi
   case "$self" in */*) ;; *) return 0 ;; esac
   [ -f "$self" ] || return 0
   phys="$(cd -P "${self%/*}" 2>/dev/null && pwd -P)" || return 0

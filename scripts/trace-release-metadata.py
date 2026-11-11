@@ -29,6 +29,7 @@ from gate_verdict import git
 
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = "scripts/tests/release-metadata-audit.json"
+STRACE_STRING_BOUND = 131072
 SUITE = re.compile(r"(?:scripts/tests|core-rules/(?:codex/)?hooks/tests|core-rules/skills/[^/]+/tests)/[A-Za-z0-9_.-]+\.bats")
 META = re.compile(r"(?:^|[/:])(core-rules/VERSION|VERSION|CHANGELOG\.md|docs/adr/[A-Za-z0-9_.-]+\.md)$")
 
@@ -221,7 +222,10 @@ def trace_suite(root: Path, directory: Path, suite: str, ordinal: int, tools: di
             shim.chmod(0o700)
         (sandbox / "bin/python3").symlink_to(real_py)
         env["PATH"] = str(sandbox / "bin") + os.pathsep + os.environ["PATH"]
-        command = [tools["strace"], "-f", "-yy", "-s", "4096", "-e", "trace=%file",
+        # %file strings are paths (PATH_MAX 4096), xattr values (64 KiB) and
+        # execve arguments, each at most MAX_ARG_STRLEN (128 KiB with its NUL):
+        # no string a traced call prints can reach this bound and be truncated.
+        command = [tools["strace"], "-f", "-yy", "-s", str(STRACE_STRING_BOUND), "-e", "trace=%file",
                    "-o", str(log), "--", tools["bats"], suite]
         with (directory / "logs/{:04d}.output".format(ordinal)).open("wb") as output:
             result = subprocess.run(command, cwd=root, env=env, stdout=output, stderr=subprocess.STDOUT)

@@ -4,13 +4,14 @@
 # a reuse is proven by a call count that did NOT grow, a rerun by one that did.
 
 load helpers
+load t28-submodule-fixture
 
 setup() {
   # Never read or write the operator's ~/.trellis or HOME.
   export HOME="$BATS_TEST_TMPDIR/home"
   export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
   mkdir -p "$HOME"
-  setup_project_dir
+  setup_project_dir "$BATS_TEST_TMPDIR"
   PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd -P)"
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
   # Fake tools live in an ignored directory inside the worktree: reuse binds
@@ -47,7 +48,9 @@ teardown() {
 
 # make_fake_tool <name> [version] [dir] — logs "<name> <args>" to calls,
 # replays <name>.out, exits with <name>.exit (default 0) after <name>.sleep
-# seconds. --version answers without logging.
+# seconds. --version answers without logging. With <name>.meet naming a peer,
+# it marks itself started, waits up to 60 seconds for the peer's mark, and
+# leaves <name>.met only if the peer started while it was still running.
 make_fake_tool() {
   # perl, not a shell script: reuse binds a #! node, python* or perl* program
   # and never parses shell.
@@ -59,6 +62,13 @@ if (@ARGV && \$ARGV[0] eq "--version") { print "\$n ${2:-1}\n"; exit 0 }
 sub slurp { open(my \$f, "<", \$_[0]) or return undef; local \$/; my \$c = <\$f>; \$c }
 open(my \$c, ">>", "\$s/calls") or die; print \$c "\$n @ARGV\n"; close \$c;
 if (defined(my \$t = slurp("\$s/\$n.sleep"))) { select(undef, undef, undef, \$t) }
+if (defined(my \$p = slurp("\$s/\$n.meet"))) {
+  open(my \$m, ">", "\$s/\$n.started"); close \$m;
+  for (1 .. 1200) {
+    if (-e "\$s/\$p.started") { open(my \$k, ">", "\$s/\$n.met"); close \$k; last }
+    select(undef, undef, undef, 0.05);
+  }
+}
 if (defined(my \$o = slurp("\$s/\$n.out"))) { print \$o }
 if (\$ENV{FAKE_DONE}) { open(my \$d, ">", "\$s/\$n.done"); close \$d }
 my \$e = slurp("\$s/\$n.exit") // 0;
@@ -120,6 +130,72 @@ receipt_files() {
   done
 }
 
+# Exercise the actual key assembler from each wrapper with independently
+# variable helper outputs. This isolates each ingredient from overlapping
+# real-world inputs; the end-to-end reuse tests below cover actual helpers.
+assert_key_ingredients() {
+  local h="$1" hook source_file field fields
+  hook="$(hook_for "$h")"
+  source_file="$BATS_TEST_TMPDIR/stop-key-$h.bash"
+  awk '/^_se_stop_key\(\) \{/ { found=1 } /^# _se_check_job / { exit } found { print }' "$hook" > "$source_file"
+  grep -q '^_se_stop_key() {' "$source_file" || { echo "$h: could not extract key function"; return 1; }
+  fields='fingerprint cwd-physical cwd-logical check-id check-form check-dir check-command check2-id check2-form check2-dir check2-command tool-closure shell-closure package-digest package-argument package-config eslint-version env ignored stat-wrapper stat-deps stat-receipt stat-pm stat-policy stat-pyenv stat-rustup'
+  [ -z "${T28_KEY_FIELD:-}" ] || fields="$T28_KEY_FIELD"
+  for field in $fields; do
+    run env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} bash "$HOOKS_DIR/tests/t28-stop-key-fixture.bash" \
+      "${hook%/*}/lib/deps.sh" "$source_file" "$PROJECT_DIR" "$BATS_TEST_TMPDIR/key-$h-$field" "$field"
+    [ "$status" -eq 0 ] || { echo "$h $field: $output"; return 1; }
+  done
+}
+
+@test "T28 Claude stop key binds every independently varied ingredient" { assert_key_ingredients claude; }
+@test "T28 Codex stop key binds every independently varied ingredient" { assert_key_ingredients codex; }
+
+assert_submodule_never_reuses() {
+  local harness="$1" setting="$2" lib digest_status
+  t28_seed_submodule "$PROJECT_DIR" "$setting"
+  seed_ruff
+  run_stop "$harness"; [ "$status" -eq 0 ] && [ "$(calls ruff)" -eq 1 ] || { echo "first pass: $output"; return 1; }
+  run_stop "$harness"; [ "$status" -eq 0 ] && reused && [ "$(calls ruff)" -eq 1 ] || { echo "clean gitlink did not reuse: $output"; return 1; }
+  t28_mutate_submodule "$PROJECT_DIR" "$setting"
+  lib="$HOOKS_DIR/lib/deps.sh"; [ "$harness" = claude ] || lib="$CODEX_HOOKS_DIR/lib/deps.sh"
+  run bash -c 'source "$1"; _se_ignored_digest "$2"' _ "$lib" "$PROJECT_DIR"
+  digest_status="$status"
+  run_stop "$harness"
+  [ "$status" -eq 0 ] && ! reused && [ "$(calls ruff)" -eq 2 ] || { echo "$harness/$setting: changed gitlink reused: $output"; return 1; }
+  [ "$digest_status" -ne 0 ] || { echo "$harness/$setting: ignored digest concealed changed gitlink"; return 1; }
+}
+@test "T28 submodule ignore dirty cannot reuse Claude pass" { assert_submodule_never_reuses claude dirty; }
+@test "T28 submodule ignore all cannot reuse Claude pass" { assert_submodule_never_reuses claude all; }
+@test "T28 submodule ignore all cannot reuse Claude pass after HEAD moves" { assert_submodule_never_reuses claude all-head; }
+@test "T28 diff ignoreSubmodules cannot reuse Claude pass" { assert_submodule_never_reuses claude config; }
+@test "T28 submodule ignore dirty cannot reuse Codex pass" { assert_submodule_never_reuses codex dirty; }
+@test "T28 submodule ignore all cannot reuse Codex pass" { assert_submodule_never_reuses codex all; }
+@test "T28 submodule ignore all cannot reuse Codex pass after HEAD moves" { assert_submodule_never_reuses codex all-head; }
+@test "T28 diff ignoreSubmodules cannot reuse Codex pass" { assert_submodule_never_reuses codex config; }
+
+assert_exec_mode_never_reuses() {
+  local harness="$1"
+  printf 'mode input\n' > "$PROJECT_DIR/mode-input"
+  chmod 644 "$PROJECT_DIR/mode-input"
+  git -C "$PROJECT_DIR" add mode-input && git -C "$PROJECT_DIR" commit -qm mode-input
+  git -C "$PROJECT_DIR" config core.fileMode false
+  seed_ruff
+  run_stop "$harness"; [ "$status" -eq 0 ] && [ "$(calls ruff)" -eq 1 ]
+  run_stop "$harness"; [ "$status" -eq 0 ] && reused && [ "$(calls ruff)" -eq 1 ]
+  chmod 755 "$PROJECT_DIR/mode-input"
+  run_stop "$harness"
+  [ "$status" -eq 0 ] && ! reused && [ "$(calls ruff)" -eq 2 ] || { echo "$harness: hidden exec-bit change reused: $output"; return 1; }
+}
+@test "T28 core.fileMode false cannot hide Claude exec-bit changes" { assert_exec_mode_never_reuses claude; }
+@test "T28 core.fileMode false cannot hide Codex exec-bit changes" { assert_exec_mode_never_reuses codex; }
+
+@test "reuse fixture keeps its project under the private Bats temp" {
+  local sandbox
+  sandbox="$(cd "$BATS_TEST_TMPDIR" && pwd -P)"
+  case "$PROJECT_DIR" in "$sandbox/"*) ;; *) echo "project escaped test temp: $PROJECT_DIR"; return 1 ;; esac
+}
+
 @test "an unchanged tree reuses the pass and says so (claude)" {
   seed_ruff
   run_stop claude
@@ -140,6 +216,178 @@ receipt_files() {
   [ "$status" -eq 0 ]
   [ "$(calls ruff)" -eq 1 ]
   printf '%s' "$output" | jq -e '.systemMessage | test("checks reused, not re-run")' >/dev/null
+}
+
+# Seed a genuinely reusable pass, then poison one session without changing
+# any check/key input. A degraded Stop must run the real checks again.
+assert_degraded_never_reuses_pass() {
+  local h="$1" hooks="$HOOKS_DIR" settings sid='t30-degraded-reuse' state key baseline
+  if [ "$h" = codex ]; then hooks="$CODEX_HOOKS_DIR"; settings="$PROJECT_DIR/.codex/hooks.json"
+  else settings="$PROJECT_DIR/.claude/settings.local.json"; fi
+  mkdir -p "${settings%/*}"
+  printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"x/turn-baseline.sh"}]}]}}\n' > "$settings"
+  printf '/%s\n' "${settings#"$PROJECT_DIR"/}" >> "$PROJECT_DIR/.git/info/exclude"
+  seed_ruff
+  run_stop "$h"; [ "$status" -eq 0 ] && [ "$(calls ruff)" -eq 1 ] || { echo "$h initial check: $output"; return 1; }
+  run_stop "$h"; [ "$status" -eq 0 ] && reused && [ "$(calls ruff)" -eq 1 ] || { echo "$h control pass did not reuse: $output"; return 1; }
+  baseline="$hooks/turn-baseline.sh"
+  run env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} PATH="$FAKE_BIN:$PATH" CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+    CODEX_PROJECT_DIR="$PROJECT_DIR" FAKE_STATE="$FAKE_STATE" bash "$baseline" <<<"{\"session_id\":\"$sid\"}"
+  [ "$status" -eq 0 ] || { echo "$h prompt failed: $output"; return 1; }
+  state="$(bash -c 'source "$1"; _se_turn_state_dir "$2"' _ "$hooks/lib/deps.sh" "$PROJECT_DIR")"
+  key="$(bash -c 'source "$1"; _se_state_key "" "$2"' _ "$hooks/lib/deps.sh" "$sid")"
+  mkdir "$state/.nonces.lock"
+  run env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} PATH="$FAKE_BIN:$PATH" CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+    CODEX_PROJECT_DIR="$PROJECT_DIR" FAKE_STATE="$FAKE_STATE" bash "$baseline" <<<"{\"session_id\":\"$sid\"}"
+  rmdir "$state/.nonces.lock"
+  [ "$status" -eq 0 ] && [ -n "$(find "$state" -name ".poison.$h.$key.*" -print -quit)" ] || { echo "$h failed to poison session: $output"; return 1; }
+  run env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} PATH="$FAKE_BIN:$PATH" CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+    CODEX_PROJECT_DIR="$PROJECT_DIR" PROCESS_GATE_NO_RECEIPTS=1 FAKE_STATE="$FAKE_STATE" bash "$(hook_for "$h")" <<<"{\"session_id\":\"$sid\"}"
+  [ "$status" -eq 0 ] && ! reused && [ "$(calls ruff)" -eq 2 ] || { echo "$h degraded Stop reused a prior pass: $output; calls=$(calls ruff)"; return 1; }
+}
+@test "T30 Claude degraded Stop cannot reuse an existing pass" { assert_degraded_never_reuses_pass claude; }
+@test "T30 Codex degraded Stop cannot reuse an existing pass" { assert_degraded_never_reuses_pass codex; }
+
+# Keep ordinary system tools but exclude shasum from PATH: this reproduces an
+# Arch-style host with sha256sum and no Perl shasum, including in the actual
+# Stop wrapper rather than testing the digest helper in isolation.
+stop_hash_path() {
+  local bin="$BATS_TEST_TMPDIR/stop-hash-bin" path name
+  mkdir -p "$bin"
+  ln -s "$(command -v git)" "$bin/git"
+  ln -s "$(command -v sha256sum)" "$bin/sha256sum"
+  for path in /usr/bin/* /bin/* /usr/sbin/* /sbin/*; do
+    [ -f "$path" ] && [ -x "$path" ] || continue
+    name=${path##*/}
+    case "$name" in shasum) continue ;; esac
+    [ -e "$bin/$name" ] || ln -s "$path" "$bin/$name"
+  done
+  printf '%s' "$bin"
+}
+assert_hash_portable_reuse() {
+  local h="$1" mode="$2" bin
+  command -v sha256sum >/dev/null 2>&1 || skip 'sha256sum is not installed'
+  seed_ruff
+  bin=$(stop_hash_path)
+  if [ "$mode" = malformed ]; then
+    command -v shasum >/dev/null 2>&1 || skip 'shasum is not installed'
+    rm -f "${bin:?}/sha256sum"
+    printf '#!/bin/sh\nprintf "%%064d\\n" 0 | tr 0 g\n' > "$bin/sha256sum"
+    chmod +x "$bin/sha256sum"
+    ln -s "$(command -v shasum)" "$bin/shasum"
+  else
+    [ ! -e "$bin/shasum" ] || { echo 'fixture accidentally exposes shasum'; return 1; }
+  fi
+  run_stop "$h" PATH="$FAKE_BIN:$bin"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(calls ruff)" -eq 1 ] || { echo "first run: $output"; return 1; }
+  run_stop "$h" PATH="$FAKE_BIN:$bin"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  reused || { echo "did not reuse: $output"; return 1; }
+  [ "$(calls ruff)" -eq 1 ] || { echo 'the verifier ran twice'; return 1; }
+}
+@test "sha256sum without shasum still reuses checks (claude)" { assert_hash_portable_reuse claude only; }
+@test "sha256sum without shasum still reuses checks (codex)" { assert_hash_portable_reuse codex only; }
+@test "malformed sha256sum falls back to shasum for reuse (claude)" { assert_hash_portable_reuse claude malformed; }
+@test "malformed sha256sum falls back to shasum for reuse (codex)" { assert_hash_portable_reuse codex malformed; }
+
+assert_malformed_hash_never_reuses() {
+  local h="$1" bin
+  command -v sha256sum >/dev/null 2>&1 || skip 'sha256sum is not installed'
+  seed_ruff
+  bin=$(stop_hash_path)
+  rm -f "${bin:?}/sha256sum"
+  printf '#!/bin/sh\nprintf "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\\n"\n' > "$bin/sha256sum"
+  chmod +x "$bin/sha256sum"
+  [ ! -e "$bin/shasum" ]
+  run_stop "$h" PATH="$FAKE_BIN:$bin"
+  [ "$status" -eq 0 ]
+  run_stop "$h" PATH="$FAKE_BIN:$bin"
+  [ "$status" -eq 0 ]
+  [ "$(calls ruff)" -eq 2 ] || { echo 'malformed digest incorrectly enabled reuse'; return 1; }
+  [ -z "$(receipt_files)" ] || { echo 'malformed digest wrote a pass receipt'; return 1; }
+}
+@test "malformed sha256sum without shasum cannot reuse (claude)" { assert_malformed_hash_never_reuses claude; }
+@test "malformed sha256sum without shasum cannot reuse (codex)" { assert_malformed_hash_never_reuses codex; }
+
+assert_arming_hint_is_not_inherited_by_checks() {
+  local h="$1"
+  seed_ruff
+  cat > "$FAKE_BIN/ruff" <<'EOF'
+#!/usr/bin/perl
+if (@ARGV && $ARGV[0] eq '--version') { print "ruff 1\n"; exit 0 }
+open(my $f, '>', "$ENV{FAKE_STATE}/arming-env") or die $!;
+print $f exists($ENV{TRELLIS_NATIVE_STOP_ARMING}) ? "present\n" : "absent\n";
+close $f;
+EOF
+  chmod +x "$FAKE_BIN/ruff"
+  run_stop "$h" TRELLIS_NATIVE_STOP_ARMING=unarmed
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(<"$FAKE_STATE/arming-env")" = absent ] || { echo 'native arming hint leaked into check'; return 1; }
+}
+@test "native arming hint does not reach Claude checks" { assert_arming_hint_is_not_inherited_by_checks claude; }
+@test "native arming hint does not reach Codex checks" { assert_arming_hint_is_not_inherited_by_checks codex; }
+
+assert_private_bridge_scratch() {
+  local h="$1" dir="$BATS_TEST_TMPDIR/bridge-stop-work"
+  mkdir "$dir"; printf 'keep\n' > "$dir/unrelated"
+  seed_ruff
+  cat > "$FAKE_BIN/ruff" <<EOF
+#!/usr/bin/perl
+if (@ARGV && \$ARGV[0] eq '--version') { print "ruff 1\\n"; exit 0 }
+opendir(my \$d, q{$dir}) or die \$!;
+my @names = readdir(\$d); closedir \$d;
+open(my \$o, '>', q{$FAKE_STATE/bridge-temp}) or die \$!;
+print \$o exists(\$ENV{TRELLIS_NATIVE_STOP_TMP_ROOT}) ? "leaked\\n" : "absent\\n";
+print \$o scalar(grep { /^trellis-stop-flags\\./ } @names), "\\n";
+close \$o;
+EOF
+  chmod +x "$FAKE_BIN/ruff"
+  run_stop "$h" TRELLIS_NATIVE_STOP_TMP_ROOT="$dir"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(<"$FAKE_STATE/bridge-temp")" = $'absent\n1' ] || { echo 'scratch not used privately'; return 1; }
+  [ "$(find "$dir" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" -eq 1 ] || { echo 'wrapper scratch was not removed'; return 1; }
+  [ "$(<"$dir/unrelated")" = keep ] || { echo 'unrelated scratch was removed'; return 1; }
+}
+@test "native bridge scratch is private and cleaned (claude)" { assert_private_bridge_scratch claude; }
+@test "native bridge scratch is private and cleaned (codex)" { assert_private_bridge_scratch codex; }
+
+@test "Stop digest rejects malformed 64-byte output from either hash tool" {
+  command -v sha256sum >/dev/null 2>&1 || skip 'sha256sum is not installed'
+  local bin lib
+  bin=$(stop_hash_path)
+  rm -f "${bin:?}/sha256sum"
+  printf '#!/bin/sh\nprintf "%%064d\\n" 0 | tr 0 g\n' > "$bin/sha256sum"
+  chmod +x "$bin/sha256sum"
+  for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
+    run env PATH="$bin" "$BASH" -c '. "$1"; _se_stop_sha256_text example' _ "$lib"
+    [ "$status" -ne 0 ] || { echo "accepted non-hex sha256sum in $lib"; return 1; }
+  done
+  cp "$bin/sha256sum" "$bin/shasum"
+  for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
+    run env PATH="$bin" "$BASH" -c '. "$1"; _se_stop_sha256_text example' _ "$lib"
+    [ "$status" -ne 0 ] || { echo "accepted non-hex shasum in $lib"; return 1; }
+  done
+}
+
+@test "Stop digest preserves exact multiline and trailing-newline bytes" {
+  command -v sha256sum >/dev/null 2>&1 || skip 'sha256sum is not installed'
+  command -v shasum >/dev/null 2>&1 || skip 'shasum is not installed'
+  local text expected bin lib
+  text=$'first line\nsecond line\n\n'
+  expected=$(printf '%s' "$text" | shasum -a 256); expected=${expected%% *}
+  bin=$(stop_hash_path)
+  for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
+    run env PATH="$bin" "$BASH" -c '. "$1"; _se_stop_sha256_text "$2"' _ "$lib" "$text"
+    [ "$status" -eq 0 ] && [ "$output" = "$expected" ] || { echo "sha256sum bytes: $output"; return 1; }
+  done
+  rm -f "${bin:?}/sha256sum"
+  printf '#!/bin/sh\nprintf "bad\\n"\n' > "$bin/sha256sum"; chmod +x "$bin/sha256sum"
+  ln -s "$(command -v shasum)" "$bin/shasum"
+  for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
+    run env PATH="$bin" "$BASH" -c '. "$1"; _se_stop_sha256_text "$2"' _ "$lib" "$text"
+    [ "$status" -eq 0 ] && [ "$output" = "$expected" ] || { echo "shasum fallback bytes: $output"; return 1; }
+  done
 }
 
 @test "receipt store is private: directory 0700, receipt 0600, one per worktree and harness" {
@@ -259,6 +507,97 @@ receipt_files() {
   [ -z "$(receipt_files)" ]
 }
 
+# Interrupt the real wrapper only after its active check has started. An
+# interrupted pass must not publish a reusable receipt; a subsequent complete
+# check must run, earn one, and then actually be reused.
+assert_interrupted_check_is_not_reused() {
+  local h="$1" hook prompt settings baseline pid i rc started=0
+  seed_ruff
+  cat > "$FAKE_BIN/ruff" <<'EOF'
+#!/usr/bin/perl
+if (@ARGV && $ARGV[0] eq '--version') { print "ruff 1\n"; exit 0 }
+open(my $c, '>>', "$ENV{FAKE_STATE}/calls") or die $!;
+print $c "ruff @ARGV\n"; close $c;
+unless (-e "$ENV{FAKE_STATE}/allow-finish") {
+  open(my $s, '>', "$ENV{FAKE_STATE}/started") or die $!; close $s;
+  while (1) { select(undef, undef, undef, 0.1) }
+}
+EOF
+  chmod +x "$FAKE_BIN/ruff"
+  hook="$(hook_for "$h")"
+  if [ "$h" = claude ]; then
+    settings=.claude/settings.local.json
+    prompt="$HOOKS_DIR/turn-baseline.sh"
+  else
+    settings=.codex/hooks.json
+    prompt="$CODEX_HOOKS_DIR/turn-baseline.sh"
+  fi
+  mkdir -p "$PROJECT_DIR/${settings%/*}"
+  printf '%s\n' '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"x/turn-baseline.sh"}]}]}}' > "$PROJECT_DIR/$settings"
+  printf '/%s\n' "$settings" >> "$PROJECT_DIR/.git/info/exclude"
+  run env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} PATH="$FAKE_BIN:$PATH" CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+    CODEX_PROJECT_DIR="$PROJECT_DIR" bash "$prompt" <<<'{"session_id":"interrupted"}'
+  [ "$status" -eq 0 ] || { echo "$h: prompt failed: $output"; return 1; }
+  baseline="$(find "$TRELLIS_HOME/state/turn-baseline" -type f -name "$h.*")"
+  [ -f "$baseline" ] || { echo "$h: prompt baseline missing"; return 1; }
+  printf 'changed after prompt\n' >> "$PROJECT_DIR/app.py"
+  env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} PATH="$FAKE_BIN:$PATH" CLAUDE_PROJECT_DIR="$PROJECT_DIR" \
+    CODEX_PROJECT_DIR="$PROJECT_DIR" PROCESS_GATE_NO_RECEIPTS=1 FAKE_STATE="$FAKE_STATE" \
+    bash "$hook" <<< '{"session_id":"interrupted"}' > "$BATS_TEST_TMPDIR/interrupted-output" 2>&1 &
+  pid=$!
+  for (( i = 0; i < 300; i++ )); do
+    if [ -e "$FAKE_STATE/started" ]; then started=1; break; fi
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if [ "$started" -ne 1 ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    echo "$h: active check did not start"
+    return 1
+  fi
+  kill -TERM "$pid" || { wait "$pid" 2>/dev/null || true; return 1; }
+  if wait "$pid"; then rc=0; else rc=$?; fi
+  [ "$rc" -eq 143 ] || { echo "$h: interrupted wrapper exit $rc"; return 1; }
+  [ "$(calls ruff)" -eq 1 ] || { echo "$h: interrupted check did not run"; return 1; }
+  [ -z "$(receipt_files)" ] || { echo "$h: interrupted check wrote a pass receipt"; return 1; }
+  [ ! -e "$baseline" ] || { echo "$h: interrupted check published a carry"; return 1; }
+  : > "$FAKE_STATE/allow-finish"
+  run_stop "$h"
+  [ "$status" -eq 0 ] || { echo "$h: retry failed: $output"; return 1; }
+  [ "$(calls ruff)" -eq 2 ] || { echo "$h: interrupted run was reused"; return 1; }
+  run_stop "$h"
+  [ "$status" -eq 0 ] && reused || { echo "$h: complete retry did not earn reuse: $output"; return 1; }
+  [ "$(calls ruff)" -eq 2 ]
+}
+
+@test "T28 interrupted active Claude check cannot earn a reusable receipt" {
+  assert_interrupted_check_is_not_reused claude
+}
+
+@test "T28 interrupted active Codex check cannot earn a reusable receipt" {
+  assert_interrupted_check_is_not_reused codex
+}
+
+assert_unsafe_receipt_refused() {
+  local harness="$1" defect="$2" dir="$TRELLIS_HOME/state/stop-receipts" file
+  seed_ruff
+  run_stop "$harness"; [ "$status" -eq 0 ] && [ "$(calls ruff)" -eq 1 ]
+  run_stop "$harness"; [ "$status" -eq 0 ] && reused && [ "$(calls ruff)" -eq 1 ] || { echo "initial reuse failed: $output"; return 1; }
+  file="$dir/$(receipt_files)"
+  case "$defect" in
+    hardlink) ln "$file" "$BATS_TEST_TMPDIR/receipt-link" ;;
+    directory) chmod 755 "$dir" ;;
+    *) return 1 ;;
+  esac
+  run_stop "$harness"
+  [ "$status" -eq 0 ] && ! reused && [ "$(calls ruff)" -eq 2 ] || { echo "$harness/$defect: unsafe store reused: $output"; return 1; }
+}
+@test "T28 Claude refuses a hard-linked pass receipt" { assert_unsafe_receipt_refused claude hardlink; }
+@test "T28 Codex refuses a hard-linked pass receipt" { assert_unsafe_receipt_refused codex hardlink; }
+@test "T28 Claude refuses a permissive receipt directory" { assert_unsafe_receipt_refused claude directory; }
+@test "T28 Codex refuses a permissive receipt directory" { assert_unsafe_receipt_refused codex directory; }
+
 @test "a receipt with group/other bits, a symlinked receipt or a wrong key is ignored" {
   seed_ruff
   run_stop claude
@@ -313,18 +652,40 @@ receipt_files() {
   [ "$status" -eq 1 ]
 }
 
+# The job shells die at once on TERM, but a check may shut down slowly (npm
+# forwards TERM and waits for its child). The hook returns only once every
+# signalled check has exited, so nothing is left even with no grace period.
+@test "a check that exits slowly on TERM is gone when the hook returns" {
+  local harness
+  seed_ruff
+  seed_npm_test
+  printf 1 > "$FAKE_STATE/ruff.exit"
+  printf 30 > "$FAKE_STATE/npm.sleep"
+  perl -0pi -e 's/^(my \(\$n, \$s\))/\$SIG{TERM} = sub { select(undef, undef, undef, 1.5); exit 143 };\n$1/m' "$FAKE_BIN/npm"
+  grep -q 'SIG{TERM}' "$FAKE_BIN/npm"
+  for harness in claude codex; do
+    run_stop "$harness" FAKE_DONE=1
+    if [ "$harness" = claude ]; then [ "$status" -eq 2 ]; else [ "$status" -eq 0 ]; fi
+    printf '%s' "$output" | grep -q 'lint (ruff)' || { echo "$harness: $output"; false; }
+    run pgrep -f "$FAKE_BIN/npm"
+    [ "$status" -eq 1 ] || { echo "$harness: npm outlived the hook: $output"; false; }
+    [ ! -e "$FAKE_STATE/npm.done" ]
+  done
+}
+
 @test "independent checks run concurrently" {
   seed_ruff
   seed_npm_test
-  printf 4 > "$FAKE_STATE/ruff.sleep"
-  printf 4 > "$FAKE_STATE/npm.sleep"
-  local start=$SECONDS
+  printf npm > "$FAKE_STATE/ruff.meet"
+  printf ruff > "$FAKE_STATE/npm.meet"
   run_stop claude
   [ "$status" -eq 0 ]
   [ "$(calls ruff)" -eq 1 ]
   [ "$(calls npm)" -eq 1 ]
-  # One after the other would take at least 8 seconds.
-  [ $((SECONDS - start)) -lt 8 ]
+  # Each saw the other start before it finished. One after the other, the
+  # first would wait out its 60 seconds alone and leave no mark.
+  [ -e "$FAKE_STATE/ruff.met" ]
+  [ -e "$FAKE_STATE/npm.met" ]
 }
 
 @test "a stop_checks.fast value in .trellis.json has no effect on the test step" {
@@ -1244,7 +1605,7 @@ shim_plus() {
   for e in "GOPATH=$BATS_TEST_TMPDIR" "GOCACHE=$BATS_TEST_TMPDIR" "GOMODCACHE=$BATS_TEST_TMPDIR" "GOWORK=off" \
            "GOTOOLCHAIN=local" "CARGO_HOME=$BATS_TEST_TMPDIR" "CARGO_TARGET_DIR=$BATS_TEST_TMPDIR" \
            "CARGO_ENCODED_RUSTFLAGS=-Cx" "RUSTDOCFLAGS=-Zx" "RUSTC_BOOTSTRAP=1" "GIT_SSH_COMMAND=ssh" "GIT_EDITOR=vim" \
-           "GIT_CONFIG_GLOBAL=$BATS_TEST_TMPDIR/gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_OPTIONAL_LOCKS=0; do
+           "GIT_CONFIG_GLOBAL=$BATS_TEST_TMPDIR/gitconfig" GIT_CONFIG_NOSYSTEM=1; do
     run_stop claude "$e"
     run_stop claude "$e"
     [ "$status" -eq 0 ]
@@ -1252,7 +1613,7 @@ shim_plus() {
     [ "$(calls ruff)" -eq "$n" ] || { echo "reused with $e"; false; }
   done
   # Display, targets and modes, bound by their text: reused.
-  for e in CARGO_TERM_COLOR=always GOOS=darwin GOPROXY=direct GIT_EDITOR=true GOOGLE_CLOUD_PROJECT=x; do
+  for e in CARGO_TERM_COLOR=always GOOS=darwin GOPROXY=direct GIT_EDITOR=true GOOGLE_CLOUD_PROJECT=x GIT_OPTIONAL_LOCKS=0; do
     run_stop claude "$e"
     run_stop claude "$e"
     [ "$status" -eq 0 ]
@@ -1445,6 +1806,42 @@ seed_toolchain() {
   done
 }
 
+_r2_l2_probe_reuse() {
+  local harness="$1"
+  printf 'node_modules/\n' > "$PROJECT_DIR/.gitignore"
+  printf 'export default [];\n' > "$PROJECT_DIR/eslint.config.js"
+  printf 'export const value = 1;\n' > "$PROJECT_DIR/app.js"
+  mkdir -p "$PROJECT_DIR/node_modules/.bin"
+  cat > "$PROJECT_DIR/node_modules/.bin/eslint" <<'EOF'
+#!/usr/bin/perl
+if (@ARGV && $ARGV[0] eq "--version") {
+  exit 9 if -e "$ENV{FAKE_STATE}/probe-fails";
+  print "eslint 9\n"; exit 0;
+}
+open(my $calls, ">>", "$ENV{FAKE_STATE}/calls") or die;
+print $calls "eslint @ARGV\n"; close $calls;
+EOF
+  chmod +x "$PROJECT_DIR/node_modules/.bin/eslint"
+  # Prove this precise local-tool fixture is actually eligible for reuse.
+  run_stop "$harness"; [ "$status" -eq 0 ]; [ "$(calls eslint)" -eq 1 ]
+  run_stop "$harness"; [ "$status" -eq 0 ]; reused; [ "$(calls eslint)" -eq 1 ]
+  # Only the external probe result changes. Without the refusal, the second
+  # broken-probe Stop reuses the first one's receipt under the empty version.
+  : > "$FAKE_STATE/probe-fails"
+  run_stop "$harness"; [ "$status" -eq 0 ]; [ "$(calls eslint)" -eq 2 ]
+  run_stop "$harness"; [ "$status" -eq 0 ]; [ "$(calls eslint)" -eq 3 ]
+  [[ "$output" != *'checks reused'* ]]
+  [[ "$output" == *'eslint version probe failed'* ]]
+}
+
+@test "R2 L2: Claude failed ESLint probes cannot reuse an otherwise reusable pass" {
+  _r2_l2_probe_reuse claude
+}
+
+@test "R2 L2: Codex failed ESLint probes cannot reuse an otherwise reusable pass" {
+  _r2_l2_probe_reuse codex
+}
+
 @test "tsc and eslint run from node_modules/.bin with the npx argv, and reuse" {
   local real_npx
   real_npx=$(command -v npx) || skip "npx is not installed"
@@ -1550,8 +1947,7 @@ EOF
       # An untracked in-worktree bridge to an outside directory, and an
       # ignored link through it: lexically inside, physically outside.
       chain) ln -s "$out" "$PROJECT_DIR/bridge"; ln -s bridge/input "$PROJECT_DIR/.alias" ;;
-      dotdot) ln -s "../${out##*/}/input" "$PROJECT_DIR/.up"
-              mv "$out" "${PROJECT_DIR%/*}/${out##*/}" && out="${PROJECT_DIR%/*}/${out##*/}" ;;
+      dotdot) ln -s "../${out##*/}/input" "$PROJECT_DIR/.up" ;;
       text) ln -s "$out/input" "$PROJECT_DIR/.text" ;;
       dangle) ln -s "$out/missing" "$PROJECT_DIR/.dangle" ;;
       git) ln -s .git/config "$PROJECT_DIR/.gitlink" ;;
@@ -1561,7 +1957,6 @@ EOF
     run_stop claude
     [ "$status" -eq 0 ] || { echo "$case_: $output"; false; }
     [ "$(calls ruff)" -eq 2 ] || { echo "$case_ was reused"; false; }
-    if [ "$case_" = dotdot ]; then mv "$out" "$BATS_TEST_TMPDIR/outside"; out="$BATS_TEST_TMPDIR/outside"; fi
   done
 }
 
@@ -1598,6 +1993,44 @@ EOF
     run_stop "$h"
     [ "$(calls ruff)" -eq 4 ] || { echo "$h: a retargeted chain was reused"; false; }
   done
+}
+
+_r3_l8_mutation_during_check() {
+  local harness="$1" receipt before after
+  printf 'initial = 1;\n' > "$PROJECT_DIR/flag-later.py"
+  git -C "$PROJECT_DIR" add flag-later.py
+  git -C "$PROJECT_DIR" commit -qm tracked
+  seed_ruff
+  cat > "$FAKE_BIN/ruff" <<'EOF'
+#!/usr/bin/perl
+if (@ARGV && $ARGV[0] eq "--version") { print "ruff 1\n"; exit 0 }
+open(my $calls, ">>", "$ENV{FAKE_STATE}/calls") or die;
+print $calls "ruff @ARGV\n"; close $calls;
+if (-e "$ENV{FAKE_STATE}/mutate-index") {
+  system("git", "update-index", "--assume-unchanged", "flag-later.py") == 0 or die;
+  open(my $f, ">>", "flag-later.py") or die; print $f "changed during check\n"; close $f;
+}
+EOF
+  chmod +x "$FAKE_BIN/ruff"
+  # Negative control: the exact fixture can earn and reuse a pass receipt.
+  run_stop "$harness"; [ "$status" -eq 0 ]; [ "$(calls ruff)" -eq 1 ]
+  run_stop "$harness"; [ "$status" -eq 0 ]; reused; [ "$(calls ruff)" -eq 1 ]
+  receipt="$TRELLIS_HOME/state/stop-receipts/$(receipt_files | head -1)"
+  before=$(shasum -a 256 "$receipt")
+  # Force a new check; it hides another edited file with an index flag.
+  : > "$FAKE_STATE/mutate-index"
+  printf 'x = 2\n' > "$PROJECT_DIR/app.py"
+  run_stop "$harness"; [ "$status" -eq 0 ]; [ "$(calls ruff)" -eq 2 ]
+  after=$(shasum -a 256 "$receipt")
+  [ "$after" = "$before" ] || { echo 'a hidden mid-check edit earned a new pass receipt'; false; }
+}
+
+@test "R3 L8: Claude index flag created by a check cannot earn a pass receipt" {
+  _r3_l8_mutation_during_check claude
+}
+
+@test "R3 L8: Codex index flag created by a check cannot earn a pass receipt" {
+  _r3_l8_mutation_during_check codex
 }
 
 @test "a tree that changes while the checks run earns no receipt" {

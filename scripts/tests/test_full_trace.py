@@ -311,7 +311,7 @@ class TraceTests(unittest.TestCase):
         (self.base / "fake.py").write_text('''import json, os, sys, time
 from pathlib import Path
 args = sys.argv[1:]
-assert args[:6] == ['-f', '-yy', '-s', '4096', '-e', 'trace=%file'], args
+assert args[:6] == ['-f', '-yy', '-s', '131072', '-e', 'trace=%file'], args
 log = Path(args[args.index('-o') + 1])
 base = log.parents[1]
 home, tmp, trellis = (Path(os.environ[key]) for key in ('HOME', 'TMPDIR', 'TRELLIS_HOME'))

@@ -584,6 +584,29 @@ run_guard_with_home() {
   [ ! -f "$STATE_DIR/$KEY.reads.tsv" ] || ! grep -qF -- "$f" "$STATE_DIR/$KEY.reads.tsv"
 }
 
+@test "143-stop explicit object failures without error never earn read credit" {
+  set_turn_epoch 1000
+  f="$PROJECT_DIR/object-failure.txt"; echo old >"$f"
+  local response
+  for response in '{"is_error":true}' '{"tool_use_error":"stale"}' '{"error":null,"is_error":true}'; do
+    run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" --argjson response "$response" \
+      '{transcript_path:$tp, tool_name:"Edit", tool_input:{file_path:$t}, tool_response:$response}')"
+    [ "$status" -eq 0 ]
+    [ ! -s "$STATE_DIR/$KEY.reads.tsv" ]
+  done
+  run_guard "$f"; run_guard "$f"; run_guard "$f"
+  [[ "$output" == *'"permissionDecision":"deny"'* ]]
+
+  # A successful object with failure-like source text must still earn credit.
+  run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" \
+    '{transcript_path:$tp, tool_name:"Edit", tool_input:{file_path:$t}, tool_response:{is_error:false,newString:"Error: ordinary code"}}')"
+  [ "$status" -eq 0 ]
+  run_guard "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -z "$stderr" ]
+}
+
 # =============================================================================
 # FIX-3 (DL-P5-09): MIXED NULLABILITY — stamp-turn gets a NULL transcript_path
 # (session_id ONLY) while guard/track get a POPULATED transcript_path with the
@@ -659,4 +682,13 @@ run_guard_with_home() {
     '{transcript_path: $tp, tool_input: {file_path: $t}}')"
   [ "$status" -eq 0 ]
   [[ "$output" != *deny* ]]        # never a block on an unmatchable path
+}
+
+@test "T50: shell and unknown tools cannot manufacture file-read credit" {
+  for tool in Bash exec_command mcp__read unknown_tool; do
+    run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg tool "$tool" --arg p "$PROJECT_DIR/file" \
+      '{transcript_path:$tp,tool_name:$tool,tool_input:{file_path:$p,command:"cat file"},tool_response:"ok"}')"
+    [ "$status" -eq 0 ]
+    [ ! -s "$STATE_DIR/$KEY.reads.tsv" ]
+  done
 }

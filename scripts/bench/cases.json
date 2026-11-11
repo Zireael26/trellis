@@ -1,0 +1,49 @@
+{
+  "schema": "trellis-bench-case-table/1",
+  "status": "candidate-not-frozen",
+  "hook_groups": {
+    "surfaces": ["claude", "claude R1", "claude R2", "codex"],
+    "tools": ["Read", "Bash", "Edit", "Write", "Grep", "Glob", "Skill", "MultiEdit"],
+    "phases": ["PreToolUse", "PostToolUse"],
+    "events": ["UserPromptSubmit", "Stop", "PreCompact", "UserPromptExpansion", "SessionEnd"]
+  },
+  "pi_tools": ["read", "bash", "edit", "write", "grep"],
+  "pi_handler_events": ["session_start", "agent_settled", "session_compact", "session_shutdown", "user_bash", "agent_before_settle", "before_agent_start", "input", "session_before_compact"],
+  "anchors": {
+    "T2": [
+      {"id":"launcher-version","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"launcher-help","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"launcher-show-config","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"launcher-heavy","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"session-start-claude","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"session-start-codex","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"git-switch","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"git-switch (hooks off)","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"git-checkout-file","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"git-checkout-file (hooks off)","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"git-worktree-add","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"git-worktree-add (hooks off)","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"attach-new-worktree","fixture_id":"unattached-linked-worktree","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"attach-current","fixture_id":"attached-checkout","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"launcher-show-config-multi-root","fixture_id":"two-attached-roots","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"git-switch-fast","fixture_id":"attached-checkout","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"pre-push-dispatcher","fixture_id":"deletion-ref","boundary_id":"managed-pre-push-deletion-no-battery","variant":"warm"}
+    ],
+    "T69": [
+      {"id":"pre-push-dispatcher-ordinary","fixture_id":"ordinary-push-sealed-noop-gates","boundary_id":"managed-pre-push-ordinary-no-battery","variant":"warm"}
+    ],
+    "T17": [
+      {"id":"git-switch-memo-miss","fixture_id":"attached-checkout","boundary_id":"installed-launcher-or-git","variant":"memo-miss"}
+    ],
+    "T48": [
+      {"id":"claude WorktreeCreate","fixture_id":"registered-shared-head-worktree","boundary_id":"claude-user-registered-callback","variant":"warm"}
+    ],
+    "T49": [
+      {"id":"claude WorktreeRemove","fixture_id":"registered-shared-head-worktree","boundary_id":"claude-user-registered-callback","variant":"warm"}
+    ],
+    "T59": [
+      {"id":"launcher-heavy-status","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"},
+      {"id":"launcher-heavy-check","fixture_id":"clean","boundary_id":"installed-launcher-or-git","variant":"warm"}
+    ]
+  }
+}

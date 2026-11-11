@@ -57,6 +57,24 @@ def read_regular(path):
         return source.read(), mode
 
 
+def verify_payload(relative):
+    recorded = os.path.join(payload, relative)
+    if (not payload or os.path.realpath(payload) != payload
+            or os.path.commonpath([payload, recorded]) != payload
+            or os.path.realpath(recorded) != recorded):
+        raise ValueError("payload file escapes recorded runtime")
+    content, source_mode = read_regular(recorded)
+    # release.json uses Git blob IDs, not a second owner/hash schema. Runtime
+    # JSON data has the same authenticity requirement as the linked entry.
+    record, _ = read_regular(os.path.join(os.path.dirname(payload), "release.json"))
+    rows = [e for e in json.loads(record)["tree"] if e["path"] == relative]
+    blob = ("blob %d\0" % len(content)).encode() + content
+    oid = hashlib.sha1(blob, usedforsecurity=False).hexdigest()  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
+    git_mode = "100755" if source_mode & 0o111 else "100644"
+    if not content or len(rows) != 1 or (rows[0]["mode"], rows[0]["oid"]) != (git_mode, oid):
+        raise ValueError("payload content hash or mode mismatch")
+
+
 def verify(relative):
     safe_parents(relative)
     matches = [e for e in owned if e["path"] == relative]
@@ -84,18 +102,8 @@ def verify(relative):
                 or os.path.commonpath([payload, recorded]) != payload
                 or os.path.realpath(recorded) != recorded or os.path.realpath(path) != recorded):
             raise ValueError("symlink escapes recorded payload file")
-        content, source_mode = read_regular(recorded)
-        # Symlink owners pin targets, not SHA-256. Authenticate their bytes
-        # against the existing sealed release's Git blob hash (no new schema).
-        # release.json records Git object IDs, so SHA-1 is format-mandated
-        # here, as in release-store.sh's own seal check.
-        record, _ = read_regular(os.path.join(os.path.dirname(payload), "release.json"))
-        rows = [e for e in json.loads(record)["tree"] if e["path"] == os.path.relpath(recorded, payload)]
-        blob = ("blob %d\0" % len(content)).encode() + content
-        oid = hashlib.sha1(blob, usedforsecurity=False).hexdigest()  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
-        git_mode = "100755" if source_mode & 0o111 else "100644"
-        if not content or len(rows) != 1 or (rows[0]["mode"], rows[0]["oid"]) != (git_mode, oid):
-            raise ValueError("payload content hash or mode mismatch")
+        # Symlink owners pin targets rather than content hashes.
+        verify_payload(os.path.relpath(recorded, payload))
     elif kind == "file":
         digest = entry.get("sha256", "")
         if not stat.S_ISREG(mode) or not isinstance(digest, str) or not re.fullmatch(r"[a-f0-9]{64}", digest):
@@ -116,4 +124,16 @@ for relative in paths:
                    if relative in deferred else str(error))
         print(f"{relative}: native Pi hook artifact missing or does not match owner — hooks not registered ({context})")
         failed = True
+# trellis.ts is the sole manifest-linked production module. Its shared rules
+# are loaded at runtime from the immutable payload, not linked under .pi or
+# statically imported as a second module. Removing their owner entries (there
+# normally are none) must not turn an unusable delivery into a healthy one.
+# Historical dispatcher-linked releases keep their pinned delivery contract.
+if ".pi/extensions/trellis.ts" in paths and not declared_by_payload(".pi/hooks/dispatch.sh"):
+    for relative in ("core-rules/hooks/rules/destructive.json", "core-rules/hooks/rules/reread.json"):
+        try:
+            verify_payload(relative)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            print(f".trellis/runtime/{relative}: native Pi hook artifact missing or does not match owner — hooks not registered ({error})")
+            failed = True
 sys.exit(1 if failed else 0)

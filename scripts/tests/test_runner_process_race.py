@@ -8,6 +8,7 @@ import io
 import os
 from pathlib import Path
 import signal
+import sys
 import tempfile
 import time
 import unittest
@@ -324,7 +325,13 @@ class SecondaryReadTests(unittest.TestCase):
             return -1 if mib[2] == PID else 0
         class Admitted(Exception):
             pass
+        # The test already mocks every libproc operation it reaches. On other
+        # platforms only, satisfy the admission availability check so the
+        # injected KERN_PROCARGS2 race reaches the same path as on macOS.
+        libproc_seam = (contextlib.nullcontext() if sys.platform == "darwin"
+                        else mock.patch.object(GATE, "_LIBPROC", object()))
         with tempfile.TemporaryDirectory(prefix="race-state-") as state_dir, \
+                libproc_seam, \
                 mock.patch.object(GATE, "process_table", return_value=table), \
                 mock.patch.object(GATE, "process_identity", return_value=(os.getpid(), 1000000)), \
                 mock.patch.object(GATE, "process_files", return_value=[]), \

@@ -150,7 +150,7 @@ dj_find_caches() {
   [ -n "${_HY_REGENERABLE_ALWAYS:-}" ] || . "$_DISK_JANITOR_LIB_DIR/hygiene-common.sh"
   # The lists travel in the environment so the walker's argv stays `- ROOT`.
   rows="$(DJ_REGENERABLE="$_HY_REGENERABLE_ALWAYS" DJ_BUILD_MARKERS="$_HY_DIST_BUILD_MARKERS" DJ_TARGET_MARKERS="$_HY_TARGET_MARKERS" \
-    python3 - "$proj" <<'PY'
+    python3 -I - "$proj" <<'PY'
 import ctypes
 import os
 import stat
@@ -460,15 +460,17 @@ dj_cache_is_stale() {
 # missing helper or failed/malformed process snapshot is unsafe to interpret as
 # idle and therefore fails closed as active.
 dj_build_active() {
-  local proj="$1"
+  local proj="$1" evidence status=0
   case "${DJ_BUILD_ACTIVE_OVERRIDE:-}" in
     1) return 0 ;;
     0) return 1 ;;
   esac
-  if "$_DISK_JANITOR_LIB_DIR/../check-process-liveness.sh" --build "$proj" >/dev/null 2>&1; then
-    return 1
-  fi
-  return 0
+  evidence="$("$_DISK_JANITOR_LIB_DIR/../check-process-liveness.sh" --build "$proj" 2>&1)" || status=$?
+  case "$status" in
+    0) return 1 ;;
+    1) return 0 ;;
+    *) printf 'disk-janitor: build liveness unknown for project=%s: %s\n' "$proj" "$evidence" >&2; return 0 ;;
+  esac
 }
 
 # ===========================================================================
@@ -599,7 +601,8 @@ dj_worktree_mtime() {
 
 # dj_worktree_clean <wt_path>
 #
-# Return 0 only when `git status --porcelain --ignored` is empty. A linked
+# Return 0 only when `git status --porcelain --ignored --untracked-files=all`
+# is empty, regardless of status.showUntrackedFiles. A linked
 # worktree removal destroys ignored files too, and an ignored path's basename is
 # never adequate proof that its contents are disposable: a credential, database,
 # or operator state can share any seemingly-artifact name. Auto-reap therefore
@@ -607,7 +610,7 @@ dj_worktree_mtime() {
 # tree carrying any residual local state stays an explicit operator action.
 dj_worktree_clean() {
   local wt="$1" status
-  status="$(git -C "$wt" status --porcelain --ignored 2>/dev/null || echo 'ERR')"
+  status="$(git -C "$wt" status --porcelain --ignored --untracked-files=all 2>/dev/null || echo 'ERR')"
   [ -z "$status" ]
 }
 
@@ -619,7 +622,7 @@ dj_worktree_clean() {
 # dj_worktree_clean's no-local-content predicate immediately afterward.
 dj_worktree_porcelain_clean() {
   local wt="$1" status
-  status="$(git -C "$wt" status --porcelain 2>/dev/null || echo 'ERR')"
+  status="$(git -C "$wt" status --porcelain --untracked-files=all 2>/dev/null || echo 'ERR')"
   [ -z "$status" ]
 }
 
@@ -1066,7 +1069,7 @@ dj_find_release_staging() {
     echo "dj_find_release_staging: python3 with descriptor-relative filesystem APIs is required" >&2
     return 1
   }
-  python3 - "$releases" <<'PY'
+  python3 -I - "$releases" <<'PY'
 import os
 import re
 import stat
@@ -1313,7 +1316,7 @@ dj_release_staging_owner_state() {
     printf 'owner liveness could not be determined (python3 unavailable)'
     return 2
   }
-  process_state="$("$python_bin" - "$pid" 2>/dev/null <<'PY'
+  process_state="$("$python_bin" -I - "$pid" 2>/dev/null <<'PY'
 import os
 import sys
 
@@ -1381,7 +1384,7 @@ dj_remove_release_staging_safely() {
   }
   # The Darwin birth reader travels as an argument, not as a file or an
   # import: this sink must not read an operator- or project-owned path.
-  python3 - "$releases" "$snapshot" "$version" "$ttl_days" \
+  python3 -I - "$releases" "$snapshot" "$version" "$ttl_days" \
     "$expected_device" "$expected_inode" "$(trellis_process_birth_python)" <<'PY'
 import errno
 import json
@@ -1727,20 +1730,24 @@ PY
 # return 0 (UNSCOPED — BAD: a task writes a `.next/**`-class output without a
 # `!.next/cache/**` negation, so turbo caches the dev/cache dirs → unbounded
 # growth). return 1 if the file is absent, has no turbo tasks, or every
-# offending output is already negated. Prints NOTHING — status via return only.
+# offending output is already negated. Return 2 with a diagnostic on stderr if
+# jq is unavailable or cannot inspect the file. The check is advisory.
 #
 # NOTE the inverted convention: 0 = problem found. Supports both the modern
 # `.tasks` and legacy `.pipeline` turbo schemas. Pure jq.
 dj_turbo_outputs_unscoped() {
   local turbo_json="$1"
   [ -f "$turbo_json" ] || return 1
-  command -v jq >/dev/null 2>&1 || return 1
+  if ! command -v jq >/dev/null 2>&1; then
+    printf 'could not check %s: jq unavailable\n' "$turbo_json" >&2
+    return 2
+  fi
 
   # For each task: does outputs[] contain a `.next/**`-class glob while LACKING
   # the `!.next/cache/**` negation? `any` over tasks → exit 0 from jq when true.
   # We feed jq's boolean back through the shell: jq prints "true"/"false".
   local verdict
-  verdict="$(jq -r '
+  if verdict="$(jq -r '
     (.tasks // .pipeline // {})
     | to_entries
     | map(.value.outputs // [])
@@ -1752,9 +1759,13 @@ dj_turbo_outputs_unscoped() {
             ($outs | any(. == "!.next/cache/**") | not)
           )
       )
-  ' "$turbo_json" 2>/dev/null || echo 'false')"
-
-  [ "$verdict" = "true" ]
+  ' "$turbo_json" 2>&1)"; then
+    case "$verdict" in true) return 0 ;; false) return 1 ;; esac
+    printf 'could not check %s: unexpected jq result\n' "$turbo_json" >&2
+  else
+    printf 'could not check %s: %s\n' "$turbo_json" "${verdict//$'\n'/; }" >&2
+  fi
+  return 2
 }
 
 # dj_turbo_fix_hint
@@ -1928,7 +1939,7 @@ dj_remove_cache_tree_safely() {
   target_dev="${target_identity%%:*}"
   target_inode="${target_identity#*:}"
 
-  python3 - "$root" "$target" "$root_dev" "$root_inode" "$target_dev" "$target_inode" <<'PY'
+  python3 -I - "$root" "$target" "$root_dev" "$root_inode" "$target_dev" "$target_inode" <<'PY'
 import ctypes
 import os
 import stat
@@ -2370,9 +2381,14 @@ dj_reap_phantom_worktree() {
 # when the directory or any record cannot be read or parsed: the caller must
 # then treat every pi entry as owned.
 dj_pi_owner_paths() {
-  local dir="$1/state/attachments" out="$2" f
+  local home="$1" state="$1/state" dir="$1/state/attachments" out="$2" f
   local -a records=()
   : >"$out" || return 1
+  # Only an accessible parent can prove that a missing child is absent. A
+  # failed stat beneath an unsearchable state directory is not an empty set.
+  [ -d "$home" ] && [ -r "$home" ] && [ -x "$home" ] || return 1
+  [ -e "$state" ] || [ -L "$state" ] || return 0
+  [ -d "$state" ] && [ -r "$state" ] && [ -x "$state" ] || return 1
   [ -e "$dir" ] || [ -L "$dir" ] || return 0
   [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ] || return 1
   for f in "$dir"/*/*.json; do
@@ -2450,7 +2466,7 @@ dj_file_bytes() {
 # argument means the owner records could not be read.
 dj_pi_entry_verdict() {
   local entry="$1" ttl="$2" owners="$3" snapshot="$4" spill_ttl="$5" spill_max="$6"
-  local real kind=pi-temp why="" line gitdir rc reason size
+  local real kind=pi-temp why="" line gitdir parent_gitdir parent_dir rc reason size
   real="$(dj__abspath "$entry")"
   if [ -L "$entry" ]; then
     printf 'skip\t%s\ta symlink; never listed\n' "$kind"
@@ -2498,14 +2514,26 @@ dj_pi_entry_verdict() {
       printf 'candidate\t%s\tunreadable .git file; registration unknown\n' "$kind"
       return 0
     fi
-    if [ -d "${gitdir%/worktrees/*}" ]; then
-      if dj_pi_listed "${gitdir%/worktrees/*}" "$real"; then rc=0; else rc=$?; fi
-    else
+    parent_gitdir="${gitdir%/worktrees/*}"
+    parent_dir="${parent_gitdir%/*}"
+    [ -n "$parent_dir" ] || parent_dir=/
+    if [ -d "$parent_gitdir" ]; then
+      if dj_pi_listed "$parent_gitdir" "$real"; then rc=0; else rc=$?; fi
+    elif [ -d "$parent_dir" ] && [ -r "$parent_dir" ] && [ -x "$parent_dir" ] &&
+        python3 -I -c 'import errno, os, sys
+try:
+    os.lstat(sys.argv[1])
+except OSError as exc:
+    sys.exit(0 if exc.errno == errno.ENOENT else 1)
+sys.exit(1)' "$parent_gitdir" 2>/dev/null; then
+      # Only a definite ENOENT under an accessible parent proves absence.
       rc=1
+    else
+      rc=2
     fi
     case "$rc" in
       0) printf 'skip\t%s\tregistered with its parent repository\n' "$kind"; return 0 ;;
-      2) printf 'candidate\t%s\tparent repository could not be queried\n' "$kind"; return 0 ;;
+      2) printf 'candidate\t%s\tparent repository could not be checked: %q\n' "$kind" "${gitdir%/worktrees/*}"; return 0 ;;
     esac
     why="orphan worktree (no repository registers it, no owner record)"
   elif [ ! -L "$entry" ] && [ -d "$entry/.git" ]; then

@@ -116,6 +116,8 @@ build_installed_release() {
     "$SOURCE/core-rules/skills/process-gate/scripts/lib" \
     "$SOURCE/scripts"
   cp "$REPO/core-rules/CLAUDE.md" "$SOURCE/core-rules/CLAUDE.md"
+  mkdir -p "$SOURCE/core-rules/legacy-hooks"
+  cp -R "$REPO/core-rules/legacy-hooks/." "$SOURCE/core-rules/legacy-hooks/"
   cp "$REPO/core-rules/templates/claude-settings.local.json" \
     "$SOURCE/core-rules/templates/claude-settings.local.json"
   cp "$REPO/core-rules/templates/codex-hooks.local.json" \
@@ -127,6 +129,8 @@ build_installed_release() {
     "$SOURCE/core-rules/skills/process-gate/scripts/lib/"
   cp "$REPO/core-rules/hooks/"*.sh "$SOURCE/core-rules/hooks/"
   cp -R "$REPO/core-rules/hooks/lib" "$SOURCE/core-rules/hooks/"
+  # The sole Pi entry loads shared rule data from the immutable runtime.
+  cp -R "$REPO/core-rules/hooks/rules" "$SOURCE/core-rules/hooks/"
   cp "$REPO/core-rules/codex/hooks/"*.sh "$SOURCE/core-rules/codex/hooks/"
   cp -R "$REPO/core-rules/codex/hooks/lib" "$SOURCE/core-rules/codex/hooks/"
   cp "$REPO/scripts/attach-project.sh" "$REPO/scripts/seed-inheritance-symlinks.sh" \
@@ -162,11 +166,7 @@ build_installed_release() {
     },
     "pi": {
       "links": [
-        {"source": "core-rules/CLAUDE.md", "destination": ".pi/rules/trellis.md"},
-        {"source": "core-rules/pi/extensions/trellis.ts", "destination": ".pi/extensions/trellis.ts"},
-        {"source": "core-rules/pi/hooks/dispatch.sh", "destination": ".pi/hooks/dispatch.sh", "executable": true},
-        {"source_children": "core-rules/codex/hooks", "destination_dir": ".pi/hooks", "entry_type": "file", "suffix": ".sh", "executable": true},
-        {"source_children": "core-rules/codex/hooks/lib", "destination_dir": ".pi/hooks/lib", "entry_type": "file", "suffix": ".sh", "executable": true}
+        {"source": "core-rules/pi/extensions/trellis.ts", "destination": ".pi/extensions/trellis.ts"}
       ],
       "render": []
     },
@@ -453,9 +453,15 @@ donor_target_absent() {
   grep -qF 'Selected rows: 1' <<<"$output"
   grep -qF "verified: installed immutable attachment $VERSION for pi" <<<"$output"
   grep -qF 'verified=1 failed=0 report-only=0' <<<"$output"
-  [ -L "$PI_PROJECT/.pi/rules/trellis.md" ]
+  [ -L "$PI_PROJECT/.agents/rules/trellis.md" ]
   [ -L "$PI_PROJECT/.pi/extensions/trellis.ts" ]
-  [ -L "$PI_PROJECT/.pi/hooks/dispatch.sh" ]
+  [ "$(find "$PI_PROJECT/.pi/extensions" -type l | wc -l | tr -d ' ')" -eq 1 ]
+  [ ! -e "$PI_PROJECT/.pi/rules" ]
+  [ ! -e "$PI_PROJECT/.pi/hooks" ]
+  [ ! -L "$PI_PROJECT/.pi/hooks" ]
+  [ ! -e "$PI_PROJECT/.trellis/runtime/core-rules/pi/extensions/hook-runtime.ts" ]
+  [ -s "$PI_PROJECT/.trellis/runtime/core-rules/hooks/rules/destructive.json" ]
+  [ -s "$PI_PROJECT/.trellis/runtime/core-rules/hooks/rules/reread.json" ]
   [ ! -e "$PI_PROJECT/.claude/hooks" ]
 }
 

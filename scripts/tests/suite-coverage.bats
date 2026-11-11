@@ -82,11 +82,22 @@ teardown() {
 }
 
 @test "the CI suite set is the local set minus the ci-scoped exclusions" {
-  local extra
+  local extra missing expected record suite scope
   [ -n "$(test_suites_for local)" ] || { echo 'local suite set is empty'; false; }
   [ -n "$(test_suites_for ci)" ] || { echo 'ci suite set is empty'; false; }
   extra="$(comm -13 <(test_suites_for local) <(test_suites_for ci))"
   [ -z "$extra" ] || { echo "ci runs suites local does not: $extra"; false; }
+  missing="$(comm -23 <(test_suites_for local) <(test_suites_for ci))"
+  expected=""
+  for record in ${TEST_SUITE_EXCLUSIONS[@]+"${TEST_SUITE_EXCLUSIONS[@]}"}; do
+    suite="${record%%|*}"
+    scope="${record#*|}"; scope="${scope%%|*}"
+    [ "$scope" = ci ] || continue
+    expected="$expected$suite
+"
+  done
+  expected="$(printf '%s' "$expected" | LC_ALL=C sort)"
+  [ "$missing" = "$expected" ] || { echo "ci drops suites local runs beyond ci-scoped exclusions: missing=[$missing] expected=[$expected]"; false; }
 }
 
 # Comment lines are stripped first: both files explain the enumeration in prose
@@ -95,6 +106,23 @@ suites_named_in_code() {
   grep -vE '^[[:space:]]*#' "$1" |
     grep -oE 'scripts/tests/[A-Za-z0-9._-]+\.bats' |
     sed 's#scripts/tests/##; s#\.bats$##' | LC_ALL=C sort -u | tr '\n' ' '
+}
+
+@test "the runner refuses an unavailable suite enumerator instead of listing an empty inventory" {
+  local fixture="$SANDBOX/runner"
+  mkdir -p "$fixture/scripts/lib" "$fixture/scripts/tests"
+  cp "$REPO_ROOT/scripts/run-tests.sh" "$fixture/scripts/run-tests.sh"
+  cp "$REPO_ROOT/scripts/lib/bats-jobs.sh" "$fixture/scripts/lib/bats-jobs.sh"
+  cp "$REPO_ROOT/scripts/tests/stage-weights.tsv" "$fixture/scripts/tests/stage-weights.tsv"
+  printf '@test "sample" { true; }\n' > "$fixture/scripts/tests/sample.bats"
+  run bash "$fixture/scripts/run-tests.sh" --list
+  [ "$status" -ne 0 ] || { echo "missing suite enumerator passed: $output"; false; }
+  [[ "$output" == *'test-suites.sh'* ]] || { echo "$output"; false; }
+
+  cp "$REPO_ROOT/scripts/lib/test-suites.sh" "$fixture/scripts/lib/test-suites.sh"
+  run bash "$fixture/scripts/run-tests.sh" --list
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'bats scripts/tests/sample.bats'* ]] || { echo "$output"; false; }
 }
 
 @test "every suite reaches a runner stage, and the CI shards partition them exactly" {
@@ -137,6 +165,56 @@ PY
   done
 }
 
+@test "native integration targets each reach exactly one stage in local and CI" {
+  local expected actual scope
+  expected="$(python3 -I - "$REPO_ROOT" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+for path in sorted((root / 'native/trellis-hooks/tests').glob('*.rs')):
+    print('cargo test ' + path.relative_to(root).as_posix())
+PY
+)"
+  [ -n "$expected" ] || { echo 'no native integration targets found'; false; }
+  for scope in local ci; do
+    run bash "$REPO_ROOT/scripts/run-tests.sh" "--scope=$scope" --native-stages=always --list
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    actual="$(printf '%s\n' "$output" | grep '^cargo test ' | LC_ALL=C sort)"
+    [ "$actual" = "$expected" ] || { echo "$scope dropped or doubled a native target: $actual"; false; }
+  done
+}
+
+@test "local Pi Node test files each reach exactly one stage in local and CI" {
+  local expected actual scope
+  expected="$(python3 -I - "$REPO_ROOT" <<'PY'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1])
+for path in sorted((root / 'core-rules/pi/tests').glob('*.test.mjs')):
+    print('node --test ' + path.relative_to(root).as_posix())
+PY
+)"
+  [ -n "$expected" ] || { echo 'no local Pi test files found'; false; }
+  for scope in local ci; do
+    run bash "$REPO_ROOT/scripts/run-tests.sh" "--scope=$scope" --list
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    actual="$(printf '%s\n' "$output" | grep '^node --test ' | LC_ALL=C sort)"
+    [ "$actual" = "$expected" ] || { echo "$scope dropped or doubled a Pi test: $actual"; false; }
+  done
+}
+
+@test "qualification recorder and checker suites reach the canonical runner in local and CI" {
+  local scope
+  for scope in local ci; do
+    run bash "$REPO_ROOT/scripts/run-tests.sh" "--scope=$scope" --list
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    printf '%s\n' "$output" | grep -Fxq 'bats scripts/tests/qualification-record.bats' ||
+      { echo "$scope dropped qualification-record.bats"; false; }
+    printf '%s\n' "$output" | grep -Fxq 'bats scripts/tests/qualification-check.bats' ||
+      { echo "$scope dropped qualification-check.bats"; false; }
+  done
+}
+
 core_inventory_fixture() {
   local path
   INVENTORY_REPO="$SANDBOX/repo"
@@ -174,6 +252,137 @@ check_core_inventory() {
   } > "$SANDBOX/aggregate.tsv"
   run bash -c 'cd "$1" && bash "$2/scripts/check-gate-inventory.sh" "$3" "$4" "$5"' \
     fixture "$INVENTORY_REPO" "$REPO_ROOT" "$INVENTORY_BASE" "$INVENTORY_HEAD" "$SANDBOX/aggregate.tsv"
+}
+
+@test "immutable inventory protects suite coverage scaffolding while allowing new tests" {
+  local suite
+  core_inventory_fixture
+  suite="$INVENTORY_REPO/scripts/tests/suite-coverage.bats"
+  mkdir -p "${suite%/*}"
+  printf '#!/usr/bin/env bats\nsetup() { true; }\n@test "existing" {\n  true\n}\n' > "$suite"
+  git -C "$INVENTORY_REPO" add scripts/tests/suite-coverage.bats
+  git -C "$INVENTORY_REPO" commit -qm 'test: existing coverage suite'
+  INVENTORY_BASE="$(git -C "$INVENTORY_REPO" rev-parse HEAD)"
+
+  printf 'setup_file() { skip "disabled"; }\n' >> "$suite"
+  check_core_inventory
+  [ "$status" -ne 0 ] || { echo "setup_file bypass passed: $output"; false; }
+  [[ "$output" == *"suite-coverage"* ]]
+
+  git -C "$INVENTORY_REPO" show "$INVENTORY_BASE:scripts/tests/suite-coverage.bats" > "$suite"
+  printf '\n@test "new coverage" {\n  true\n}\n' >> "$suite"
+  check_core_inventory
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "added coverage tests cannot redefine setup or teardown on their closing line" {
+  local suite hook
+  core_inventory_fixture
+  suite="$INVENTORY_REPO/scripts/tests/suite-coverage.bats"
+  mkdir -p "${suite%/*}"
+  printf '#!/usr/bin/env bats\nsetup() { POLICY=keep; }\n@test "existing" {\n  [ "$POLICY" = keep ]\n}\n' > "$suite"
+  git -C "$INVENTORY_REPO" add scripts/tests/suite-coverage.bats
+  git -C "$INVENTORY_REPO" commit -qm 'test: protected coverage suite'
+  INVENTORY_BASE="$(git -C "$INVENTORY_REPO" rev-parse HEAD)"
+
+  # This is data inside a heredoc, not an actual function-closing line.
+  printf '\n@test "new coverage" {\n  cat <<'\''EOF'\'' >/dev/null\n}; setup() {\nEOF\n  true\n}\n' >> "$suite"
+  check_core_inventory
+  [ "$status" -eq 0 ] || { echo "benign heredoc refused: $output"; false; }
+
+  for hook in setup teardown; do
+    git -C "$INVENTORY_REPO" show "$INVENTORY_BASE:scripts/tests/suite-coverage.bats" > "$suite"
+    printf '\n@test "new coverage" {\n  true\n}; %s() {\n  skip "disabled"\n}\n' "$hook" >> "$suite"
+    check_core_inventory
+    [ "$status" -ne 0 ] || { echo "$hook redefinition passed: $output"; false; }
+    [[ "$output" == *'suite-coverage code after test closing brace'* ]] || { echo "$output"; false; }
+  done
+  for hook in setup teardown; do
+    git -C "$INVENTORY_REPO" show "$INVENTORY_BASE:scripts/tests/suite-coverage.bats" > "$suite"
+    printf '\n@test "new coverage" {\n  true; }; %s() {\n  skip "disabled"\n}\n' "$hook" >> "$suite"
+    check_core_inventory
+    [ "$status" -ne 0 ] || { echo "same-line $hook redefinition passed: $output"; false; }
+    [[ "$output" == *'suite-coverage code after test closing brace'* ]] || { echo "$output"; false; }
+    git -C "$INVENTORY_REPO" show "$INVENTORY_BASE:scripts/tests/suite-coverage.bats" > "$suite"
+    printf '\n@test "new coverage" { true; }; %s() {\n  skip "disabled"\n}\n' "$hook" >> "$suite"
+    check_core_inventory
+    [ "$status" -ne 0 ] || { echo "header $hook redefinition passed: $output"; false; }
+    [[ "$output" == *'suite-coverage code after test closing brace'* ]] || { echo "$output"; false; }
+  done
+
+  git -C "$INVENTORY_REPO" show "$INVENTORY_BASE:scripts/tests/suite-coverage.bats" > "$suite"
+  printf '\n@test "one-line benign coverage" { true; }\n' >> "$suite"
+  check_core_inventory
+  [ "$status" -eq 0 ] || { echo "one-line test refused: $output"; false; }
+}
+
+@test "a complete one-line hook smuggle is rejected at the test closure" {
+  local suite hook
+  core_inventory_fixture
+  suite="$INVENTORY_REPO/scripts/tests/suite-coverage.bats"
+  mkdir -p "${suite%/*}"
+  printf '#!/usr/bin/env bats\nsetup() { true; }\n@test "existing" {\n  true\n}\n' > "$suite"
+  git -C "$INVENTORY_REPO" add scripts/tests/suite-coverage.bats
+  git -C "$INVENTORY_REPO" commit -qm 'test: protected coverage suite'
+  INVENTORY_BASE="$(git -C "$INVENTORY_REPO" rev-parse HEAD)"
+  for hook in setup teardown; do
+    git -C "$INVENTORY_REPO" show "$INVENTORY_BASE:scripts/tests/suite-coverage.bats" > "$suite"
+    printf '\n@test "new coverage" {\n  true\n}; %s() { skip "disabled"; }\n' "$hook" >> "$suite"
+    check_core_inventory
+    [ "$status" -ne 0 ] || { echo "complete $hook redefinition passed: $output"; false; }
+    [[ "$output" == *'suite-coverage code after test closing brace'* ]] || { echo "$output"; false; }
+  done
+}
+
+@test "coverage guard preserves blank lines inside shared executable content" {
+  local suite
+  core_inventory_fixture
+  suite="$INVENTORY_REPO/scripts/tests/suite-coverage.bats"
+  mkdir -p "${suite%/*}"
+  printf '#!/usr/bin/env bats\nsetup() {\n  value="first\n\nsecond"\n}\n@test "existing" {\n  true\n}\n' > "$suite"
+  git -C "$INVENTORY_REPO" add scripts/tests/suite-coverage.bats
+  git -C "$INVENTORY_REPO" commit -qm 'test: coverage with multiline helper'
+  INVENTORY_BASE="$(git -C "$INVENTORY_REPO" rev-parse HEAD)"
+  printf '#!/usr/bin/env bats\nsetup() {\n  value="first\nsecond"\n}\n@test "existing" {\n  true\n}\n' > "$suite"
+  printf '\n@test "new coverage" {\n  true\n}\n' >> "$suite"
+  check_core_inventory
+  [ "$status" -ne 0 ] || { echo "multiline helper change passed: $output"; false; }
+  [[ "$output" == *'suite-coverage non-test content changed'* ]]
+}
+
+@test "immutable inventory rejects quoted protected paths without rejecting benign paths" {
+  core_inventory_fixture
+  mkdir -p "$INVENTORY_REPO/docs"
+  printf 'ordinary documentation\n' > "$INVENTORY_REPO/docs/normal.md"
+  check_core_inventory
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  mkdir -p "$INVENTORY_REPO/core-rules/skills/process-gate/hooks"
+  printf 'changed\n' > "$INVENTORY_REPO/core-rules/skills/process-gate/hooks/gäte.sh"
+  check_core_inventory
+  [ "$status" -ne 0 ] || { echo "quoted protected path passed: $output"; false; }
+  [[ "$output" == *"protected process-gate path changed"* ]]
+}
+
+@test "payload scan exemption rejects content resembling diff headers" {
+  local scan
+  core_inventory_fixture
+  scan="$INVENTORY_REPO/scripts/tests/release-payload-commit.bats"
+  mkdir -p "${scan%/*}"
+  printf '#!/usr/bin/env bats\n--removed fixture\n' > "$scan"
+  git -C "$INVENTORY_REPO" add scripts/tests/release-payload-commit.bats
+  git -C "$INVENTORY_REPO" commit -qm 'test: existing payload fixture'
+  INVENTORY_BASE="$(git -C "$INVENTORY_REPO" rev-parse HEAD)"
+  printf 'scripts/check-gate-inventory.sh|scripts/tests/\n' >> "$scan"
+  check_core_inventory
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+
+  printf '++added fixture\n' >> "$scan"
+  check_core_inventory
+  [ "$status" -ne 0 ] || { echo "added diff-header content passed: $output"; false; }
+
+  printf '#!/usr/bin/env bats\nscripts/check-gate-inventory.sh|scripts/tests/\n' > "$scan"
+  check_core_inventory
+  [ "$status" -ne 0 ] || { echo "removed diff-header content passed: $output"; false; }
 }
 
 @test "immutable inventory accepts the exact per-file core split without a doctor split" {
@@ -256,4 +465,45 @@ PY
   [ "$status" -eq 0 ] || { echo 'bats.yml no longer calls scripts/run-tests.sh'; false; }
   named="$(suites_named_in_code "$workflow")"
   [ -z "$named" ] || { echo "bats.yml hand-lists suites: $named"; false; }
+}
+
+@test "native crate unit tests reach exactly one stage in local and CI" {
+  local scope count
+  # The lib and bin carry #[cfg(test)] modules (pi_latch, session/save,
+  # autonomy, stop/*, read_state, ...). `cargo test --test <stem>` per
+  # integration file never compiles them, so they need their own stage.
+  grep -rqF '#[cfg(test)]' "$REPO_ROOT/native/trellis-hooks/src" ||
+    { echo 'no native unit tests found'; false; }
+  for scope in local ci; do
+    run bash "$REPO_ROOT/scripts/run-tests.sh" "--scope=$scope" --native-stages=always --list
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    count="$(printf '%s\n' "$output" | grep -Fxc 'cargo unit-tests native/trellis-hooks (lib + bins)' || true)"
+    [ "$count" -eq 1 ] || { echo "$scope has $count native unit-test stages"; false; }
+  done
+}
+
+@test "lean-mode 074 suites keep their identities in the canonical runner" {
+  local scope stage missing
+  for scope in local ci; do
+    run bash "$REPO_ROOT/scripts/run-tests.sh" "--scope=$scope" --native-stages=always --list
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    missing=""
+    for stage in \
+      'bats scripts/tests/reread-override.bats' \
+      'bats scripts/tests/pi-dispatch-parity.bats' \
+      'bats scripts/tests/hook-optional-locks.bats' \
+      'bats scripts/tests/hook-parity.bats' \
+      'bats scripts/tests/attach-postjob-batch.bats' \
+      'bats scripts/tests/trellis-latency-sc13.bats' \
+      'bats core-rules/hooks/tests/stop-verify-active.bats' \
+      'bats core-rules/hooks/tests/pi-compaction-synthetic.bats' \
+      'bats core-rules/hooks/tests/parity.bats' \
+      'cargo test native/trellis-hooks/tests/session_save.rs' \
+      'cargo test native/trellis-hooks/tests/optional_locks.rs' \
+      'node --test core-rules/pi/tests/completion-gate.test.mjs' \
+      'node --test core-rules/pi/tests/in-process-parity.test.mjs'; do
+      printf '%s\n' "$output" | grep -Fxq -- "$stage" || missing="$missing [$stage]"
+    done
+    [ -z "$missing" ] || { echo "$scope lost suites:$missing"; false; }
+  done
 }

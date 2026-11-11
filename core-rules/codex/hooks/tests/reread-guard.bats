@@ -25,6 +25,8 @@
 # PORTABLE / MIRROR-CLEAN: NO absolute machine paths. The hooks resolve from
 # $BATS_TEST_DIRNAME; the project dir, fixtures and state live under mktemp.
 
+bats_require_minimum_version 1.5.0
+
 # Resolve the canonical Codex hooks dir from this test file's location.
 HOOKS_DIR="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
 GUARD="$HOOKS_DIR/reread-guard.sh"
@@ -93,6 +95,29 @@ warn_rows() {
   [ -f "$STATE_DIR/$KEY.warns.tsv" ] || { echo 0; return; }
   T="$1" E="$2" awk -F '\t' '$2==ENVIRON["T"] && $1==ENVIRON["E"]{n++} END{print n+0}' \
     "$STATE_DIR/$KEY.warns.tsv"
+}
+
+@test "143-stop explicit object failures without error never earn read credit" {
+  set_turn_epoch 1000
+  f="$PROJECT_DIR/object-failure.txt"; echo old >"$f"
+  local response
+  for response in '{"is_error":true}' '{"tool_use_error":"stale"}' '{"error":null,"is_error":true}'; do
+    run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" --argjson response "$response" \
+      '{transcript_path:$tp, tool_name:"Edit", tool_input:{file_path:$t}, tool_response:$response}')"
+    [ "$status" -eq 0 ]
+    [ ! -s "$STATE_DIR/$KEY.reads.tsv" ]
+  done
+  run_guard "$f"; run_guard "$f"; run_guard "$f"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *'"decision":"block"'* ]]
+
+  run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" \
+    '{transcript_path:$tp, tool_name:"Edit", tool_input:{file_path:$t}, tool_response:{is_error:false,newString:"Error: ordinary code"}}')"
+  [ "$status" -eq 0 ]
+  run_guard "$f"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -z "$stderr" ]
 }
 
 # =============================================================================
@@ -215,6 +240,67 @@ warn_rows() {
   run_with_stderr "$GUARD" "$event"
   [ "$status" -eq 2 ]
   [[ "$output" == *'"decision":"block"'* ]]
+}
+
+@test "143-stop missing deployed action normalizer blocks rather than permitting" {
+  local dir="$BATS_TEST_TMPDIR/deploy/hooks" event
+  mkdir -p "$dir/lib"
+  cp "$GUARD" "$dir/reread-guard.sh"
+  cp "$HOOKS_DIR/lib/deps.sh" "$HOOKS_DIR/lib/autonomy.sh" "$HOOKS_DIR/lib/guard-rules.sh" "$dir/lib/"
+  event="$(jq -nc --arg tp "$TP" --arg t "$PROJECT_DIR/new.txt" \
+    '{transcript_path:$tp,tool_name:"Write",tool_input:{file_path:$t}}')"
+  run_with_stderr "$dir/reread-guard.sh" "$event"
+  [ "$status" -eq 2 ]
+  [[ "$stderr" == *"normalizer"* ]]
+  [[ "$output" == *'"decision":"block"'* ]]
+  run --separate-stderr perl "$HOOKS_DIR/../../hooks/lib/guard-supervise.pl" codex reread-guard bash "$dir/reread-guard.sh" <<<"$event"
+  [ "$status" -eq 12 ]
+  [[ "$output" == *'"decision":"block"'* ]]
+
+  # A healthy installation still permits a new file without a warning.
+  cp "$HOOKS_DIR/../../hooks/lib/action-normalize.sh" "$dir/lib/action-normalize.sh"
+  run_with_stderr "$dir/reread-guard.sh" "$event"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -z "$stderr" ]
+  run --separate-stderr perl "$HOOKS_DIR/../../hooks/lib/guard-supervise.pl" codex reread-guard bash "$dir/reread-guard.sh" <<<"$event"
+  [ "$status" -eq 10 ]
+  [ -z "$output" ]
+}
+
+@test "143-stop native rename protects unread existing destination without penalizing new targets" {
+  set_turn_epoch 1000
+  local src="$PROJECT_DIR/a.ts" dst="$PROJECT_DIR/b.ts" command event
+  printf 'source-old\n' >"$src"
+  record_read 2000 "$src"
+  command=$'*** Begin Patch\n*** Update File: a.ts\n*** Move to: b.ts\n@@\n-source-old\n+source-new\n*** End Patch'
+  event="$(jq -nc --arg tp "$TP" --arg cwd "$PROJECT_DIR" --arg command "$command" \
+    '{transcript_path:$tp,cwd:$cwd,tool_name:"apply_patch",tool_input:{command:$command}}')"
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 0 ]; [ -z "$stderr" ]; [ -z "$output" ]
+
+  printf 'destination-original\n' >"$dst"
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 0 ]; [[ "$stderr" == *"warn 1/2"* ]]; [[ "$stderr" == *"$dst"* ]]
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 0 ]; [[ "$stderr" == *"warn 2/2"* ]]
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 2 ]; [[ "$output" == *'"decision":"block"'* ]]
+  record_read 2000 "$dst"
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 0 ]; [ -z "$stderr" ]; [ -z "$output" ]
+}
+
+@test "143-stop rename with equivalent source and destination spends only one warning" {
+  set_turn_epoch 1000
+  printf 'source-old\n' >"$PROJECT_DIR/a.ts"
+  local command event
+  command=$'*** Begin Patch\n*** Update File: a.ts\n*** Move to: ./a.ts\n@@\n-source-old\n+source-new\n*** End Patch'
+  event="$(jq -nc --arg tp "$TP" --arg cwd "$PROJECT_DIR" --arg command "$command" \
+    '{transcript_path:$tp,cwd:$cwd,tool_name:"apply_patch",tool_input:{command:$command}}')"
+  run_with_stderr "$GUARD" "$event"
+  [ "$status" -eq 0 ]; [[ "$stderr" == *"warn 1/2"* ]]
+  [ "$(warn_rows "$PROJECT_DIR/a.ts" 1000)" -eq 1 ]
 }
 
 # =============================================================================
@@ -373,6 +459,22 @@ warn_rows() {
 # A genuinely unreadable state dir must NEVER produce a block — the gate
 # degrades to permit. Drive past where a block would otherwise fire.
 # =============================================================================
+# Without the shared normalizer the guard cannot tell which files the edit
+# touches, so it refuses rather than permit an unchecked edit (spec 074 E6).
+@test "missing action normalizer → BLOCK (decision+exit 2), never a permit" {
+  local deploy="$BATS_TEST_TMPDIR/deploy/hooks"
+  mkdir -p "$deploy"
+  cp -R "$HOOKS_DIR/." "$deploy/"
+  [ ! -e "$deploy/lib/action-normalize.sh" ]
+  printf 'x\n' > "$PROJECT_DIR/f.txt"
+  TRELLIS_ROOT="$BATS_TEST_TMPDIR/no-runtime" run_with_stderr "$deploy/reread-guard.sh" \
+    "$(jq -nc --arg f "$PROJECT_DIR/f.txt" --arg tp "$TP" \
+      '{hook_event_name:"PreToolUse",tool_name:"Edit",transcript_path:$tp,tool_input:{file_path:$f}}')"
+  [ "$status" -eq 2 ] || { echo "rc=$status out=$output err=$stderr"; false; }
+  [ "$output" = '{"decision":"block","reason":"reread-guard: missing action normalizer; refusing"}' ]
+  [[ "$stderr" == *"missing action normalizer; refusing"* ]]
+}
+
 @test "fail-open: unwritable state dir → permit, never a block (even past the budget)" {
   set_turn_epoch 1000
   f="$PROJECT_DIR/fo.txt"; echo "old" > "$f"
@@ -728,4 +830,26 @@ warn_rows() {
     '{transcript_path: $tp, tool_input: {file_path: $t}}')"
   [ "$status" -eq 0 ]
   [ -z "$output" ]        # never a block on an unmatchable path
+}
+
+@test "T50: native rename credits destination only and explicit failure earns nothing" {
+  patch='*** Begin Patch
+*** Update File: old
+*** Move to: new
+@@
+-before
++after
+*** Delete File: gone
+*** End Patch'
+  for response in '{"isError":true}' '{"error":"stale"}'; do
+    run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg cmd "$patch" --argjson result "$response" \
+      '{transcript_path:$tp,toolName:"apply_patch",input:{command:$cmd},result:$result}')"
+    [ "$status" -eq 0 ]
+    [ ! -s "$STATE_DIR/$KEY.reads.tsv" ]
+  done
+  run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg cmd "$patch" \
+    '{transcript_path:$tp,toolName:"apply_patch",input:{command:$cmd},result:"Success. Updated the following files:"}')"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l < "$STATE_DIR/$KEY.reads.tsv" | tr -d ' ')" -eq 1 ]
+  [ "$(cut -f2 "$STATE_DIR/$KEY.reads.tsv")" = "$PROJECT_DIR/new" ]
 }

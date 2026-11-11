@@ -140,16 +140,48 @@ wm_inventory_repos() {
 }
 
 # wm_owner_index WORK — WORK/owners.jsonl: {root, release, file} for every
-# attachment owner record.
+# attachment owner record. An unknown inventory must never mean "no owner".
 wm_owner_index() {
-  local work="$1" file
-  : > "$work/owners.jsonl"
-  for file in "${TRELLIS_HOME:-$HOME/.trellis}"/state/attachments/*/*.json; do
-    [ -f "$file" ] || continue
-    jq -c --arg file "$file" '{root:(.worktree_root // ""), release:(.release // ""), file:$file}' "$file" \
-      >> "$work/owners.jsonl" 2>/dev/null ||
-      jq -nc --arg file "$file" '{root:"", release:"", file:$file}' >> "$work/owners.jsonl"
+  local work="$1" file checkout ancestor base="${TRELLIS_HOME:-$HOME/.trellis}/state/attachments"
+  : > "$work/owners.jsonl" || return 5
+  if [ ! -e "$base" ] && [ ! -L "$base" ]; then
+    ancestor="${base%/*}"
+    while [ ! -e "$ancestor" ] && [ ! -L "$ancestor" ]; do
+      [ "$ancestor" != / ] || return 5
+      ancestor="${ancestor%/*}"
+      [ -n "$ancestor" ] || ancestor=/
+    done
+    if [ -d "$ancestor" ] && (CDPATH='' cd "$ancestor" && /bin/ls -a . >/dev/null 2>&1); then
+      return 0
+    fi
+    wm_err "cannot inspect attachment owners: $base"
+    return 5
+  fi
+  if [ -L "$base" ] || [ ! -d "$base" ] || ! /bin/ls -a "$base" >/dev/null 2>&1; then
+    wm_err "cannot list attachment owners: $base"
+    return 5
+  fi
+  for checkout in "$base"/*; do
+    [ -e "$checkout" ] || [ -L "$checkout" ] || continue
+    if [ -L "$checkout" ] || [ ! -d "$checkout" ] || ! /bin/ls -a "$checkout" >/dev/null 2>&1; then
+      wm_err "cannot list attachment owner directory: $checkout"
+      return 5
+    fi
+    for file in "$checkout"/*.json; do
+      [ -e "$file" ] || [ -L "$file" ] || continue
+      if [ -L "$file" ] || [ ! -f "$file" ] || ! jq -cse --arg file "$file" '
+        if length == 1 and (.[0] | type == "object")
+          and (.[0].worktree_root | type == "string" and startswith("/") and length > 1
+            and (test("(^|/)(\\.|\\.\\.)(/|$)") | not))
+          and (.[0].release | type == "string" and length > 0)
+        then .[0] | {root:.worktree_root, release:.release, file:$file}
+        else error("invalid owner") end' "$file" >> "$work/owners.jsonl" 2>/dev/null; then
+        wm_err "cannot read attachment owner: $file"
+        return 5
+      fi
+    done
   done
+  return 0
 }
 
 # wm_porcelain COMMON — `git worktree list --porcelain -z` for one repository,
@@ -190,6 +222,45 @@ wm_admin_dir() {
   return 1
 }
 
+# The gc default is not the default of `git worktree prune`: always supply it.
+wm_prune_expiry() {
+  local common="$1" expiry rc=0
+  if [ "${WM_PRUNE_RECENT:-0}" = 1 ]; then
+    printf 'now\n'
+    return 0
+  fi
+  expiry="$(wm_git --git-dir="$common" config --get gc.worktreePruneExpire 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) expiry=3.months.ago ;;
+    *) return 2 ;;
+  esac
+  case "$expiry" in ''|*$'\n'*|*$'\r'*) return 2 ;; esac
+  printf '%s\n' "$expiry"
+}
+
+# Git's dry-run decides expiry, including its own date and index-mtime rules.
+# Return 0 when Git would prune this admin entry, 1 when it would not, and 2
+# when the answer cannot be trusted. Names with controls cannot be parsed from
+# Git's line-oriented output and must not forge another entry's result.
+wm_prune_would_remove() {
+  local common="$1" path="$2" expiry="$3" admin name item listing line
+  admin="$(wm_admin_dir "$common" "$path")" || return 2
+  name="${admin##*/}"
+  for item in "$common"/worktrees/*; do
+    [ -e "$item" ] || [ -L "$item" ] || continue
+    case "${item##*/}" in *$'\n'*|*$'\r'*|*$'\t'*) return 2 ;; esac
+  done
+  # Git writes its verbose dry-run decisions to stderr, not stdout.
+  listing="$(LC_ALL=C wm_git --git-dir="$common" worktree prune --dry-run --verbose "--expire=$expiry" 2>&1)" || return 2
+  while IFS= read -r line; do
+    [ "$line" != "Removing worktrees/$name: gitdir file points to non-existent location" ] || return 0
+  done <<EOF
+$listing
+EOF
+  return 1
+}
+
 # wm_linked_from WORK ADMIN — an existing directory whose `.git` file points
 # at ADMIN (from the inventory walk).
 wm_linked_from() {
@@ -214,6 +285,7 @@ wm_bytes() {
 wm_facts_repo() {
   local work="$1" common="$2" root="$3" only="${4:-}" repo="" rec path head branch locked prunable main
   local project_dir project prc owners owner_count owner release group_release="" registry admin moved_to
+  local prune_eligible expiry prune_rc
   # A moved worktree re-attaches at its checkout group's release (the
   # registry's checkout row), falling back to its own owner record's.
   registry="${TRELLIS_HOME:-$HOME/.trellis}/registry.json"
@@ -231,23 +303,28 @@ wm_facts_repo() {
     owner_count="$(printf '%s' "$owners" | grep -c . || true)"
     release="$(printf '%s\n' "$owners" | sed -n '1p' | jq -r '.release // empty' 2>/dev/null)"
     owner="$(printf '%s\n' "$owners" | sed -n '1p' | jq -r '.file // empty' 2>/dev/null)"
-    moved_to=""
+    moved_to=""; prune_eligible=null
     if [ "$prunable" = true ] && admin="$(wm_admin_dir "$common" "$path")"; then
       moved_to="$(wm_linked_from "$work" "$admin")"
+      if [ "$locked" != true ] && expiry="$(wm_prune_expiry "$common")"; then
+        prune_rc=0
+        wm_prune_would_remove "$common" "$path" "$expiry" || prune_rc=$?
+        case "$prune_rc" in 0) prune_eligible=true ;; 1) prune_eligible=false ;; esac
+      fi
     fi
     jq -nc --arg repo "$repo" --arg common "$common" --arg path "$path" \
       --arg head "$head" --arg branch "$branch" --arg project "$project" \
       --argjson project_rc "$prc" --arg owner "$owner" --arg release "$release" \
       --arg group_release "$group_release" --arg moved_to "$moved_to" \
       --argjson owner_count "$owner_count" --argjson locked "$locked" \
-      --argjson prunable "$prunable" --argjson bytes "$(wm_bytes "$path")" \
+      --argjson prunable "$prunable" --argjson prune_eligible "$prune_eligible" --argjson bytes "$(wm_bytes "$path")" \
       '{repo:$repo, common:$common, path:$path, head:$head,
         branch:(if $branch == "" then null else $branch end),
         project:(if $project == "" then null else $project end), project_rc:$project_rc,
         owner_record:(if $owner == "" then null else $owner end),
         owner_count:$owner_count, release:(if $release == "" then null else $release end),
         group_release:(if $group_release == "" then null else $group_release end),
-        locked:$locked, missing:$prunable, orphan:false, bytes:$bytes,
+        locked:$locked, missing:$prunable, prune_eligible:$prune_eligible, orphan:false, bytes:$bytes,
         moved_to:(if $moved_to == "" then null else $moved_to end),
         class:null, reasons:[], target:null, dehydrate:[], after:[]}'
   done < "$work/porcelain.jsonl"
@@ -258,7 +335,7 @@ wm_facts_repo() {
 wm_facts() {
   local work="$1" root common rec
   root="$(hy_root)" || return "$?"
-  wm_owner_index "$work"
+  wm_owner_index "$work" || return "$?"
   wm_inventory_repos "$work" > "$work/repos"
   while IFS= read -r -d '' common; do
     wm_facts_repo "$work" "$common" "$root"
@@ -306,25 +383,28 @@ wm_render_table() {
 
 wm_usage() {
   cat <<'EOF'
-Usage: trellis worktree migrate [--dry-run] [--json] [--only <path>]
-       trellis worktree migrate --apply [--yes] [--only <path>] [--resume <journal>]
+Usage: trellis worktree migrate [--dry-run] [--json] [--only <path>] [--prune-recent]
+       trellis worktree migrate --apply [--yes] [--only <path>] [--resume <journal>] [--prune-recent]
        trellis worktree migrate --revert <journal> [--yes]
 
 Plan (default, read-only) or apply the move of every linked worktree into
 the sanctioned roots. --json prints one plan row per line. --apply prints the
 plan, asks for confirmation (or takes --yes), and journals every step under
 TRELLIS_HOME/state/worktree-migrate/. --resume finishes an interrupted run in
-its own journal. Exit 4 when any entry failed and was held.
+its own journal. Fresh missing worktrees are held for repair until Git's
+configured prune expiry; --prune-recent explicitly overrides that grace period.
+Exit 4 when any entry failed and was held.
 EOF
 }
 
 # wm_main ARGS... — the `migrate` subcommand.
 wm_main() {
-  local json=0 only="" work rows status=0 mode=plan yes=0 resume="" revert="" journal
+  local json=0 only="" work rows status=0 mode=plan yes=0 resume="" revert="" journal WM_PRUNE_RECENT=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --dry-run) ;;
       --json) json=1 ;;
+      --prune-recent) WM_PRUNE_RECENT=1 ;;
       --apply) mode=apply ;;
       --yes) yes=1 ;;
       --only|--resume|--revert)
@@ -353,8 +433,12 @@ wm_main() {
       status=2
     elif { [ "$yes" -eq 1 ] || wm_confirm "Revert the moves in $revert"; } && wm_lock; then
       journal="${revert%.jsonl}-revert-$(date -u +%Y%m%dT%H%M%SZ).jsonl"
-      touch "$journal" && chmod 600 "$journal"
-      wm_revert "$work" "$revert" "$journal" || status=$?
+      if touch "$journal" && chmod 600 "$journal"; then
+        wm_revert "$work" "$revert" "$journal" || status=$?
+      else
+        wm_err "cannot prepare journal: $journal"
+        status=5
+      fi
       wm_unlock
       printf 'journal: %s\n' "$journal"
     else
@@ -367,11 +451,21 @@ wm_main() {
     wm_lock || { status=$?; rm -rf "$work"; return "$status"; }
     if [ -n "$resume" ]; then
       [ "$yes" -eq 1 ] || wm_confirm "Resume $resume" || { status=$?; wm_unlock; rm -rf "$work"; return "$status"; }
-      wm_resume "$work" "$resume" || status=4
+      if wm_resume "$work" "$resume" "$only"; then
+        :
+      else
+        status=$?
+        if [ "$status" -eq 5 ]; then
+          wm_unlock
+          rm -rf "${work:?}"
+          return 5
+        fi
+        status=4
+      fi
     fi
   fi
   wm_facts "$work" > "$work/facts.jsonl" || status=$?
-  if [ "$status" -eq 0 ] && [ -n "$only" ]; then
+  if [ -n "$only" ]; then
     jq -c --arg only "$only" 'select(.path == $only)' "$work/facts.jsonl" > "$work/only.jsonl"
     mv "$work/only.jsonl" "$work/facts.jsonl"
   fi
@@ -384,8 +478,12 @@ wm_main() {
       0|4)
         if [ "$yes" -eq 1 ] || wm_confirm "Apply this plan"; then
           journal="${resume:-$(wm_state_dir)/$(date -u +%Y%m%dT%H%M%SZ).jsonl}"
-          touch "$journal" && chmod 600 "$journal"
-          wm_apply "$work" "$rows" "$journal" || status=$?
+          if touch "$journal" && chmod 600 "$journal"; then
+            wm_apply "$work" "$rows" "$journal" || status=$?
+          else
+            wm_err "cannot prepare journal: $journal"
+            status=5
+          fi
           printf 'journal: %s\n' "$journal"
         else
           status=$?

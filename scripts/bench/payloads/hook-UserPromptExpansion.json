@@ -1,0 +1,4 @@
+{
+  "session_id": "bench-session-0001", "transcript_path": "@TRANSCRIPT@", "cwd": "@PROJECT@",
+  "hook_event_name": "UserPromptExpansion", "command_name": "bench-known", "expansion_type": "slash_command"
+}

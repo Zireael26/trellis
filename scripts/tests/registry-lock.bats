@@ -162,6 +162,66 @@ setup() {
   [[ "$output" == *'timed out waiting for registry lock'*'kept changing'* ]]
 }
 
+@test "an indeterminate liveness probe never reclaims a live or unknown holder" {
+  run bash -c '
+    . "$1"
+    lock="$2/locks/registry.lock"
+    mkdir "$lock" || exit
+    printf "%s\n" "$$" > "$lock/pid"
+    # Model a shell that cannot signal or run ps; the isolated Python probe
+    # can still prove this process exists.
+    kill() { return 1; }
+    ps() { return 1; }
+    trellis_home_lock_try_recover_stale "$lock" registry && exit 10
+    [ "$(< "$lock/pid")" = "$$" ] || exit 11
+    # A failed verifier is indeterminate, never proof of death.
+    python3() { return 42; }
+    trellis_home_lock_try_recover_stale "$lock" registry && exit 12
+    [ "$(< "$lock/pid")" = "$$" ]
+  ' _ "$HOME_LIB" "$HOME_FIX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "an actual EPERM from the isolated probe retains the lock holder" {
+  # PID 1 is normally alive but owned by another user. Skip only when this
+  # environment can signal it or cannot establish the EPERM precondition.
+  run python3 -I -c '
+import errno, os, sys
+try:
+    os.kill(1, 0)
+except OSError as error:
+    sys.exit(0 if error.errno == errno.EPERM else 1)
+sys.exit(1)
+'
+  [ "$status" -eq 0 ] || skip 'no live unsignalable PID 1'
+  run bash -c '
+    . "$1"
+    lock="$2/locks/registry.lock"
+    mkdir "$lock" || exit
+    printf "1\n" > "$lock/pid"
+    kill() { return 1; }
+    ps() { return 1; }
+    trellis_home_lock_try_recover_stale "$lock" registry && exit 10
+    [ "$(< "$lock/pid")" = 1 ]
+  ' _ "$HOME_LIB" "$HOME_FIX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "unavailable liveness verification explains why a lock is retained" {
+  local empty="$BATS_TEST_TMPDIR/no-python"
+  mkdir "$empty"
+  run env PATH="$empty" TRELLIS_LIBS_PRELOADED=1 /bin/bash -c '
+    . "$1"
+    kill() { return 1; }
+    ps() { return 1; }
+    trellis_home_pid_is_live 999999999 || exit 10
+    python3() { return 42; }
+    trellis_home_pid_is_live 999999999 || exit 11
+  ' _ "$HOME_LIB"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'python3 is unavailable'*'liveness probe failed'* ]] || { echo "$output"; false; }
+}
+
 @test "registry lock still recovers one validated dead holder with a zero budget" {
   mkdir "$HOME_FIX/locks/registry.lock"
   printf '999999999\n' > "$HOME_FIX/locks/registry.lock/pid"
@@ -263,4 +323,64 @@ postjob_registry_result() {
   [[ "$output" == *'attachment reconciliation failed'* ]]
   [[ "$output" == *'timed out waiting for registry lock'* ]]
   [[ "$output" != *'unsafe worktree'* ]]
+}
+
+@test "stale-lock recovery never deletes a pid record it no longer owns" {
+  run bash -c '
+    . "$1"
+    home="$2"
+    lock="$home/locks/registry.lock"
+    mkdir -p "$lock"
+    printf "999999\n" > "$lock/pid"
+    replaced=0
+    trellis_home_pid_is_live() {
+      if [ "$replaced" -eq 0 ]; then
+        replaced=1
+        printf "%s\n" "$$" > "$lock/pid"
+        return 1
+      fi
+      return 1
+    }
+    trellis_home_lock_try_recover_stale "$lock" registry
+    rc=$?
+    [ "$rc" -ne 0 ] || exit 10
+    [ "$(cat "$lock/pid" 2>/dev/null)" = "$$" ] || exit 11
+    exit 0
+  ' _ "$HOME_LIB" "$HOME_FIX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "a losing stale-lock recoverer retries when the pid record already moved" {
+  run bash -c '
+    . "$1"
+    home="$2"
+    lock="$home/locks/registry.lock"
+    mkdir -p "$lock"
+    printf "999999\n" > "$lock/pid"
+    trellis_home_lock_has_only_pid() { command rm -f "$lock/pid"; return 0; }
+    trellis_home_lock_try_recover_stale "$lock" registry
+    [ "$?" -eq 1 ] || exit 10
+  ' _ "$HOME_LIB" "$HOME_FIX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "an unreadable moved pid record is restored instead of deleted" {
+  run bash -c '
+    . "$1"
+    home="$2"
+    lock="$home/locks/registry.lock"
+    mkdir -p "$lock"
+    printf "999999\n" > "$lock/pid"
+    trellis_home_lock_read_pid() {
+      case "$1" in
+        *.recovery.*) return 1 ;;
+        *) printf "999999\n"; return 0 ;;
+      esac
+    }
+    trellis_home_lock_try_recover_stale "$lock" registry
+    rc=$?
+    [ "$rc" -eq 1 ] || exit 10
+    [ "$(cat "$lock/pid" 2>/dev/null)" = "999999" ] || exit 11
+  ' _ "$HOME_LIB" "$HOME_FIX"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

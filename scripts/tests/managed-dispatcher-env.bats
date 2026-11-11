@@ -6,6 +6,9 @@ setup() {
   ROOT="$(mktemp -d "${TMPDIR:-/tmp}/managed-dispatcher-env.XXXXXX")"
   ROOT="$(CDPATH= cd "$ROOT" && pwd -P)"
   PAYLOAD="$ROOT/payload"
+  # The bounded generator only renders for an existing canonical payload
+  # directory; an empty one is a provisional payload with no bundled generator.
+  mkdir "$PAYLOAD"
   MANIFEST="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   # shellcheck disable=SC1090
   source "$REPO_ROOT/scripts/lib/attachment.sh"
@@ -380,10 +383,10 @@ teardown() {
 
 
 @test "generated dispatcher exec env -i forwards TRELLIS_ALLOW_MAIN_PUSH and SECURITY_GATE_SKIP" {
-  printf '%s\n' "$DISPATCHER_TEXT" | grep -F "TRELLIS_ALLOW_MAIN_PUSH=\${TRELLIS_ALLOW_MAIN_PUSH-}" >/dev/null
-  printf '%s\n' "$DISPATCHER_TEXT" | grep -F "SECURITY_GATE_SKIP=\${SECURITY_GATE_SKIP-}" >/dev/null
-  printf '%s\n' "$PRE_PUSH_TEXT" | grep -F "TRELLIS_ALLOW_MAIN_PUSH=\${TRELLIS_ALLOW_MAIN_PUSH-}" >/dev/null
-  printf '%s\n' "$PRE_PUSH_TEXT" | grep -F "SECURITY_GATE_SKIP=\${SECURITY_GATE_SKIP-}" >/dev/null
+  printf '%s\n' "$DISPATCHER_TEXT" | grep -F 'TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}"' >/dev/null
+  printf '%s\n' "$DISPATCHER_TEXT" | grep -F 'SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}"' >/dev/null
+  printf '%s\n' "$PRE_PUSH_TEXT" | grep -F 'TRELLIS_ALLOW_MAIN_PUSH="${TRELLIS_ALLOW_MAIN_PUSH-}"' >/dev/null
+  printf '%s\n' "$PRE_PUSH_TEXT" | grep -F 'SECURITY_GATE_SKIP="${SECURITY_GATE_SKIP-}"' >/dev/null
   header="$(printf '%s\n' "$DISPATCHER_TEXT" | sed -n '1,/\/bin\/bash.*-c/p')"
   echo "$header" | grep -F "TRELLIS_ALLOW_MAIN_PUSH" >/dev/null
   echo "$header" | grep -F "SECURITY_GATE_SKIP" >/dev/null
@@ -1005,6 +1008,67 @@ prepare_item8_carrier_fixture() {
   find "$payload" -type f -exec chmod 500 {} \;
   find "$payload" -type d -exec chmod 500 {} \;
   chmod 500 "$release"
+}
+
+@test "T69 prior and carrier each receive the original push arguments and all refs" {
+  SCRATCH_CARRIER_BODY='printf "CARRIER_ARGC=%s\nCARRIER_ARG1=%s\nCARRIER_ARG2=%s\n" "$#" "${1-}" "${2-}"
+while IFS= read -r ref; do printf "CARRIER_REF=%s\n" "$ref"; done' prepare_scratch_fixture
+  cat > "$ROOT/scratch-prior-hooks/pre-push" <<'PRIOR'
+#!/bin/bash
+printf 'PRIOR_ARGC=%s\nPRIOR_ARG1=%s\nPRIOR_ARG2=%s\n' "$#" "${1-}" "${2-}"
+while IFS= read -r ref; do printf 'PRIOR_REF=%s\n' "$ref"; done
+PRIOR
+  printf '%s\n' 'refs/heads/one 111 refs/heads/one 222' \
+    'refs/heads/two 333 refs/heads/two 444' > "$SCRATCH_REFS"
+  run env "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    "HOME=$SCRATCH_CALLER_HOME" "TMPDIR=$SCRATCH_CALLER_TMP" \
+    "TMP=$SCRATCH_CALLER_TMP" "TEMP=$SCRATCH_CALLER_TMP" \
+    /bin/bash -c 'cd "$1" && "$2" "$4" "$5" < "$3"' \
+    _ "$SCRATCH_PROJECT" "$SCRATCH_PRE_DISPATCHER" "$SCRATCH_REFS" \
+    'remote name' 'url with spaces'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  local observed expected
+  observed="$(printf '%s\n' "$output" | /usr/bin/awk '/^(PRIOR|CARRIER)_(ARGC|ARG1|ARG2|REF)=/')"
+  expected="$(printf '%s\n' \
+    'PRIOR_ARGC=2' 'PRIOR_ARG1=remote name' 'PRIOR_ARG2=url with spaces' \
+    'PRIOR_REF=refs/heads/one 111 refs/heads/one 222' \
+    'PRIOR_REF=refs/heads/two 333 refs/heads/two 444' \
+    'CARRIER_ARGC=2' 'CARRIER_ARG1=remote name' 'CARRIER_ARG2=url with spaces' \
+    'CARRIER_REF=refs/heads/one 111 refs/heads/one 222' \
+    'CARRIER_REF=refs/heads/two 333 refs/heads/two 444')"
+  [ "$observed" = "$expected" ] || { printf 'transport mismatch:\n%s\n' "$output"; false; }
+}
+
+@test "T69 invalid early carrier still runs prior but never executes carrier" {
+  prepare_scratch_fixture
+  local carrier="$SCRATCH_RELEASES/1.2.3/payload/core-rules/githooks/pre-push"
+  chmod u+w "$carrier"
+  printf '#!/bin/bash\nprintf tampered > %q\n' "$SCRATCH_WITNESS/tampered.txt" > "$carrier"
+  run_scratch_pre_push
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"managed immutable release carrier is unavailable"* ]] || { echo "$output"; false; }
+  [ -f "$SCRATCH_WITNESS/prior.txt" ] || { echo "predecessor did not run: $output"; false; }
+  [ ! -e "$SCRATCH_WITNESS/tampered.txt" ] || { echo "tampered carrier ran"; false; }
+}
+
+@test "T69 predecessor tampering of non-carrier release content is refused before gate" {
+  prepare_scratch_fixture
+  run_scratch_pre_push
+  [ "$status" -eq 0 ] || { echo "healthy control: $output"; false; }
+  [ -f "$SCRATCH_WITNESS/carrier.txt" ] || { echo "healthy carrier did not run"; false; }
+  mv "$SCRATCH_WITNESS/carrier.txt" "$SCRATCH_WITNESS/healthy-carrier.txt"
+  local seed="$SCRATCH_RELEASES/1.2.3/payload/scripts/seed-inheritance-symlinks.sh"
+  cat > "$ROOT/scratch-prior-hooks/pre-push" <<PRIOR
+#!/bin/bash
+chmod u+w "$seed"
+printf '#!/bin/bash\\nexit 0\\n# modified by prior\\n' > "$seed"
+printf 'PRIOR_CHANGED_RELEASE\\n'
+PRIOR
+  run_scratch_pre_push
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"PRIOR_CHANGED_RELEASE"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"managed immutable release carrier is unavailable"* ]] || { echo "$output"; false; }
+  [ ! -e "$SCRATCH_WITNESS/carrier.txt" ] || { echo "carrier ran after release tamper"; false; }
 }
 
 @test "item8 r2: prior rewrite followed by blocked main prints carrier restore command" {

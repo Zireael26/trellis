@@ -230,3 +230,18 @@ EOF
 }
 
 
+
+@test "an unwritable oversized log does not abort the remaining roots" {
+  [ "$(id -u)" -ne 0 ] || skip "root can truncate a read-only file"
+  local locked="$MOCK_ROOT1/pi-bash-locked.log" other="$MOCK_ROOT2/pi-bash-other.log"
+  truncate -s 2147483649 "$locked"
+  chmod 444 "$locked"
+  truncate -s 2147483649 "$other"
+
+  run "$WATCHDOG" --root "$MOCK_ROOT1" --root "$MOCK_ROOT2"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [ "$(file_size "$locked")" -gt 0 ] || { echo "unwritable log changed"; false; }
+  [ "$(file_size "$other")" -eq 0 ] || { echo "later root was skipped"; false; }
+  [[ "$output" == *"could not truncate $locked"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Permission denied"* ]] || { echo "raw stderr leaked: $output"; false; }
+}

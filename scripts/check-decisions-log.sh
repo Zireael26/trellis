@@ -31,10 +31,11 @@ KIND_SLOT_RE = re.compile(
 ALLOWED_KINDS = {"interpretation", "pattern", "scope", "architectural"}
 
 
-def meaningful_content_lines(lines: list[str]):
-    """Yield the file-content denominator, excluding Markdown scaffolding."""
+def meaningful_content_lines(lines: list[str], errors: list[str]):
+    """Yield content outside Markdown scaffolding, recording unclosed blocks."""
     in_html_comment = False
     fence_marker = None
+    block_start = None
 
     for line_number, line in enumerate(lines, start=1):
         stripped = line.strip()
@@ -49,13 +50,20 @@ def meaningful_content_lines(lines: list[str]):
         if stripped.startswith("<!--"):
             if "-->" not in stripped[4:]:
                 in_html_comment = True
+                block_start = line_number
             continue
         if stripped.startswith("```") or stripped.startswith("~~~"):
             fence_marker = stripped[:3]
+            block_start = line_number
             continue
-        if not stripped or line.startswith("#"):
+        if not stripped or re.match(r"^#{1,6}(?:[ \t]|$)", line):
             continue
         yield line_number, line
+
+    if in_html_comment:
+        errors.append(f"line {block_start}: unclosed HTML comment")
+    elif fence_marker is not None:
+        errors.append(f"line {block_start}: unclosed {fence_marker} fence")
 
 
 def first_failure(line: str) -> str:
@@ -131,9 +139,11 @@ def inspect_file(path: str) -> tuple[dict, bool]:
         return record, True
 
     lines = contents.splitlines()
-    candidates = list(meaningful_content_lines(lines))
+    syntax_errors = []
+    candidates = list(meaningful_content_lines(lines, syntax_errors))
+    record["findings"].extend(syntax_errors)
     record["candidates"] = len(candidates)
-    if not candidates:
+    if not candidates and not syntax_errors:
         record["findings"].append(no_entries_note(path))
 
     for line_number, line in candidates:
@@ -165,7 +175,7 @@ def inspect_file(path: str) -> tuple[dict, bool]:
             "SUSPICIOUS: all architectural entries carry SURFACED INLINE"
         )
 
-    return record, True
+    return record, not syntax_errors
 
 
 def print_human(records: list[dict]) -> None:

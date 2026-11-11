@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate 3: Bypass markers — --no-verify, force-push, override env vars, hook tampering.
+# Gate 3: Bypass markers — override env vars, hook tampering, persistent config drift.
 # Usage: check-bypass.sh [--range=<gitspec>]
 
 set -euo pipefail
@@ -35,28 +35,44 @@ fi
 PROJECT_DIR="$git_root"
 
 # 1. TRELLIS_ALLOW_MAIN_PUSH=1 in commit trailers within range -> warn (must be justified)
-if git log --format='%B' "$RANGE" 2>/dev/null | grep -qE 'TRELLIS_ALLOW_MAIN_PUSH=1'; then
+if git log --format='%B' "$RANGE" 2>/dev/null | grep -E 'TRELLIS_ALLOW_MAIN_PUSH=1' >/dev/null; then
   findings+=("commit-trailer: TRELLIS_ALLOW_MAIN_PUSH=1 found — must be justified in gotchas.md")
   [ "$worst" = "pass" ] && worst="warn"
 fi
 
 # 1a. PROCESS_GATE_SKIP=1 in commit trailers within range -> warn (must be justified)
-if git log --format='%B' "$RANGE" 2>/dev/null | grep -qE 'PROCESS_GATE_SKIP=1'; then
+if git log --format='%B' "$RANGE" 2>/dev/null | grep -E 'PROCESS_GATE_SKIP=1' >/dev/null; then
   findings+=("commit-trailer: PROCESS_GATE_SKIP=1 found — must be justified in gotchas.md")
   [ "$worst" = "pass" ] && worst="warn"
 fi
 
 # 2. .husky/* tampering: short-circuit at top
 if [ -d "$PROJECT_DIR/.husky" ]; then
-  while IFS= read -r hook; do
-    [ -z "$hook" ] && continue
+  while IFS= read -r -d '' hook; do
     [ -f "$hook" ] || continue
-    # First non-empty, non-shebang, non-comment line
-    first="$(awk 'NR>1 && !/^#/ && !/^[[:space:]]*$/ {print; exit}' "$hook" 2>/dev/null || true)"
-    case "$first" in
-      "exit 0"|"true"|":") findings+=("${hook#"$PROJECT_DIR"/}: short-circuit (first effective line: $first)"); worst="fail" ;;
+    # Skip comments and bare no-ops; a shebang-less first command still counts.
+    hook_head="$(awk '
+      /^[[:space:]]*#/ || /^[[:space:]]*$/ {next}
+      /^[[:space:]]*(true|:)[[:space:]]*(;[[:space:]]*)?(#.*)?$/ {noop=1; next}
+      {printf "cmd:%s\n", $0; found=1; exit}
+      END {if (!found && noop) print "noop:"}
+    ' "$hook" 2>/dev/null || true)"
+    first=""
+    short_circuit=false
+    case "$hook_head" in
+      noop:) first="only no-op commands"; short_circuit=true ;;
+      cmd:*)
+        first="${hook_head#cmd:}"
+        if [[ "$first" =~ ^[[:space:]]*exit[[:space:]]+0([[:space:]]*($|\;|\#)) ]]; then
+          short_circuit=true
+        fi
+        ;;
     esac
-  done < <(find "$PROJECT_DIR/.husky" -maxdepth 1 -type f \( -name 'pre-*' -o -name 'commit-msg' -o -name 'post-*' \) 2>/dev/null)
+    if $short_circuit; then
+      findings+=("${hook#"$PROJECT_DIR"/}: short-circuit (first effective line: $first)")
+      worst="fail"
+    fi
+  done < <(find -L "$PROJECT_DIR/.husky" -maxdepth 1 -type f \( -name 'pre-*' -o -name 'commit-msg' -o -name 'post-*' \) -print0 2>/dev/null)
 fi
 
 # 3. Native-githooks projects: core.hooksPath set?
@@ -210,9 +226,9 @@ fi
 
 # core.hooksPath is shared by linked worktrees. A disabled worktree record
 # does not make the checkout unmanaged: its sibling may own the dispatcher.
-# 0 = managed (emit path); 2 = truly unmanaged.
+# 0 = managed (emit path); 2 = truly unmanaged; 1 = invalid sibling state.
 bypass_managed_hooks_path() {
-  local home checkout owner record
+  local home checkout owner owner_id record sibling_root managed="" candidate
   if [ "$(jq -r '.git_hooks.enabled // false' <<< "$attachment_state")" = true ]; then
     jq -r '.git_hooks.managed_hooks_path // empty' <<< "$attachment_state"
     return 0
@@ -220,28 +236,54 @@ bypass_managed_hooks_path() {
   home="${TRELLIS_HOME:-${HOME}/.trellis}"
   checkout="$(jq -r '.checkout_id' <<< "$attachment_state")"
   for owner in "$home/state/attachments/$checkout/"*.json; do
-    [ -f "$owner" ] && [ ! -L "$owner" ] || continue
-    record="$(bypass_read_owner "$owner")" || continue
-    jq -e --arg checkout "$checkout" '
-      .schema_version == 1 and .status == "committed" and .checkout_id == $checkout
-      and .git_hooks.enabled == true
-    ' <<< "$record" >/dev/null 2>&1 || continue
-    jq -r '.git_hooks.managed_hooks_path // empty' <<< "$record"
-    return 0
+    [ -e "$owner" ] || [ -L "$owner" ] || continue
+    record="$(bypass_read_owner "$owner")" || return 1
+    owner_id="${owner##*/}"; owner_id="${owner_id%.json}"
+    [[ "$owner_id" =~ ^[a-f0-9]{64}$ ]] || return 1
+    jq -e --arg checkout "$checkout" --arg worktree "$owner_id" '
+      (if has("git_hooks") then .git_hooks else {} end) as $hooks
+      | .schema_version == 1 and .status == "committed" and .checkout_id == $checkout
+        and .worktree_id == $worktree and (.worktree_root | type == "string" and startswith("/"))
+        and (.artifacts | type == "array")
+        and ((has("pre_existing") | not) or (.pre_existing | type == "array"))
+        and ((has("renders") | not) or (.renders | type == "array"))
+        and ($hooks | type == "object")
+        and ((has("git_hooks") | not) or (($hooks | has("enabled")) and ($hooks.enabled | type == "boolean")))
+    ' <<< "$record" >/dev/null 2>&1 || return 1
+    sibling_root="$(jq -r '.worktree_root' <<< "$record")" || return 1
+    [ "$(printf '%s' "$sibling_root" | bypass_hash)" = "$owner_id" ] || return 1
+    if [ "$(jq -r '.git_hooks.enabled // false' <<< "$record")" = true ]; then
+      candidate="$(jq -r '.git_hooks.managed_hooks_path // empty' <<< "$record")"
+      [ -n "$candidate" ] && { [ -z "$managed" ] || [ "$managed" = "$candidate" ]; } || return 1
+      managed="$candidate"
+    fi
   done
-  [ -d "$home/state/git-hooks/$checkout" ] || return 2
-  printf '%s\n' "$home/state/git-hooks/$checkout"
+  if [ -n "$managed" ]; then
+    printf '%s\n' "$managed"
+  elif [ -d "$home/state/git-hooks/$checkout" ]; then
+    printf '%s\n' "$home/state/git-hooks/$checkout"
+  else
+    return 2
+  fi
 }
 
 # Package installs can reset Git hook authority without changing any native
 # harness registration. Read local config (not one-shot harness -c overrides),
 # resolve relative paths from the worktree, and require the checkout's managed
 # dispatcher, including projects with package.json and non-manager worktrees.
-if [ -n "$attachment_state" ] && managed_hooks_path="$(bypass_managed_hooks_path)"; then
-  if ! hooks_finding="$(pg_check_managed_hooks_path "$PROJECT_DIR" "$managed_hooks_path" --local)"; then
-    findings+=("$hooks_finding")
-    worst="fail"
-  fi
+if [ -n "$attachment_state" ]; then
+  managed_status=0
+  managed_hooks_path="$(bypass_managed_hooks_path)" || managed_status=$?
+  case "$managed_status" in
+    0)
+      if ! hooks_finding="$(pg_check_managed_hooks_path "$PROJECT_DIR" "$managed_hooks_path" --local)"; then
+        findings+=("$hooks_finding")
+        worst="fail"
+      fi
+      ;;
+    2) ;; # genuinely unmanaged
+    *) findings+=("local attachment state: sibling owner unavailable or invalid — managed hooks cannot be verified"); worst="fail" ;;
+  esac
 fi
 
 # Every attached harness runs through this owner-recorded runtime anchor.
@@ -388,8 +430,9 @@ for harness in claude codex; do
 done
 
 # Authenticate every owner-recorded Pi auxiliary, including dormant executables
-# and literal parent directories. Keep the two native registration requirements
-# even if an owner entry is removed. Doctor uses this same read-only validator.
+# and literal parent directories. The validator filters historical dispatcher
+# requirements by the pinned manifest: current delivery links only trellis.ts,
+# but still requires its sealed runtime rules. Doctor/show-config share it.
 if grep -Fxq pi <<< "$attached_harnesses"; then
   if ! pi_findings="$(python3 -I "$SKILL_DIR/scripts/lib/pi-artifacts.py" \
       "$PROJECT_DIR" "$runtime_payload" .pi/extensions/trellis.ts .pi/hooks/dispatch.sh \
@@ -401,23 +444,14 @@ if grep -Fxq pi <<< "$attached_harnesses"; then
   fi
 fi
 
-# 5. Range commits with --no-verify in reflog (best-effort; reflog is local)
-# If we have access to the reflog and any commit in the range matches a no-verify entry by sha, flag.
-if [ -d "$PROJECT_DIR/.git" ] && git -C "$PROJECT_DIR" reflog show HEAD --grep-reflog='no-verify' >/dev/null 2>&1; then
-  # Best-effort. Reflog is not always populated, especially for fresh clones / CI.
-  while IFS= read -r sha; do
-    [ -z "$sha" ] && continue
-    if git -C "$PROJECT_DIR" reflog show HEAD --format='%H %gs' 2>/dev/null | grep -E "^$sha .*no-verify" >/dev/null 2>&1; then
-      findings+=("commit:$sha — committed with --no-verify (reflog evidence)")
-      worst="fail"
-    fi
-  done < <(git -C "$PROJECT_DIR" log --format='%H' "$RANGE" 2>/dev/null)
-fi
-
+# Git reflog records commit subjects, not invocation flags; a subject containing
+# "no-verify" is not evidence that hooks were skipped.
 case "$worst" in
   pass) pg_log pass "Bypass markers (range=$RANGE)" ;;
   warn) pg_log warn "Bypass markers (range=$RANGE)"; for f in "${findings[@]}"; do pg_finding "$f"; done ;;
   fail) pg_log fail "Bypass markers (range=$RANGE)"; for f in "${findings[@]}"; do pg_finding "$f"; done ;;
 esac
+pg_finding "Bypass coverage: Git reflog does not record --no-verify; hook execution cannot be verified post-hoc by this check"
+pg_finding "Husky coverage: short-circuit detection is a heuristic, not a full shell analysis"
 
 pg_exit_code "$worst"

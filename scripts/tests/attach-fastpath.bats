@@ -3,23 +3,37 @@
 REPO_ROOT="$(CDPATH= cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 ATTACH="$REPO_ROOT/scripts/attach-project.sh"
 load helpers/release-fixture
+load helpers/native-render-fixture
 
 setup() {
   SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/a5b.fixture.XXXXXX")"
   SANDBOX="$(CDPATH= cd "$SANDBOX" && pwd -P)"
   export HOME="$SANDBOX/user" TRELLIS_HOME="$SANDBOX/home" GIT_CONFIG_NOSYSTEM=1
+  # The A4 job is stubbed below, so no verdict job ever starts: say so as
+  # scripts/run-tests.sh does, instead of depending on the caller's runner.
+  export TRELLIS_ATTACH_POSTJOB=off
   # Only unit fixtures stub A4; production requires the frozen dependency.
   trellis_attach_postjob_spawn() { :; }
   export -f trellis_attach_postjob_spawn
   mkdir -p "$HOME" "$TRELLIS_HOME" "$SANDBOX/source/core-rules/templates" "$SANDBOX/source/core-rules/githooks" "$SANDBOX/source/scripts"
   chmod 700 "$HOME" "$TRELLIS_HOME"
   release_fixture_bootstrap "$HOME" "$TRELLIS_HOME" "$SANDBOX"
-  cp "$REPO_ROOT/core-rules/templates/claude-settings.local.json" "$SANDBOX/source/core-rules/templates/"
-  cp "$REPO_ROOT/core-rules/templates/codex-hooks.local.json" "$SANDBOX/source/core-rules/templates/"
+  mkdir -p "$SANDBOX/source/core-rules/legacy-hooks"
+  cp -R "$REPO_ROOT/core-rules/legacy-hooks/." "$SANDBOX/source/core-rules/legacy-hooks/"
+  # Legacy-shaped templates keep the substitution route covered; the T34B
+  # native cases render native registrations (T34 option B).
+  cp "$REPO_ROOT/core-rules/legacy-hooks/claude-settings.local.json" "$SANDBOX/source/core-rules/templates/"
+  cp "$REPO_ROOT/core-rules/legacy-hooks/codex-hooks.local.json" "$SANDBOX/source/core-rules/templates/"
+  if [[ "$BATS_TEST_DESCRIPTION" == 'T34B native'* ]]; then
+    native_render_fixture_source "$SANDBOX/source"
+  fi
   printf '# fixture policy\n' > "$SANDBOX/source/core-rules/CLAUDE.md"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$SANDBOX/source/core-rules/githooks/pre-push"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$SANDBOX/source/scripts/seed-inheritance-symlinks.sh"
   chmod 755 "$SANDBOX/source/core-rules/githooks/pre-push" "$SANDBOX/source/scripts/seed-inheritance-symlinks.sh"
+  if [[ "$BATS_TEST_DESCRIPTION" == 'T2A seed'* ]]; then
+    cp "$REPO_ROOT/scripts/seed-inheritance-symlinks.sh" "$SANDBOX/source/scripts/seed-inheritance-symlinks.sh"
+  fi
   printf '1.2.3\n' > "$SANDBOX/source/core-rules/VERSION"
   # Post-checkout hash-checks every payload file its reconcile runs and refuses
   # a release that lacks one (A1). The stub seed stays the reconcile; these
@@ -362,6 +376,675 @@ fast_attach() {
   printf '%s\n' "$output"
 }
 
+@test "T13 donor preflight captures one canonical registry state while all transaction locks are held" {
+  local trace="$SANDBOX/t13-registry-captures"
+  run bash -c '
+    . "$1"
+    TEST_CAPTURE_LOG="$5"
+    eval "$(declare -f local_registry_read_diagnostic_state | sed "1s/local_registry_read_diagnostic_state/t13_original_registry_read/")"
+    local_registry_read_diagnostic_state() {
+      [ -L "${_ATTACHMENT_CHECKOUT_LOCK_LINK:-}" ] && [ -d "${_ATTACHMENT_CHECKOUT_LOCK_HOLDER:-}" ] || return 99
+      [ -L "${_ATTACHMENT_LOCK_LINK:-}" ] && [ -d "${_ATTACHMENT_LOCK_HOLDER:-}" ] || return 99
+      [ -d "${_TRELLIS_HOME_LOCK_DIR:-}" ] && [ ! -L "$_TRELLIS_HOME_LOCK_DIR" ] || return 99
+      printf "capture\n" >> "$TEST_CAPTURE_LOG"
+      t13_original_registry_read "$@"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$PROJECT" "$trace"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$trace" | tr -d ' ')" = 1 ] || { echo 'expected one lock-held diagnostic capture'; return 1; }
+}
+
+t13_owner_validation_wrapper() {
+  local mini="$1"
+  mkdir -p "$mini/lib"
+  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$REPO_ROOT/scripts/lib/release-executed.py" "$mini/lib/"
+  cat > "$mini/attach-project.sh" <<'BASH'
+. "$T13_REAL_ATTACH" || exit 1
+eval "$(declare -f _attachment_owner_json_valid | sed '1s/_attachment_owner_json_valid/t13_original_owner_valid/')"
+_attachment_owner_json_valid() {
+  printf '%s\n' "$1" >> "$T13_OWNER_VALIDATION_TRACE"
+  t13_original_owner_valid "$@"
+}
+eval "$(declare -f attach_exclude_verify_state | sed '1s/attach_exclude_verify_state/t13_original_exclude_verify/')"
+attach_exclude_verify_state() {
+  if [ -n "${T13_EXCLUDE_VALIDATION_TRACE:-}" ]; then printf '%s\n' "$1" >> "$T13_EXCLUDE_VALIDATION_TRACE"; fi
+  t13_original_exclude_verify "$@"
+}
+BASH
+}
+
+@test "T13 canonical donor preflight validates the selected owner schema once" {
+  local mini="$SANDBOX/t13-owner-count" trace="$SANDBOX/t13-owner-count.log"
+  t13_owner_validation_wrapper "$mini"
+  run bash -c '
+    . "$1"
+    SCRIPT_DIR="$4"
+    export T13_REAL_ATTACH="$1" T13_OWNER_VALIDATION_TRACE="$5"
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$mini" "$trace"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  [ "$(grep -Fxc "$DONOR" "$trace")" -eq 1 ] || { echo "selected owner schema was validated more than once"; return 1; }
+}
+
+@test "T13 malformed selected owner still misses before any publication" {
+  local mini="$SANDBOX/t13-owner-invalid" trace="$SANDBOX/t13-owner-invalid.log"
+  t13_owner_validation_wrapper "$mini"
+  jq '.git_hooks.previous_hooks_path = ""' "$DONOR" > "$SANDBOX/invalid-owner.json"
+  chmod 600 "$SANDBOX/invalid-owner.json"
+  mv "$SANDBOX/invalid-owner.json" "$DONOR"
+  run bash -c '
+    . "$1"
+    SCRIPT_DIR="$4"
+    export T13_REAL_ATTACH="$1" T13_OWNER_VALIDATION_TRACE="$5"
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "full-path\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$mini" "$trace"
+  [ "$status" -eq 5 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'full-path'* ]] || { echo "$output"; return 1; }
+  grep -Fx "$DONOR" "$trace" >/dev/null || { echo 'canonical owner validation was not reached'; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'invalid owner published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
+}
+
+@test "T13 canonical preflight validates each owner once with multiple donors" {
+  local mini="$SANDBOX/t13-owner-many" trace="$SANDBOX/t13-owner-many.log" third="$SANDBOX/third"
+  local owner owner_list="$SANDBOX/t13-owners-before"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' > "$owner_list"
+  git -C "$PROJECT" worktree add -q -b t13-third "$third"
+  t13_owner_validation_wrapper "$mini"
+  run bash -c '
+    . "$1"
+    SCRIPT_DIR="$4"
+    export T13_REAL_ATTACH="$1" T13_OWNER_VALIDATION_TRACE="$5"
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$third" "$mini" "$trace"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  while IFS= read -r owner; do
+    [ "$(grep -Fxc "$owner" "$trace")" -eq 1 ] || { echo "wrong validation count for $owner"; return 1; }
+  done < "$owner_list"
+  [ "$(wc -l < "$trace" | tr -d ' ')" -eq 2 ] || { echo 'expected both original owners once'; return 1; }
+}
+
+@test "T13 malformed unselected owner still misses before any publication" {
+  local mini="$SANDBOX/t13-owner-sibling" trace="$SANDBOX/t13-owner-sibling.log" third="$SANDBOX/third" sibling
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  sibling="$(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' | LC_ALL=C sort | tail -1)"
+  jq '.git_hooks.previous_hooks_path = ""' "$sibling" > "$SANDBOX/invalid-sibling.json"
+  chmod 600 "$SANDBOX/invalid-sibling.json"
+  mv "$SANDBOX/invalid-sibling.json" "$sibling"
+  git -C "$PROJECT" worktree add -q -b t13-third "$third"
+  t13_owner_validation_wrapper "$mini"
+  run bash -c '
+    . "$1"
+    SCRIPT_DIR="$4"
+    export T13_REAL_ATTACH="$1" T13_OWNER_VALIDATION_TRACE="$5"
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "full-path\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$third" "$mini" "$trace"
+  [ "$status" -eq 5 ] && [[ "$output" == *'full-path'* ]] || { echo "$output"; return 1; }
+  grep -Fx "$sibling" "$trace" >/dev/null || { echo 'canonical sibling validation was not reached'; return 1; }
+  [ ! -e "$third/.trellis/runtime" ] || { echo 'invalid sibling published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
+}
+
+@test "T13 identical sibling excludes share one canonical check per exact value" {
+  local mini="$SANDBOX/t13-exclude-count" trace="$SANDBOX/t13-exclude-count.log" owners="$SANDBOX/t13-exclude-owners.log"
+  local third="$SANDBOX/third" fourth="$SANDBOX/fourth" owner distinct
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  git -C "$PROJECT" worktree add -q -b t13-third "$third"
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$third"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  distinct="$(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' -exec jq -cS .exclude {} \; | LC_ALL=C sort -u | wc -l | tr -d ' ')"
+  [ "$distinct" -lt 3 ] || { echo 'fixture has no repeated exact excludes'; return 1; }
+  git -C "$PROJECT" worktree add -q -b t13-fourth "$fourth"
+  t13_owner_validation_wrapper "$mini"
+  run bash -c '
+    . "$1"
+    SCRIPT_DIR="$4"
+    export T13_REAL_ATTACH="$1" T13_OWNER_VALIDATION_TRACE="$5" T13_EXCLUDE_VALIDATION_TRACE="$6"
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$fourth" "$mini" "$owners" "$trace"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$trace" | tr -d ' ')" -eq "$distinct" ] || { echo 'repeated exact excludes were reverified'; return 1; }
+  [ "$(LC_ALL=C sort -u "$trace" | wc -l | tr -d ' ')" -eq "$distinct" ] || { echo 'traced exclude values differ from fixture owners'; return 1; }
+}
+
+@test "T13 malformed sibling exclude block still misses before publication" {
+  local third="$SANDBOX/third" owner sibling=""
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  while IFS= read -r owner; do
+    if jq -e '.git_hooks.enabled == false' "$owner" >/dev/null; then sibling="$owner"; fi
+  done < <(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json')
+  [ -n "$sibling" ] || { echo 'missing non-authority owner'; return 1; }
+  jq '.exclude.managed_block_base64 = "YQ=="' "$sibling" > "$SANDBOX/invalid-exclude.json"
+  chmod 600 "$SANDBOX/invalid-exclude.json"
+  mv "$SANDBOX/invalid-exclude.json" "$sibling"
+  git -C "$PROJECT" worktree add -q -b t13-third "$third"
+  run bash -c '
+    . "$1"
+    export TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "full-path\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$third"
+  [ "$status" -eq 5 ] && [[ "$output" == *'full-path'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *'invalid exclude owner'* ]] || { echo "$output"; return 1; }
+  [ ! -e "$third/.trellis/runtime" ] || { echo 'invalid sibling exclude published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
+}
+
+@test "T13 sibling exclude record naming another file misses before publication" {
+  local third="$SANDBOX/third" owner sibling=""
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  while IFS= read -r owner; do
+    if jq -e '.git_hooks.enabled == false' "$owner" >/dev/null; then sibling="$owner"; fi
+  done < <(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json')
+  [ -n "$sibling" ] || { echo 'missing non-authority owner'; return 1; }
+  # Reusing the shared capture is sound only for records naming that file.
+  # The canonical owner schema binds the path to the record's common dir and
+  # the donor binds that to the pinned one; this proves the refusal survives.
+  : > "$SANDBOX/foreign-exclude"
+  jq --arg path "$SANDBOX/foreign-exclude" '.exclude.path = $path' "$sibling" > "$SANDBOX/foreign-exclude.json"
+  chmod 600 "$SANDBOX/foreign-exclude.json"
+  mv "$SANDBOX/foreign-exclude.json" "$sibling"
+  git -C "$PROJECT" worktree add -q -b t13-third "$third"
+  run bash -c '
+    . "$1"
+    export TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "full-path\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$third"
+  [ "$status" -eq 5 ] && [[ "$output" == *'full-path'* ]] || { echo "$output"; return 1; }
+  # Selected donor or sibling: both refusals come from the canonical schema.
+  [[ "$output" == *'preflight refused: invalid owner'* || "$output" == *'preflight refused: non-exact donor owner'* ]] ||
+    { echo "$output"; return 1; }
+  [ ! -e "$third/.trellis/runtime" ] || { echo 'foreign sibling exclude published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
+}
+
+@test "T13 ignored registry namespace blocks donor publication" {
+  jq --arg target "$TARGET" '.discovery_ignores = (.discovery_ignores // {})
+      | .discovery_ignores.personal = [{"path":$target,"reason":"project-reserved"}]' \
+    "$TRELLIS_HOME/registry.json" > "$SANDBOX/registry-with-ignore.json"
+  chmod 600 "$SANDBOX/registry-with-ignore.json"
+  mv "$SANDBOX/registry-with-ignore.json" "$TRELLIS_HOME/registry.json"
+  cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before"
+  run bash -c '
+    . "$1"
+    export TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "canonical-fallback\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  cmp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before"
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'ignored root published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ] || { echo 'ignored root published a journal'; echo "$output"; return 1; }
+  [ "$status" -eq 5 ] && [[ "$output" == *'canonical-fallback'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *'identity or path collision'* ]] || { echo "$output"; return 1; }
+}
+
+@test "T13 modified managed hook still misses before publication" {
+  local managed="$TRELLIS_HOME/state/git-hooks/$(jq -r .checkout_id "$DONOR")/post-checkout"
+  printf '# t13-hook-drift\n' >> "$managed"
+  run bash -c '
+    . "$1"
+    export TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "canonical-fallback\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  [ "$status" -eq 5 ] && [[ "$output" == *'canonical-fallback'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *'invalid managed hooks'* ]] || { echo "$output"; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'hook drift published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
+}
+
+@test "T13 hardlinked donor artifact misses and falls back to canonical attach" {
+  local donor_file="$PROJECT/.claude/settings.local.json"
+  ln "$donor_file" "$SANDBOX/donor-hardlink"
+  run bash -c '
+    . "$1"
+    export TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "canonical-fallback\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  [ "$status" -eq 5 ] && [[ "$output" == *'canonical-fallback'* ]] || { echo "$output"; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'fast miss published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
+  run env TRELLIS_FASTPATH_TRACE=1 "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'donor fast-path miss:'* ]] || { echo 'the complete attach did not demonstrate a fast-path miss'; echo "$output"; return 1; }
+  [[ "$output" != *'donor fast path'* ]] || { echo 'hardlinked donor used the fast path'; return 1; }
+  [ -L "$TARGET/.trellis/runtime" ] && [ -f "$TARGET/.claude/settings.local.json" ]
+  [ "$donor_file" -ef "$SANDBOX/donor-hardlink" ] || { echo 'donor hardlink was changed'; return 1; }
+}
+
+@test "T13 project-appended donor hooks remain unowned through canonical fallback" {
+  local donor_file="$PROJECT/.claude/settings.local.json"
+  jq '.hooks.PreToolUse[0].hooks += [{"type":"command","command":"t13-project-hook"}]
+      | .hooks.PreToolUse += [{"matcher":"t13-project-block","hooks":[{"type":"command","command":"t13-project-block-hook"}]}]' \
+    "$donor_file" > "$SANDBOX/donor-with-project-hooks.json"
+  chmod 600 "$SANDBOX/donor-with-project-hooks.json"
+  mv "$SANDBOX/donor-with-project-hooks.json" "$donor_file"
+  run bash -c '. "$1"; _attachment_verify_owner_artifacts_impl "$2" "$3"' t13 \
+    "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$DONOR"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run bash -c '
+    . "$1"
+    export TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "canonical-fallback\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  [ "$status" -eq 5 ] && [[ "$output" == *'canonical-fallback'* ]] || { echo "$output"; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'fast miss published an artifact'; return 1; }
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" != *'donor fast path'* ]] || { echo 'modified project hooks used the fast path'; return 1; }
+  jq -e 'any(.hooks.PreToolUse[0].hooks[]; .command == "t13-project-hook")
+      and any(.hooks.PreToolUse[]; .matcher == "t13-project-block")' "$donor_file" >/dev/null
+  jq -e 'all(.hooks.PreToolUse[0].hooks[]; .command != "t13-project-hook")
+      and all(.hooks.PreToolUse[]; .matcher != "t13-project-block")' "$TARGET/.claude/settings.local.json" >/dev/null
+}
+
+@test "T13 donor render with recorded project hook is a read-only miss" {
+  local donor_file="$PROJECT/.claude/settings.local.json"
+  /usr/bin/python3 -I - "$donor_file" "$DONOR" <<'PY'
+import base64, hashlib, json, os, sys
+path, owner_path = sys.argv[1:]
+with open(path, encoding='utf-8') as stream:
+    guard = json.load(stream)
+guard['hooks']['PreToolUse'][0]['hooks'].append({'type': 'command', 'command': 't13-recorded-project-hook'})
+data = (json.dumps(guard, sort_keys=True) + '\n').encode()
+with open(path, 'wb') as stream:
+    stream.write(data)
+os.chmod(path, 0o600)
+with open(owner_path, encoding='utf-8') as stream:
+    owner = json.load(stream)
+for artifact in owner['artifacts']:
+    if artifact['path'] == '.claude/settings.local.json':
+        artifact['sha256'] = hashlib.sha256(data).hexdigest()
+for render in owner['renders']:
+    if render['path'] == '.claude/settings.local.json':
+        render['after_sha256'] = hashlib.sha256(data).hexdigest()
+        render['after_base64'] = base64.b64encode(data).decode()
+with open(owner_path, 'w', encoding='utf-8') as stream:
+    json.dump(owner, stream, sort_keys=True)
+    stream.write('\n')
+os.chmod(owner_path, 0o600)
+PY
+  run bash -c '. "$1"; _attachment_verify_owner_artifacts_impl "$2" "$3"' t13 \
+    "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$DONOR"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run bash -c '
+    . "$1"
+    export TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "canonical-fallback\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  if [ -e "$TARGET/.trellis/runtime" ] || [ -L "$TARGET/.trellis/runtime" ]; then
+    if jq -e 'any(.hooks.PreToolUse[0].hooks[]; .command == "t13-recorded-project-hook")' \
+      "$TARGET/.claude/settings.local.json" >/dev/null 2>&1; then echo 'project hook copied into target'; fi
+    echo 'recorded project hook was published'; return 1
+  fi
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
+  [ "$status" -eq 5 ] && [[ "$output" == *'canonical-fallback'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *'guard template differs'* ]] || { echo "$output"; return 1; }
+}
+
+@test "T13 holds three lock descriptors during capture and closes them before registry publication" {
+  local trace="$SANDBOX/t13-fd-stages"
+  run bash -c '
+    . "$1"
+    TEST_FD_LOG="$4"
+    export TRELLIS_FASTPATH_TRACE=1
+    eval "$(declare -f local_registry_read_diagnostic_state | sed "1s/local_registry_read_diagnostic_state/t13_original_registry_read/")"
+    eval "$(declare -f local_registry_write_locked_bound_rows | sed "1s/local_registry_write_locked_bound_rows/t13_original_registry_write/")"
+    local_registry_read_diagnostic_state() {
+      { : <&31; } 2>/dev/null && { : <&32; } 2>/dev/null && { : <&33; } 2>/dev/null || { echo "lock fd missing at capture" >&2; return 99; }
+      printf "open\n" >> "$TEST_FD_LOG"
+      t13_original_registry_read "$@"
+    }
+    local_registry_write_locked_bound_rows() {
+      if { : <&31; } 2>/dev/null || { : <&32; } 2>/dev/null || { : <&33; } 2>/dev/null; then
+        echo "lock fd leaked past post-journal check" >&2
+        return 99
+      fi
+      printf "closed\n" >> "$TEST_FD_LOG"
+      t13_original_registry_write "$@"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$trace"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  [ "$(< "$trace")" = $'open\nclosed' ] || { echo "wrong fd stages"; return 1; }
+}
+
+@test "T13 pin checks keep their verdicts and launch uname at most once per process" {
+  local trace="$SANDBOX/t13-uname-unit"
+  mkdir -p "$SANDBOX/t13-pin-a" "$SANDBOX/t13-pin-b"
+  : > "$trace"
+  run bash -c '
+    . "$1"
+    # A function stands in for the binary, so PATH (and the caller toolchain
+    # the donor proof compares) is unchanged; it counts each launch request.
+    uname() { [ "$T13_IN_PIN" != 1 ] || printf "uname\n" >> "$T13_UNAME_TRACE"; command uname "$@"; }
+    T13_UNAME_TRACE="$3" T13_IN_PIN=1
+    exec 40<"$4"
+    for check in 1 2 3 4; do attach_t13_pin_matches 40 "$4" || { echo "check $check missed" >&2; exit 1; }; done
+    attach_t13_pin_matches 40 "$5" && { echo "a different holder matched" >&2; exit 1; }
+    exec 40<&-
+    exit 0
+  ' t13 "$ATTACH" unused "$trace" "$SANDBOX/t13-pin-a" "$SANDBOX/t13-pin-b"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$trace" | tr -d ' ')" -le 1 ] || { echo "uname launched $(wc -l < "$trace" | tr -d ' ') times for five checks"; return 1; }
+}
+
+@test "T13 donor attach pin checks launch no uname after the checkout pin opens" {
+  local trace="$SANDBOX/t13-uname-attach" checks="$SANDBOX/t13-pin-checks"
+  : > "$trace"
+  run bash -c '
+    . "$1"
+    uname() { [ "$T13_IN_PIN" != 1 ] || printf "uname\n" >> "$T13_UNAME_TRACE"; command uname "$@"; }
+    T13_UNAME_TRACE="$3" T13_PIN_CHECKS="$4" T13_IN_PIN=0
+    eval "$(declare -f attach_t13_pin_matches | sed "1s/attach_t13_pin_matches/t13_original_pin_matches/")"
+    attach_t13_pin_matches() {
+      local rc=0
+      printf "check %s\n" "$1" >> "$T13_PIN_CHECKS"
+      T13_IN_PIN=1
+      t13_original_pin_matches "$@" || rc=$?
+      T13_IN_PIN=0
+      return "$rc"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$5" --fleet personal --release 1.2.3 "$6"
+  ' t13 "$ATTACH" unused "$trace" "$checks" "$TRELLIS_HOME" "$TARGET"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  [ "$(wc -l < "$checks" | tr -d ' ')" -eq 4 ] || { echo "expected four pin checks:"; cat "$checks"; return 1; }
+  [ ! -s "$trace" ] || { echo "pin checks launched uname $(wc -l < "$trace" | tr -d ' ') times"; return 1; }
+}
+
+@test "T13 unrelated fd 3 and 4 do not break donor attach or the calling shell" {
+  run bash -c '
+    exec 3<"$4" 4<"$4"
+    . "$1"
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3" || exit $?
+    { : <&3; } && { : <&4; } || { echo "caller fds were closed" >&2; exit 99; }
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$PROJECT/.trellis.json"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+}
+
+@test "T13 occupied private fd numbers fall back without clobbering the caller" {
+  local fd target result_file="$SANDBOX/t13-caller-fd"
+  printf 'caller-owned-descriptor\n' > "$result_file"
+  for fd in 31 32 33; do
+    target="$SANDBOX/fd-$fd"
+    git -C "$PROJECT" worktree add -q -b "t13-fd-$fd" "$target"
+    run bash -c '
+      case "$4" in
+        31) exec 31<"$5" ;;
+        32) exec 32<"$5" ;;
+        33) exec 33<"$5" ;;
+        *) exit 99 ;;
+      esac
+      . "$1"
+      trellis_attach_postjob_spawn() { :; }
+      attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3" || exit $?
+      case "$4" in
+        31) IFS= read -r value <&31 ;;
+        32) IFS= read -r value <&32 ;;
+        33) IFS= read -r value <&33 ;;
+      esac
+      [ "$value" = caller-owned-descriptor ] || { echo "caller descriptor changed" >&2; exit 99; }
+    ' t13 "$ATTACH" "$TRELLIS_HOME" "$target" "$fd" "$result_file"
+    [ "$status" -eq 0 ] || { echo "fd $fd: $output"; return 1; }
+    [[ "$output" != *'donor fast path'* ]] || { echo "occupied fd $fd used donor fastpath"; return 1; }
+    [ -L "$target/.trellis/runtime" ] || { echo "fd $fd canonical fallback not ready"; return 1; }
+  done
+}
+
+@test "T13 fsmonitor spawned by a Python Git child cannot inherit lock descriptors" {
+  local hook="$SANDBOX/t13-fsmonitor" witness="$SANDBOX/t13-fsmonitor-called"
+  cat > "$hook" <<'PY'
+#!/usr/bin/python3
+import json, os, subprocess, sys
+opened = []
+for fd in (31, 32, 33):
+    try:
+        os.fstat(fd)
+        opened.append(fd)
+    except OSError:
+        pass
+ancestry = []
+pid = os.getppid()
+for _ in range(4):
+    try:
+        row = subprocess.check_output(['/bin/ps', '-p', str(pid), '-o', 'ppid=', '-o', 'command='], text=True).strip()
+        parent, command = row.split(None, 1)
+        ancestry.append({'pid': pid, 'command': command})
+        pid = int(parent)
+        if pid <= 1:
+            break
+    except (OSError, subprocess.CalledProcessError, ValueError):
+        break
+with open(os.environ['T13_FS_LOG'], 'a', encoding='utf-8') as out:
+    out.write('hook ' + json.dumps({'pid': os.getpid(), 'ppid': os.getppid(), 'pins': opened, 'argv': sys.argv[1:], 'ancestry': ancestry}) + '\n')
+sys.stdout.buffer.write(b'0\0')
+PY
+  chmod 700 "$hook"
+  git -C "$TARGET" config --local core.fsmonitor "$hook"
+  run bash -c '
+    . "$1"
+    export T13_FS_LOG="$4"
+    git() {
+      local pins=""
+      { : <&31; } 2>/dev/null && pins="$pins 31"
+      { : <&32; } 2>/dev/null && pins="$pins 32"
+      { : <&33; } 2>/dev/null && pins="$pins 33"
+      printf "git %s pins=%s\n" "$*" "$pins" >> "$T13_FS_LOG"
+      command git "$@"
+    }
+    eval "$(declare -f local_registry_read_diagnostic_state | sed "1s/local_registry_read_diagnostic_state/t13_original_registry_read/")"
+    local_registry_read_diagnostic_state() { printf "capture\n" >> "$T13_FS_LOG"; t13_original_registry_read "$@"; }
+    eval "$(declare -f local_registry_write_locked_bound_rows | sed "1s/local_registry_write_locked_bound_rows/t13_original_registry_write/")"
+    local_registry_write_locked_bound_rows() { printf "postjournal\n" >> "$T13_FS_LOG"; t13_original_registry_write "$@"; }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$witness"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+  run /usr/bin/python3 -I - "$witness" <<'PY'
+import json, sys
+lines = open(sys.argv[1], encoding='utf-8').read().splitlines()
+hooks = [(index, json.loads(line[5:])) for index, line in enumerate(lines) if line.startswith('hook ')]
+assert hooks, 'configured fsmonitor hook did not run in this fixture'
+for index, hook in hooks:
+    assert hook['pins'] == [], hook
+    assert 'capture' in lines[:index] and 'postjournal' in lines[index + 1:], lines
+    assert any('attach-fastpath.py' in item['command'] for item in hook['ancestry']), hook
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; grep -E '^(hook |capture|postjournal|git )' "$witness"; return 1; }
+}
+
+@test "T13 Bash 3.2 TERM closes every pinned fd before releasing locks" {
+  local pidfile="$SANDBOX/t13-term-pid" trace="$SANDBOX/t13-term-trace" log="$SANDBOX/t13-term.log"
+  local runner pid tries=0 rc=0
+  /bin/bash -c '
+    . "$1"
+    TEST_PIDFILE="$4" TEST_TRACE="$5"
+    eval "$(declare -f local_registry_read_diagnostic_state | sed "1s/local_registry_read_diagnostic_state/t13_original_registry_read/")"
+    eval "$(declare -f _attachment_lock_release | sed "1s/_attachment_lock_release/t13_original_attachment_release/")"
+    eval "$(declare -f _attachment_checkout_lock_release | sed "1s/_attachment_checkout_lock_release/t13_original_checkout_release/")"
+    local_registry_read_diagnostic_state() {
+      { : <&31; } 2>/dev/null && { : <&32; } 2>/dev/null && { : <&33; } 2>/dev/null || return 99
+      printf "%s\n" "$_ATTACHMENT_PROCESS_PID" > "$TEST_PIDFILE"
+      /bin/sleep 3
+      t13_original_registry_read "$@"
+    }
+    _attachment_lock_release() {
+      if { : <&31; } 2>/dev/null || { : <&32; } 2>/dev/null || { : <&33; } 2>/dev/null; then
+        printf "fast-open\n" >> "$TEST_TRACE"
+      else printf "fast-closed\n" >> "$TEST_TRACE"; fi
+      t13_original_attachment_release "$@"
+    }
+    _attachment_checkout_lock_release() {
+      if { : <&31; } 2>/dev/null; then printf "checkout-open\n" >> "$TEST_TRACE"
+      else printf "checkout-closed\n" >> "$TEST_TRACE"; fi
+      t13_original_checkout_release "$@"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$pidfile" "$trace" > "$log" 2>&1 &
+  runner=$!
+  while [ ! -s "$pidfile" ] && kill -0 "$runner" 2>/dev/null && [ "$tries" -lt 300 ]; do
+    /bin/sleep 0.1
+    tries=$((tries + 1))
+  done
+  if [ ! -s "$pidfile" ]; then
+    kill "$runner" 2>/dev/null || true
+    wait "$runner" 2>/dev/null || true
+    echo 'lock-fd signal seam was not reached'; return 1
+  fi
+  pid="$(< "$pidfile")"
+  kill -TERM "$pid" || return 1
+  wait "$runner" || rc=$?
+  [ "$rc" -ne 0 ] || { echo 'TERM reported successful attach'; return 1; }
+  grep -Fx 'fast-closed' "$trace" >/dev/null || { echo 'fast lock fd not closed before release'; return 1; }
+  grep -Fx 'checkout-closed' "$trace" >/dev/null || { echo 'checkout fd not closed before release'; return 1; }
+  ! grep -E '^(fast|checkout)-open$' "$trace" >/dev/null || { echo 'a pinned fd leaked into release'; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'TERM left a published artifact'; return 1; }
+}
+
+t13_assert_equal_token_lock_replacement() {
+  local kind="$1" trace="$SANDBOX/t13-replaced-$1"
+  run bash -c '
+    . "$1"
+    TEST_HOLDER_LOG="$4" TEST_HOLDER_KIND="$5"
+    eval "$(declare -f local_registry_read_diagnostic_state | sed "1s/local_registry_read_diagnostic_state/t13_original_registry_read/")"
+    local_registry_read_diagnostic_state() {
+      local holder token=owner.json
+      case "$TEST_HOLDER_KIND" in
+        checkout) holder="$_ATTACHMENT_CHECKOUT_LOCK_HOLDER" ;;
+        attachment) holder="$_ATTACHMENT_LOCK_HOLDER" ;;
+        registry) holder="$_TRELLIS_HOME_LOCK_DIR"; token=pid ;;
+        *) return 99 ;;
+      esac
+      printf "%s\n" "$holder" > "$TEST_HOLDER_LOG"
+      mv "$holder" "$holder.original" || return 99
+      mkdir -m 700 "$holder" || return 99
+      cp "$holder.original/$token" "$holder/$token" || return 99
+      chmod 600 "$holder/$token" || return 99
+      t13_original_registry_read "$@"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$trace" "$kind"
+  [ -s "$trace" ] || { echo 'replacement seam was not reached'; return 1; }
+  [ "$status" -ne 0 ] || { echo 'replacement lock authorized an attach'; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'artifact published after lock replacement'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ] || { echo 'journal published after lock replacement'; return 1; }
+  [ -d "$(< "$trace")" ] || { echo 'unknown replacement lock was deleted'; return 1; }
+}
+
+@test "T13 equal-token checkout lock replacement before Python refuses and is retained" {
+  t13_assert_equal_token_lock_replacement checkout
+}
+
+@test "T13 equal-token attachment lock replacement before Python refuses and is retained" {
+  t13_assert_equal_token_lock_replacement attachment
+}
+
+@test "T13 equal-token registry lock replacement before Python refuses and is retained" {
+  t13_assert_equal_token_lock_replacement registry
+}
+
+# qp H3: the same equal-token replacement after --begin, at the registry write.
+# The journal exists, so the refusal is recoverable; the replacement holder is
+# evidence and must survive cleanup.
+t13_assert_post_begin_lock_replacement() {
+  local kind="$1" trace="$SANDBOX/t13-post-begin-$1"
+  run bash -c '
+    . "$1"
+    TEST_HOLDER_LOG="$4" TEST_HOLDER_KIND="$5"
+    eval "$(declare -f local_registry_write_locked_bound_rows | sed "1s/local_registry_write_locked_bound_rows/t13_original_bound_write/")"
+    local_registry_write_locked_bound_rows() {
+      local holder token=owner.json
+      case "$TEST_HOLDER_KIND" in
+        checkout) holder="$_ATTACHMENT_CHECKOUT_LOCK_HOLDER" ;;
+        attachment) holder="$_ATTACHMENT_LOCK_HOLDER" ;;
+        registry) holder="$_TRELLIS_HOME_LOCK_DIR"; token=pid ;;
+        *) return 99 ;;
+      esac
+      printf "%s\n" "$holder" > "$TEST_HOLDER_LOG"
+      mv "$holder" "$holder.original" || return 99
+      mkdir -m 700 "$holder" || return 99
+      cp "$holder.original/$token" "$holder/$token" || return 99
+      chmod 600 "$holder/$token" || return 99
+      t13_original_bound_write "$@"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$trace" "$kind"
+  [ -s "$trace" ] || { echo 'post-begin replacement seam was not reached'; return 1; }
+  [ "$status" -eq 3 ] || { echo "status $status: $output"; return 1; }
+  [[ "$output" == *'run trellis recover'* ]] || { echo "$output"; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'artifact published after lock replacement'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 1 ] || { echo 'journal not retained for recovery'; return 1; }
+  [ -d "$(< "$trace")" ] || { echo 'unknown replacement lock was deleted'; return 1; }
+}
+
+@test "T13 qp-H3 equal-token checkout lock replacement after begin stops publication and is retained" {
+  t13_assert_post_begin_lock_replacement checkout
+}
+
+@test "T13 qp-H3 equal-token attachment lock replacement after begin stops publication and is retained" {
+  t13_assert_post_begin_lock_replacement attachment
+}
+
+@test "T13 qp-H3 equal-token registry lock replacement after begin stops publication and is retained" {
+  t13_assert_post_begin_lock_replacement registry
+}
+
+@test "T13 qp-H3 the registry write and finish keep the pins in the parent, never in children" {
+  local trace="$SANDBOX/t13-finish-pins"
+  run bash -c '
+    . "$1"
+    TEST_FD_LOG="$4"
+    eval "$(declare -f local_registry_write_locked_bound_rows | sed "1s/local_registry_write_locked_bound_rows/t13_original_bound_write/")"
+    local_registry_write_locked_bound_rows() {
+      /bin/bash -c "for fd in 31 32 33; do { : <&\$fd; } 2>/dev/null && echo child-open-\$fd; done; exit 0" >> "$TEST_FD_LOG"
+      t13_original_bound_write "$@" || return
+      printf "written\n" >> "$TEST_FD_LOG"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3" || exit
+    [ "$(< "$TEST_FD_LOG")" = written ] || exit 98
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$trace"
+  [ "$status" -eq 0 ] || { echo "$output"; cat "$trace"; return 1; }
+  [[ "$output" == *'attached (donor fast path):'* ]] || { echo "$output"; return 1; }
+}
+
 @test "A5B takes fast path and invokes the async hook after ownership" {
   run bash -c '
     . "$1"
@@ -539,6 +1222,60 @@ PY
   done
 }
 
+@test "T13 donor binding changed after the early check refuses under the transaction locks" {
+  local trace="$SANDBOX/t13-binding-trace"
+  # No seam on the binding check: a concurrent registry writer moves the
+  # checkout row's root to a reachable non-worktree between the unlocked early
+  # check and the donor transaction. The donor proof binds checkout and worktree
+  # IDs but never the checkout row's root, so the canonical binding verifier,
+  # run on the lock-held capture, is what refuses.
+  run bash -c '
+    . "$1"
+    target="$3"; donor="$4"; trace="$5"
+    eval "$(declare -f attach_expected_binding_verify | sed "1s/attach_expected_binding_verify/t13_original_binding_verify/")"
+    attach_expected_binding_verify() {
+      local rc=0
+      t13_original_binding_verify "$@" || rc=$?
+      printf "verify args=%s rc=%s\n" "$#" "$rc" >> "$T13_BINDING_TRACE"
+      return "$rc"
+    }
+    eval "$(declare -f trellis_home_resolve_release | sed "1s/trellis_home_resolve_release/t13_original_resolve_release/")"
+    trellis_home_resolve_release() {
+      local registry="$T13_HOME/registry.json"
+      jq --arg root "$T13_HOME" ".projects |= with_entries(.value.checkouts |= with_entries(.value.root = \$root))" \
+        "$registry" > "$registry.t13" && chmod 600 "$registry.t13" && mv "$registry.t13" "$registry" || return 99
+      cp "$registry" "$T13_BINDING_TRACE.registry" || return 99
+      printf "registry raced\n" >> "$T13_BINDING_TRACE"
+      t13_original_resolve_release "$@"
+    }
+    export T13_BINDING_TRACE="$trace" T13_HOME="$2" T13_DONOR_ROOT="$(jq -r .worktree_root "$donor")"
+    identity="$(local_registry_identity_for_root "$target")"
+    checkout="$(printf "%s\n" "$identity" | jq -r .checkout_id)"
+    worktree="$(printf "%s\n" "$identity" | jq -r .worktree_id)"
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 \
+      --expected-fleet personal --expected-project-id a5b-fixture \
+      --expected-root "$target" --expected-checkout-id "$checkout" \
+      --expected-worktree-id "$worktree" --expected-attachment-id "" \
+      --expected-release 1.2.3 --expected-harnesses-json '\''["claude","codex"]'\'' \
+      --expected-donor-root "$T13_DONOR_ROOT" --expected-donor-checkout-id "$checkout" \
+      --expected-donor-worktree-id "$(jq -r .worktree_id "$donor")" \
+      --expected-donor-attachment-id "$(jq -r .attachment_id "$donor")" \
+      --expected-donor-release 1.2.3 --expected-donor-harnesses-json '\''["claude","codex"]'\'' \
+      "$target"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$DONOR" "$trace"
+  printf '%s\n' "$(cat "$trace")"
+  [ "$(sed -n 1p "$trace")" = 'verify args=5 rc=0' ] || { echo 'early binding check did not pass first'; return 1; }
+  [ "$(sed -n 2p "$trace")" = 'registry raced' ] || { echo 'race was not between the checks'; return 1; }
+  [ "$status" -eq 4 ] || { echo "status $status: $output"; return 1; }
+  [ "$(sed -n 3p "$trace")" = 'verify args=6 rc=4' ] || { echo 'lock-held binding check did not refuse'; return 1; }
+  [[ "$output" == *'target row failed strict local registry identity validation'* ]] || { echo "$output"; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'moved checkout row published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 0 ]
+  [ "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' | wc -l | tr -d ' ')" -eq 1 ]
+  cmp "$TRELLIS_HOME/registry.json" "$trace.registry" || { echo 'refused binding changed the registry'; return 1; }
+}
+
 @test "A5B registry publication must use the locked registry API" {
   run bash -c '
     . "$1"
@@ -552,11 +1289,11 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "A5B owned artifact and owner metadata parity with the slow path" {
+assert_fast_slow_parity() {
   cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before"
   fast_attach
   [ "$status" -eq 0 ]
-  [[ "$output" == *'donor fast path'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]]
   FAST_OWNER="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' ! -path "$DONOR")"
   cp "$FAST_OWNER" "$SANDBOX/fast-owner"
   /usr/bin/python3 - "$TARGET" "$SANDBOX/fast-owner" "$SANDBOX/artifact-bytes.json" <<'PY'
@@ -596,6 +1333,77 @@ PY
   [ "$status" -eq 0 ]
 }
 
+@test "A5B owned artifact and owner metadata parity with the slow path" {
+  assert_fast_slow_parity
+}
+
+@test "T13 unknown and historical owner or registry shapes are read-only misses" {
+  local shape filter file owner_before="$SANDBOX/t13-shape-owner" registry_before="$SANDBOX/t13-shape-registry"
+  cp "$DONOR" "$owner_before"
+  cp "$TRELLIS_HOME/registry.json" "$registry_before"
+  # Historical owners (no toolchain or exclude record) are still valid for the
+  # canonical schema; unknown versions and keys are not. Either way the donor
+  # transaction must leave everything as it found it and defer to canonical.
+  for shape in owner-schema-2 owner-unknown-key owner-no-toolchain owner-no-exclude registry-schema-2 registry-unknown-key; do
+    case "$shape" in
+      owner-schema-2) filter='.schema_version = 2'; file="$DONOR" ;;
+      owner-unknown-key) filter='.t13_future = true'; file="$DONOR" ;;
+      owner-no-toolchain) filter='del(.toolchain_path)'; file="$DONOR" ;;
+      owner-no-exclude) filter='del(.exclude, .exclude_block_hash)'; file="$DONOR" ;;
+      registry-schema-2) filter='.schema_version = 2'; file="$TRELLIS_HOME/registry.json" ;;
+      registry-unknown-key) filter='.t13_future = {}'; file="$TRELLIS_HOME/registry.json" ;;
+    esac
+    jq "$filter" "$file" > "$SANDBOX/t13-shape.json" && chmod 600 "$SANDBOX/t13-shape.json" && mv "$SANDBOX/t13-shape.json" "$file"
+    cp "$DONOR" "$SANDBOX/t13-shape-owner-now"
+    cp "$TRELLIS_HOME/registry.json" "$SANDBOX/t13-shape-registry-now"
+    run bash -c '
+      . "$1"
+      export TRELLIS_FASTPATH_TRACE=1
+      trellis_attach_postjob_spawn() { :; }
+      release_store_locate() { printf "canonical-fallback\n" >&2; return 5; }
+      attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+    ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+    [ "$status" -eq 5 ] && [[ "$output" == *'canonical-fallback'* ]] || { echo "$shape: status $status: $output"; return 1; }
+    [ ! -e "$TARGET/.trellis/runtime" ] && [ ! -L "$TARGET/.trellis/runtime" ] || { echo "$shape published an artifact"; return 1; }
+    [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 0 ] || { echo "$shape left a journal"; return 1; }
+    [ "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' | wc -l | tr -d ' ')" -eq 1 ] || { echo "$shape published an owner"; return 1; }
+    cmp "$DONOR" "$SANDBOX/t13-shape-owner-now" || { echo "$shape changed the donor owner"; return 1; }
+    cmp "$TRELLIS_HOME/registry.json" "$SANDBOX/t13-shape-registry-now" || { echo "$shape changed the registry"; return 1; }
+    cp "$owner_before" "$DONOR"
+    cp "$registry_before" "$TRELLIS_HOME/registry.json"
+  done
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] && [[ "$output" == *'attached (donor fast path):'* ]] || { echo "restored fixture: $output"; return 1; }
+}
+
+@test "T13 proposal forged after begin makes finish refuse and recover restores state" {
+  run bash -c '
+    . "$1"
+    eval "$(declare -f local_registry_write_locked_bound_rows | sed "1s/local_registry_write_locked_bound_rows/t13_original_bound_write/")"
+    # Models a workspace swap between --begin and the Bash write: the writer
+    # and any later path-based reader see the same forged proposal.
+    local_registry_write_locked_bound_rows() {
+      jq ".projects |= with_entries(.value.metadata.t13_forged = true)" "$2" > "$2.forged" && mv "$2.forged" "$2" || return 99
+      t13_original_bound_write "$@"
+    }
+    trellis_attach_postjob_spawn() { :; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t13 "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  [ "$status" -eq 3 ] || { echo "status $status: $output"; return 1; }
+  [[ "$output" == *'run trellis recover'* ]] || { echo "$output"; return 1; }
+  jq -e '[.projects[].metadata.t13_forged] | any' "$TRELLIS_HOME/registry.json" >/dev/null ||
+    { echo 'fixture did not reach the registry write'; return 1; }
+  [ ! -e "$TARGET/.trellis/runtime" ] || { echo 'forged proposal published an artifact'; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 1 ]
+  run "$ATTACH" recover --home "$TRELLIS_HOME" "$TARGET"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 0 ]
+  [ ! -e "$TARGET/.trellis/runtime" ]
+  run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ -L "$TARGET/.trellis/runtime" ]
+}
+
 @test "A5B interrupted batch remains recoverable with the existing journal" {
   run env ATTACHMENT_FAULT_PHASE=fast-published "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
   [ "$status" -ne 0 ]
@@ -603,4 +1411,205 @@ PY
   run "$ATTACH" recover --home "$TRELLIS_HOME" "$TARGET"
   [ "$status" -eq 0 ]
   [ ! -e "$TARGET/.trellis/runtime" ]
+}
+
+# T34 option B: native renders name the project root and this host's
+# companion. The donor is verified against the canonical render for its own
+# root and the target gets the canonical render for the target root.
+@test "T34B native donor takes the fast path with the target's own render" {
+  native_render_fixture_strings "$PROJECT/.claude/settings.local.json" | grep -qF "$NATIVE_COMPANION"
+  native_render_fixture_strings "$PROJECT/.claude/settings.local.json" | grep -qF "$PROJECT"
+  native_render_fixture_strings "$PROJECT/.codex/hooks.json" | grep -qF "$PROJECT"
+  assert_fast_slow_parity
+  [[ "$output" != *'donor not reused'* ]]
+  for file in .claude/settings.local.json .codex/hooks.json; do
+    native_render_fixture_strings "$TARGET/$file" | grep -qF "$NATIVE_COMPANION"
+    native_render_fixture_strings "$TARGET/$file" | grep -qF "$TARGET"
+    ! native_render_fixture_strings "$TARGET/$file" | grep -qF "$PROJECT"
+  done
+}
+
+@test "T34B native tampered, mismatched, other-arch or unverifiable donors run the full attach with a labelled status" {
+  local case label digest other_digest
+  digest="$(jq -r --arg t "$NATIVE_TARGET" '.assets[$t].sha256' "$REPO_ROOT/core-rules/native/artifacts.json")"
+  other_digest="$(jq -r --arg t "$NATIVE_OTHER_TARGET" '.assets[$t].sha256' "$REPO_ROOT/core-rules/native/artifacts.json")"
+  cp "$DONOR" "$SANDBOX/donor-before"
+  cp "$PROJECT/.claude/settings.local.json" "$SANDBOX/guard-before"
+  for case in tampered other-root other-arch legacy-render missing-companion; do
+    case "$case" in
+      tampered)
+        native_render_fixture_rewrite "$DONOR" "$PROJECT" .claude/settings.local.json timeout
+        label='donor render differs from its own root render' ;;
+      other-root)
+        native_render_fixture_rewrite "$DONOR" "$PROJECT" .claude/settings.local.json replace "$PROJECT" "$SANDBOX/elsewhere"
+        label='donor render differs from its own root render' ;;
+      other-arch)
+        native_render_fixture_rewrite "$DONOR" "$PROJECT" .claude/settings.local.json replace "/$NATIVE_TARGET/$digest/" "/$NATIVE_OTHER_TARGET/$other_digest/"
+        label='donor render is for another host target' ;;
+      legacy-render)
+        native_render_fixture_rewrite "$DONOR" "$PROJECT" .claude/settings.local.json legacy
+        label='legacy donor render; this host renders native' ;;
+      missing-companion)
+        chmod 700 "${NATIVE_COMPANION%/*}"
+        mv "$NATIVE_COMPANION" "$SANDBOX/companion-aside"
+        label='canonical render refused' ;;
+    esac
+    run bash -c '
+      . "$1"
+      release_store_locate() { printf "full-path\n" >&2; return 5; }
+      attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+    ' t34b "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+    printf '%s: %s\n' "$case" "$output"
+    [ "$status" -eq 5 ]
+    [[ "$output" == *'full-path'* ]]
+    [[ "$output" == *"trellis attach: donor not reused ($label"* ]]
+    [[ "$output" != *'attached (donor fast path)'* ]]
+    [ ! -e "$TARGET/.trellis/runtime" ] && [ ! -L "$TARGET/.trellis/runtime" ]
+    [ ! -e "$TARGET/.claude" ]
+    [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 0 ]
+    if [ "$case" = missing-companion ]; then
+      mv "$SANDBOX/companion-aside" "$NATIVE_COMPANION"
+      chmod 500 "${NATIVE_COMPANION%/*}"
+    fi
+    chmod 600 "$DONOR" "$PROJECT/.claude/settings.local.json"
+    cp "$SANDBOX/donor-before" "$DONOR"
+    cp "$SANDBOX/guard-before" "$PROJECT/.claude/settings.local.json"
+  done
+  # Restored, the same donor takes the fast path: every miss above was the render check.
+  fast_attach
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'attached (donor fast path):'* ]]
+}
+
+@test "T34B native donor with drifted, unrecorded bytes falls back without reuse" {
+  printf ' \n' >> "$PROJECT/.claude/settings.local.json"
+  run bash -c '
+    . "$1"
+    release_store_locate() { printf "full-path\n" >&2; return 5; }
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
+  ' t34b "$ATTACH" "$TRELLIS_HOME" "$TARGET"
+  printf '%s\n' "$output"
+  [ "$status" -eq 5 ]
+  [[ "$output" == *'full-path'* ]]
+  [[ "$output" != *'attached (donor fast path)'* ]]
+  [ ! -e "$TARGET/.trellis/runtime" ] && [ ! -L "$TARGET/.trellis/runtime" ]
+}
+
+@test "T34B native expected donor binding retains the fast path" {
+  run bash -c '
+    . "$1"
+    target="$3"; donor="$4"
+    identity="$(local_registry_identity_for_root "$target")"
+    checkout="$(printf "%s\n" "$identity" | jq -r .checkout_id)"
+    worktree="$(printf "%s\n" "$identity" | jq -r .worktree_id)"
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 \
+      --expected-fleet personal --expected-project-id a5b-fixture \
+      --expected-root "$target" --expected-checkout-id "$checkout" \
+      --expected-worktree-id "$worktree" --expected-attachment-id "" \
+      --expected-release 1.2.3 --expected-harnesses-json '\''["claude","codex"]'\'' \
+      --expected-donor-root "$(jq -r .worktree_root "$donor")" --expected-donor-checkout-id "$checkout" \
+      --expected-donor-worktree-id "$(jq -r .worktree_id "$donor")" --expected-donor-attachment-id "$(jq -r .attachment_id "$donor")" \
+      --expected-donor-release 1.2.3 --expected-donor-harnesses-json '\''["claude","codex"]'\'' \
+      "$target"
+  ' t34b "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$DONOR"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'attached (donor fast path):'* ]]
+  native_render_fixture_strings "$TARGET/.claude/settings.local.json" | grep -qF "$TARGET"
+}
+
+# Spec 074 T2a: the seed's canonical donor verify (attachment_verify_donor) is
+# shared with the fast path's PREFLIGHT, which then skips only its per-artifact
+# leaf loop, and only for the identical owner bytes at this release.
+t2a_leaf_wrapper() {
+  local mini="$1"
+  mkdir -p "$mini/lib"
+  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$REPO_ROOT/scripts/lib/release-executed.py" "$mini/lib/"
+  cat > "$mini/attach-project.sh" <<'BASH'
+. "$T2A_REAL_ATTACH" || exit 1
+eval "$(declare -f _attachment_verify_owner_artifacts | sed '1s/_attachment_verify_owner_artifacts/t2a_original_owner_artifacts/')"
+_attachment_verify_owner_artifacts() {
+  printf '%s %s\n' "$1" "${3:-all}" >> "$T2A_LEAF_TRACE"
+  [ "${T2A_STOP:-0}" != 1 ] || return 3
+  t2a_original_owner_artifacts "$@"
+}
+BASH
+}
+
+# Runs attach with the expected donor binding the seed passes, after the
+# caller-provided proof setup ($6, evaluated in the attach shell).
+t2a_attach() {
+  run bash -c '
+    . "$1"
+    SCRIPT_DIR="$4"
+    export T2A_REAL_ATTACH="$1" T2A_LEAF_TRACE="$5" TRELLIS_FASTPATH_TRACE=1
+    trellis_attach_postjob_spawn() { :; }
+    release_store_locate() { printf "full-path\n" >&2; return 5; }
+    home="$2"; target="$3"; donor="$7"
+    identity="$(local_registry_identity_for_root "$target")"
+    checkout="$(printf "%s\n" "$identity" | jq -r .checkout_id)"
+    worktree="$(printf "%s\n" "$identity" | jq -r .worktree_id)"
+    digest="$(shasum -a 256 "$donor" | cut -d " " -f 1)"
+    tab=$(printf "\t")
+    eval "$6"
+    attach_cmd_attach --home "$home" --fleet personal --release 1.2.3 \
+      --expected-fleet personal --expected-project-id a5b-fixture \
+      --expected-root "$target" --expected-checkout-id "$checkout" \
+      --expected-worktree-id "$worktree" --expected-attachment-id "" \
+      --expected-release 1.2.3 --expected-harnesses-json '\''["claude","codex"]'\'' \
+      --expected-donor-root "$(jq -r .worktree_root "$donor")" --expected-donor-checkout-id "$checkout" \
+      --expected-donor-worktree-id "$(jq -r .worktree_id "$donor")" --expected-donor-attachment-id "$(jq -r .attachment_id "$donor")" \
+      --expected-donor-release 1.2.3 --expected-donor-harnesses-json '\''["claude","codex"]'\'' \
+      "$target"
+  ' t2a "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$T2A_MINI" "$T2A_TRACE" "$1" "$DONOR"
+  printf '%s\n' "$output"
+}
+
+@test "T2A a seed donor proof skips only the PREFLIGHT leaf loop for the same owner bytes" {
+  T2A_MINI="$SANDBOX/t2a-mini" T2A_TRACE="$SANDBOX/t2a-shared.log"
+  t2a_leaf_wrapper "$T2A_MINI"
+  # As the seed does: a canonical attachment_verify of exactly these bytes.
+  t2a_attach 'attachment_verify "$home" "$donor" || exit 9
+    _ATTACHMENT_DONOR_PROOF="$$"${tab}"$donor"${tab}"$digest"${tab}1.2.3'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'donor proof shared'* ]]
+  [ "$(grep -Fxc "$DONOR proven-leaves" "$T2A_TRACE")" -eq 1 ]
+  [ "$(grep -Fxc "$DONOR all" "$T2A_TRACE")" -eq 0 ]
+}
+
+@test "T2A proofs for other bytes, another release, another process or an inherited value are not shared" {
+  local case proof
+  T2A_MINI="$SANDBOX/t2a-mini" T2A_TRACE="$SANDBOX/t2a-refused.log"
+  t2a_leaf_wrapper "$T2A_MINI"
+  for case in other-bytes other-release other-process inherited-preflight inherited-python; do
+    case "$case" in
+      other-bytes) proof='_ATTACHMENT_DONOR_PROOF="$$"${tab}"$donor"${tab}"$(printf "%064d" 0)"${tab}1.2.3' ;;
+      other-release) proof='_ATTACHMENT_DONOR_PROOF="$$"${tab}"$donor"${tab}"$digest"${tab}9.9.9' ;;
+      other-process) proof='_ATTACHMENT_DONOR_PROOF="1"${tab}"$donor"${tab}"$digest"${tab}1.2.3' ;;
+      inherited-preflight) proof='export _TRELLIS_PREFLIGHT_DONOR_PROVEN="$donor"${tab}"$digest"' ;;
+      inherited-python) proof='export TRELLIS_FASTPATH_DONOR_PROOF="$donor"${tab}"$digest"${tab}1.2.3' ;;
+    esac
+    : > "$T2A_TRACE"
+    T2A_STOP=1 t2a_attach "$proof"
+    printf '%s: %s\n' "$case" "$(cat "$T2A_TRACE")"
+    [ "$status" -eq 5 ]
+    [[ "$output" == *'donor proof not shared'* ]]
+    [ "$(grep -Fxc "$DONOR all" "$T2A_TRACE")" -eq 1 ]
+    [ "$(grep -Fxc "$DONOR proven-leaves" "$T2A_TRACE")" -eq 0 ]
+    [ ! -e "$TARGET/.trellis/runtime" ] && [ ! -L "$TARGET/.trellis/runtime" ]
+  done
+}
+
+@test "T2A seed shares its canonical donor verify with the fast path" {
+  local wt="$SANDBOX/t2a-seed-target"
+  # The fixture's seed is a stub; this case runs the installed real one on a
+  # worktree added without the post-checkout reconcile.
+  git -C "$PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t2a-seed "$wt"
+  run env TRELLIS_ATTACH_POSTJOB=off TRELLIS_FASTPATH_TRACE=1 \
+    bash "$TRELLIS_HOME/releases/1.2.3/payload/scripts/seed-inheritance-symlinks.sh" --target "$wt"
+  printf '%s\n' "$output"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'donor proof shared'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]]
 }

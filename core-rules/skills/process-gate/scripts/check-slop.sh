@@ -20,11 +20,9 @@
 # Scope is the ratchet: only lines the range adds are reported, so pre-existing
 # violations belong to the cleanup sessions, not to this gate.
 #
-# Detection is EITHER the profile's native linter, narrowed to the profile's own
-# rules, OR the shared grep pattern set — never the project's whole lint config
-# (see the detection-ladder section below) and never an unrun linter's silence
-# (see run_native). Both of those render a project's ordinary lint findings, or a
-# broken toolchain, as an anti-slop verdict.
+# Detection uses the profile's native rules plus patterns not owned by a running
+# native engine, or the full shared pattern set when the native lane degrades.
+# It never reports the project's whole lint config or an unrun linter's silence.
 
 set -euo pipefail
 
@@ -48,8 +46,78 @@ MALFORMED=""
 TRELLIS_JSON="$PROJECT_DIR/.trellis.json"
 if [ -f "$TRELLIS_JSON" ]; then
   if ! command -v jq >/dev/null 2>&1; then
-    pg_log info "Anti-slop: n/a — jq unavailable, posture unreadable (range=$RANGE)"
-    exit 0
+    # Posture alone can be read through the same vetted interpreter resolver as
+    # security-gate. Restrict resolution to fixed system locations, never the
+    # project's or caller's PATH; do not run the scan without jq.
+    engine_lib="$SKILL_DIR/../security-gate/scripts/lib/engine.sh"
+    fallback_py=""
+    if [ -f "$engine_lib" ]; then
+      fallback_py="$(PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin; export PATH
+        builtin source "$engine_lib" && sg_resolve_python "$PROJECT_DIR")" || fallback_py=""
+    fi
+    if [ -z "$fallback_py" ] || [ ! -x /usr/bin/env ]; then
+      pg_log fail "Anti-slop: jq unavailable and posture unknown — trusted interpreter unavailable (range=$RANGE)"
+      exit 1
+    fi
+    fallback="$(/usr/bin/env -i PATH=/usr/bin:/bin HOME="${HOME:-/}" LANG=C \
+      "$fallback_py" -I -c '
+import json, sys
+
+def kind(value):
+    if value is None: return "null"
+    if isinstance(value, bool): return "boolean"
+    if isinstance(value, dict): return "object"
+    if isinstance(value, list): return "array"
+    if isinstance(value, str): return "string"
+    return "number"
+
+def reject_constant(value):
+    raise ValueError(value)
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        root = json.load(stream, parse_constant=reject_constant)
+except (OSError, UnicodeError, ValueError):
+    print("malformed:.trellis.json is not parseable JSON")
+    sys.exit(0)
+if not isinstance(root, dict):
+    print("malformed:.trellis.json is not a JSON object")
+    sys.exit(0)
+node = root.get("gate_profiles")
+if node is None:
+    print("off:")
+elif not isinstance(node, dict):
+    print("malformed:gate_profiles is not an object")
+else:
+    node = node.get("anti_slop")
+    if node is None:
+        print("off:")
+    elif not isinstance(node, dict):
+        print("malformed:gate_profiles.anti_slop is not an object")
+    else:
+        posture = node.get("posture")
+        if posture is None: print("off:")
+        elif not isinstance(posture, str): print("malformed:posture is a " + kind(posture) + ", not a string")
+        elif posture in ("off", "advisory", "enforced"): print("ok:" + posture)
+        else: print("malformed:posture is not one of off|advisory|enforced")
+' "$TRELLIS_JSON" 2>/dev/null)" || fallback=""
+    case "$fallback" in
+      off:|ok:off)
+        pg_log info "Anti-slop: n/a — posture off or undeclared (range=$RANGE)"
+        exit 0 ;;
+      ok:advisory)
+        pg_log info "Anti-slop: n/a — jq unavailable; advisory check did not run (range=$RANGE)"
+        exit 0 ;;
+      ok:enforced)
+        pg_log fail "Anti-slop: jq unavailable; enforced check did not run (range=$RANGE)"
+        exit 1 ;;
+      malformed:*)
+        pg_log warn "Anti-slop: ${fallback#malformed:} — treated as advisory; jq unavailable, check did not run (range=$RANGE)"
+        exit 0 ;;
+      *)
+        pg_log fail "Anti-slop: jq unavailable and posture unknown — trusted interpreter failed (range=$RANGE)"
+        exit 1 ;;
+    esac
   fi
   verdict="$(jq -r '
     . as $r
@@ -106,7 +174,7 @@ fi
 # check-secrets.sh; it is both the scan input and the ratchet filter.
 WORK="$(mktemp -d 2>/dev/null || mktemp -d -t check-slop)"
 # shellcheck disable=SC2154  # `rc` is assigned inside the trap
-trap 'rc=$?; rm -rf "$WORK"; exit "$rc"' EXIT
+trap 'rc=$?; rm -rf "${WORK:?}"; exit "$rc"' EXIT
 LOOKUP="$WORK/added"
 DEGRADED=""
 
@@ -119,7 +187,9 @@ DEGRADED=""
 # otherwise the LOOKUP columns shift by one and every finding in that file is
 # silently dropped.
 diff_rc=0
-git -c core.quotePath=false diff --no-color --unified=0 "$RANGE" 2>"$WORK/diff.err" >"$WORK/diff.raw" || diff_rc=$?
+git -c core.quotePath=false diff --no-ext-diff --no-textconv \
+  --src-prefix=a/ --dst-prefix=b/ --no-color --unified=0 "$RANGE" \
+  2>"$WORK/diff.err" >"$WORK/diff.raw" || diff_rc=$?
 # SAFETY: an unresolvable range must fail visibly — an empty lookup would pass over work that never ran.
 if [ "$diff_rc" -ne 0 ]; then
   pg_log fail "Anti-slop (range=$RANGE, posture=$POSTURE)"
@@ -158,10 +228,28 @@ while IFS= read -r f; do
 done < <(cut -f1 "$LOOKUP" | sort -u)
 
 # --- detection ladder ------------------------------------------------------
-# An INSTALLED PROFILE means the native linter owns that language; the grep
-# pattern set is the fallback everywhere else. Go and Rust are pattern-only in v1
-# (their profiles ship dormant); Java is pattern-only because it has no native
-# lane at all — see profiles/java/README.md § Why no native engine.
+# An INSTALLED PROFILE owns the patterns its native rules cover; remaining
+# patterns still run. Go, Rust and Java have no native lane in v1.
+# The map names only pattern IDs; native rules with no pattern equivalent need
+# no entry. Suppressions retain the native engine's own semantics.
+native_covered_patterns() {
+  case "$1" in
+    # ts-as-any: native accepts justified assertions, e.g. `// SAFETY: checked` then `x as any`.
+    # ts-as-unknown-as: no-chained-type-assertions owns assertion chains.
+    # ts-record-literal: native intentionally allows empty accumulators, e.g. `const x: Record<string, T> = {}`.
+    # ts-module-mock: native excludes a locally shadowed vi, e.g. `const vi = service; vi.mock("x")`.
+    oxlint) printf '%s' 'ts-as-any,ts-as-unknown-as,ts-record-literal,ts-module-mock' ;;
+    # ANN401 misses standalone class fields, e.g. `class C:\n    field: Any`;
+    # PGH004 has no corresponding pattern rule.
+    ruff) printf '%s' 'py-any-annotation' ;;
+    # ignore-without-code owns bare ignores; unused-ignore is also kept only
+    # for bare comments, since strict mypy reports an unused bare ignore that way.
+    # A module-level bare # type: ignore skips the whole file silently in mypy;
+    # e.g. `# type: ignore` on line 1 followed by `x: int = "wrong"`.
+    # Unlike grep, mypy ignores string text such as `message = "# type: ignore"`.
+    mypy) printf '%s' 'py-bare-type-ignore' ;;
+  esac
+}
 #
 # "Installed profile" is the profile's own marker in the config, never the mere
 # existence of a config file: oxlint keys off the vendored plugin's name, ruff off
@@ -171,7 +259,8 @@ done < <(cut -f1 "$LOOKUP" | sort -u)
 # means. Detecting on file existence alone made any project with an oxlint config
 # report its entire lint configuration under the anti-slop label.
 #
-# resolve_engine <marker> <bin-name> <local-bin-path> <config...> -> path on stdout
+# resolve_engine <marker> <bin-name> <local-bin-path> <config...> -> path,
+# unavailable (marker but no executable), or empty (no configured profile).
 resolve_engine() {
   local marker="$1" name="$2" local_bin="$3" cand
   shift 3
@@ -182,6 +271,8 @@ resolve_engine() {
       printf '%s' "$PROJECT_DIR/$local_bin"
     elif command -v "$name" >/dev/null 2>&1; then
       command -v "$name"
+    else
+      printf '%s' unavailable
     fi
     return 0
   done
@@ -215,22 +306,36 @@ parse_unix_findings() {
 # parse_mypy_findings <comma-separated-codes> — <path>:<line>: error: <message>
 # [<code>]. Columns are off by default so this cannot reuse parse_unix_findings;
 # notes and hints are dropped, and only the error codes the profile's mypy fragment
-# owns survive (mypy has no "run only these codes" flag).
+# owns survive (mypy has no "run only these codes" flag). `unused-ignore` is
+# additionally kept only when its added source line has a bare ignore: mypy's
+# strict mode assigns that code instead of `ignore-without-code` to unused ones.
 #
 # The trailing code is EXTRACTED and matched for exact membership rather than
 # regex-matched: passing a `\[(a|b)\]` pattern through `awk -v` gets unescaped once
 # by awk's own string processing, leaving `[(a|b)]` — a character class that
 # matches any message containing one of those letters, i.e. everything.
 parse_mypy_findings() {
-  awk -v codes=",$1," '{
+  awk -v codes=",$1," -v lk="$LOOKUP" '
+  BEGIN {
+    while ((read_status = getline source < lk) > 0) {
+      split(source, fields, "\t")
+      sub(/^[^\t]*\t[^\t]*\t/, "", source)
+      if (source ~ /#[[:space:]]*type:[[:space:]]*ignore([^[:alnum:]_]|$)/ &&
+          source !~ /#[[:space:]]*type:[[:space:]]*ignore[[:space:]]*\[/)
+        bare[fields[1] "\t" fields[2]] = 1
+    }
+    if (read_status < 0) exit 2
+  }
+  {
     if (!match($0, /^[^:]+:[0-9]+: error: /)) next
     hdr = substr($0, 1, RLENGTH)
     rest = substr($0, RLENGTH + 1)
     if (!match(rest, /\[[a-z][a-z-]*\][[:space:]]*$/)) next
     code = substr(rest, RSTART + 1, RLENGTH - 2)
     sub(/\].*$/, "", code)
-    if (index(codes, "," code ",") == 0) next
     split(hdr, p, ":")
+    if (index(codes, "," code ",") == 0 &&
+        !(code == "unused-ignore" && (p[1] "\t" p[2]) in bare)) next
     printf "%s\t%s\t%s\n", p[1], p[2], rest
   }'
 }
@@ -251,31 +356,42 @@ run_native() {
   return 0
 }
 
-# scan_patterns <file> <lang> -> file<TAB>line<TAB>pattern-id, added lines only.
+# scan_patterns <file> <lang> [native-covered-ids] -> file<TAB>line<TAB>pattern-id.
 # slop_scan_text numbers its own stdin, so the real line numbers are carried in
 # a parallel column and re-joined by index.
 #
 # The content column is rebuilt by cutting the two leading fields off the row, not
-# by printing $3: the content still carries its own leading indentation, so under
-# FS='\t' a tab-indented added line puts the code in $4 and up and `print $3`
-# yields an empty string. gofmt indents with tabs, so `print $3` made the entire
-# Go lane — and every tab-indented TS/JS/PY file — invisible to the gate while the
-# tripwire flagged the same lines.
+# by printing $3: the content still carries its own leading indentation. Insert
+# a blank scan line at each gap in source line numbers so a SAFETY comment cannot
+# justify a construct separated from it by unchanged code.
 scan_patterns() {
-  local file="$1" lang="$2" scan_rc=0 join_rc=0
-  awk -F'\t' -v f="$file" '$1 == f { sub(/^[^\t]*\t[^\t]*\t/, ""); print }' "$LOOKUP" > "$WORK/lines"
-  awk -F'\t' -v f="$file" '$1 == f { print $2 }' "$LOOKUP" > "$WORK/nums"
+  local file="$1" lang="$2" covered="${3:-}" scan_rc=0 join_rc=0
+  : > "$WORK/lines"
+  : > "$WORK/nums"
+  # Numbered scan input is <file-line> TAB <text>. A gap line carries the
+  # unchanged line before the next added one and an index entry of 0.
+  awk -F'\t' -v f="$file" -v lines="$WORK/lines" -v nums="$WORK/nums" '
+    $1 == f {
+      if (previous && $2 != previous + 1) { print ($2 - 1) "\t" >> lines; print 0 >> nums }
+      previous = $2
+      print $2 >> nums
+      n = $2
+      sub(/^[^\t]*\t[^\t]*\t/, "")
+      print n "\t" $0 >> lines
+    }' "$LOOKUP"
   [ -s "$WORK/lines" ] || return 0
-  slop_scan_text "$lang" < "$WORK/lines" > "$WORK/hits" || scan_rc=$?
+  slop_scan_text "$lang" --numbered < "$WORK/lines" > "$WORK/hits" || scan_rc=$?
   # SAFETY: slop_scan_text is grep-like — only status 1 means clean; an error must degrade, never pass as a clean scan.
   if [ "$scan_rc" -ge 2 ]; then
     DEGRADED="$DEGRADED scan-$lang(rc=$scan_rc)"
     return 0
   fi
   if [ "$scan_rc" -eq 1 ]; then return 0; fi
-  awk -F'\t' -v f="$file" -v nf="$WORK/nums" '
+  awk -F'\t' -v f="$file" -v nf="$WORK/nums" -v covered="$covered" '
         BEGIN { while ((getline l < nf) > 0) { n[++i] = l } }
-        { printf "%s\t%s\t%s\n", f, n[$1], $2 }' "$WORK/hits" || join_rc=$?
+        index("," covered ",", "," $2 ",") == 0 {
+          printf "%s\t%s\t%s\n", f, n[$1], $2
+        }' "$WORK/hits" || join_rc=$?
   # SAFETY: a failed line-number join must degrade — partial output is not a clean scan.
   if [ "$join_rc" -ne 0 ]; then
     DEGRADED="$DEGRADED scan-join-$lang(rc=$join_rc)"
@@ -288,40 +404,50 @@ MODES=""
 
 if [ "${#TS_FILES[@]}" -gt 0 ]; then
   ts_engine="patterns"
-  if [ -n "$oxlint_bin" ]; then
+  if [ -n "$oxlint_bin" ] && [ "$oxlint_bin" != unavailable ]; then
     if run_native oxlint "$WORK/out" "$oxlint_bin" --format=unix "${TS_FILES[@]}"; then
       ts_engine="oxlint"
       parse_rc=0
-      parse_unix_findings "$SLOP_OXLINT_PLUGIN" < "$WORK/out" >> "$RAW" || parse_rc=$?
-      # SAFETY: an unparsed native report is untrusted output — its loss must degrade, never pass as clean.
+      parse_unix_findings "$SLOP_OXLINT_PLUGIN" < "$WORK/out" > "$WORK/ts.native" || parse_rc=$?
+      # SAFETY: a failed parser cannot establish native coverage; discard any
+      # partial report and run the full pattern lane.
       if [ "$parse_rc" -ne 0 ]; then
         DEGRADED="$DEGRADED oxlint-parse(rc=$parse_rc)"
+        ts_engine="patterns"
+      else
+        cat "$WORK/ts.native" >> "$RAW"
       fi
     fi
   fi
-  if [ "$ts_engine" = "patterns" ]; then
-    for f in "${TS_FILES[@]}"; do scan_patterns "$f" ts >> "$RAW"; done
+  ts_covered=""
+  if [ "$ts_engine" = oxlint ]; then
+    ts_covered="$(native_covered_patterns oxlint)"
+    ts_engine="oxlint+patterns"
   fi
+  for f in "${TS_FILES[@]}"; do scan_patterns "$f" ts "$ts_covered" >> "$RAW"; done
   MODES="$MODES ts=$ts_engine"
 fi
 
 # ruff and mypy own disjoint halves of the Python profile (plan D3), so both run
-# when installed. If EITHER fails to run, the whole language degrades to the
-# pattern set — the pattern lane approximates both halves, so it cannot
-# under-report, whereas keeping the surviving engine's findings would let the note
-# claim coverage for rules nothing checked.
+# when installed. If EITHER configured engine fails or is unavailable, discard
+# native findings and run the full pattern set; the mode reports the fallback.
 if [ "${#PY_FILES[@]}" -gt 0 ]; then
   py_engine=""
+  py_covered=""
   py_failed=0
+  if [ "$ruff_bin" = unavailable ]; then py_failed=1; ruff_bin=""; fi
+  if [ "$mypy_bin" = unavailable ]; then py_failed=1; mypy_bin=""; fi
   if [ -n "$ruff_bin" ]; then
     if run_native ruff "$WORK/out" "$ruff_bin" check --no-cache \
       --output-format=concise --select "$SLOP_RUFF_RULES" "${PY_FILES[@]}"; then
       py_engine="ruff"
+      py_covered="$(native_covered_patterns ruff)"
       parse_rc=0
       parse_unix_findings < "$WORK/out" >> "$WORK/py.native" || parse_rc=$?
       # SAFETY: an unparsed native report is untrusted output — its loss must degrade, never pass as clean.
       if [ "$parse_rc" -ne 0 ]; then
         DEGRADED="$DEGRADED ruff-parse(rc=$parse_rc)"
+        py_failed=1
       fi
     else
       py_failed=1
@@ -331,11 +457,13 @@ if [ "${#PY_FILES[@]}" -gt 0 ]; then
     if run_native mypy "$WORK/out" "$mypy_bin" --no-incremental \
       --cache-dir=/dev/null --no-error-summary "${PY_FILES[@]}"; then
       py_engine="${py_engine:+$py_engine+}mypy"
+      py_covered="${py_covered:+$py_covered,}$(native_covered_patterns mypy)"
       parse_rc=0
       parse_mypy_findings "$SLOP_MYPY_CODES" < "$WORK/out" >> "$WORK/py.native" || parse_rc=$?
       # SAFETY: an unparsed native report is untrusted output — its loss must degrade, never pass as clean.
       if [ "$parse_rc" -ne 0 ]; then
         DEGRADED="$DEGRADED mypy-parse(rc=$parse_rc)"
+        py_failed=1
       fi
     else
       py_failed=1
@@ -343,11 +471,13 @@ if [ "${#PY_FILES[@]}" -gt 0 ]; then
   fi
   if [ -z "$py_engine" ] || [ "$py_failed" = "1" ]; then
     py_engine="patterns"
-    rm -f "$WORK/py.native"
-    for f in "${PY_FILES[@]}"; do scan_patterns "$f" py >> "$RAW"; done
+    rm -f "${WORK:?}/py.native"
+    py_covered=""
   else
     cat "$WORK/py.native" >> "$RAW"
+    py_engine="$py_engine+patterns"
   fi
+  for f in "${PY_FILES[@]}"; do scan_patterns "$f" py "$py_covered" >> "$RAW"; done
   MODES="$MODES py=$py_engine"
 fi
 

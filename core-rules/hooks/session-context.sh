@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # session-context.sh — SessionStart (startup|resume). Inject repo context header.
 # Source: Trellis / core-rules / hooks.md
 #
@@ -32,7 +33,7 @@ for __se_git_env in ${!GIT_CONFIG_@}; do
 done
 unset __se_git_env
 unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
-export GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0
+export GIT_TERMINAL_PROMPT=0
 git() {
   command git -c core.fsmonitor=false -c core.hooksPath=/dev/null "$@"
 }
@@ -158,10 +159,15 @@ fi
 # --- Autonomy level ---
 # The shared resolver implements the complete canonical pick/clamp algorithm,
 # including preset defaults and the lowest active preset ceiling.
-_se_resolve_autonomy "$REPO_ROOT"
+_se_resolve_autonomy "$REPO_ROOT" || :
 AUTONOMY_CTX="--- Autonomy ---
 Level: L${AUTONOMY_LEVEL} (${AUTONOMY_NAME})
 "
+if [ -n "${AUTONOMY_ERROR:-}" ]; then
+  AUTONOMY_CTX="--- Autonomy ---
+Policy unavailable; use conservative L1 and restore read access: ${AUTONOMY_ERROR}.
+"
+fi
 if [ "$AUTONOMY_CLAMPED" -eq 1 ]; then
   AUTONOMY_CTX="${AUTONOMY_CTX}Requested autonomy L${AUTONOMY_REQUESTED_LEVEL}, clamped to L${AUTONOMY_CEILING} (preset ${AUTONOMY_LIMITING_PRESET}).
 "

@@ -252,6 +252,128 @@ prepare_managed_with_shims() {
   fi
 }
 
+@test "strict shim verification refuses an unreadable previous directory" {
+  prepare_managed_with_shims
+  owner="$(< "$OWNER")"
+  rm -f "${MANAGED:?}/pre-commit" "${MANAGED:?}/commit-msg"
+  chmod 311 "$PREVIOUS"
+  run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+  rc="$status"
+  chmod 700 "$PREVIOUS"
+  [ "$rc" -eq 3 ] || { echo "unreadable hook directory was verified: $output"; false; }
+  [[ "$output" == *"$PREVIOUS"* ]]
+}
+
+@test "shim recreation refuses an unreadable previous directory without removing hooks" {
+  prepare_managed_with_shims
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$PAYLOAD")"
+  chmod 311 "$PREVIOUS"
+  run attach_hooks_recreate_missing_dispatchers "$MANAGED" ".previous-hooks" "$PAYLOAD" "core-rules/githooks/pre-push" "$manifest" "$PROJECT"
+  rc="$status"
+  chmod 700 "$PREVIOUS"
+  [ "$rc" -eq 3 ] || { echo "unreadable hook directory was accepted: $output"; false; }
+  [[ "$output" == *"$PREVIOUS"* ]]
+  [ -f "$MANAGED/pre-commit" ]
+  [ -f "$MANAGED/commit-msg" ]
+}
+
+@test "missing previous directory remains empty for recreation and strict verification" {
+  prepare_managed_with_shims
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$PAYLOAD")"
+  rm -f "${PREVIOUS:?}/pre-commit" "${PREVIOUS:?}/commit-msg" "${PREVIOUS:?}/pre-push" "${PREVIOUS:?}/my-tool"
+  rmdir "$PREVIOUS"
+  run attach_hooks_recreate_missing_dispatchers "$MANAGED" ".previous-hooks" "$PAYLOAD" "core-rules/githooks/pre-push" "$manifest" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$MANAGED/pre-commit" ]
+  owner="$(< "$OWNER")"
+  run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "readable empty previous directory remains empty for recreation and strict verification" {
+  prepare_managed_with_shims
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$PAYLOAD")"
+  rm -f "${PREVIOUS:?}/pre-commit" "${PREVIOUS:?}/commit-msg" "${PREVIOUS:?}/pre-push" "${PREVIOUS:?}/my-tool"
+  run attach_hooks_recreate_missing_dispatchers "$MANAGED" ".previous-hooks" "$PAYLOAD" "core-rules/githooks/pre-push" "$manifest" "$PROJECT"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$MANAGED/pre-commit" ]
+  owner="$(< "$OWNER")"
+  run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+# The fixtures are the verbatim generators extracted from the two distinct
+# released shim bodies. They do not use the implementation under test.
+write_released_shims() {
+  local version="$1" name
+  shift
+  for name in "$@"; do
+    [ -e "$PREVIOUS/$name" ] || printf '#!/bin/sh\nexit 0\n' > "$PREVIOUS/$name"
+    chmod 700 "$PREVIOUS/$name"
+    (
+      . "$REPO_ROOT/scripts/tests/fixtures/released-hook-shims/$version-generator.sh"
+      _attachment_hooks_passthrough_shim_body "$name"
+    ) > "$MANAGED/$name" || return 1
+    chmod 700 "$MANAGED/$name"
+  done
+}
+
+@test "strict verification accepts every exact released shim and rejects modified bytes" {
+  local version name owner
+  prepare_managed_with_shims
+  owner="$(< "$OWNER")"
+  for version in v135 v142; do
+    # The allowlist names are safe shell words and include every supported hook.
+    # shellcheck disable=SC2046
+    write_released_shims "$version" $(_attachment_hooks_passthrough_names)
+    run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+    [ "$status" -eq 0 ] || { echo "$version strict verification: $output"; false; }
+  done
+  printf '# modified\n' >> "$MANAGED/pre-commit"
+  run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+  [ "$status" -eq 3 ] || { echo "modified shim accepted: $output"; false; }
+  run attach_hooks_remove "$HOME_FIX" "$owner"
+  [ "$status" -eq 3 ] || { echo "modified shim removed: $output"; false; }
+  [ -f "$MANAGED/pre-commit" ]
+}
+
+@test "relink recreation upgrades all twelve husky 9 shims and refuses modifications" {
+  local version name owner manifest body
+  local husky_names="applypatch-msg commit-msg post-applypatch post-commit post-merge post-rewrite pre-applypatch pre-auto-gc pre-commit pre-merge-commit pre-rebase prepare-commit-msg"
+  prepare_managed_with_shims
+  owner="$(< "$OWNER")"
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$PAYLOAD")"
+  for version in v135 v142; do
+    # shellcheck disable=SC2086
+    write_released_shims "$version" $husky_names
+    run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    run attach_hooks_recreate_missing_dispatchers "$MANAGED" ".previous-hooks" "$PAYLOAD" "core-rules/githooks/pre-push" "$manifest" "$PROJECT"
+    [ "$status" -eq 0 ] || { echo "$version recreation: $output"; false; }
+    for name in $husky_names; do
+      body=$(_attachment_hooks_passthrough_shim_body "$name")
+      _attachment_hooks_file_matches "$MANAGED/$name" "$body" 700 || { echo "$name was not upgraded"; false; }
+    done
+  done
+  write_released_shims v142 pre-commit
+  printf '# modified\n' >> "$MANAGED/pre-commit"
+  run attach_hooks_recreate_missing_dispatchers "$MANAGED" ".previous-hooks" "$PAYLOAD" "core-rules/githooks/pre-push" "$manifest" "$PROJECT"
+  [ "$status" -eq 3 ] || { echo "modified shim was upgraded: $output"; false; }
+  grep -Fx '# modified' "$MANAGED/pre-commit"
+}
+
+@test "detach accepts exact shims from both released template families" {
+  local version owner
+  for version in v135 v142; do
+    prepare_managed_with_shims
+    owner="$(< "$OWNER")"
+    write_released_shims "$version" pre-commit commit-msg
+    run attach_hooks_remove "$HOME_FIX" "$owner"
+    [ "$status" -eq 0 ] || { echo "$version detach: $output"; false; }
+    [ ! -e "$MANAGED" ]
+  done
+}
+
 @test "detach removes the shims with the managed dir" {
   prepare_managed_with_shims
   owner="$(cat "$OWNER")"
@@ -267,4 +389,102 @@ prepare_managed_with_shims() {
   rm -rf "$PREVIOUS"
   attach_hooks_remove "$HOME_FIX" "$owner"
   [ ! -e "$MANAGED" ]
+}
+
+# Spec 074 T68: with no previous hooks path recorded, the default hooks dir
+# (<common dir>/hooks) is the predecessor.
+make_default_hooks() {
+  printf '#!/bin/sh\nprintf ran > "%s"\n' "$ROOT/default-ran" > "$PROJECT/.git/hooks/pre-commit"
+  chmod 755 "$PROJECT/.git/hooks/pre-commit"
+}
+
+# prepare_managed_with_shims for a null previous, laid out as a release before
+# T68 left it: dispatchers and sidecars, no default hooks dir shim.
+prepare_managed_without_default_shims() {
+  prepare_managed_with_shims
+  rm -f "$MANAGED/pre-commit" "$MANAGED/commit-msg"
+  git -C "$PROJECT" config --local --unset-all core.hooksPath
+  rm -rf "$PREVIOUS"
+  printf '\n' > "$MANAGED/previous-hooks-path"
+  git -C "$PROJECT" config --local core.hooksPath "$MANAGED"
+  jq '.git_hooks.previous_hooks_path = null' "$OWNER" > "$ROOT/owner.tmp" && mv "$ROOT/owner.tmp" "$OWNER"
+  make_default_hooks
+}
+
+@test "with no previous, the default hooks dir supplies the names: regular executables only, shared by every worktree" {
+  local linked="$ROOT/linked" outside="$ROOT/outside"
+  make_default_hooks
+  printf '#!/bin/sh\nexit 0\n' > "$outside"
+  chmod 755 "$outside" "$PROJECT/.git/hooks/pre-commit.sample"
+  ln -s "$outside" "$PROJECT/.git/hooks/post-commit"
+  printf '#!/bin/sh\nexit 0\n' > "$PROJECT/.git/hooks/commit-msg"
+  chmod 644 "$PROJECT/.git/hooks/commit-msg"
+  printf '#!/bin/sh\nexit 0\n' > "$PROJECT/.git/hooks/my-tool"
+  chmod 755 "$PROJECT/.git/hooks/my-tool"
+  [ "$(_attachment_hooks_expected_passthrough_names "$PROJECT" "")" = pre-commit ]
+  git -C "$PROJECT" commit -q --allow-empty -m initial
+  git -C "$PROJECT" worktree add -q "$linked"
+  [ "$(_attachment_hooks_expected_passthrough_names "$linked" "")" = pre-commit ]
+  # A symlinked hooks dir is never followed.
+  mv "$PROJECT/.git/hooks" "$ROOT/real-hooks"
+  ln -s "$ROOT/real-hooks" "$PROJECT/.git/hooks"
+  [ -z "$(_attachment_hooks_expected_passthrough_names "$PROJECT" "")" ]
+  # Outside a repository there is no default hooks dir to read.
+  run _attachment_hooks_expected_passthrough_names "$ROOT/home" ""
+  [ "$status" -ne 0 ]
+}
+
+@test "the default shim runs the common dir's hook, never a symlink, and exits 0 when it is gone" {
+  make_default_hooks
+  mkdir -p "$MANAGED"
+  printf '%s\n' "$(_attachment_hooks_default_passthrough_shim_body pre-commit)" > "$MANAGED/pre-commit"
+  chmod 700 "$MANAGED/pre-commit"
+  ( cd "$PROJECT" && "$MANAGED/pre-commit" )
+  [ "$(cat "$ROOT/default-ran")" = ran ]
+  rm "$ROOT/default-ran"
+  mv "$PROJECT/.git/hooks/pre-commit" "$ROOT/aside"
+  ln -s "$ROOT/aside" "$PROJECT/.git/hooks/pre-commit"
+  ( cd "$PROJECT" && "$MANAGED/pre-commit" )
+  [ ! -e "$ROOT/default-ran" ]
+  rm "$PROJECT/.git/hooks/pre-commit"
+  ( cd "$PROJECT" && "$MANAGED/pre-commit" )
+  [ ! -e "$ROOT/default-ran" ]
+  # The recorded shim reads only previous-hooks-path; empty, it runs nothing.
+  printf '\n' > "$MANAGED/previous-hooks-path"
+  cp "$ROOT/aside" "$PROJECT/.git/hooks/pre-commit"
+  printf '%s\n' "$(_attachment_hooks_passthrough_shim_body pre-commit)" > "$MANAGED/pre-commit"
+  ( cd "$PROJECT" && "$MANAGED/pre-commit" )
+  [ ! -e "$ROOT/default-ran" ]
+}
+
+@test "with no previous, strict verification wants the default shims a payload's library expects" {
+  local old="$ROOT/old-payload"
+  prepare_managed_without_default_shims
+  owner="$(cat "$OWNER")"
+  run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+  [ "$status" -eq 3 ]
+  # A payload whose library lacks the capability marker predates default
+  # shims: it expects none, and refuses one.
+  mkdir -p "$old/scripts/lib"
+  grep -vFx '# trellis-capability: default-hooks-dir-shims' "$REPO_ROOT/scripts/lib/attachment.sh" > "$old/scripts/lib/attachment.sh"
+  _attachment_hooks_verify_passthrough_shims "$MANAGED" "$PROJECT" "" "$old"
+  [ -z "$(_attachment_hooks_expected_passthrough_names "$PROJECT" "" "$old")" ]
+  cp "$REPO_ROOT/scripts/lib/attachment.sh" "$old/scripts/lib/attachment.sh"
+  [ "$(_attachment_hooks_expected_passthrough_names "$PROJECT" "" "$old")" = pre-commit ]
+  # A recorded predecessor's shim never stands in for the default one.
+  printf '%s\n' "$(_attachment_hooks_passthrough_shim_body pre-commit)" > "$MANAGED/pre-commit"
+  chmod 700 "$MANAGED/pre-commit"
+  run _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+  [ "$status" -eq 3 ]
+  # Detach's content check accepts either generated body, nothing else.
+  _attachment_hooks_present_shims_match "$MANAGED"
+  printf '%s\n' "$(_attachment_hooks_default_passthrough_shim_body pre-commit)" > "$MANAGED/pre-commit"
+  _attachment_hooks_state_owned_matches_data "$HOME_FIX" "$owner"
+  _attachment_hooks_present_shims_match "$MANAGED"
+  grep -vFx '# trellis-capability: default-hooks-dir-shims' "$REPO_ROOT/scripts/lib/attachment.sh" > "$old/scripts/lib/attachment.sh"
+  run _attachment_hooks_verify_passthrough_shims "$MANAGED" "$PROJECT" "" "$old"
+  [ "$status" -eq 3 ]
+  printf '#!/bin/sh\nexit 1\n' > "$MANAGED/pre-commit"
+  run _attachment_hooks_present_shims_match "$MANAGED"
+  [ "$status" -eq 3 ]
 }

@@ -78,6 +78,50 @@ scripts/trellis" ] || { echo "$output"; false; }
   [ "$(g cat-file blob "$payload:core-rules/VERSION")" = 7.7.7 ]
 }
 
+@test "A3.2 packaging from a subdirectory produces the same filtered payload" {
+  local from_root from_subdir
+  from_root="$(tool "$PAYLOAD_FIXTURE_RELEASE")"
+  run bash -c 'cd "$1/scripts" && bash "$2/scripts/release-payload-commit.sh" "$3"' \
+    _ "$SRC" "$REPO_ROOT" "$PAYLOAD_FIXTURE_RELEASE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  from_subdir="$output"
+  [ "$from_subdir" = "$from_root" ] || { echo "subdirectory built a different payload"; false; }
+  payload_fixture_origin_main "$SRC" "$PAYLOAD_FIXTURE_RELEASE"
+  run bash -c 'cd "$1/scripts" && bash "$2/scripts/release-payload-commit.sh" --verify-candidate "$3" "$4" 7.7.7' \
+    _ "$SRC" "$REPO_ROOT" "$from_subdir" "$PAYLOAD_FIXTURE_RELEASE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  # Relative invocation must still find its usage text after changing cwd.
+  cp "$REPO_ROOT/scripts/release-payload-commit.sh" "$SRC/scripts/payload-tool.sh"
+  run bash -c 'cd "$1/scripts" && bash payload-tool.sh --verify-candidate' _ "$SRC"
+  [ "$status" -eq 2 ] && [[ "$output" == *'Usage:'* ]] || { echo "$output"; false; }
+}
+
+@test "A3.7 an unfiltered payload is refused when verification starts in a subdirectory" {
+  local tree unfiltered
+  payload_fixture_origin_main "$SRC" "$PAYLOAD_FIXTURE_RELEASE"
+  tree="$(g rev-parse "$PAYLOAD_FIXTURE_RELEASE^{tree}")"
+  unfiltered="$(g commit-tree "$tree" -p "$PAYLOAD_FIXTURE_RELEASE" -m unfiltered)"
+  run bash -c 'cd "$1/scripts" && bash "$2/scripts/release-payload-commit.sh" --verify-candidate "$3" "$4" 7.7.7' \
+    _ "$SRC" "$REPO_ROOT" "$unfiltered" "$PAYLOAD_FIXTURE_RELEASE"
+  refused 'listed file is not deleted'
+}
+
+@test "A3.2 a list naming only empty Git trees is refused" {
+  local empty version list core tree release
+  empty="$(g mktree < /dev/null)"
+  version="$(g rev-parse "$PAYLOAD_FIXTURE_RELEASE:core-rules/VERSION")"
+  list="$(printf 'empty/\n' | g hash-object -w --stdin)"
+  core="$(printf '100644 blob %s\tVERSION\n100644 blob %s\tpayload-exclude.txt\n' "$version" "$list" | g mktree)"
+  tree="$(printf '040000 tree %s\tcore-rules\n040000 tree %s\tempty\n' "$core" "$empty" | g mktree)"
+  release="$(g commit-tree "$tree" -p "$PAYLOAD_FIXTURE_RELEASE" -m 'empty excluded tree')"
+  run tool "$release"
+  refused 'exclusion list contains no files'
+  payload_fixture_origin_main "$SRC" "$release"
+  unfiltered="$(g commit-tree "$tree" -p "$release" -m unfiltered)"
+  run tool --verify-candidate "$unfiltered" "$release" 7.7.7
+  refused 'exclusion list contains no files'
+}
+
 @test "A3.2 two runs give the same SHA, with author and committer copied and nothing else touched" {
   before_refs="$(g for-each-ref)"
   before_status="$(g status --porcelain=v1 --untracked-files=all)"
@@ -173,7 +217,8 @@ core-rules/skills/orchestrate/recipes/conductor.wf.js|specs/
 core-rules/skills/orchestrate/recipes/digest-adopt.wf.js|specs/
 scripts/verify-conductor-spec-inventory.mjs|specs/
 scripts/lib/trellis.config.schema.json|specs/
-trellis.config.json|specs/'
+trellis.config.json|specs/
+scripts/build-native-hooks.sh|native/'
 
 list_prefixes() {
   sed -e '/^#/d' -e '/^$/d' "$1/core-rules/payload-exclude.txt"
@@ -194,7 +239,7 @@ EOF
 # comments are stripped first; a reference is a listed prefix at a path-token
 # boundary, `(^|[^A-Za-z0-9_.-])<prefix>`.
 scan_references() {
-  local root="$1" list="$2" path prefix pattern base any lines
+  local root="$1" list="$2" path prefix pattern base any lines prefix_lines
   PREFIXES="$(list_prefixes "$root")"
   any="(^|[^A-Za-z0-9_.-])($(printf '%s\n' "$PREFIXES" | sed 's/[.]/\\./g' | paste -sd '|' -))"
   while IFS= read -r path; do
@@ -216,7 +261,20 @@ scan_references() {
     while IFS= read -r prefix; do
       case $'\n'"$SCAN_EXEMPT_PAIRS"$'\n' in *$'\n'"$path|$prefix"$'\n'*) continue ;; esac
       pattern="(^|[^A-Za-z0-9_.-])$(printf '%s' "$prefix" | sed 's/[.]/\\./g')"
-      printf '%s\n' "$lines" | grep -E -- "$pattern" | sed "s#^#$path: $prefix: #" || true
+      prefix_lines="$lines"
+      # Source hashes are provenance, not runtime reads, whatever their prefix
+      # (T71: include_str! edges include test-only data). Keep every other
+      # manifest field in the scan, including the executable asset paths.
+      if [ "$path" = core-rules/native/artifacts.json ]; then
+        prefix_lines="$(jq 'del(.inputs)' "$root/$path")" || return 1
+      fi
+      if [ "$prefix" = native/ ]; then
+        # These two nested directories are runtime assets/install entries,
+        # never the excluded root workspace. Replace tokens, not whole lines:
+        # a real root native/ reference on the same line must still fail.
+        prefix_lines="$(printf '%s\n' "$prefix_lines" | sed -E 's#(core-rules|bin)/native/#\1/@native-runtime/#g')"
+      fi
+      printf '%s\n' "$prefix_lines" | grep -E -- "$pattern" | sed "s#^#$path: $prefix: #" || true
     done <<EOF
 $PREFIXES
 EOF
@@ -263,6 +321,33 @@ repo_file_list() {
   run scan_references "$root" "$root/list"
   [[ "$output" == *'scripts/lib/real.sh: scripts/tests/: bash "$ROOT/scripts/tests/x.bats"'* ]] ||
     { echo "a real reference was missed: $output"; false; }
+}
+
+@test "A3.3 native runtime paths and source provenance do not hide real root source dependencies" {
+  local root="$BATS_TEST_TMPDIR/native-scan"
+  mkdir -p "$root/core-rules/native" "$root/scripts"
+  printf 'native/\nscripts/tests/\n' > "$root/core-rules/payload-exclude.txt"
+  printf '{"inputs":{"native/src/main.rs":"hash"},"install_path":"bin/native/hash/trellis-hooks","assets":{"arm":{"path":"arm/trellis-hooks"}}}\n' \
+    > "$root/core-rules/native/artifacts.json"
+  printf 'crate="native/src"\n' > "$root/scripts/build-native-hooks.sh"
+  printf 'asset="$ROOT/core-rules/native/arm/trellis-hooks"; installed="$HOME/bin/native/hash/trellis-hooks"\n' \
+    > "$root/scripts/runtime.sh"
+  printf '%s\n' core-rules/native/artifacts.json scripts/build-native-hooks.sh scripts/runtime.sh > "$root/list"
+  run scan_references "$root" "$root/list"
+  [ -z "$output" ] || { echo "$output"; false; }
+
+  printf 'asset="$ROOT/core-rules/native/arm/trellis-hooks"; . "$ROOT/native/src/helper.sh"\n' \
+    >> "$root/scripts/runtime.sh"
+  run scan_references "$root" "$root/list"
+  [[ "$output" == *'scripts/runtime.sh: native/: '*'$ROOT/native/src/helper.sh'* ]] || { echo "$output"; false; }
+
+  # Even the provenance manifest's actual executable path is not exempt.
+  printf '{"inputs":{"native/src/main.rs":"hash"},"assets":{"arm":{"path":"native/src/helper.sh"}}}\n' \
+    > "$root/core-rules/native/artifacts.json"
+  printf 'tests="scripts/tests/injected.bats"\n' >> "$root/scripts/build-native-hooks.sh"
+  run scan_references "$root" "$root/list"
+  [[ "$output" == *'core-rules/native/artifacts.json: native/: '* ]] || { echo "$output"; false; }
+  [[ "$output" == *'scripts/build-native-hooks.sh: scripts/tests/: '* ]] || { echo "$output"; false; }
 }
 
 @test "A3.3 the scan skips the records directories R3.8 skips, nested receipts included" {

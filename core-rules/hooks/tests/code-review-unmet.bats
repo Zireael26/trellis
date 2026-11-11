@@ -142,7 +142,10 @@ deploy_codex_hook() {
   local deploy hookdir
   deploy="$(mktemp -d "$BATS_TEST_TMPDIR/deploy.XXXXXX")"
   hookdir="$deploy/.codex/hooks"
-  mkdir -p "$hookdir/lib"
+  mkdir -p "$hookdir/lib" "$deploy/scripts/lib"
+  # The copied hook has no TRELLIS_ROOT; carry the real installation-relative
+  # resolver too, rather than making the fixture rely on PATH Python.
+  cp "$CORE_LIB_DIR/../../../scripts/lib/trellis-python.sh" "$deploy/scripts/lib/trellis-python.sh"
   cp "$CODEX_HOOKS_DIR/code-review-subagent.sh" "$hookdir/code-review-subagent.sh"
   cp "$CORE_LIB_DIR/code-reviewer.sh"           "$hookdir/lib/code-reviewer.sh"
   cp "$CODEX_HOOKS_DIR/lib/deps.sh"             "$hookdir/lib/deps.sh"

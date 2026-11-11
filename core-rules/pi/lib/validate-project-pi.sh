@@ -45,8 +45,8 @@
 # cleared, so it cannot point git at another repository's index, refs or
 # exclude block; tools run from the system directories only, plus jq's own
 # directory when jq lives elsewhere; and HOME, TRELLIS_HOME (other than the
-# account's own values), PI_CODING_AGENT_DIR or that jq resolving inside the
-# checkout refuses before anything is scanned. Launchers start this script with
+# account's own values), PI_CODING_AGENT_DIR, XDG_CONFIG_HOME or that jq
+# resolving inside the checkout refuses before anything is scanned. Launchers start this script with
 # a clean environment, since BASH_ENV or SHELLOPTS act before its first line.
 #
 # Usage: validate-project-pi.sh [--foreman] <dir>
@@ -135,6 +135,7 @@ check_env() {
 check_env HOME "$real_home"
 check_env TRELLIS_HOME "${real_home:+$real_home/.trellis}"
 check_env PI_CODING_AGENT_DIR ""
+check_env XDG_CONFIG_HOME "${real_home:+$real_home/.config}"
 if [ -n "$jq_dir" ] && inside_checkout "$jq_dir"; then
   refuse "jq resolves inside '$top' ($jq_dir/jq); install jq outside the checkout"
 fi

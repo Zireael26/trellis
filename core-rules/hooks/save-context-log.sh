@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # save-context-log.sh — PreCompact. Dumps a session summary to context-log.md.
 # Source: Trellis / core-rules / hooks.md
 #
@@ -42,19 +43,19 @@ fi
 # Malformed JSON envelope must return 1 before any write.
 TRANSCRIPT=""
 if [ -n "$INPUT" ]; then
-  _trimmed=$(printf '%s' "$INPUT" | tr -d '[:space:]')
-  if [ -n "$_trimmed" ]; then
-    if ! printf '%s' "$INPUT" | jq -e . >/dev/null; then
-      echo "save-context-log: malformed envelope JSON — parse error; skipping" >&2
-      exit 1
-    fi
-    TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
-    _jq_status=$?
-    if [ $_jq_status -ne 0 ]; then
-      echo "save-context-log: malformed envelope JSON — parse error; skipping" >&2
-      exit 1
-    fi
-  fi
+  case "$INPUT" in
+    *[![:space:]]*)
+      # One parse (T61) for both former checks: `jq -e .` (the last document
+      # is neither null nor false) and `.transcript_path // empty` (every
+      # document is an object or null).
+      if ! TRANSCRIPT=$(printf '%s' "$INPUT" | jq -rs '
+        if (.[-1] == null or .[-1] == false) then ("" | halt_error(1))
+        else (.[] | .transcript_path // empty) end'); then
+        echo "save-context-log: malformed envelope JSON — parse error; skipping" >&2
+        exit 1
+      fi
+      ;;
+  esac
 fi
 if [ -n "$TRANSCRIPT" ] && [ ! -f "$TRANSCRIPT" ]; then
   echo "save-context-log: transcript_path '$TRANSCRIPT' does not exist — malformed envelope; skipping" >&2
@@ -83,19 +84,24 @@ _user_err="${TMPDIR}/user_err.tmp"
 _assist_out="${TMPDIR}/assist_out.tmp"
 _assist_err="${TMPDIR}/assist_err.tmp"
 
+_WRITE_FAILED=0
 {
-  printf '# Context log\n'
-  printf '_Saved: %s_\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf '# Context log\n' || _WRITE_FAILED=1
+  printf '_Saved: %s_\n\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" || _WRITE_FAILED=1
 
   # --- Branch ---
+  IN_WORK_TREE=0
   if command -v git >/dev/null 2>&1 && git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    IN_WORK_TREE=1
+  fi
+  if [ "$IN_WORK_TREE" = 1 ]; then
     BRANCH=$(git -C "$PROJECT_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
-    printf '## Branch\n%s\n\n' "$BRANCH"
+    printf '## Branch\n%s\n\n' "$BRANCH" || _WRITE_FAILED=1
   fi
 
   # --- Files touched this session ---
   # Best-effort: list files edited vs HEAD plus untracked, NUL-delimited to preserve spaces and renames.
-  if command -v git >/dev/null 2>&1 && git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  if [ "$IN_WORK_TREE" = 1 ]; then
     git -C "$PROJECT_DIR" status --porcelain -z >"$_porcelain_tmp" 2>&1
     _git_status=$?
     if [ $_git_status -eq 0 ]; then
@@ -123,8 +129,8 @@ _assist_err="${TMPDIR}/assist_err.tmp"
             _prev_path=""
             ;;
           *)
-            _status=$(printf '%s' "$_entry" | cut -c1-2)
-            _path=$(printf '%s' "$_entry" | cut -c4-)
+            _status="${_entry:0:2}"
+            _path="${_entry:3}"
             case "$_status" in
               R*|C*)
                 _prev_status="$_status"
@@ -149,7 +155,7 @@ _assist_err="${TMPDIR}/assist_err.tmp"
       fi
       TOUCHED=$(printf '%s' "$_touched_entries" | head -40)
       if [ -n "$TOUCHED" ]; then
-        printf '## Files touched\n```\n%s\n```\n\n' "$TOUCHED"
+        printf '## Files touched\n```\n%s\n```\n\n' "$TOUCHED" || _WRITE_FAILED=1
       fi
     fi
     rm -f "$_porcelain_tmp"
@@ -164,11 +170,12 @@ _assist_err="${TMPDIR}/assist_err.tmp"
     ' "$TODOS_FILE" >"$_todos_out" 2>"$_todos_err"; then
       OPEN=$(head -20 "$_todos_out")
       if [ -n "$OPEN" ]; then
-        printf '## Open todos\n%s\n\n' "$OPEN"
+        printf '## Open todos\n%s\n\n' "$OPEN" || _WRITE_FAILED=1
       fi
     else
       _todos_err_msg=$(head -n1 "$_todos_err")
-      printf '## Open todos\n_todos.json malformed — %s_\n\n' "$_todos_err_msg"
+      case "$_todos_err_msg" in *'File too large'*|*'No space'*|*'Disk quota'*|*'write error'*|*'cannot write'*) _WRITE_FAILED=1 ;; esac
+      printf '## Open todos\n_todos.json malformed — %s_\n\n' "$_todos_err_msg" || _WRITE_FAILED=1
       echo "save-context-log: todos.json malformed — $_todos_err_msg" >&2
     fi
     rm -f "$_todos_out" "$_todos_err"
@@ -181,29 +188,54 @@ _assist_err="${TMPDIR}/assist_err.tmp"
   # Real assistant decisions have .message.content as an array of text blocks;
   # extract .text from blocks where .type == "text".
   if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-    if jq -s -r '[ .[] | select(.type == "user" and (.message.content | type) == "string") | .message.content ] | .[-2:][]' "$TRANSCRIPT" >"$_user_out" 2>"$_user_err"; then
-      USER_MSGS=$(cat "$_user_out")
+    # One parse (T61) for both sections. A per-run token line separates
+    # them; any jq failure re-runs the two original filters so the
+    # malformed-transcript output and write-failure classing are unchanged.
+    _scl_tok="__trellis_scl_${TMPDIR##*.}_$$__"
+    if jq -s -r --arg tok "$_scl_tok" '
+      ([ .[] | select(.type == "user" and (.message.content | type) == "string") | .message.content ] | .[-2:][]),
+      $tok,
+      ([ .[] | select(.type == "assistant" and (.message.content | type) == "array") | .message.content | map(select(.type == "text") | .text) | join("\n") ] | .[-2:][])
+    ' "$TRANSCRIPT" >"$_user_out" 2>/dev/null; then
+      _scl_both=$(cat "$_user_out")
+      USER_MSGS="${_scl_both%%"$_scl_tok"*}"
+      while [ "${USER_MSGS%$'\n'}" != "$USER_MSGS" ]; do USER_MSGS="${USER_MSGS%$'\n'}"; done
+      ASSISTANT_MSGS="${_scl_both#*"$_scl_tok"}"
+      ASSISTANT_MSGS="${ASSISTANT_MSGS#$'\n'}"
       if [ -n "$USER_MSGS" ]; then
-        printf '## Last user asks\n%s\n\n' "$USER_MSGS"
+        printf '## Last user asks\n%s\n\n' "$USER_MSGS" || _WRITE_FAILED=1
       fi
-    else
-      _user_err_msg=$(head -n1 "$_user_err")
-      printf '## Last user asks\n_transcript malformed — %s_\n\n' "$_user_err_msg"
-      echo "save-context-log: transcript malformed — $_user_err_msg" >&2
-    fi
-    rm -f "$_user_out" "$_user_err"
-    if jq -s -r '[ .[] | select(.type == "assistant" and (.message.content | type) == "array") | .message.content | map(select(.type == "text") | .text) | join("\n") ] | .[-2:][]' "$TRANSCRIPT" >"$_assist_out" 2>"$_assist_err"; then
-      ASSISTANT_MSGS=$(cat "$_assist_out")
       if [ -n "$ASSISTANT_MSGS" ]; then
-        printf '## Last assistant decisions\n%s\n\n' "$ASSISTANT_MSGS"
+        printf '## Last assistant decisions\n%s\n\n' "$ASSISTANT_MSGS" || _WRITE_FAILED=1
       fi
     else
-      _assist_err_msg=$(head -n1 "$_assist_err")
-      printf '## Last assistant decisions\n_transcript malformed — %s_\n\n' "$_assist_err_msg"
-      echo "save-context-log: transcript malformed — $_assist_err_msg" >&2
+      if jq -s -r '[ .[] | select(.type == "user" and (.message.content | type) == "string") | .message.content ] | .[-2:][]' "$TRANSCRIPT" >"$_user_out" 2>"$_user_err"; then
+        USER_MSGS=$(cat "$_user_out")
+        if [ -n "$USER_MSGS" ]; then
+          printf '## Last user asks\n%s\n\n' "$USER_MSGS" || _WRITE_FAILED=1
+        fi
+      else
+        _user_err_msg=$(head -n1 "$_user_err")
+        case "$_user_err_msg" in *'File too large'*|*'No space'*|*'Disk quota'*|*'write error'*|*'cannot write'*) _WRITE_FAILED=1 ;; esac
+        printf '## Last user asks\n_transcript malformed — %s_\n\n' "$_user_err_msg" || _WRITE_FAILED=1
+        echo "save-context-log: transcript malformed — $_user_err_msg" >&2
+      fi
+      rm -f "$_user_out" "$_user_err"
+      if jq -s -r '[ .[] | select(.type == "assistant" and (.message.content | type) == "array") | .message.content | map(select(.type == "text") | .text) | join("\n") ] | .[-2:][]' "$TRANSCRIPT" >"$_assist_out" 2>"$_assist_err"; then
+        ASSISTANT_MSGS=$(cat "$_assist_out")
+        if [ -n "$ASSISTANT_MSGS" ]; then
+          printf '## Last assistant decisions\n%s\n\n' "$ASSISTANT_MSGS" || _WRITE_FAILED=1
+        fi
+      else
+        _assist_err_msg=$(head -n1 "$_assist_err")
+        case "$_assist_err_msg" in *'File too large'*|*'No space'*|*'Disk quota'*|*'write error'*|*'cannot write'*) _WRITE_FAILED=1 ;; esac
+        printf '## Last assistant decisions\n_transcript malformed — %s_\n\n' "$_assist_err_msg" || _WRITE_FAILED=1
+        echo "save-context-log: transcript malformed — $_assist_err_msg" >&2
+      fi
+      rm -f "$_assist_out" "$_assist_err"
     fi
-    rm -f "$_assist_out" "$_assist_err"
   fi
+  [ "$_WRITE_FAILED" -eq 0 ]
 } > "$TMP_OUT"
 _WRITE_STATUS=$?
 if [ $_WRITE_STATUS -ne 0 ]; then

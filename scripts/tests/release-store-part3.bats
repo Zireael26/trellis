@@ -35,6 +35,87 @@ setup() {
   [ "$(registry_release_for_root "$project")" = "$ADOPTION_VERSION_B" ]
 }
 
+# BEGIN LANE fx5
+@test "successful locked adoption reaps only old private transaction stages" {
+  install_adoption_releases
+  project="$SANDBOX/stale-stage-project"
+  make_portable_project "$project" stale-stage-project
+  attach_portable_project "$project" personal "$ADOPTION_VERSION_A"
+  owner="$(owner_for_root "$project")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  [ -d "$managed" ] || { echo 'managed hook fixture missing' >&2; false; }
+  owner_dir="$(dirname "$owner")"; owner_base="$(basename "$owner")"
+  hook_dir="$(dirname "$managed")"; hook_base="$(basename "$managed")"
+  old_owner="$owner_dir/.$owner_base.release-adopt.a1B2c3"
+  young_owner="$owner_dir/.$owner_base.release-adopt.d4E5f6"
+  other_owner="$owner_dir/.$owner_base.release-adopt.not-six"
+  link_owner="$owner_dir/.$owner_base.release-adopt.g7H8i9"
+  wrong_kind="$owner_dir/.$owner_base.release-adopt.j1K2l3"
+  old_hook="$hook_dir/.$hook_base.release-adopt.m4N5o6"
+  young_hook="$hook_dir/.$hook_base.release-adopt.p7Q8r9"
+  unknown_hook="$hook_dir/.$hook_base.release-adopt.s1T2u3"
+  printf old > "$old_owner"; printf young > "$young_owner"; printf other > "$other_owner"
+  chmod 600 "$old_owner" "$young_owner" "$other_owner"
+  printf 'outside\n' > "$SANDBOX/outside"
+  ln -s "$SANDBOX/outside" "$link_owner"
+  mkdir -m 700 "$wrong_kind" "$old_hook" "$young_hook" "$unknown_hook"
+  printf partial > "$old_hook/post-checkout"; chmod 700 "$old_hook/post-checkout"
+  printf keep > "$unknown_hook/unexpected"; chmod 600 "$unknown_hook/unexpected"
+  touch -t 200001010000 "$old_owner" "$other_owner" "$wrong_kind" "$old_hook" "$unknown_hook"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project stale-stage-project
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$old_owner" ] || { echo 'old owner stage survived' >&2; false; }
+  [ ! -e "$old_hook" ] || { echo 'old hook stage survived' >&2; false; }
+  [ -f "$young_owner" ] && [ -d "$young_hook" ] || { echo 'young stage removed' >&2; false; }
+  [ -f "$other_owner" ] && [ -d "$wrong_kind" ] || { echo 'non-matching stage removed' >&2; false; }
+  [ -L "$link_owner" ] && [ "$(<"$SANDBOX/outside")" = outside ] || { echo 'stage symlink followed' >&2; false; }
+  [ "$(<"$unknown_hook/unexpected")" = keep ] || { echo 'unknown stage content removed' >&2; false; }
+}
+
+@test "TERM during real hook staging is reaped by the next successful adoption" {
+  install_adoption_releases
+  project="$SANDBOX/term-stage-project"
+  make_portable_project "$project" term-stage-project
+  attach_portable_project "$project" personal "$ADOPTION_VERSION_A"
+  owner="$(owner_for_root "$project")"
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
+  hook_dir="$(dirname "$managed")"; hook_base="$(basename "$managed")"
+  cp "$owner" "$SANDBOX/owner-before"
+  hooks_before="$(hook_state_listing "$managed")"
+  mkdir "$RELEASE_TEST_HOOK_BARRIER"
+  : > "$RELEASE_TEST_HOOK_BARRIER/partial-write"
+  log="$SANDBOX/term-stage-adopt.log"
+  env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project term-stage-project > "$log" 2>&1 &
+  RELEASE_PROCESS_PID_A=$!
+  wait_for_release_barrier "$RELEASE_TEST_HOOK_BARRIER/partial-hook-write.ready" "$RELEASE_PROCESS_PID_A" "$log"
+  transaction_pid="$(<"$RELEASE_TEST_HOOK_BARRIER/partial-hook-write.pid")"
+  case "$transaction_pid" in ''|*[!0-9]*|0*) echo 'invalid transaction PID' >&2; return 1 ;; esac
+  [ "$transaction_pid" != "$RELEASE_PROCESS_PID_A" ] || { echo 'expected the actual hook subshell' >&2; return 1; }
+  kill -TERM "$transaction_pid"
+  wait_for_release_process "$RELEASE_PROCESS_PID_A"
+  RELEASE_PROCESS_PID_A=''
+  [ "$RELEASE_PROCESS_STATUS" -ne 0 ] || { echo 'interrupted adoption unexpectedly succeeded' >&2; return 1; }
+  cmp -s "$owner" "$SANDBOX/owner-before" || { echo 'owner changed after interrupted stage' >&2; return 1; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_A" ] || { echo 'runtime changed after interrupted stage' >&2; return 1; }
+  [ "$(hook_state_listing "$managed")" = "$hooks_before" ] || { echo 'live hooks changed after interrupted stage' >&2; return 1; }
+  shopt -s nullglob
+  stages=("$hook_dir/.$hook_base.release-adopt."??????)
+  [ "${#stages[@]}" -eq 1 ] || { echo "expected one interrupted stage, got ${#stages[@]}" >&2; return 1; }
+  stage="${stages[0]}"
+  [ -d "$stage" ] && [ ! -L "$stage" ] || return 1
+  touch -t 200001010000 "$stage"
+  young="$(mktemp -d "$hook_dir/.$hook_base.release-adopt.XXXXXX")"
+  chmod 700 "$young"
+  rm -rf "${RELEASE_TEST_HOOK_BARRIER:?}"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$ADOPTION_VERSION_B" --project term-stage-project
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ ! -e "$stage" ] || { echo 'old interrupted stage survived retry' >&2; return 1; }
+  [ -d "$young" ] || { echo 'young stage was removed' >&2; return 1; }
+  [ "$(readlink "$project/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
+}
+# END LANE fx5
+
 @test "managed adoption ignores hostile inherited Git environment" {
   install_adoption_releases
   project="$SANDBOX/git-env-project"
@@ -466,3 +547,70 @@ setup() {
   [ "$(resolved_policy_markers "$project")" = "$markers_before" ]
   [ "$(git -C "$project" ls-files -s)" = "$tracked_before" ]
 }
+
+# Shared scaffold sections below; existing tests above remain unchanged.
+# BEGIN LANE A0
+# END LANE A0
+
+# BEGIN LANE A1
+# END LANE A1
+
+# BEGIN LANE A2
+# END LANE A2
+
+# BEGIN LANE A3
+# END LANE A3
+
+# BEGIN LANE A4
+# END LANE A4
+
+# BEGIN LANE B1
+# END LANE B1
+
+# BEGIN LANE B2
+# END LANE B2
+
+# BEGIN LANE B3
+# END LANE B3
+
+# BEGIN LANE B4
+# END LANE B4
+
+# BEGIN LANE B5
+# END LANE B5
+
+# BEGIN LANE B6
+# END LANE B6
+
+# BEGIN LANE B7
+# END LANE B7
+
+# BEGIN LANE B8
+# END LANE B8
+
+# BEGIN LANE B9
+# END LANE B9
+
+# BEGIN LANE B10
+# END LANE B10
+
+# BEGIN LANE B11
+# END LANE B11
+
+# BEGIN LANE C0
+# END LANE C0
+
+# BEGIN LANE C1
+# END LANE C1
+
+# BEGIN LANE C2
+# END LANE C2
+
+# BEGIN LANE C3
+# END LANE C3
+
+# BEGIN LANE C4
+# END LANE C4
+
+# BEGIN LANE serial-tail
+# END LANE serial-tail

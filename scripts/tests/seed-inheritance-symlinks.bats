@@ -472,26 +472,38 @@ t14_add_broken_sibling_row() {
   [ "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' | wc -l | tr -d ' ')" -eq 4 ]
 
   real_git="$(command -v git)"
+  real_python="$(command -v python3)"
   trace_bin="$T14_SANDBOX/trace-bin"
   hash_log="$T14_SANDBOX/verify-hash.log"
   mkdir -p "$trace_bin"
+  # A full verify runs either as the one-process audit (release_verify.py
+  # RELEASE SKIP_WRITABLE, spec 074 T5) or, when that decides nothing, as the
+  # shell pass's single `git hash-object --stdin-paths` batch. Count both; the
+  # audit's per-call "acl" form is not a full verify.
   cat > "$trace_bin/git" <<EOF
 #!/usr/bin/env bash
 if [ "\${1:-}" = "hash-object" ] && [ "\${2:-}" = "--no-filters" ] && [ "\${3:-}" = "--stdin-paths" ]; then
-  printf 'hash\n' >> "$hash_log"
+  printf 'git-hash\n' >> "$hash_log"
 fi
 exec "$real_git" "\$@"
 EOF
-  chmod 755 "$trace_bin/git"
-  # No stamp, so the release is hashed in full: once, not once per sibling.
+  cat > "$trace_bin/python3" <<EOF
+#!/usr/bin/env bash
+case "\${2:-}" in
+  */release_verify.py) [ "\${4:-}" = acl ] || printf 'audit\n' >> "$hash_log" ;;
+esac
+exec "$real_python" "\$@"
+EOF
+  chmod 755 "$trace_bin/git" "$trace_bin/python3"
+  # No stamp, so the release is verified in full: once, not once per sibling.
   rm -rf "$TRELLIS_HOME/state/release-stamps"
   : > "$hash_log"
 
-  run env PATH="$trace_bin:$PATH" TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$T14_PROJECT"
+  run env -u TRELLIS_PYTHON PATH="$trace_bin:$PATH" TRELLIS_HOME="$TRELLIS_HOME" bash "$SCRIPT" --target "$T14_PROJECT"
 
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"already attached: $T14_PROJECT"* ]] || { echo "$output"; return 1; }
-  [ "$(wc -l < "$hash_log" | tr -d ' ')" -eq 1 ] || { echo "hash_count=$(wc -l < "$hash_log")"; return 1; }
+  [ "$(wc -l < "$hash_log" | tr -d ' ')" -eq 1 ] || { echo "full verifies:"; cat "$hash_log"; return 1; }
 }
 
 # The detached post-attach job takes this checkout's lock for brief steps right

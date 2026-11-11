@@ -220,22 +220,22 @@ case "$cmd" in
     if [ "$defer_attachment" -eq 1 ]; then
       echo "worktree created without checkout; Trellis attachment will reconcile on first checkout: $abs"
     else
-      # Git silently skips a missing or drifted post-checkout dispatcher. The
-      # fast path needs both its runtime link and its committed owner record;
-      # otherwise retry the full seed (which is inert for unregistered clones).
+      # Git silently skips a missing or drifted post-checkout dispatcher. An
+      # owner record that merely exists is not readiness (spec 074 T48): with a
+      # runtime link, the canonical read-only verify must pass (committed
+      # owner, exact artifacts, anchor); otherwise retry the full seed, which
+      # returns 0 only once ready and is inert for unregistered clones.
       needs_seed=1
-      if [ -L "$abs/.trellis/runtime" ] && [ -e "$abs/.trellis/runtime" ]; then
-        . "$SCRIPT_DIR/lib/trellis-home.sh"
-        . "$SCRIPT_DIR/lib/local-registry.sh"
-        home="$(trellis_home_resolve "")"
-        identity="$(local_registry_identity_for_root "$abs")"
-        checkout="$(printf '%s\n' "$identity" | jq -r '.checkout_id')"
-        worktree="$(printf '%s\n' "$identity" | jq -r '.worktree_id')"
-        owner="$home/state/attachments/$checkout/$worktree.json"
-        if [ -f "$owner" ] && [ ! -L "$owner" ]; then needs_seed=0; fi
+      if [ -L "$abs/.trellis/runtime" ] && [ -e "$abs/.trellis/runtime" ] &&
+         "$SCRIPT_DIR/seed-inheritance-symlinks.sh" --target "$abs" --verify-only --quiet >/dev/null 2>&1; then
+        needs_seed=0
       fi
       if [ "$needs_seed" -eq 1 ]; then
-        "$SCRIPT_DIR/seed-inheritance-symlinks.sh" --target "$abs" --quiet
+        "$SCRIPT_DIR/seed-inheritance-symlinks.sh" --target "$abs" --quiet || {
+          rc=$?
+          echo "error: worktree created but not ready: $abs; remedy: trellis worktree sync $abs" >&2
+          exit "$rc"
+        }
       fi
       echo "worktree ready: $abs"
     fi

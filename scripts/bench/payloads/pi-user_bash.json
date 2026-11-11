@@ -1,0 +1,5 @@
+{
+  "schema_version": 1, "harness": "pi", "cwd": "@PROJECT@", "session_id": "bench-session-0001", "session_file": "@TRANSCRIPT@",
+  "phase": "pre_action", "native_event": "user_bash",
+  "action": {"id": "bench-user-bash", "tool_name": "bash", "family": "shell", "target_coverage": "complete", "targets": [], "input": {"command": "git status --short"}}, "result": null
+}

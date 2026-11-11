@@ -326,7 +326,11 @@ An interrupted attach or detach leaves a journal. Recovery resolves the one
 matching journal from local ownership state, verifies its recorded boundaries,
 and either completes the committed operation or rolls back the uncommitted
 one. Ambiguous, modified, or mismatched state remains a conflict for operator
-resolution rather than an automatic deletion.
+resolution rather than an automatic deletion. A detach journal resumes at its
+recorded removal, owner-commit, render, or external phase, whichever step the
+interruption stopped; recovery and a repeated detach wait for a busy checkout
+lock rather than refuse it, and every refusal names its code and keeps the
+journal.
 
 Relink repairs a missing local runtime anchor only to the verified release
 already recorded for that attachment. It verifies the remaining owned leaves

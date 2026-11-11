@@ -75,9 +75,9 @@ for_each_hook() {
   new="$(snap new)"
   check() {
     run_hook "$1" "refs/heads/feature $new refs/heads/feature $old" PG_PUSH_TEST_SCOPE=full
-    [ "$status" -eq 0 ]
-    assert_args "--mode=push --range=$old..$new"
-    [ "$(tail -n 1 "$CAPTURE.scope")" = branch ]
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    assert_args "--mode=push --range=$old..$new" || return 1
+    [ "$(tail -n 1 "$CAPTURE.scope")" = branch ] || return 1
   }
   for_each_hook check
 }
@@ -96,8 +96,8 @@ for_each_hook() {
   tip="$(snap feature)"
   check() {
     run_hook "$1" "refs/heads/feature $tip refs/heads/feature $ZERO"
-    [ "$status" -eq 0 ]
-    assert_args "--mode=push --range=$fork..$tip"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    assert_args "--mode=push --range=$fork..$tip" || return 1
   }
   for_each_hook check
 }
@@ -109,8 +109,8 @@ for_each_hook() {
   tip="$(snap feature)"
   check() {
     run_hook "$1" "refs/heads/feature $tip refs/heads/feature $ZERO"
-    [ "$status" -eq 0 ]
-    assert_args "--mode=push --range=$base..$tip"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    assert_args "--mode=push --range=$base..$tip" || return 1
   }
   for_each_hook check
 }
@@ -121,10 +121,10 @@ for_each_hook() {
   tip="$(snap feature)"
   check() {
     run_hook "$1" "refs/heads/feature $tip refs/heads/feature $ZERO"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"remote default does not resolve"* ]] || { echo "$output"; false; }
-    [[ "$output" == *"git remote set-head"* ]] || { echo "$output"; false; }
-    [ ! -f "$CAPTURE" ]
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"remote default does not resolve"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"git remote set-head"* ]] || { echo "$output"; return 1; }
+    [ ! -f "$CAPTURE" ] || return 1
   }
   for_each_hook check
 }
@@ -194,14 +194,14 @@ refs/tags/v9.9.9 $new refs/tags/v9.9.9 $ZERO"
   new="$(snap next)"
   check() {
     run_hook "$1" "refs/heads/main $new refs/heads/main $old"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"Direct push to refs/heads/main blocked by Trellis policy"* ]]
-    [ ! -f "$CAPTURE" ]
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"Direct push to refs/heads/main blocked by Trellis policy"* ]] || { echo "$output"; return 1; }
+    [ ! -f "$CAPTURE" ] || return 1
 
     run_hook "$1" "refs/heads/main $new refs/heads/main $old" TRELLIS_ALLOW_MAIN_PUSH=1 PG_PUSH_TEST_SCOPE=full
-    [ "$status" -eq 0 ]
-    assert_args "--mode=merge --range=$old..$new --target=main"
-    [ "$(tail -n 1 "$CAPTURE.scope")" = unset ]
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    assert_args "--mode=merge --range=$old..$new --target=main" || return 1
+    [ "$(tail -n 1 "$CAPTURE.scope")" = unset ] || return 1
   }
   for_each_hook check
 }
@@ -233,7 +233,7 @@ refs/heads/master $tip refs/heads/master $new" TRELLIS_ALLOW_MAIN_PUSH=1
     run_hook "$1" "refs/heads/feature $new refs/heads/feature $old
 refs/heads/main $new refs/heads/main $old" TRELLIS_ALLOW_MAIN_PUSH=1
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    assert_args "--mode=merge --range=$old..$new --target=main"
+    assert_args "--mode=merge --range=$old..$new --target=main" || return 1
   }
   for_each_hook check
 }
@@ -247,10 +247,10 @@ refs/heads/main $new refs/heads/main $old" TRELLIS_ALLOW_MAIN_PUSH=1
   check() {
     run_hook "$1" "refs/heads/one $one refs/heads/one $base
 refs/heads/two $two refs/heads/two $base"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"two or more branch updates derive different ranges"* ]] || { echo "$output"; false; }
-    [[ "$output" == *"Push branches one at a time"* ]] || { echo "$output"; false; }
-    [ ! -f "$CAPTURE" ]
+    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"two or more branch updates derive different ranges"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"Push branches one at a time"* ]] || { echo "$output"; return 1; }
+    [ ! -f "$CAPTURE" ] || return 1
   }
   for_each_hook check
 }
@@ -262,8 +262,8 @@ refs/heads/two $two refs/heads/two $base"
   check() {
     run_hook "$1" "(delete) $ZERO refs/heads/gone $old
 refs/heads/feature $new refs/heads/feature $old"
-    [ "$status" -eq 0 ]
-    assert_args "--mode=push --range=$old..$new"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    assert_args "--mode=push --range=$old..$new" || return 1
   }
   for_each_hook check
 }
@@ -279,7 +279,7 @@ refs/heads/feature $new refs/heads/feature $old"
 refs/heads/feature $tip refs/heads/feature $base" PG_PUSH_TEST_SCOPE=branch
     [ "$status" -eq 0 ] || return 1
     assert_args "--mode=push --range=$base..$tip" || return 1
-    [ "$(cat "$CAPTURE.scope")" = full ]
+    [ "$(cat "$CAPTURE.scope")" = full ] || return 1
   }
   for_each_hook check || return 1
 }
@@ -295,7 +295,7 @@ refs/heads/feature $tip refs/heads/feature $base" PG_PUSH_TEST_SCOPE=branch
     run_hook "$1" "refs/tags/v9.9.9 $tagobject refs/tags/v9.9.9 $ZERO" PG_PUSH_TEST_SCOPE=branch
     [ "$status" -eq 0 ] || return 1
     assert_args "--mode=push --range=$tagsha..$tagobject" || return 1
-    [ "$(cat "$CAPTURE.scope")" = full ]
+    [ "$(cat "$CAPTURE.scope")" = full ] || return 1
   }
   for_each_hook check || return 1
 }

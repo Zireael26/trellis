@@ -1,0 +1,1127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "trellis://qualification/requirements/1",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "trellis-qualification-requirements/1"
+    },
+    "spec": {
+      "type": "string",
+      "minLength": 1
+    },
+    "baseline_sha": {
+      "const": "3661cb5f2949c2482b6380fc4631cd549556e0ce"
+    },
+    "cutover_note": {"type": "string", "minLength": 1},
+    "cutover_commit": {
+      "anyOf": [
+        {
+          "type": "string",
+          "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "manifest_path": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_sets": {
+      "type": "object",
+      "properties": {
+        "exclusions": {
+          "const": [
+            "specs/",
+            "scripts/qualification/",
+            "scripts/lib/test-suites.sh"
+          ]
+        },
+        "native_build": {
+          "const": [
+            "native/trellis-hooks/",
+            "scripts/build-native-hooks.sh"
+          ]
+        },
+        "selection_only_inputs": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "before_mode": {"enum": ["100644", "100755", "120000"]},
+              "after_mode": {"enum": ["100644", "100755", "120000"]},
+              "before_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "after_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "target": {"const": "aarch64-unknown-linux-musl"},
+              "role": {"enum": ["pin", "rendered-fixture"]}
+            },
+            "required": ["before_sha256", "after_sha256", "before_mode", "after_mode", "target", "role"],
+            "additionalProperties": false
+          }
+        },
+        "rendered_registrations": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "exclusions",
+        "native_build",
+        "rendered_registrations"
+      ],
+      "additionalProperties": false
+    },
+    "cells": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "tasks": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "platform": {
+            "type": "object",
+            "properties": {
+              "os": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "Darwin",
+                    "Linux"
+                  ]
+                },
+                "minItems": 1
+              },
+              "arch": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "aarch64",
+                    "x86_64"
+                  ]
+                },
+                "minItems": 1
+              },
+              "filesystems": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 0
+              },
+              "ctime": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "fine",
+                    "coarse",
+                    "unknown"
+                  ]
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "os",
+              "arch",
+              "filesystems",
+              "ctime"
+            ],
+            "additionalProperties": false
+          },
+          "route": {
+            "enum": [
+              "native",
+              "legacy",
+              "manifest",
+              "build",
+              "mixed"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "criteria": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "tasks",
+          "platform",
+          "route",
+          "target",
+          "requirements",
+          "criteria"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "benches": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "task": {
+            "type": "string",
+            "minLength": 1
+          },
+          "platform": {
+            "type": "object",
+            "properties": {
+              "os": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "Darwin",
+                    "Linux"
+                  ]
+                },
+                "minItems": 1
+              },
+              "arch": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "aarch64",
+                    "x86_64"
+                  ]
+                },
+                "minItems": 1
+              },
+              "filesystems": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 0
+              },
+              "ctime": {
+                "type": "array",
+                "items": {
+                  "enum": [
+                    "fine",
+                    "coarse",
+                    "unknown"
+                  ]
+                },
+                "minItems": 1
+              }
+            },
+            "required": [
+              "os",
+              "arch",
+              "filesystems",
+              "ctime"
+            ],
+            "additionalProperties": false
+          },
+          "route": {
+            "enum": [
+              "native",
+              "legacy",
+              "manifest"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "requirements": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "id",
+          "task",
+          "platform",
+          "route",
+          "target",
+          "requirements"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "oracle",
+              "bench",
+              "build"
+            ]
+          },
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          },
+          "suite": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "filter": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "enum": [
+              "tap",
+              "bench",
+              "exit"
+            ]
+          },
+          "expected_exit": {
+            "type": "integer"
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0
+          },
+          "bench_schema": {"type": "string", "minLength": 1},
+          "tests": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+          "nested_tests": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1}},
+          "tests_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "condition": {
+            "enum": [
+              "always",
+              "selected-target",
+              "native-route",
+              "legacy-route"
+            ]
+          },
+          "target": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "argv",
+          "cwd",
+          "suite",
+          "filter",
+          "format",
+          "expected_exit",
+          "inputs",
+          "condition",
+          "target"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "case_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fixture_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "boundary_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "variant": {
+            "type": "string",
+            "minLength": 1
+          },
+          "owner": {
+            "type": "string",
+            "minLength": 1
+          },
+          "criterion": {
+            "type": "string",
+            "minLength": 1
+          },
+          "origin": {
+            "enum": [
+              "I-A4",
+              "regression"
+            ]
+          },
+          "applicability": {
+            "type": "object",
+            "properties": {
+              "macos-apfs": {
+                "type": "object",
+                "properties": {
+                  "native": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": true
+                          },
+                          "reason": {
+                            "type": "null"
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": false
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "legacy": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": true
+                          },
+                          "reason": {
+                            "type": "null"
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": false
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "native",
+                  "legacy"
+                ],
+                "additionalProperties": false
+              },
+              "macos-nonapfs": {
+                "type": "object",
+                "properties": {
+                  "native": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": true
+                          },
+                          "reason": {
+                            "type": "null"
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": false
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "legacy": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": true
+                          },
+                          "reason": {
+                            "type": "null"
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": false
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "native",
+                  "legacy"
+                ],
+                "additionalProperties": false
+              },
+              "linux": {
+                "type": "object",
+                "properties": {
+                  "native": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": true
+                          },
+                          "reason": {
+                            "type": "null"
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": false
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "legacy": {
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": true
+                          },
+                          "reason": {
+                            "type": "null"
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "applicable": {
+                            "const": false
+                          },
+                          "reason": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "ctime": {
+                            "type": "array",
+                            "items": {
+                              "enum": [
+                                "fine",
+                                "coarse",
+                                "unknown"
+                              ]
+                            },
+                            "minItems": 1,
+                            "uniqueItems": true
+                          }
+                        },
+                        "required": [
+                          "applicable",
+                          "reason",
+                          "ctime"
+                        ],
+                        "additionalProperties": false
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "native",
+                  "legacy"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "macos-apfs",
+              "macos-nonapfs",
+              "linux"
+            ],
+            "additionalProperties": false
+          },
+          "budgets": {
+            "type": "object",
+            "properties": {
+              "macos-apfs": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "absolute",
+                      "relative",
+                      "report-only"
+                    ]
+                  },
+                  "p50": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "p90": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "inclusive": {
+                    "type": "boolean"
+                  },
+                  "factor": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "p50",
+                  "p90",
+                  "inclusive",
+                  "factor"
+                ],
+                "additionalProperties": false
+              },
+              "macos-nonapfs": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "absolute",
+                      "relative",
+                      "report-only"
+                    ]
+                  },
+                  "p50": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "p90": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "inclusive": {
+                    "type": "boolean"
+                  },
+                  "factor": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "p50",
+                  "p90",
+                  "inclusive",
+                  "factor"
+                ],
+                "additionalProperties": false
+              },
+              "linux": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "enum": [
+                      "absolute",
+                      "relative",
+                      "report-only"
+                    ]
+                  },
+                  "p50": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "p90": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  },
+                  "inclusive": {
+                    "type": "boolean"
+                  },
+                  "factor": {
+                    "type": [
+                      "number",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "p50",
+                  "p90",
+                  "inclusive",
+                  "factor"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "macos-apfs",
+              "macos-nonapfs",
+              "linux"
+            ],
+            "additionalProperties": false
+          },
+          "expected_exit_codes": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "uniqueItems": true},
+          "eligibility": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 0
+          }
+        },
+        "required": [
+          "key",
+          "case_id",
+          "fixture_id",
+          "boundary_id",
+          "variant",
+          "owner",
+          "criterion",
+          "origin",
+          "applicability",
+          "budgets",
+          "eligibility"
+        ],
+        "additionalProperties": false
+      },
+      "minItems": 0
+    },
+    "matrix": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              },
+              "sha256": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{64}$"
+              }
+            },
+            "required": [
+              "path",
+              "sha256"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0
+        }
+      },
+      "required": [
+        "ids",
+        "inputs"
+      ],
+      "additionalProperties": false
+    },
+    "coverage": {
+      "type": "object",
+      "properties": {
+        "criteria": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "required_variants": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 0,
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "criteria",
+        "required_variants"
+      ],
+      "additionalProperties": false
+    },
+    "case_exit_codes": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "uniqueItems": true}},
+    "selection_only_target": {
+      "const": "aarch64-unknown-linux-musl"
+    },
+    "deferred_cells": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "properties": {
+          "cell": {"type": "string", "minLength": 1},
+          "task": {"type": "string", "pattern": "^T[0-9]+$"},
+          "decision": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "required": ["cell", "task", "decision", "reason"],
+        "additionalProperties": false
+      }
+    },
+    "deferred_benches": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "properties": {
+          "bench": {"type": "string", "minLength": 1},
+          "task": {"type": "string", "pattern": "^T[0-9]+$"},
+          "decision": {"type": "string", "minLength": 1},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "required": ["bench", "task", "decision", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema",
+    "spec",
+    "baseline_sha",
+    "cutover_commit",
+    "manifest_path",
+    "input_sets",
+    "cells",
+    "benches",
+    "commands",
+    "cases",
+    "matrix",
+    "coverage",
+    "selection_only_target"
+  ],
+  "additionalProperties": false
+}

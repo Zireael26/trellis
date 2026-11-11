@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # primer-capture-nudge.sh — Codex Stop. Advisory nudge for a new subsystem
 # after an edit-heavy turn.
 #

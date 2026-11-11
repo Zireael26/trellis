@@ -57,7 +57,7 @@ def names(text):
     return collections.Counter(name for _, name in declarations)
 
 
-def split_blocks(raw):
+def split_blocks(raw, ignore_test_separator_blanks=False):
     # Let bash recognize complete function syntax (including heredocs/quoted
     # braces), rather than guessing that the next column-zero } closes a test.
     lines = raw.splitlines(keepends=True)
@@ -70,18 +70,51 @@ def split_blocks(raw):
         header = re.sub(rb'^@test\s+([\"\']).*?\1\s*\{', b'gate_test() {', lines[index], count=1)
         if header == lines[index]:
             raise ValueError("unsupported Bats declaration")
-        index += 1
+        prefix = b''
         while index < len(lines):
-            candidate = header + b''.join(lines[start+1:index+1])
-            if lines[index].strip() == b'}' and subprocess.run(
-                    ["bash", "-n"], input=candidate, stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL).returncode == 0:
+            line = header if index == start else lines[index]
+            for closing in re.finditer(rb'}', line):
+                pos = closing.start()
+                # A shell closing brace is a token, not part of ${variable}.
+                if pos and line[pos-1:pos] not in b' \t;|&(){}':
+                    continue
+                if subprocess.run(
+                        ["bash", "-n"], input=prefix + line[:pos+1] + b'\n',
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode:
+                    continue
+                # Bash has recognized the complete test function. Any code
+                # after its closing brace is top-level, even on the same line.
+                tail = line[pos+1:].strip()
+                if tail and not tail.startswith(b'#'):
+                    raise ValueError("suite-coverage code after test closing brace")
                 blocks.append(b''.join(lines[start:index+1]))
+                if ignore_test_separator_blanks:
+                    common.append(None)
                 index += 1
                 break
-            index += 1
+            else:
+                prefix += line
+                index += 1
+                continue
+            break
         else:
             raise ValueError("incomplete Bats test block")
+    if ignore_test_separator_blanks:
+        # Ignore only blank runs adjoining a test block, not blank lines inside
+        # shared helpers, quoted strings or heredocs where they can carry data.
+        normalized = []
+        after_test = False
+        for line in common:
+            if line is None:
+                while normalized and not normalized[-1].strip():
+                    normalized.pop()
+                after_test = True
+            elif after_test and not line.strip():
+                continue
+            else:
+                normalized.append(line)
+                after_test = False
+        common = normalized
     return b''.join(common), blocks
 
 
@@ -100,14 +133,22 @@ def payload_scan_pair_only(base, head, name):
     """The release-payload scan may change only by adding this tool's one-prefix exemption."""
     if name != PAYLOAD_SCAN_TEST:
         return False
-    diff = git("diff", "-U0", "--no-renames", base, head, "--", name).decode().splitlines()
-    changed = [line for line in diff
-               if line[:1] in "+-" and not line.startswith(("+++", "---"))]
+    diff = git("diff", "--no-ext-diff", "--no-color", "-U0", "--no-renames",
+               base, head, "--", name).decode().splitlines()
+    changed = []
+    in_hunk = False
+    for line in diff:
+        if line.startswith("@@ "):
+            in_hunk = True
+        elif in_hunk and line[:1] in "+-":
+            changed.append(line)
     return changed == ["+" + PAYLOAD_SCAN_PAIR]
 
 
 def check_range(base, head):
-    changed = git("diff", "--name-only", "--no-renames", base, head).decode().splitlines()
+    changed = [os.fsdecode(path) for path in
+               git("diff", "--name-only", "-z", "--no-renames", base, head).split(b"\0")
+               if path]
     split_paths = {"scripts/tests/doctor-fix.bats", "scripts/tests/doctor-fix-common.bash"} | {
         "scripts/tests/doctor-fix-part{}.bats".format(i) for i in range(1, 5)}
     doctor_source = "scripts/tests/doctor-fix.bats"
@@ -123,8 +164,10 @@ def check_range(base, head):
                      or Path(name).name.startswith(('test_', 'test-'))
                      or re.search(r'(?:_test\.[^/]+|\.(?:test|spec)\.[^/]+|\.bats)$', name) is not None)
         if name == "scripts/tests/suite-coverage.bats":
-            _, before = split_blocks(git("show", base + ":" + name))
-            _, after = split_blocks(git("show", head + ":" + name))
+            before_common, before = split_blocks(git("show", base + ":" + name), True)
+            after_common, after = split_blocks(git("show", head + ":" + name), True)
+            if before_common != after_common:
+                raise ValueError("suite-coverage non-test content changed")
             if collections.Counter(before) - collections.Counter(after):
                 raise ValueError("existing suite-coverage @test blocks changed")
             continue

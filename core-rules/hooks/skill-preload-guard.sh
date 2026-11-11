@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # PreToolUse(Skill): deny oversized or ambiguous Skill roots before body load.
 
 set -u
@@ -26,7 +27,6 @@ fi
 SKILL_NAME=$(printf '%s' "$INPUT" | jq -r '.tool_input.skill')
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$PWD}"
 USER_HOME="${HOME:-}"
-[ -d "$PROJECT_DIR" ] && [ -d "$USER_HOME" ] || exit 0
 
 REASON=$(skill_preload_check "$SKILL_NAME" "$PROJECT_DIR" "$USER_HOME")
 STATUS=$?

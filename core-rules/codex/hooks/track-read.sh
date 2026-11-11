@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export GIT_OPTIONAL_LOCKS=0
 # track-read.sh — Codex PostToolUse on Read|Write|Edit|MultiEdit.
 # Source: Trellis / core-rules / codex hooks. Phase 5b (E2 re-read-before-edit
 # guard, Codex mirror of the Claude Phase 5a hook).

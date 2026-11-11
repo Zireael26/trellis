@@ -52,7 +52,9 @@ fleet-wide breakage. Do not "fix" the pin back to floating during a re-sync.
 5. Set `gate_profiles.anti_slop.posture` in the project's `.trellis.json` (`"advisory"` first).
 
 Findings in owned source are a cleanup-session input, not a reason to weaken severity, add
-suppressions, or launder types.
+suppressions, or launder types. The process gate also scans shared patterns not covered by
+the plugin, including `any` in function signatures; native-covered patterns use the native
+rule's suppression semantics instead of reporting the same category twice.
 
 ## Self-test
 

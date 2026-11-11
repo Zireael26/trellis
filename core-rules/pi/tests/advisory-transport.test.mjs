@@ -6,7 +6,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, copyFileSync, readFileSync, rmSy
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import extension from '../extensions/trellis.ts';
+import extension, { decisionContext, deliverPostResult } from '../extensions/trellis.ts';
+import { realDispatchExec, mockDispatchExec } from './dispatch-test-transport.mjs';
 
 const dispatcher = new URL('../hooks/dispatch.sh', import.meta.url);
 function fixture(t) {
@@ -20,24 +21,35 @@ function fixture(t) {
   const event = (phase, native_event, family = 'file_read') => ({ schema_version: 1, harness: 'pi', cwd, session_id: 'scratch', phase, native_event, action: { family, tool_name: family === 'shell' ? 'bash' : 'read', input: { path: 'file' }, targets: [] }, result: phase === 'post_action' ? { status: 'succeeded', is_error: false, output: [] } : null });
   const run = (event, env = {}) => {
     const result = spawnSync('bash', [dispatcher.pathname, '--base64', Buffer.from(JSON.stringify(event)).toString('base64')], { cwd, env: { ...process.env, ...env }, encoding: 'utf8' });
-    return { ...result, decision: JSON.parse(result.stdout) };
+    return { ...result, decision: JSON.parse(result.stdout.split('\n')[0]) };
   };
   const handlers = new Map();
   const messages = [];
   const notifications = [];
   const pi = {
     on: (name, handler) => handlers.set(name, name === 'before_agent_start' ? (event, ctx) => handler({ messageType: 'user', ...event }, ctx) : handler),
-    getAllTools: () => [],
+    // Pi 0.85 builtin metadata: the extension refuses read/edit/write/bash
+    // whose provenance is not a single builtin (ccbe6a0c7).
+    getAllTools: () => ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'].map(name => ({
+      name, sourceInfo: { path: `<builtin:${name}>`, source: 'builtin', scope: 'temporary', origin: 'top-level', baseDir: undefined },
+    })),
     sendMessage: (...args) => messages.push(args),
-    exec: async (_script, args) => {
+    exec: realDispatchExec(async (_script, args, options) => {
       const event = args[0] === '--event-file' ? JSON.parse(readFileSync(args[1], 'utf8')) : JSON.parse(Buffer.from(args[1], 'base64').toString());
-      const result = run(event);
+      const result = run(event, options.env);
       return { stdout: result.stdout, stderr: result.stderr, code: result.status, killed: false };
-    },
+    }),
   };
   extension(pi);
   const ctx = { cwd, ui: { notify: (...args) => notifications.push(args) }, sessionManager: { getSessionId: () => 'scratch', getSessionFile: () => undefined } };
-  return { cwd, hook, event, run, pi, handlers, messages, notifications, ctx };
+  // Synthetic compatibility decisions exercise delivery, not the local evaluator.
+  const deliveredReasons = new Set();
+  const deliver = (event, decision, pre) => deliverPostResult(pi, { notify: ctx.ui.notify }, event, pre, decision, deliveredReasons);
+  const readPreContext = () => {
+    const context = decisionContext({ schema_version: 1, capability_status: 'unsupported', decision: 'allow', reason: 'pre_action/file_read: unsupported — no pre-action handler' }, deliveredReasons);
+    return { context: context ? `[Trellis pre-action advisory; capability: unsupported]\n${context}` : '', capabilityOnly: true };
+  };
+  return { cwd, hook, event, run, pi, handlers, messages, notifications, ctx, deliver, readPreContext };
 }
 
 test('mixed streams retain structured context and reason, including in tool-result patch', async t => {
@@ -51,7 +63,7 @@ test('mixed streams retain structured context and reason, including in tool-resu
   assert.match(result.decision.reason, /stderr sentinel/);
   assert.equal(result.decision.decision, 'warn');
   const original = [{ type: 'text', text: 'original result' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
-  const patch = await f.handlers.get('tool_result')({ toolCallId: 'read-1', toolName: 'read', input: { path: 'file' }, content: original, details: { retained: true }, isError: true }, f.ctx);
+  const patch = f.deliver({ toolCallId: 'read-1', toolName: 'read', input: { path: 'file' }, content: original, details: { retained: true }, isError: true }, result.decision);
   assert.deepEqual(patch.content.slice(0, 2), original);
   assert.match(patch.content[2].text, /context sentinel/);
   assert.match(patch.content[2].text, /reason sentinel/);
@@ -64,8 +76,9 @@ test('allow plus pure context reaches the model-visible tool result', async t =>
   const f = fixture(t);
   f.hook('truncation-check.sh', `printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"pure context"}}'`);
   f.hook('track-read.sh', 'exit 0');
-  assert.equal(f.run(f.event('post_action', 'tool_result')).decision.decision, 'allow');
-  const patch = await f.handlers.get('tool_result')({ toolCallId: 'x', toolName: 'read', input: {}, content: [], isError: false }, f.ctx);
+  const { decision } = f.run(f.event('post_action', 'tool_result'));
+  assert.equal(decision.decision, 'allow');
+  const patch = f.deliver({ toolCallId: 'x', toolName: 'read', input: {}, content: [], isError: false }, decision);
   assert.match(patch.content[0].text, /pure context/);
 });
 
@@ -99,11 +112,16 @@ test('malformed optional fields and execution failure stay visible and advisory 
     { stdout: '{"schema_version":1,"capability_status":"advisory","decision":"allow","context":{}}', stderr: '', code: 0 },
     { stdout: '', stderr: 'bridge failed', code: 2 },
   ]) {
-    f.pi.exec = async () => response;
+    f.pi.exec = mockDispatchExec(async () => response);
     const compact = await f.handlers.get('session_before_compact')({ reason: 'manual' }, f.ctx);
     assert.equal(compact, undefined);
-    const patch = await f.handlers.get('tool_result')({ toolCallId: 'x', toolName: 'read', input: {}, content: [], isError: false }, f.ctx);
+    const reason = response.stderr || `Trellis Pi dispatcher failed completion or decision validation (status ${response.code})`;
+    assert.ok(f.messages.at(-1)[0].content.includes(reason));
+    assert.deepEqual(f.notifications.at(-1), [reason, 'warning']);
+    const patch = f.deliver({ toolCallId: 'x', toolName: 'read', input: {}, content: [], isError: false }, { schema_version: 1, capability_status: 'unknown', decision: 'deny', reason });
     assert.match(patch.content[0].text, /capability: unknown/);
+    assert.ok(patch.content[0].text.includes(reason));
+    assert.deepEqual(f.notifications.at(-1), [reason, 'warning']);
   }
 });
 
@@ -197,7 +215,7 @@ test('unsupported reads stay model visible without UI fatigue; genuine errors st
     { capability_status: 'unsupported', decision: 'deny', reason: 'deny sentinel' },
     { capability_status: 'unsupported', decision: 'warn', reason: 'unsupported observation' },
   ]) {
-    f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, ...response }), stderr: 'stderr sentinel', code: 0 });
+    f.pi.exec = mockDispatchExec(async () => ({ stdout: JSON.stringify({ schema_version: 1, ...response }), stderr: 'stderr sentinel', code: 0 }));
     // Reads no longer cross the process boundary; exercise its errors on shell.
     await f.handlers.get('tool_call')({ toolCallId: 'shell-errors', toolName: 'bash', input: { command: 'gh pr create' } }, f.ctx);
   }
@@ -206,7 +224,11 @@ test('unsupported reads stay model visible without UI fatigue; genuine errors st
 
 test('capability-only successful reads remain byte-exact, dedupe across turns, and reset per session', async t => {
   const f = fixture(t);
-  f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'enforced', decision: 'allow' }), stderr: '', code: 0 });
+  f.pi.exec = mockDispatchExec(async (_script, args) => {
+    const event = JSON.parse(readFileSync(args[1], 'utf8'));
+    assert.equal(event.phase, 'lifecycle', 'ordinary read pre/post must not dispatch');
+    return { stdout: JSON.stringify({ schema_version: 1, capability_status: 'enforced', decision: 'allow' }), stderr: '', code: 0 };
+  });
   const content = [
     { type: 'text', text: 'first\r\n\u0000é e\u0301\n' },
     { type: 'image', data: 'AAECA/8=', mimeType: 'image/png' },
@@ -246,30 +268,33 @@ test('capability-only successful reads remain byte-exact, dedupe across turns, a
 for (const capability_status of ['unsupported', 'advisory']) {
   test(`capability-only ${capability_status} post-read notices go out-of-band once`, async t => {
     const f = fixture(t);
-    f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status, decision: 'allow', reason: 'post capability sentinel' }), stderr: '', code: 0 });
+    const decision = { schema_version: 1, capability_status, decision: 'allow', reason: 'post capability sentinel' };
     const content = [{ type: 'text', text: 'exact\r\n' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
+    const bytes = Buffer.from(JSON.stringify(content));
     for (const toolCallId of ['first', 'repeat']) {
       // No pre entry also exercises post classification independently.
-      const patch = await f.handlers.get('tool_result')({ toolCallId, toolName: 'read', input: {}, content, isError: false }, f.ctx);
-      assert.equal(patch, undefined);
+      const event = { toolCallId, toolName: 'read', input: {}, content, isError: false };
+      assert.equal(f.deliver(event, decision), undefined);
+      assert.strictEqual(event.content, content);
+      assert.deepEqual(Buffer.from(JSON.stringify(content)), bytes);
     }
     assert.equal(f.messages.length, 1);
     assert.equal(f.messages[0][0].customType, 'trellis-context');
     assert.match(f.messages[0][0].content, /post capability sentinel/);
     assert.equal(f.messages[0][0].display, false);
     assert.deepEqual(f.messages[0][1], { triggerTurn: false });
+    assert.equal(f.notifications.length, 0);
   });
 }
 
 test('pure pre/post read capability notices share one context-only message without result pollution', async t => {
   const f = fixture(t);
-  f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'advisory', decision: 'allow', reason: 'post sentinel' }), stderr: '', code: 0 });
+  const decision = { schema_version: 1, capability_status: 'advisory', decision: 'allow', reason: 'post sentinel' };
   const content = [{ type: 'text', text: 'exact\r\n' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
   const bytes = Buffer.from(JSON.stringify(content));
   for (const toolCallId of ['first', 'repeat']) {
     const call = { toolCallId, toolName: 'read', input: { path: 'file' } };
-    await f.handlers.get('tool_call')(call, f.ctx);
-    assert.equal(await f.handlers.get('tool_result')({ ...call, content, isError: false }, f.ctx), undefined);
+    assert.equal(f.deliver({ ...call, content, isError: false }, decision, f.readPreContext()), undefined);
     assert.deepEqual(Buffer.from(JSON.stringify(content)), bytes);
   }
   assert.equal(f.messages.length, 1);
@@ -286,28 +311,30 @@ for (const response of [
 ]) {
   test(`read ${response.decision} with ${response.context ? 'real context' : 'non-allow reason'} stays inline`, async t => {
     const f = fixture(t);
-    f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, ...response }), stderr: '', code: 0 });
+    const decision = { schema_version: 1, ...response };
     const call = { toolCallId: 'read-control', toolName: 'read', input: { path: 'file' } };
-    await f.handlers.get('tool_call')(call, f.ctx);
     const original = [{ type: 'text', text: 'original' }, { type: 'image', data: 'AA==', mimeType: 'image/png' }];
-    const patch = await f.handlers.get('tool_result')({ ...call, content: original, isError: false }, f.ctx);
+    const bytes = Buffer.from(JSON.stringify(original));
+    const patch = f.deliver({ ...call, content: original, isError: false }, decision, f.readPreContext());
     assert.deepEqual(patch.content.slice(0, original.length), original);
     assert.match(patch.content.at(-1).text, new RegExp(response.reason));
     if (response.context) assert.match(patch.content.at(-1).text, new RegExp(response.context));
     assert.doesNotMatch(patch.content.at(-1).text, /no pre-action handler/);
     assert.equal(f.messages.length, 1); // Only the pure pre-read capability moves out-of-band.
     assert.doesNotMatch(f.messages[0][0].content, /sentinel|real context reason/);
+    assert.deepEqual(Object.keys(patch), ['content']);
+    assert.deepEqual(Buffer.from(JSON.stringify(original)), bytes);
     assert.equal(f.notifications.length, response.decision === 'allow' ? 0 : 1);
+    if (response.decision !== 'allow') assert.deepEqual(f.notifications[0], [response.reason, 'warning']);
   });
 }
 
 test('failed read capability notices retain existing inline behavior', async t => {
   const f = fixture(t);
-  f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'unsupported', decision: 'allow', reason: 'failed post sentinel' }), stderr: '', code: 0 });
+  const decision = { schema_version: 1, capability_status: 'unsupported', decision: 'allow', reason: 'failed post sentinel' };
   const call = { toolCallId: 'failed', toolName: 'read', input: { path: 'file' } };
-  await f.handlers.get('tool_call')(call, f.ctx);
   const original = [{ type: 'text', text: 'read failure' }];
-  const patch = await f.handlers.get('tool_result')({ ...call, content: original, isError: true }, f.ctx);
+  const patch = f.deliver({ ...call, content: original, isError: true }, decision, f.readPreContext());
   assert.deepEqual(patch.content.slice(0, original.length), original);
   assert.match(patch.content.at(-1).text, /no pre-action handler/);
   assert.match(patch.content.at(-1).text, /failed post sentinel/);
@@ -320,11 +347,12 @@ for (const reason of ['startup', 'resume']) {
     writeFileSync(resolve(f.cwd, 'context-log.md'), 'stale context sentinel');
     f.hook('session-context.sh', `jq --rawfile history "$CODEX_PROJECT_DIR/context-log.md" '{hookSpecificOutput:{additionalContext:("context-log.md (previous session) — " + .source + "\\n" + $history)}}'`);
     f.hook('post-compact-context.sh', `jq -n --rawfile history "$CODEX_PROJECT_DIR/context-log.md" '{hookSpecificOutput:{additionalContext:("WRONG portable recovery: " + $history)}}'`);
-    f.hook('inject-primer-index.sh', `printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"applicable primer sentinel"}}'`);
+    f.hook('inject-primer-index.sh', `case "$(jq -r '.source')" in startup|resume) printf '%s\\n' '{"hookSpecificOutput":{"additionalContext":"applicable primer sentinel"}}' ;; esac`);
     await f.handlers.get('session_start')({ reason }, f.ctx);
     const start = f.handlers.get('before_agent_start')({ systemPrompt: 'parent' }, f.ctx);
     assert.match(start.message.content, new RegExp('context-log.md \\(previous session\\) — ' + reason));
     assert.match(start.message.content, /stale context sentinel/);
+    assert.match(start.message.content, /applicable primer sentinel/);
     assert.doesNotMatch(start.message.content, /WRONG portable recovery/);
     for (let i = 0; i < 2; i++) {
       const observed = f.run(f.event('lifecycle', 'session_compact'));
@@ -333,7 +361,8 @@ for (const reason of ['startup', 'resume']) {
       await f.handlers.get('session_compact')({ reason: 'manual' }, f.ctx);
       const next = f.handlers.get('before_agent_start')({ systemPrompt: 'parent' }, f.ctx);
       assert.doesNotMatch(next.message.content, /stale context sentinel|previous session|WRONG portable recovery/);
-      assert.match(next.message.content, /applicable primer sentinel/);
+      assert.doesNotMatch(next.message.content, /applicable primer sentinel/);
+      assert.match(next.message.content, /task-context v1:/);
       // Machine observations persist; routine model notices dedupe per session.
       if (i === 0) assert.match(next.message.content, /unsupported.*portable.*recovery.*not wired/);
       else assert.doesNotMatch(next.message.content, /unsupported.*portable.*recovery.*not wired/);
@@ -343,7 +372,7 @@ for (const reason of ['startup', 'resume']) {
 
 test('session compact preserves both reason and context for the next agent start', async t => {
   const f = fixture(t);
-  f.pi.exec = async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'advisory', decision: 'warn', context: 'compact context', reason: 'compact reason' }), stderr: '', code: 0 });
+  f.pi.exec = mockDispatchExec(async () => ({ stdout: JSON.stringify({ schema_version: 1, capability_status: 'advisory', decision: 'warn', context: 'compact context', reason: 'compact reason' }), stderr: '', code: 0 }));
   await f.handlers.get('session_compact')({ reason: 'manual' }, f.ctx);
   const next = f.handlers.get('before_agent_start')({ systemPrompt: 'parent' }, f.ctx);
   assert.match(next.message.content, /compact context/);

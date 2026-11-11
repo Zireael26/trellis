@@ -296,6 +296,24 @@ for rename in (False,True):
 PY
 }
 
+@test "a reader lists a snapshot replaced while it waited for the lock" {
+  check <<'PY'
+record=seed(); mod=module(); fcntl=mod.fcntl
+class Contended:
+    def __getattr__(self,name): return getattr(fcntl,name)
+    def flock(self,fd,operation):
+        # A writer commits its atomic replace after this reader opened the
+        # directory but before it got the lock.
+        staged=state/'.partial-writer'
+        staged.write_bytes(record.read_bytes()); staged.chmod(0o600)
+        os.replace(staged,record)
+        fcntl.flock(fd,operation)
+mod.fcntl=Contended()
+result=mod.read({'git_common_dir':str(root/'.git'),'worktree_root':str(root)})
+assert [d['status'] for d in result['documents']]==['current'],result
+PY
+}
+
 @test "late alarm cannot strand owned scratch or report success after cleanup" {
   check <<'PY'
 import signal

@@ -181,7 +181,7 @@ SH
   chmod 755 "$COUNTED_WRAPPER_DIR/seed-inheritance-symlinks.sh"
 }
 
-@test "wrapper add seeds only in post-checkout after one read-only pre-add call" {
+@test "wrapper add seeds only in post-checkout between read-only pre-add and readiness checks" {
   t14_setup_sandbox
   t14_make_runtime_release
   t14_make_project
@@ -193,8 +193,10 @@ SH
     "$T14_PROJECT" "$COUNTED_WRAPPER_DIR/worktree.sh"
 
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
-  grep -- '--pre-add --quiet' "$WRAPPER_SEED_LOG"
+  # T48: the wrapper proves readiness read-only and never reseeds a ready tree.
+  [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 2 ]
+  [[ "$(sed -n 1p "$WRAPPER_SEED_LOG")" == "--target "*" --pre-add --quiet" ]]
+  [[ "$(sed -n 2p "$WRAPPER_SEED_LOG")" == "--target "*"/t14-counted-wrapper --verify-only --quiet" ]]
   [ -f "$(t14_owner_for_root "$T14_WORKTREE")" ]
   [ -L "$T14_WORKTREE/.trellis/runtime" ]
   [ -L "$T14_WORKTREE/.claude/rules/trellis.md" ]
