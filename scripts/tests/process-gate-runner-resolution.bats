@@ -185,7 +185,7 @@ SH
 
 assert_hook_authority_failure() {
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"core.hooksPath"* ]]
+  [[ "$output" == *"core.hooksPath"* ]] || false
   [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$MANAGED_HOOKS")"* ]] || {
     echo "$output"; false;
   }
@@ -301,7 +301,7 @@ SH
       git -C "$MAIN" config core.hooksPath "$MANAGED_HOOKS"
       run_managed_carrier "$hook"
       [ "$status" -eq "$expected" ] || { echo "signal=$signal status=$status"; echo "$output"; false; }
-      [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$MANAGED_HOOKS")"* ]]
+      [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$MANAGED_HOOKS")"* ]] || false
       [ "$(git -C "$MAIN" config --get core.hooksPath)" = .husky/_ ]
     done
   done
@@ -354,9 +354,9 @@ SH
   for hook in "$PRE_PUSH" "$HUSKY_PRE_PUSH"; do
     run_managed_carrier "$hook"
     [ "$status" -eq 1 ] || { echo "$output"; false; }
-    [[ "$output" == *"TRELLIS_HOME must be an absolute path for managed attachments"* ]]
-    [[ "$output" != *"Trellis verification starting"* ]]
-    [[ "$output" != *"core.hooksPath:"* ]]
+    [[ "$output" == *"TRELLIS_HOME must be an absolute path for managed attachments"* ]] || false
+    [[ "$output" != *"Trellis verification starting"* ]] || false
+    [[ "$output" != *"core.hooksPath:"* ]] || false
     [ ! -e "$FIXTURE/pnpm.log" ]
   done
 }
@@ -371,7 +371,7 @@ SH
       [ "$(git -C "$MAIN" config --get core.hooksPath)" = "$MANAGED_HOOKS" ]
       [ "$(cat "$PNPM_CAPTURE")" = '0|<unset>|error' ]
       if [ "$stale" = 1 ]; then
-        [[ "$output" == *"stale dependencies"* ]]
+        [[ "$output" == *"stale dependencies"* ]] || false
       fi
     done
   done
@@ -431,7 +431,7 @@ PY
     git -C "$MAIN" config core.hooksPath "$MANAGED_HOOKS"
     run_managed_carrier "$hook"
     assert_hook_authority_failure
-    [[ "$output" == *"spec-gate blocked this push"* ]]
+    [[ "$output" == *"spec-gate blocked this push"* ]] || false
     [ "$(cat "$PNPM_CAPTURE")" = '0|<unset>|error' ]
   done
 }
@@ -446,7 +446,7 @@ PY
     run_managed_carrier "$hook"
     assert_hook_authority_failure "$MANAGED_HOOKS"
     [ "$(git -C "$MAIN" config --local --get core.hooksPath)" = .husky/_ ]
-    [[ "$output" == *"core.hooksPath: local path"* ]]
+    [[ "$output" == *"core.hooksPath: local path"* ]] || false
   done
 }
 
@@ -480,7 +480,7 @@ PY
   for hook in "$PRE_PUSH" "$HUSKY_PRE_PUSH"; do
     run_managed_carrier "$hook" "$FIXTURE/refs"
     assert_hook_authority_failure
-    [[ "$output" == *"Direct push to refs/heads/main blocked"* ]]
+    [[ "$output" == *"Direct push to refs/heads/main blocked"* ]] || false
     [ ! -e "$PNPM_CAPTURE" ]
   done
 }
@@ -550,8 +550,8 @@ PY
   for hook in "$PRE_PUSH" "$HUSKY_PRE_PUSH"; do
     run_managed_carrier "$hook"
     [ "$status" -eq 0 ] || { echo "$output"; false; }
-    [[ "$output" == *"Overall: MERGEABLE"* ]]
-    [[ "$output" != *"PREVIOUS_RELEASE_RUNNER"* ]]
+    [[ "$output" == *"Overall: MERGEABLE"* ]] || false
+    [[ "$output" != *"PREVIOUS_RELEASE_RUNNER"* ]] || false
   done
 }
 
@@ -564,9 +564,9 @@ PY
   for hook in "$PRE_PUSH" "$HUSKY_PRE_PUSH"; do
     run_managed_carrier "$hook"
     [ "$status" -eq 1 ] || { echo "$output"; false; }
-    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]]
-    [[ "$output" == *"Overall: BLOCKED"* ]]
-    [[ "$output" != *"PREVIOUS_RELEASE_RUNNER"* ]]
+    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]] || false
+    [[ "$output" == *"Overall: BLOCKED"* ]] || false
+    [[ "$output" != *"PREVIOUS_RELEASE_RUNNER"* ]] || false
   done
 }
 
@@ -651,31 +651,31 @@ PY
 
   run_pre_push "$WORKTREE"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"refusing push because the gate produced no safety verdict"* ]]
-  [[ "$output" == *"$WORKTREE/.claude/skills/process-gate/scripts/run-all.sh: process-gate skill symlink target is unavailable"* ]]
-  [[ "$output" == *"$WORKTREE/.agents/skills/process-gate/scripts/run-all.sh: exists but is not a regular file"* ]]
-  [[ "$output" == *"$WORKTREE/core-rules/skills/process-gate/scripts/run-all.sh: not found"* ]]
-  [[ "$output" == *"$MAIN/.claude/skills/process-gate/scripts/run-all.sh: not found"* ]]
-  [[ "$output" == *"$MAIN/.agents/skills/process-gate/scripts/run-all.sh: not found"* ]]
+  [[ "$output" == *"refusing push because the gate produced no safety verdict"* ]] || false
+  [[ "$output" == *"$WORKTREE/.claude/skills/process-gate/scripts/run-all.sh: process-gate skill symlink target is unavailable"* ]] || false
+  [[ "$output" == *"$WORKTREE/.agents/skills/process-gate/scripts/run-all.sh: exists but is not a regular file"* ]] || false
+  [[ "$output" == *"$WORKTREE/core-rules/skills/process-gate/scripts/run-all.sh: not found"* ]] || false
+  [[ "$output" == *"$MAIN/.claude/skills/process-gate/scripts/run-all.sh: not found"* ]] || false
+  [[ "$output" == *"$MAIN/.agents/skills/process-gate/scripts/run-all.sh: not found"* ]] || false
 
   run_husky_pre_push "$WORKTREE"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"refusing push because the gate produced no safety verdict"* ]]
-  [[ "$output" == *"$WORKTREE/.claude/skills/process-gate/scripts/run-all.sh: process-gate skill symlink target is unavailable"* ]]
-  [[ "$output" == *"$WORKTREE/.agents/skills/process-gate/scripts/run-all.sh: exists but is not a regular file"* ]]
-  [[ "$output" == *"$WORKTREE/core-rules/skills/process-gate/scripts/run-all.sh: not found"* ]]
-  [[ "$output" == *"$MAIN/.claude/skills/process-gate/scripts/run-all.sh: not found"* ]]
-  [[ "$output" == *"$MAIN/.agents/skills/process-gate/scripts/run-all.sh: not found"* ]]
+  [[ "$output" == *"refusing push because the gate produced no safety verdict"* ]] || false
+  [[ "$output" == *"$WORKTREE/.claude/skills/process-gate/scripts/run-all.sh: process-gate skill symlink target is unavailable"* ]] || false
+  [[ "$output" == *"$WORKTREE/.agents/skills/process-gate/scripts/run-all.sh: exists but is not a regular file"* ]] || false
+  [[ "$output" == *"$WORKTREE/core-rules/skills/process-gate/scripts/run-all.sh: not found"* ]] || false
+  [[ "$output" == *"$MAIN/.claude/skills/process-gate/scripts/run-all.sh: not found"* ]] || false
+  [[ "$output" == *"$MAIN/.agents/skills/process-gate/scripts/run-all.sh: not found"* ]] || false
 
   # Candidate reporting is the carriers' job; shiftleft resolves no runner.
   run_pr_gate "$WORKTREE"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"Candidates tried:"* ]]
+  [[ "$output" != *"Candidates tried:"* ]] || false
   assert_runner_not_run
 
   run_codex_pr_gate "$WORKTREE"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"Candidates tried:"* ]]
+  [[ "$output" != *"Candidates tried:"* ]] || false
   assert_runner_not_run
 }
 

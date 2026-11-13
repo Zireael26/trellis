@@ -158,7 +158,7 @@ commit_and_check() {
   git -C "$PROJECT_DIR" commit -qm 'feat: oversized code'
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 1 ] || { echo "suffix disguised code: $output"; false; }
-  [[ "$output" == *'hard cap 800'* ]]
+  [[ "$output" == *'hard cap 800'* ]] || false
 
   # An actual lockfile in a nested directory remains exempt.
   write_bulk "$PROJECT_DIR/deps/uv.lock" 900
@@ -271,7 +271,7 @@ commit_and_check() {
   git -C "$PROJECT_DIR" commit -qm 'feat: add parser'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"900 lines > hard cap"* ]]
+  [[ "$output" == *"900 lines > hard cap"* ]] || false
 }
 
 @test "143-pg: rename into a lockfile cannot subtract unrelated code" {
@@ -285,7 +285,7 @@ commit_and_check() {
   git -C "$PROJECT_DIR" commit -qm 'feat: add code and rename'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"1000 lines > hard cap"* ]]
+  [[ "$output" == *"1000 lines > hard cap"* ]] || false
   mkdir -p "$PROJECT_DIR/packages"
   git -C "$PROJECT_DIR" mv src/yarn.lock packages/yarn.lock
   write_bulk "$PROJECT_DIR/src/small.ts" 10
@@ -293,7 +293,7 @@ commit_and_check() {
   git -C "$PROJECT_DIR" commit -qm 'chore: move lockfile and add small change'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"10 lines"* ]]
+  [[ "$output" == *"10 lines"* ]] || false
 }
 
 @test "143-pg: invalid PR size thresholds fail closed and valid decimals pass" {
@@ -303,7 +303,7 @@ commit_and_check() {
   for var in PROCESS_GATE_PR_SIZE_LIMIT PROCESS_GATE_PR_SIZE_HARD; do
     run env "$var=800k" bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
     [ "$status" -eq 1 ] || { echo "$output"; false; }
-    [[ "$output" == *"$var"* && "$output" == *"non-negative integer"* ]]
+    [[ "$output" == *"$var"* && "$output" == *"non-negative integer"* ]] || false
   done
   run env PROCESS_GATE_PR_SIZE_LIMIT=000400 PROCESS_GATE_PR_SIZE_HARD=000800 \
     bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
@@ -312,7 +312,7 @@ commit_and_check() {
     PROCESS_GATE_PR_SIZE_HARD=9999999999999999999999999999999 \
     bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" != *"integer expression expected"* && "$output" != *"integer expected"* ]]
+  [[ "$output" != *"integer expression expected"* && "$output" != *"integer expected"* ]] || false
 }
 
 @test "143-pg-r2: edited code renamed to a lockfile still counts" {
@@ -329,10 +329,10 @@ PY
   write_bulk "$PROJECT_DIR/src/new.ts" 300
   git -C "$PROJECT_DIR" add src
   git -C "$PROJECT_DIR" commit -qm 'feat: edit and rename code'
-  [[ "$(git -C "$PROJECT_DIR" diff --summary HEAD~1..HEAD)" == *"rename"* ]]
+  [[ "$(git -C "$PROJECT_DIR" diff --summary HEAD~1..HEAD)" == *"rename"* ]] || false
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"900 lines > hard cap"* ]]
+  [[ "$output" == *"900 lines > hard cap"* ]] || false
 }
 
 @test "143-pg-r2: malformed lockfile line stats fail closed" {
@@ -351,7 +351,7 @@ PY
   run env PATH="$mock_bin:$PATH" REAL_GIT="$real_git" \
     bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"pr-size: unable to enumerate changed files"* ]]
+  [[ "$output" == *"pr-size: unable to enumerate changed files"* ]] || false
 }
 
 @test "143-pg: malformed base-config threshold fails even for a small change" {
@@ -364,7 +364,7 @@ PY
   git -C "$PROJECT_DIR" commit -qm 'feat: small change'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"PROCESS_GATE_PR_SIZE_HARD"* && "$output" == *"non-negative integer"* ]]
+  [[ "$output" == *"PROCESS_GATE_PR_SIZE_HARD"* && "$output" == *"non-negative integer"* ]] || false
 }
 
 @test "143-pr-size: default boundaries report countable lines on pass warn and fail" {
@@ -375,7 +375,7 @@ PY
     case "$n" in 600) expected=0 ;; 601|1200) expected=2 ;; 1201) expected=1 ;; esac
     [ "$status" -eq "$expected" ] || { echo "$n: $output"; false; }
     [[ "$output" == *"$n lines countable"* ]] || { echo "$output"; false; }
-    [[ "$output" == *"excluded: tests=0, fixtures=0, generated=0, lockfiles=0"* ]]
+    [[ "$output" == *"excluded: tests=0, fixtures=0, generated=0, lockfiles=0"* ]] || false
   done
 }
 
@@ -387,7 +387,7 @@ PY
     commit_and_check
     case "$n" in 10) expected=0 ;; 11|20) expected=2 ;; 21) expected=1 ;; esac
     [ "$status" -eq "$expected" ] || { echo "$n: $output"; false; }
-    [[ "$output" == *"$n lines countable"* ]]
+    [[ "$output" == *"$n lines countable"* ]] || false
   done
 }
 
@@ -408,7 +408,7 @@ PY
   commit_and_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"23 lines countable"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"excluded: tests=36, fixtures=0, generated=0, lockfiles=0"* ]]
+  [[ "$output" == *"excluded: tests=36, fixtures=0, generated=0, lockfiles=0"* ]] || false
 }
 
 @test "143-pr-size: fixture and snapshot paths are excluded separately from tests" {
@@ -422,7 +422,7 @@ PY
   commit_and_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"3 lines countable"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"excluded: tests=0, fixtures=21, generated=0, lockfiles=0"* ]]
+  [[ "$output" == *"excluded: tests=0, fixtures=21, generated=0, lockfiles=0"* ]] || false
 }
 
 @test "143-pr-size: generated markers and committed attributes are isolated from local state" {
@@ -450,7 +450,7 @@ PY
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"9 lines countable"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"excluded: tests=0, fixtures=0, generated=25, lockfiles=0"* ]]
+  [[ "$output" == *"excluded: tests=0, fixtures=0, generated=25, lockfiles=0"* ]] || false
 }
 
 @test "143-pr-size: generated deletions use base metadata" {
@@ -462,8 +462,8 @@ PY
   git -C "$PROJECT_DIR" rm -q src/generated.c .gitattributes
   commit_and_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"1 lines countable"* ]]
-  [[ "$output" == *"excluded: tests=0, fixtures=0, generated=15, lockfiles=0"* ]]
+  [[ "$output" == *"1 lines countable"* ]] || false
+  [[ "$output" == *"excluded: tests=0, fixtures=0, generated=15, lockfiles=0"* ]] || false
 }
 
 @test "143-pr-size: unrecognized or late generated markers still count" {
@@ -474,7 +474,7 @@ PY
   commit_and_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"23 lines countable"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"generated=0"* ]]
+  [[ "$output" == *"generated=0"* ]] || false
 }
 
 @test "143-pr-size: single revision uses base attributes and tracked working-tree markers" {
@@ -491,7 +491,7 @@ PY
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"3 lines countable"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"excluded: tests=0, fixtures=0, generated=6, lockfiles=0"* ]]
+  [[ "$output" == *"excluded: tests=0, fixtures=0, generated=6, lockfiles=0"* ]] || false
 }
 
 @test "143-pr-size: lock lines and exclusion breakdown remain visible on warnings" {
@@ -503,8 +503,8 @@ PY
   printf '%s\n' '// @generated' 'one' 'two' > "$PROJECT_DIR/src/generated.ts"
   commit_and_check
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"601 lines countable"* ]]
-  [[ "$output" == *"excluded: tests=11, fixtures=12, generated=3, lockfiles=10"* ]]
+  [[ "$output" == *"601 lines countable"* ]] || false
+  [[ "$output" == *"excluded: tests=11, fixtures=12, generated=3, lockfiles=10"* ]] || false
 }
 
 @test "143-pr-size: renames into every exclusion class cannot hide edited code" {
@@ -542,7 +542,7 @@ PY
   git -C "$PROJECT_DIR" commit -qm 'feat: unusual filenames'
   run bash -c 'cd "$1/src" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"1 lines countable"* && "$output" == *"tests=2"* ]]
+  [[ "$output" == *"1 lines countable"* && "$output" == *"tests=2"* ]] || false
   first="$output"
   run env CODEX_PROJECT_DIR="$PROJECT_DIR" bash -c 'cd "$1/src" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] && [ "$output" = "$first" ] || { echo "$output"; false; }
@@ -559,7 +559,7 @@ PY
   write_bulk "$PROJECT_DIR/src/generated.c" 3
   commit_and_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"0 lines countable"* && "$output" == *"generated=3"* ]]
+  [[ "$output" == *"0 lines countable"* && "$output" == *"generated=3"* ]] || false
 }
 
 @test "143-pr-size: metadata enumeration failure fails closed" {
@@ -576,7 +576,7 @@ PY
   run env PATH="$mock_bin:$PATH" REAL_GIT="$real_git" \
     bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"unable to enumerate changed files"* ]]
+  [[ "$output" == *"unable to enumerate changed files"* ]] || false
 }
 
 @test "143-pr-size: three-dot range uses merge-base attributes" {
@@ -595,7 +595,7 @@ PY
   git -C "$PROJECT_DIR" checkout -q feat/generated
   run bash -c 'cd "$1" && exec bash "$2" --range=main...HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"2 lines countable"* && "$output" == *"generated=8"* ]]
+  [[ "$output" == *"2 lines countable"* && "$output" == *"generated=8"* ]] || false
 }
 
 @test "143-pr-size: threshold overrides from base config are honored" {
@@ -620,7 +620,7 @@ PY
   printf 'changed\n' >> "$PROJECT_DIR/fixtures/new.ts"
   commit_and_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$(git -C "$PROJECT_DIR" diff --summary HEAD~1..HEAD)" == *rename* ]]
+  [[ "$(git -C "$PROJECT_DIR" diff --summary HEAD~1..HEAD)" == *rename* ]] || false
   [[ "$output" == *"1 lines countable"* && "$output" == *"tests=0, fixtures=0"* ]] || { echo "$output"; false; }
 }
 
@@ -1225,5 +1225,5 @@ PY
   commit_and_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"1 lines countable"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"excluded: tests=1, fixtures=0, generated=0, lockfiles=0"* ]]
+  [[ "$output" == *"excluded: tests=1, fixtures=0, generated=0, lockfiles=0"* ]] || false
 }

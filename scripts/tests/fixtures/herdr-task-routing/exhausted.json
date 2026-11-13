@@ -24,10 +24,10 @@
       "provider": "openai-codex",
       "limits": [
         {
-          "id": "luna-window",
+          "id": "terra-window",
           "status": "exhausted",
           "scope": {
-            "modelId": "gpt-6-luna"
+            "modelId": "gpt-6.1-terra"
           }
         },
         {

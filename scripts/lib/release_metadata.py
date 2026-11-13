@@ -11,7 +11,7 @@ import sys
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_receipts import digest, private, state_root
-from gate_verdict import encoded, find_verdict, git, safe_inputs
+from gate_verdict import encoded, find_verdict, git, ref_rows, safe_inputs
 
 
 def metadata_path(path: str) -> bool:
@@ -92,6 +92,7 @@ def evaluate(root: Path, base: str, head: str, manifest: str) -> tuple[int, str]
     branch = git(root, "symbolic-ref", "-q", "HEAD").decode().strip()
     base_head = git(root, "rev-parse", base).decode().strip()
     gated_head = git(root, "rev-parse", head).decode().strip()
+    current_refs = ref_rows(root)
     state = state_root()
     if not private(state, True) or not private(state / "verdicts", True):
         raise ValueError("no private base verdict directory")
@@ -99,16 +100,19 @@ def evaluate(root: Path, base: str, head: str, manifest: str) -> tuple[int, str]
         try:
             if not private(path):
                 continue
-            candidate = json.loads(path.read_text(encoding="utf-8"))["inputs"]
+            record = json.loads(path.read_text(encoding="utf-8"))
+            candidate = record["inputs"]
             if candidate["tree"] != tree or find_verdict(candidate, state) is None:
                 continue
-            adjusted = dict(candidate, tree=current["tree"])
             # Only the current branch may have advanced from base to candidate;
-            # tags, remote refs and every other branch must be unchanged.
-            if isinstance(candidate["refs"], list):
-                adjusted["refs"] = [branch + " " + gated_head if row == branch + " " + base_head else row
-                                    for row in candidate["refs"]]
-            if encoded(adjusted) == encoded(current):
+            # tags, remote refs and every other branch must be unchanged. Refs
+            # are not keyed, so the verdict carries them as evidence, and a
+            # verdict without them never narrows.
+            refs = record.get("refs")
+            if not isinstance(refs, list) or current_refs is None:
+                continue
+            adjusted_refs = [branch + " " + gated_head if row == branch + " " + base_head else row for row in refs]
+            if adjusted_refs == current_refs and encoded(dict(candidate, tree=current["tree"])) == encoded(current):
                 return count, "bats " + " ".join(shlex.quote(suite) for suite in suites)
         except (OSError, ValueError, KeyError, TypeError):
             continue

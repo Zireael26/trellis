@@ -136,7 +136,7 @@ mutate_rules() {
     run python3 -I "$RT/scripts/gen-guard-rules.py" --write --root "$RT"
     [ "$status" -eq 1 ] || { echo "accepted $mutation: $output"; return 1; }
     [[ "$output" == gen-guard-rules:* ]] || { echo "unhandled schema error $mutation: $output"; return 1; }
-    [[ "$output" != *Traceback* ]]
+    [[ "$output" != *Traceback* ]] || false
   done
 }
 
@@ -194,19 +194,19 @@ mutate_rules() {
   mutate_rules reread.json '.warn_budget.default += 1 | .warn_budget.by_level |= map_values(. + 1)'
   run parity_reread_run claude "$(claude_hook reread-guard)"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unread-escalates: expected"* ]]
-  [[ "$output" == *"autonomy-4: expected"* ]]
+  [[ "$output" == *"unread-escalates: expected"* ]] || false
+  [[ "$output" == *"autonomy-4: expected"* ]] || false
   run parity_reread_run codex "$(codex_hook reread-guard)"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unread-escalates: expected"* ]]
+  [[ "$output" == *"unread-escalates: expected"* ]] || false
 }
 
 @test "parity: dropping the edit-failure markers fails the failed-edit cases" {
   mutate_rules reread.json '.edit_failure_markers.pattern = "no-such-marker-anywhere"'
   run parity_track_run claude "$(claude_hook track-read)"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"edit-error-string: expected skip"* ]]
+  [[ "$output" == *"edit-error-string: expected skip"* ]] || false
   run parity_track_run codex "$(codex_hook track-read)"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"edit-marker-later-line: expected skip"* ]]
+  [[ "$output" == *"edit-marker-later-line: expected skip"* ]] || false
 }

@@ -146,8 +146,12 @@ dj_find_caches() {
     echo "dj_find_caches: python3 with descriptor-relative mount checks is required" >&2
     return 1
   }
-  # shellcheck source=hygiene-common.sh
-  [ -n "${_HY_REGENERABLE_ALWAYS:-}" ] || . "$_DISK_JANITOR_LIB_DIR/hygiene-common.sh"
+  # An inherited scalar is not proof that this shell loaded the library.
+  if ! declare -F hy_last_git_activity >/dev/null || [ -z "${_HY_REGENERABLE_ALWAYS:-}" ] ||
+     [ -z "${_HY_DIST_BUILD_MARKERS:-}" ] || [ -z "${_HY_TARGET_MARKERS:-}" ]; then
+    # shellcheck source=hygiene-common.sh
+    . "$_DISK_JANITOR_LIB_DIR/hygiene-common.sh"
+  fi
   # The lists travel in the environment so the walker's argv stays `- ROOT`.
   rows="$(DJ_REGENERABLE="$_HY_REGENERABLE_ALWAYS" DJ_BUILD_MARKERS="$_HY_DIST_BUILD_MARKERS" DJ_TARGET_MARKERS="$_HY_TARGET_MARKERS" \
     python3 -I - "$proj" <<'PY'
@@ -740,7 +744,7 @@ dj_worktree_in_use() {
   # Pull only fixed-string candidates in one pass, then validate exact/path-prefix
   # semantics in shell so sibling names ("wt" vs "wt-old") cannot false-positive.
   # grep status 1 means no match; any other non-zero is a broken check and blocks.
-  if matches="$(LC_ALL=C grep -F "n$real_wt" "$snapshot" 2>/dev/null)"; then
+  if matches="$(/usr/bin/env LC_ALL=C grep -F "n$real_wt" "$snapshot" 2>/dev/null)"; then
     while IFS= read -r line; do
       case "$line" in
         n*) open_path="${line#n}" ;;

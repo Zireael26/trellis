@@ -97,7 +97,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "minor updates across all dependency maps within the same major do not require an ADR" {
@@ -113,112 +113,112 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "satisfiable comparator range updates within the same majors do not require an ADR" {
   commit_runtime_transition_and_check ">=1.2.0 <1.4.0" ">=1.2.1 <1.4.0"
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "satisfiable hyphen range updates within the same majors do not require an ADR" {
   commit_runtime_transition_and_check "1.2.2 - 1.4.0" "1.2.3 - 1.5.0"
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "satisfiable exact-bound updates within the same major do not require an ADR" {
   commit_runtime_transition_and_check ">=1.2.0 <=1.2.0" ">=1.2.1 <=1.2.1"
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "satisfiable adjacent strict-bound updates within the same major do not require an ADR" {
   commit_runtime_transition_and_check ">1.2.3 <=1.2.4" ">1.2.4 <=1.2.5"
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "satisfiable OR and wildcard updates preserve the maintenance exemption" {
   commit_runtime_transition_and_check "^1.2.3 || 2.4.x" "^1.3.0 || 2.5.x"
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "exact prerelease updates within the same major do not require an ADR" {
   commit_runtime_transition_and_check "1.2.3-beta.1" "1.2.3-beta.2"
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"ADR: trigger paths changed"* ]]
+  [[ "$output" != *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "valid-to-reversed hyphen range requires an ADR" {
   commit_runtime_transition_and_check "1.2.2 - 1.2.3" "1.2.4 - 1.2.3"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "valid-to-empty comparator range requires an ADR" {
   commit_runtime_transition_and_check ">=1.2.0 <1.4.0" ">=1.5.0 <1.4.0"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "empty-to-empty comparator range still requires an ADR" {
   commit_runtime_transition_and_check ">=1.5.0 <1.4.0" ">=1.6.0 <1.4.0"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "conflicting exact comparator range requires an ADR" {
   commit_runtime_transition_and_check "1.2.3 1.2.4" "1.2.5 1.2.6"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "strict comparator gap with no stable version requires an ADR" {
   commit_runtime_transition_and_check ">1.2.2 <1.2.4" ">1.2.3 <1.2.4"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "wildcard prerelease syntax requires an ADR" {
   commit_runtime_transition_and_check "1.x-alpha" "1.x-beta"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "leading-zero semver syntax requires an ADR" {
   commit_runtime_transition_and_check "01.2.3" "01.2.4"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "comparator wildcards remain fail-closed parser uncertainty" {
   commit_runtime_transition_and_check ">=1.x" ">=1.X"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "empty dependency ranges require an ADR" {
   commit_runtime_transition_and_check "" " "
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "widening a comparator upper bound into a new major requires an ADR" {
@@ -229,7 +229,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "adding a dependency still requires an ADR" {
@@ -240,7 +240,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "removing a dependency still requires an ADR" {
@@ -250,7 +250,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "deleting package.json still requires an ADR" {
@@ -259,7 +259,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "renaming package.json away still requires an ADR" {
@@ -268,7 +268,7 @@ commit_runtime_transition_and_check() {
   commit_all_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "changing package.json from a file to a symlink still requires an ADR" {
@@ -279,7 +279,7 @@ commit_runtime_transition_and_check() {
   commit_all_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "changing a dependency major still requires an ADR" {
@@ -289,7 +289,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "changing scripts still requires an ADR" {
@@ -299,7 +299,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "changing engines or config still requires an ADR" {
@@ -312,7 +312,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "changing a dependency from a non-semver source still requires an ADR" {
@@ -322,7 +322,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "changing dependency range shape still requires an ADR" {
@@ -332,7 +332,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "malformed package.json still requires an ADR" {
@@ -342,7 +342,7 @@ commit_runtime_transition_and_check() {
   commit_package_and_check
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "invalid or stale range fails closed" {
@@ -351,7 +351,7 @@ commit_runtime_transition_and_check() {
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD..refs/heads/does-not-exist"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"ADR: unable to enumerate trigger paths"* ]]
+  [[ "$output" == *"ADR: unable to enumerate trigger paths"* ]] || false
 }
 
 # --- large-payload membership: the SIGPIPE regression ----------------------
@@ -398,14 +398,14 @@ seed_wide_change() {
   seed_wide_change "chore: wide change" CHANGELOG.md
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"CHANGELOG.md: not updated despite code changes"* ]]
+  [[ "$output" != *"CHANGELOG.md: not updated despite code changes"* ]] || false
 }
 
 @test "changelog absence is still reported in a large changed-file set" {
   seed_wide_change "chore: wide change"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]]
+  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]] || false
 }
 
 @test "gotchas membership is found when the hint is in the checked range" {
@@ -415,14 +415,14 @@ seed_wide_change() {
     CHANGELOG.md gotchas.md
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"gotchas.md"* ]]
+  [[ "$output" != *"gotchas.md"* ]] || false
 }
 
 @test "gotchas absence is still reported when the hint is in the checked range" {
   seed_wide_change "fix: the hook silently dropped the exclude block" CHANGELOG.md
 
   [ "$status" -eq 2 ]
-  [[ "$output" == *"gotchas.md: commit message hints suggest"* ]]
+  [[ "$output" == *"gotchas.md: commit message hints suggest"* ]] || false
 }
 
 @test "EPM membership is found when the trigger is in the checked range" {
@@ -440,7 +440,7 @@ seed_wide_change() {
   seed_wide_change "chore: wide change" CHANGELOG.md engineering-process.md
 
   [ "$status" -eq 0 ]
-  [[ "$output" != *"engineering-process.md: process trigger paths changed"* ]]
+  [[ "$output" != *"engineering-process.md: process trigger paths changed"* ]] || false
 }
 
 @test "EPM absence is still reported when the trigger is in the checked range" {
@@ -457,7 +457,7 @@ seed_wide_change() {
   seed_wide_change "chore: wide change" CHANGELOG.md
 
   [ "$status" -eq 2 ]
-  [[ "$output" == *"engineering-process.md: process trigger paths changed"* ]]
+  [[ "$output" == *"engineering-process.md: process trigger paths changed"* ]] || false
 }
 
 @test "no membership test against changed_files pipes into an early-exiting grep" {
@@ -479,7 +479,7 @@ seed_wide_change() {
   printf 'code\n' > "$PROJECT_DIR/src/café.ts"
   commit_all_and_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]]
+  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]] || false
 }
 
 @test "143-pg: deleted code requires a changelog but docs deletion does not" {
@@ -494,7 +494,7 @@ seed_wide_change() {
   git -C "$PROJECT_DIR" rm -q src/old.ts
   commit_all_and_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]]
+  [[ "$output" == *"CHANGELOG.md: not updated despite code changes"* ]] || false
 }
 
 @test "143-pg-r2: unpadded reference resolves Trellis numbered ADR" {
@@ -528,19 +528,19 @@ seed_wide_change() {
   git -C "$PROJECT_DIR" commit -qm 'change dependencies again' -m "Refs: ${path}-not-the-adr"
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
   printf '{"dependencies":{"prefix":"3.0.0"}}\n' > "$PROJECT_DIR/package.json"
   git -C "$PROJECT_DIR" add package.json
   git -C "$PROJECT_DIR" commit -qm 'change dependencies with prefixed path' -m "Refs: x${path}"
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
   printf '{"dependencies":{"another":"3.0.0"}}\n' > "$PROJECT_DIR/package.json"
   git -C "$PROJECT_DIR" add package.json
   git -C "$PROJECT_DIR" commit -qm 'change dependencies once more' -m 'Refs: ADR-2026'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
 }
 
 @test "143-pg-r3: literal paths must name ADRs, not README or template files" {
@@ -558,7 +558,7 @@ seed_wide_change() {
     git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m "Refs: docs/adr/$name"
     run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
     [ "$status" -eq 1 ] || { echo "accepted $name: $output"; false; }
-    [[ "$output" == *"ADR: trigger paths changed"* ]]
+    [[ "$output" == *"ADR: trigger paths changed"* ]] || false
   done
   for name in 0042-decision.md ADR-0043-decision.md adr-0044.md 2026-10-18-decision.md; do
     i=$((i + 1))
@@ -596,7 +596,7 @@ seed_wide_change() {
   git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m 'Refs: ADR-0042'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
   unlink "$PROJECT_DIR/docs/adr/0042-link.md"
   printf '# Real ADR\n' > "$PROJECT_DIR/docs/adr/0042-link.md"
   git -C "$PROJECT_DIR" add docs/adr/0042-link.md
@@ -622,7 +622,7 @@ seed_wide_change() {
   run env PATH="$mock_bin:$PATH" REAL_GIT="$real_git" \
     bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"CHANGELOG: unable to enumerate changed paths"* ]]
+  [[ "$output" == *"CHANGELOG: unable to enumerate changed paths"* ]] || false
 }
 
 @test "143-pg: ADR reference must resolve to an existing tracked ADR" {
@@ -637,7 +637,7 @@ seed_wide_change() {
   git -C "$PROJECT_DIR" commit -qm 'change dependencies' -m 'See ADR-0099'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"ADR: trigger paths changed"* ]]
+  [[ "$output" == *"ADR: trigger paths changed"* ]] || false
   printf '{"dependencies":{"new":"1.0.0","another":"2.0.0"}}\n' > "$PROJECT_DIR/package.json"
   git -C "$PROJECT_DIR" add package.json
   git -C "$PROJECT_DIR" commit -qm 'change dependencies again' -m 'See ADR-0099 and ADR-0001'

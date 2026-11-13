@@ -30,7 +30,7 @@ check_surface() {
 @test "no plugin is accurately reported and check creates no node shim" {
   check_surface
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not installed"* ]]
+  [[ "$output" == *"not installed"* ]] || false
   [ ! -e "$ACCOUNT/.local" ]
 }
 
@@ -39,7 +39,7 @@ check_surface() {
   cp "$CODEX_MANIFEST" "$SANDBOX/before.json"
   check_surface
   [ "$status" -eq 1 ]
-  [[ "$output" == *"SessionEnd timeout capped at 3s"* ]]
+  [[ "$output" == *"SessionEnd timeout capped at 3s"* ]] || false
   cmp "$CODEX_MANIFEST" "$SANDBOX/before.json"
   [ ! -e "$ACCOUNT/.local" ]
 }
@@ -59,7 +59,7 @@ PY
   cp "$CODEX_MANIFEST" "$SANDBOX/repaired.json"
   check_surface --repair
   [ "$status" -eq 0 ]
-  [[ "$output" != *"repaired"* ]]
+  [[ "$output" != *"repaired"* ]] || false
   cmp "$CODEX_MANIFEST" "$SANDBOX/repaired.json"
 }
 
@@ -71,7 +71,7 @@ PY
   cp "$ACCOUNT/.local/bin/node" "$SANDBOX/owned-node"
   check_surface --repair
   [ "$status" -eq 1 ]
-  [[ "$output" == *"operator-owned"* ]]
+  [[ "$output" == *"operator-owned"* ]] || false
   [ ! -L "$ACCOUNT/.local/bin/node" ]
   cmp "$ACCOUNT/.local/bin/node" "$SANDBOX/owned-node"
 }
@@ -82,7 +82,7 @@ PY
   cp "$CODEX_MANIFEST" "$SANDBOX/before.json"
   check_surface --repair
   [ "$status" -eq 1 ]
-  [[ "$output" == *"cannot inspect/repair"* ]]
+  [[ "$output" == *"cannot inspect/repair"* ]] || false
   cmp "$CODEX_MANIFEST" "$SANDBOX/before.json"
 }
 
@@ -95,8 +95,8 @@ PY
     hc_codex_plugin_surface
   ' doctor-fixture "$REPO_ROOT"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"--repair"* ]]
-  [[ "$output" != *"auto-repaired"* ]]
+  [[ "$output" == *"--repair"* ]] || false
+  [[ "$output" != *"auto-repaired"* ]] || false
   cmp "$CODEX_MANIFEST" "$SANDBOX/before.json"
   [ ! -e "$ACCOUNT/.local" ]
 }
@@ -108,7 +108,7 @@ PY
     hc_codex_plugin_surface
   ' doctor-fixture "$REPO_ROOT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"not installed"* ]]
+  [[ "$output" == *"not installed"* ]] || false
 }
 
 @test "unknown flags are rejected without creating directories" {
@@ -126,7 +126,7 @@ PY
   check_surface --repair
   [ "$status" -eq 0 ]
   [ "$(readlink "$ACCOUNT/.local/bin/node")" = "$SANDBOX/real-bin/node" ]
-  [[ "$output" != *"refreshed"* ]]
+  [[ "$output" != *"refreshed"* ]] || false
 }
 
 @test "invalid hooks shape cannot produce a healthy check" {
@@ -134,7 +134,7 @@ PY
   printf '{"hooks": []}\n' > "$CODEX_MANIFEST"
   check_surface
   [ "$status" -eq 1 ]
-  [[ "$output" == *"hooks must be an object"* ]]
+  [[ "$output" == *"hooks must be an object"* ]] || false
 }
 
 @test "valid pinned node version survives a different interactive PATH version" {
@@ -146,7 +146,7 @@ PY
   check_surface --repair
   [ "$status" -eq 0 ]
   [ "$(readlink "$ACCOUNT/.local/bin/node")" = "$SANDBOX/pinned-bin/node" ]
-  [[ "$output" != *"refreshed"* ]]
+  [[ "$output" != *"refreshed"* ]] || false
 }
 
 @test "missing external node is diagnosed without creating a shim" {
@@ -155,7 +155,7 @@ PY
   ln -s "$(python3 -c 'import os, sys; print(os.path.realpath(sys.executable))')" "$BIN/python3"
   run env HOME="$ACCOUNT" PATH="$BIN" /bin/bash "$CHECKER"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"no node outside"* ]]
+  [[ "$output" == *"no node outside"* ]] || false
   [ ! -e "$ACCOUNT/.local" ]
 }
 

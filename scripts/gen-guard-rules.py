@@ -272,6 +272,8 @@ def load_destructive(doc):
                 raise RuleError(f"{where} exempt: identifier_boundary must be one bracket expression")
             if any(not re.fullmatch(r"-[A-Za-z0-9]", x) for x in ex["refuse_short_flags"]):
                 raise RuleError(f"{where} exempt refuse_short_flags: -x flags")
+            if any(re.search(pat, ex["replacement"], re.I if icase else 0) for pat in rule["match"]):
+                raise RuleError(f"{where} exempt: a match pattern matches the replacement, so exempting could make the rule fire")
             refuse = [(pat, check_pattern(pat, f"{where} exempt refuse_if_line_matches", icase))
                       for pat in ex["refuse_if_line_matches"]]
             compiled["exempt"] = dict(ex, regex=f"({ex['identifier_boundary']})({ex['identifier']})", refuse=refuse)
@@ -370,7 +372,10 @@ def render_destructive(rules):
         exempt = rule.get("exempt")
         if exempt:
             out += [
-                f"  if {' && '.join([engine_test(exempt['engines'])] + [f'! {match_call(p, t)}' for p, t in exempt['refuse']])}; then",
+                # The exemption only removes identifiers, so it cannot make a rule fire
+                # that its patterns do not fire on the raw text; checking them first
+                # keeps the per-character exemption scan off every unrelated command.
+                f"  if {' && '.join([engine_test(exempt['engines'])] + [match_call(p, t) for p, t in rule['match']] + [f'! {match_call(p, t)}' for p, t in exempt['refuse']])}; then",
                 f"    _gr_exempt {sh(','.join(exempt['allowed_commands']))} {sh(' '.join(exempt['command_prefixes']))} \\",
                 f"      {sh(exempt['boundaries'])} {sh(exempt['regex'])} {sh(exempt['replacement'])} \\",
                 f"      {sh(' '.join(exempt['refuse_short_flags']))}",

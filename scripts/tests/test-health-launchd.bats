@@ -85,7 +85,7 @@ seed_ready() {
 assert_refusal() {
   local step="$1"
   [ "$status" -ne 0 ]
-  [[ "$output" == "test-health: refused ($step): "* ]]
+  [[ "$output" == "test-health: refused ($step): "* ]] || false
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1 ]
   [ ! -e "$TEST_HEALTH_FAKE_ARGS" ]
 }
@@ -147,7 +147,7 @@ PY
   export FAKE_HOST='Linux arm64'
   run /bin/bash "$RUNNER"
   [ "$status" -eq 3 ]
-  [[ "$output" == 'info: test-health could not run: off-host '* ]]
+  [[ "$output" == 'info: test-health could not run: off-host '* ]] || false
   [ ! -e "$LAUNCHER_CALLS" ] && [ ! -e "$TEST_HEALTH_LOCK_FILE" ]
 }
 
@@ -194,7 +194,7 @@ PY
   export OMIT_MANIFEST=1
   run /bin/bash "$RUNNER"
   assert_refusal manifest
-  [[ "$output" == *"$MANIFEST"* ]]
+  [[ "$output" == *"$MANIFEST"* ]] || false
 }
 
 @test "non-ready manifest refuses before Claude" {
@@ -213,14 +213,14 @@ PY
   export OMIT_PROMPT=1
   run /bin/bash "$RUNNER"
   assert_refusal prompt
-  [[ "$output" == *"$PROMPT"* ]]
+  [[ "$output" == *"$PROMPT"* ]] || false
 }
 
 @test "placeholder in materialized prompt refuses before Claude" {
   export PROMPT_BODY='Read {{TASK_ROOT}}'
   run /bin/bash "$RUNNER"
   assert_refusal prompt
-  [[ "$output" == *'unfilled placeholder'* ]]
+  [[ "$output" == *'unfilled placeholder'* ]] || false
 }
 
 @test "relative TRELLIS_HOME refuses before lock or launcher" {

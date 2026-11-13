@@ -816,7 +816,7 @@ JSON
 # doctor under the control PATH and forwards the caller's PATH as
 # TRELLIS_ATTACH_CALLER_PATH, so that is searched first.
 attachment_claude_code_version() {
-  local dir claude="" saved_ifs="$IFS"
+  local dir claude="" saved_ifs="$IFS" version
   IFS=:
   for dir in ${TRELLIS_ATTACH_CALLER_PATH:-} ${PATH:-}; do
     case "$dir" in /*) ;; *) continue ;; esac
@@ -829,9 +829,18 @@ attachment_claude_code_version() {
   [ -n "$claude" ] || return 1
   # perl comes from the control PATH; the CLI gets the caller's, so a
   # `#!/usr/bin/env node` claude finds the runtime installed beside it.
-  perl -e '$ENV{PATH} = shift; alarm shift; exec @ARGV' \
+  # The first line must open with a canonical X.Y.Z (no leading zeros, no
+  # fourth part, no prerelease) followed by whitespace or its end; anything
+  # else is no version. Read it whatever the pipeline's status: a CLI may
+  # print its version and then exit nonzero, and under pipefail that status
+  # is the CLI's (r152-t13-code F3).
+  version="$(perl -e '$ENV{PATH} = shift; alarm shift; exec @ARGV' \
     "${TRELLIS_ATTACH_CALLER_PATH:-$PATH}" 10 "$claude" --version </dev/null 2>/dev/null |
-    head -n 1 | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true
+    head -n 1 |
+    sed -nE 's/^((0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*))([[:space:]].*)?$/\1/p')" || :
+  # A claude that is present but gives no version is undecided, not old.
+  [ -n "$version" ] || return 2
+  printf '%s\n' "$version"
 }
 
 # Claude Code 2.1.295 added the hook `onFailure` key; exec-form hooks
@@ -841,11 +850,56 @@ attachment_claude_code_version() {
 # SessionStart is the pre-exec shell-form wiring below, byte for byte, and the
 # guard supervisor alone fails closed.
 ATTACHMENT_CLAUDE_ON_FAILURE_VERSION=2.1.295
+
+# attachment_claude_decision: one of supported (at least the floor),
+# unsupported (an older valid version), absent (no claude found) or unreadable
+# (found, but no version). Probes afresh; nothing is cached across processes.
+attachment_claude_decision() {
+  local version rc=0 order
+  version="$(attachment_claude_code_version)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) printf 'absent\n'; return 0 ;;
+    *) printf 'unreadable\n'; return 0 ;;
+  esac
+  # Only a canonical X.Y.Z from the version source (the CLI, an override, a
+  # wrapper) is decided; anything else, and any comparison that does not
+  # answer -1, 0 or 1, is undecided, never supported.
+  case "$version" in
+    ''|*[!0-9.]*) printf 'unreadable\n'; return 0 ;;
+  esac
+  semver_is_valid "$version" || { printf 'unreadable\n'; return 0; }
+  order="$(semver_compare "$version" "$ATTACHMENT_CLAUDE_ON_FAILURE_VERSION")" ||
+    { printf 'unreadable\n'; return 0; }
+  case "$order" in
+    -1) printf 'unsupported\n' ;;
+    0|1) printf 'supported\n' ;;
+    *) printf 'unreadable\n' ;;
+  esac
+}
+
+# T13 D2: an attach boundary (attach_cmd_attach) makes the decision once and
+# owns it here; every render in that process, the donor fast path's included,
+# uses it. Never inherited: sourcing the library clears it.
+unset _ATTACHMENT_CLAUDE_DECISION
+attachment_claude_decide_boundary() {
+  _ATTACHMENT_CLAUDE_DECISION="$(attachment_claude_decision)" || _ATTACHMENT_CLAUDE_DECISION=unreadable
+}
+
+# 0: supported. 1: absent or older. 2: present but unreadable (the canonical
+# render still takes the shell form; callers that must not guess, like the
+# donor fast path, treat 2 as undecided).
 attachment_claude_on_failure_supported() {
-  local version
-  version="$(attachment_claude_code_version)" || return 1
-  [ -n "$version" ] || return 1
-  [ "$(semver_compare "$version" "$ATTACHMENT_CLAUDE_ON_FAILURE_VERSION")" != -1 ]
+  local decision="${_ATTACHMENT_CLAUDE_DECISION:-}"
+  case "$decision" in
+    supported|unsupported|absent|unreadable) ;;
+    *) decision="$(attachment_claude_decision)" || decision=unreadable ;;
+  esac
+  case "$decision" in
+    supported) return 0 ;;
+    unsupported|absent) return 1 ;;
+    *) return 2 ;;
+  esac
 }
 
 # The shell-form `.hooks` of claude-settings.local.json before exec form,
@@ -1050,6 +1104,18 @@ try:
         semver = numeric + r'\.' + numeric + r'\.' + numeric + r'(?:-' + prerelease + r'(?:\.' + prerelease + r')*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?'
         require(type(d['version']) is str and re.fullmatch('[0-9a-f]{64}', a['sha256']) and re.fullmatch(semver, d['version']), 'invalid native registration identity')
         companion = home+'/bin/native/'+d['version']+'/'+target+'/'+a['sha256']+'/trellis-hooks'
+        # The first 1.4.x -> 1.5.x configure relinks the user surface through
+        # this payload before any companion is staged (the old configure cannot
+        # stage one). With no companion anywhere on its path, the user template
+        # takes the complete legacy surface (labelled); the second configure
+        # stages the companion and relinks native. A present-but-wrong
+        # companion still refuses below, and project templates still refuse.
+        if template == 'core-rules/templates/claude-user-settings.json':
+            try:
+                ordinary(companion)
+            except FileNotFoundError:
+                print('native registration unavailable: no companion is installed yet; select the complete legacy template', file=sys.stderr)
+                raise SystemExit(10)
         data, mode = ordinary(companion)
         require(stat.S_IMODE(mode.st_mode) == 0o500 and mode.st_uid == os.getuid(), 'unsafe companion ownership/mode')
         require(len(data) == a['size'] and hashlib.sha256(data).hexdigest() == a['sha256'], 'registration companion digest mismatch')
@@ -1241,6 +1307,17 @@ _attachment_ensure_private_dir() {
     [ -n "$(find "$value" -maxdepth 0 -perm 0700 -print 2>/dev/null)" ] || return 1
   fi
   [ "$(_attachment_mode "$value")" = 700 ]
+}
+
+# The artifact-verdict reader needs only these existing private directories.
+# Unlike _attachment_prepare_state it must never create or chmod state.
+_attachment_state_readonly_ok() {
+  local home=$1 dir uid
+  uid=$(id -u) || return 1
+  for dir in "$home" "$home/state" "$home/state/attachments"; do
+    _attachment_canonical_dir "$dir" || return 1
+    [ -n "$(find "$dir" -maxdepth 0 -user "$uid" -perm 0700 -print 2>/dev/null)" ] || return 1
+  done
 }
 
 _attachment_prepare_state() {
@@ -1708,7 +1785,7 @@ PY
     if { [ -f "$entry" ] || [ -L "$entry" ]; } && [ -x "$entry" ]; then
       printf '%s\n' "$base"
     fi
-  done < "$entries" | LC_ALL=C sort
+  done < "$entries" | /usr/bin/env LC_ALL=C sort
 )
 
 # SHA-256 of the exact released shim bytes, including the final newline.
@@ -2007,6 +2084,7 @@ trellis_gate_env_name_safe() {
 caller_gate_env=()
 trellis_collect_gate_env() {
   local trellis_env_root=${1:-} trellis_env_names="" trellis_env_name trellis_env_ifs trellis_env_decl
+  local trellis_env_policy=none
   local -a trellis_env_names_array=()
   caller_gate_env=()
   [ -x /usr/bin/git ] && [ -x /usr/bin/python3 ] || return 0
@@ -2067,7 +2145,8 @@ except (UnicodeError, ValueError):
 if not isinstance(document, dict):
     sys.exit(0)
 gate = document.get("gate", {})
-if not isinstance(gate, dict) or set(gate) - {"env_passthrough"}:
+if (not isinstance(gate, dict) or set(gate) - {"env_passthrough", "verdict_reuse"}
+        or not isinstance(gate.get("verdict_reuse", True), bool)):
     sys.exit(0)
 names = gate.get("env_passthrough", [])
 if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
@@ -2092,6 +2171,8 @@ for name in names:
         sys.exit(0)
     if upper in reserved or upper.startswith(prefixes):
         sys.exit(0)
+# The policy identity first, so the gate keys the same policy it was forwarded.
+print("@" + match.group(1).decode("ascii"))
 for name in names:
     print(name)
 ' "$trellis_env_root" 2>/dev/null)" || trellis_env_names=""
@@ -2103,6 +2184,9 @@ for name in names:
   IFS=$trellis_env_ifs
   for trellis_env_name in "${trellis_env_names_array[@]}"; do
     [ -n "$trellis_env_name" ] || continue
+    case "$trellis_env_name" in
+      @*) trellis_env_policy=${trellis_env_name#@}; continue ;;
+    esac
     trellis_gate_env_name_safe "$trellis_env_name" || return 1
     trellis_env_decl="$(declare -p "$trellis_env_name" 2>/dev/null)" || continue
     trellis_env_decl="${trellis_env_decl#declare -}"
@@ -2113,6 +2197,8 @@ for name in names:
       *x*) caller_gate_env+=("$trellis_env_name=${!trellis_env_name}") ;;
     esac
   done
+  # Last, and never a caller value: TRELLIS_ names are refused above.
+  caller_gate_env+=("TRELLIS_GATE_ENV_POLICY=$trellis_env_policy")
 }
 # Resolve a context with the caller's HOME before isolation, forwarding only
 # its endpoint. The caller's XDG config path is retained as a positional input
@@ -2125,7 +2211,7 @@ if [ "$caller_docker_host_set" != x ] && [ "${DOCKER_CONTEXT+x}" = x ]; then
     caller_docker_host_set=x
   else
     printf 'Trellis: cannot resolve Docker context "%s"; continuing without DOCKER_HOST.\n' \
-      "$(printf '%s' "$DOCKER_CONTEXT" | LC_ALL=C /usr/bin/tr '[:cntrl:]' '?')" >&2
+      "$(printf '%s' "$DOCKER_CONTEXT" | /usr/bin/env LC_ALL=C /usr/bin/tr '[:cntrl:]' '?')" >&2
   fi
 fi
 EOF
@@ -2218,7 +2304,7 @@ trellis_derive_command_scratch() {
   case "$python_bin" in /*) ;; *) return 1 ;; esac
   program="$(launcher_command_scratch_create_program)" || return 1
   [ -n "$program" ] || return 1
-  record="$(LC_ALL=C "$python_bin" -I -c "$program" "$home")" || return 1
+  record="$(/usr/bin/env LC_ALL=C "$python_bin" -I -c "$program" "$home")" || return 1
   case "$record" in
     *$'\t'*$'\t'*) ;;
     *) return 1 ;;
@@ -2458,9 +2544,9 @@ trellis_mode() {
 # ACL-blind.
 trellis_readonly() {
   local path="$1" permissions="" mode="" numeric
-  permissions="$(LC_ALL=C /bin/ls -lde -- "$path" 2>/dev/null)" || {
+  permissions="$(/usr/bin/env LC_ALL=C /bin/ls -lde -- "$path" 2>/dev/null)" || {
     [ "$(/usr/bin/uname -s 2>/dev/null)" != Darwin ] || return 1
-    permissions="$(LC_ALL=C /bin/ls -ld -- "$path" 2>/dev/null)" || return 1
+    permissions="$(/usr/bin/env LC_ALL=C /bin/ls -ld -- "$path" 2>/dev/null)" || return 1
   }
   case "$permissions" in *"
 "*) return 1 ;; esac
@@ -2542,7 +2628,7 @@ trellis_release_blob_oid() {
   local path="$1" target="" size="" output=""
   if [ -L "$path" ]; then
     target="$(readlink "$path")" || return 1
-    size="$(printf '%s' "$target" | LC_ALL=C wc -c | tr -d ' ')" || return 1
+    size="$(printf '%s' "$target" | /usr/bin/env LC_ALL=C wc -c | tr -d ' ')" || return 1
     if command -v shasum >/dev/null 2>&1; then
       output="$(
         set -o pipefail
@@ -2667,7 +2753,7 @@ trellis_release_stamp() {
   python_bin="$(command -v python3)" || return 1
   case "$python_bin" in /*) ;; *) return 1 ;; esac
   program="$(trellis_release_stamp_program)" || return 1
-  LC_ALL=C "$python_bin" -I -c "$program" "$@" 2>/dev/null
+  /usr/bin/env LC_ALL=C "$python_bin" -I -c "$program" "$@" 2>/dev/null
 }
 
 trellis_verify_release() {
@@ -2765,7 +2851,8 @@ trellis_verify_release_tree() (
 # payload's attach-project.sh. That attach can take the donor fast path
 # (attach-fastpath.py, which loads release-executed.py) and starts
 # attach-postjob.sh, which sources health-checks.sh, disk-janitor-agents.sh and
-# release-stamp.sh (which runs release_stamp.py), so those are listed too. A
+# release-stamp.sh (which runs release_stamp.py), so those are listed too, as is
+# owner_verify.py, which attachment_verify_owners_batch runs. A
 # listed file the release lacks refuses. release_verify.py, which that full
 # verify runs when the release has one, is checked whenever it is present; a
 # release from before it has only the shell pass in release-store.sh. The rest
@@ -2794,6 +2881,8 @@ trellis_verify_release_executed() {
     scripts/lib/trellis.registry.schema.json
     scripts/lib/attach-fastpath.py
     scripts/lib/release-executed.py
+    scripts/lib/attachment_fs.py
+    scripts/lib/detach_native.py
     scripts/lib/attach-postjob.sh
     scripts/lib/health-checks.sh
     scripts/lib/disk-janitor-agents.sh
@@ -2805,6 +2894,7 @@ trellis_verify_release_executed() {
     scripts/lib/release_tmp.py
     scripts/lib/release-stamp.sh
     scripts/lib/release_stamp.py
+    scripts/lib/owner_verify.py
   )
   local -a listed=("$payload/scripts" "$payload/scripts/lib")
 
@@ -2818,6 +2908,11 @@ trellis_verify_release_executed() {
   if [ -e "$payload/scripts/lib/release_verify.py" ] || [ -L "$payload/scripts/lib/release_verify.py" ]; then
     paths+=(scripts/lib/release_verify.py)
   fi
+  # Older releases have no registry batch helper and use the scalar path.
+  # When present, its executable bytes need the same snapshot proof.
+  if [ -e "$payload/scripts/lib/registry_identity_batch.py" ] || [ -L "$payload/scripts/lib/registry_identity_batch.py" ]; then
+    paths+=(scripts/lib/registry_identity_batch.py)
+  fi
   for path in "${paths[@]}"; do
     [ -f "$payload/$path" ] && [ ! -L "$payload/$path" ] || return 1
     listed+=("$payload/$path")
@@ -2827,8 +2922,8 @@ trellis_verify_release_executed() {
   # themselves with -e (one " 0: user:... allow write" line each). Where ls has
   # no -e (GNU), the mode column's "+" is reliable. This runs on every call:
   # the full verify behind a stamp reads ACLs only through that hidden "+".
-  permissions="$(LC_ALL=C /bin/ls -lde -- "${listed[@]}" 2>/dev/null)" ||
-    permissions="$(LC_ALL=C /bin/ls -ld -- "${listed[@]}" 2>/dev/null)" || return 1
+  permissions="$(/usr/bin/env LC_ALL=C /bin/ls -lde -- "${listed[@]}" 2>/dev/null)" ||
+    permissions="$(/usr/bin/env LC_ALL=C /bin/ls -ld -- "${listed[@]}" 2>/dev/null)" || return 1
   printf '%s\n' "$permissions" |
     /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }' || return 1
   if stamp="$(trellis_release_stamp check "$managed_home" "$release_dir")" && [ "$stamp" = hit ]; then
@@ -2838,7 +2933,7 @@ trellis_verify_release_executed() {
   python_bin="$(command -v python3)" || return 1
   case "$python_bin" in /*) ;; *) return 1 ;; esac
   program="$(trellis_verify_executed_program)" || return 1
-  LC_ALL=C "$python_bin" -I -c "$program" \
+  /usr/bin/env LC_ALL=C "$python_bin" -I -c "$program" \
     "$payload" "$release_dir/release.json" "$expected_release_manifest_sha256" "${paths[@]}"
 }
 
@@ -2990,7 +3085,7 @@ trellis_sync_pnpm_global_virtual_store() {
       "$pnpm_bin" --dir "$scratch" config get --location=global enableGlobalVirtualStore \
       </dev/null 2>/dev/null)" || return 1
   fi
-  setting="$(printf '%s' "$setting" | LC_ALL=C tr -d '[:space:]')" || return 1
+  setting="$(printf '%s' "$setting" | /usr/bin/env LC_ALL=C tr -d '[:space:]')" || return 1
   case "$setting" in
     true|false) action=set ;;
     ''|undefined) action=delete ;;
@@ -3228,7 +3323,7 @@ _attachment_hooks_post_checkout_dispatcher_body_in_process() {
   # known wrappers and helper implementations may be elided: if those change,
   # emit empty filters so current-worktree proof misses rather than guessing.
   if [ -f "$registry" ] && [ ! -L "$registry" ] && [ -f "$home_lib" ] && [ ! -L "$home_lib" ]; then
-    if LC_ALL=C python3 -I - "$library" "$registry" "$home_lib" 2>/dev/null <<'PY'
+    if /usr/bin/env LC_ALL=C python3 -I - "$library" "$registry" "$home_lib" 2>/dev/null <<'PY'
 import base64
 import hashlib
 from pathlib import Path
@@ -3264,16 +3359,30 @@ def jq_filter(source, name, prefix, suffix):
 require_known(library, "_attachment_json_file", "8e376af326e997b5a62c76eadf6d9c91b62559939317dc483455bf8a1737aad1")
 require_known(library, "_attachment_mode", "3a3018155df2c2b88aefa6836e2ee04bfba76b0b13f57b998efd2165ac7d4a60")
 require_known(library, "_attachment_stat_mode", "f47543f5ddb2d5d5a21e72d265482df28edfaf0406a1e92d2bdd27dde681e418")
-require_known(registry, "local_registry_require_project_id", "374fb7b39f349bb7ed37966b7e1bf2eafccc98fa5f15be3cbe5676d57c4547ef")
+require_known(registry, "local_registry_require_project_id", "e9beb759f7c4466c592443965bbd0adc386a3e4973eb445f5fa0af165950b542")
 require_known(home, "trellis_home_require_jq", "89152ac34108df047ee82d0032a290e8f69be237219ca9423233aa4410da41cd")
-owner_prefix = (
+# The owner schema is the single-quoted assignment the per-file check and the
+# batch owner checks share. The wrapper must be exactly this text, so the
+# assignment is what it evaluates; any other text refuses.
+owner_wrapper = (
     '_attachment_owner_json_valid() {\n'
     '  local file=$1\n'
     '  _attachment_json_file "$file" || return 2\n'
     '  [ "$(_attachment_mode "$file")" = 600 ] || return 3\n'
-    "  jq -e '\n"
+    '  jq -e "$_attachment_owner_schema_filter" "$file" >/dev/null 2>&1 || return 2\n'
+    '}\n'
 )
-owner_suffix = "  ' \"$file\" >/dev/null 2>&1 || return 2\n}\n"
+
+
+def assignment(source, name):
+    if len(re.findall(r"(?m)^" + re.escape(name) + r"=", source)) != 1:
+        raise ValueError("missing or reassigned schema: " + name)
+    matches = re.findall(r"(?ms)^" + re.escape(name) + r"='\n(.*?)^'\n", source)
+    if len(matches) != 1 or "'" in matches[0] or not matches[0].strip():
+        raise ValueError("schema assignment changed: " + name)
+    return matches[0]
+
+
 manifest_prefix = (
     'local_registry_manifest_project_id() {\n'
     '  local manifest="${1:-}" project_id\n'
@@ -3294,7 +3403,9 @@ manifest_suffix = (
     '  printf \'%s\\n\' "$project_id"\n'
     '}\n'
 )
-owner = jq_filter(library, "_attachment_owner_json_valid", owner_prefix, owner_suffix)
+if function(library, "_attachment_owner_json_valid") != owner_wrapper:
+    raise ValueError("validator wrapper changed: _attachment_owner_json_valid")
+owner = assignment(library, "_attachment_owner_schema_filter")
 manifest = jq_filter(registry, "local_registry_manifest_project_id", manifest_prefix, manifest_suffix)
 for name, expression in (("trellis_owner_schema_b64", owner), ("trellis_manifest_schema_b64", manifest)):
     print(name + "=" + base64.b64encode(expression.encode()).decode("ascii"))
@@ -3420,7 +3531,7 @@ trellis_worktree_current() {
       local program=""
       [ "$#" -eq 3 ] && [ "$1" = check ] || return 1
       program="$(trellis_release_stamp_program)" || return 1
-      LC_ALL=C python3 -I -c '
+      /usr/bin/env LC_ALL=C python3 -I -c '
 import base64, binascii, decimal, hashlib, json, os, stat, subprocess, sys
 operation, stamp_home, release_dir, program = sys.argv[1:5]
 root, payload, managed, record, managed_home, manifest, common = sys.argv[5:12]
@@ -3531,6 +3642,52 @@ if (not trellis_schema_valid(owner_bytes, manifest_bytes, owner_schema_b64, mani
         or owner.get("worktree_id") != hashlib.sha256(os.fsencode(root)).hexdigest()):
     sys.exit(1)
 hooks = owner["git_hooks"]
+# A linked worktree records no hook state (enabled false): the checkout has one
+# hooks-enabled owner, and the full reconcile verifies the managed hooks of
+# that owner for every sibling. Bind the hook checks below to it: the only enabled
+# owner record in this checkout, pinned, schema-valid, committed, another
+# canonical worktree on the same release. None, several, an unreadable or
+# unexpected entry, or a relative predecessor (resolved from another root)
+# takes the full reconcile.
+if hooks.get("enabled") is False:
+    owners_dir = managed_home + "/state/attachments/" + owner["checkout_id"]
+    enabled = []
+    for name in sorted(os.listdir(owners_dir)):
+        if (len(name) != 69 or not name.endswith(".json")
+                or any(char not in "0123456789abcdef" for char in name[:64])):
+            sys.exit(1)
+        if name[:64] == owner["worktree_id"]:
+            continue
+        fd = os.open(owners_dir + "/" + name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_uid != os.geteuid()):
+                sys.exit(1)
+            with os.fdopen(os.dup(fd), "rb") as handle:
+                candidate = load(handle.read())
+        except (OSError, ValueError, UnicodeError):
+            sys.exit(1)
+        finally:
+            os.close(fd)
+        state = candidate.get("git_hooks") if isinstance(candidate, dict) else None
+        if not isinstance(state, dict):
+            sys.exit(1)
+        if state.get("enabled") is True:
+            enabled.append(name)
+    if len(enabled) != 1:
+        sys.exit(1)
+    hooks_bytes = capture_regular(owners_dir + "/" + enabled[0], 0o600)
+    hooks_owner = load(hooks_bytes)
+    if (not trellis_schema_valid(hooks_bytes, manifest_bytes, owner_schema_b64, manifest_schema_b64)
+            or hooks_owner.get("checkout_id") != owner["checkout_id"]
+            or hooks_owner.get("worktree_id") != enabled[0][:64]
+            or hooks_owner.get("worktree_id") != hashlib.sha256(os.fsencode(hooks_owner["worktree_root"])).hexdigest()
+            or hooks_owner["worktree_root"] == root or hooks_owner["status"] != "committed"
+            or hooks_owner["release"] != owner["release"] or hooks_owner["git_hooks"].get("enabled") is not True
+            or not (hooks_owner["git_hooks"].get("previous_hooks_path") or "/").startswith("/")):
+        sys.exit(1)
+    hooks = hooks_owner["git_hooks"]
 runtime = [item for item in owner["artifacts"] if item["path"] == ".trellis/runtime"]
 if (owner["status"] != "committed" or owner["project_root"] != root
         or owner["worktree_root"] != root or declared["project_id"] != owner["project_id"]
@@ -4513,11 +4670,9 @@ _attachment_journal_json_valid() {
         end))))" "$file" >/dev/null 2>&1 || return 2
 }
 
-_attachment_owner_json_valid() {
-  local file=$1
-  _attachment_json_file "$file" || return 2
-  [ "$(_attachment_mode "$file")" = 600 ] || return 3
-  jq -e '
+# The owner record schema, shared by the per-file check and the batch check of
+# a checkout's owners (attachment_detach_owners_batch).
+_attachment_owner_schema_filter='
     def exact($allowed): ((keys_unsorted - $allowed) | length) == 0;
     def controls: test("[[:cntrl:]]");
     def abs: type == "string" and startswith("/") and . != "/" and (endswith("/") | not)
@@ -4602,7 +4757,13 @@ _attachment_owner_json_valid() {
       and (if has("exclude") then has("exclude_block_hash") and (.exclude_block_hash == .exclude.managed_block_sha256) and (.exclude | exclude) else true end)
       and (if has("toolchain_path") then (.toolchain_path | toolchain_path) else true end)
       and (if has("git_hooks") then (.git_hooks | hooks) else true end)
-  ' "$file" >/dev/null 2>&1 || return 2
+'
+
+_attachment_owner_json_valid() {
+  local file=$1
+  _attachment_json_file "$file" || return 2
+  [ "$(_attachment_mode "$file")" = 600 ] || return 3
+  jq -e "$_attachment_owner_schema_filter" "$file" >/dev/null 2>&1 || return 2
 }
 
 _attachment_plan_from_journal() {
@@ -4891,6 +5052,15 @@ _attachment_claim_pinned() (
         chmod 700 "./$(basename "$_ATTACHMENT_QUARANTINE")" || return 1
         mv -- "./$base" "$claim" || return 3
         ;;
+      empty)
+        # Killed between creating the journaled quarantine and claiming the
+        # leaf: finish that claim, as _attachment_remove_pinned does. Up to
+        # 1.5.1 this refused forever (render-conflict on recover).
+        _attachment_identity_matches "./$base" "$expected_identity" file || return 3
+        _attachment_path_exact "./$base" "$artifact" || return 3
+        chmod 700 "./$(basename "$_ATTACHMENT_QUARANTINE")" || return 1
+        mv -- "./$base" "$claim" || return 3
+        ;;
       claimed)
         [ ! -e "./$base" ] && [ ! -L "./$base" ] || return 3
         ;;
@@ -4922,6 +5092,17 @@ _attachment_discard_pinned_claim() (
         rm -- "$claim" || return 1
         ;;
       empty) ;;
+      absent)
+        # Killed after the claim and its quarantine were removed, before the
+        # clear: only the clear is left, unless the claimed file is back in
+        # place. Up to 1.5.1 this refused forever.
+        claim="./$(basename "$path")"
+        if [ -e "$claim" ] || [ -L "$claim" ]; then
+          ! _attachment_identity_matches "$claim" "$expected_identity" file || return 3
+        fi
+        _attachment_clear_removal_intent "$journal"
+        return $?
+        ;;
       *) return 3 ;;
     esac
     rmdir "./$(basename "$_ATTACHMENT_QUARANTINE")" || return 1
@@ -5278,39 +5459,14 @@ _attachment_verify_owner_artifacts() {
 }
 
 _attachment_verify_detach_owner_artifacts() {
-  local owner=$1 record root relative kind expected has_mode mode target code
-  record=$(jq -c . "$owner") && _attachment_validate_roots "$record" && _attachment_validate_ids "$record" &&
-    root=$(printf '%s\n' "$record" | jq -r '.worktree_root') || {
+  local owner=$1 record
+  record=$(jq -c . "$owner") && _attachment_validate_roots "$record" && _attachment_validate_ids "$record" || {
     _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-record-invalid "$owner"
     return 3
   }
-  # Sorted by path (jq's codepoint order is LC_ALL=C byte order for UTF-8), so
-  # the drifted artifact reported first is deterministic.
-  while IFS= read -r -d '' relative && IFS= read -r -d '' kind &&
-        IFS= read -r -d '' expected && IFS= read -r -d '' has_mode &&
-        IFS= read -r -d '' mode && IFS= read -r -d '' target; do
-    # An attach refused at hook install withdraws its runtime anchor; relink
-    # accepts that absence, and so does detach. A repointed anchor still drifts.
-    if [ "$relative" = .trellis/runtime ] && _attachment_parent_safe "$root" "$relative" &&
-       [ ! -e "$root/$relative" ] && [ ! -L "$root/$relative" ]; then
-      continue
-    fi
-    if ! _attachment_parent_safe "$root" "$relative" ||
-       ! _attachment_artifact_exact_fields "$root" "$relative" "$kind" "$expected" "$has_mode" "$mode" "$target"; then
-      code=owned-file-drift
-      [ "$kind" != symlink ] || code=owned-symlink-drift
-      _attachment_refuse "${ATTACHMENT_ACTION:-}" "$code" "$root/$relative"
-      return 3
-    fi
-  done < <(printf '%s\n' "$record" | jq -j '
-    . as $owner
-    | (($owner.renders // []) | map(.path)) as $render_paths
-    | [$owner.artifacts[] as $artifact
-       | select(($render_paths | index($artifact.path)) == null)
-       | $artifact]
-    | sort_by(.path)[] | .path, "\u0000", .kind, "\u0000", .sha256, "\u0000",
-      has("mode"), "\u0000", .mode, "\u0000", .target, "\u0000"
-  ')
+  # Sorted by path (code point order, as jq sorted it), so the drifted
+  # artifact reported first is deterministic; one process checks them all.
+  _attachment_detach_python verify "${ATTACHMENT_ACTION:-}" <<< "$record" || return 3
 }
 
 _attachment_owner_matches_plan() {
@@ -6248,293 +6404,48 @@ _attachment_fold_progress_log() {
 # The commit's publisher: every remaining artifact in one process, through the
 # same pinned stage, identity and claim steps as _attachment_publish_pending,
 # with each transition appended to the progress log.
+# The absolute path of attachment_fs.py in this payload: the verified payload
+# when the libraries are preloaded, else beside this library. Refuses a path
+# that could not be embedded literally in a Python raw string.
+_attachment_fs_module() {
+  local path
+  if [ "${TRELLIS_LIBS_PRELOADED:-}" = 1 ]; then
+    path="${TRELLIS_VERIFIED_PAYLOAD:-}/scripts/lib/attachment_fs.py"
+  else
+    path="${_ATTACHMENT_DIR:-}/attachment_fs.py"
+  fi
+  case "$path" in /*) ;; *) return 1 ;; esac
+  case "$path" in *"'"*|*\\*|*[[:cntrl:]]*) return 1 ;; esac
+  [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] || return 1
+  printf '%s\n' "$path"
+}
+
 _attachment_commit_program() {
+  local fs
+  fs=$(_attachment_fs_module) || return 1
+  printf "ATTACHMENT_FS = r'%s'\n" "$fs"
   cat <<'PY'
-import base64
-import ctypes
-import errno
-import fcntl
-import hashlib
-import json
+import importlib.util
 import os
-import random
 import signal
-import stat
-import string
 import sys
 
-# T39: HFS+ cannot hard-link a symlink (ENOTSUP). Only for that, a symlink is
-# published by rename_exclusive, which keeps the staged inode and never
-# replaces an existing name; every other link failure still refuses.
-def link_unsupported(error):
-    return error.errno in (errno.ENOTSUP, getattr(errno, "EOPNOTSUPP", errno.ENOTSUP))
+
+def _load_attachment_fs(path):
+    # The shared primitives, by absolute payload path, never from sys.path.
+    spec = importlib.util.spec_from_file_location("trellis_attachment_fs", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return {name: value for name, value in vars(module).items() if not name.startswith("__")}
 
 
-# Exit statuses match the shell publish path they replace: 1 I/O, 2 shape,
-# 3 conflict. FAULT is the pre-existing numeric ATTACHMENT_FAULT_PHASE stop.
-FAULT = 75
-ORPHANED = 76
-REMOVE_PREFIX = ".trellis-attachment-remove-"
-
-
-class Stop(Exception):
-    def __init__(self, status):
-        Exception.__init__(self, status)
-        self.status = status
-
-
-def refuse(status=3):
-    raise Stop(status)
-
-
-def orphaned():
-    # Our parent is no longer the shell recorded as the lock owner, so a
-    # recovery may already own the worktree: stop without another write.
-    sys.stderr.write("trellis attachment: commit stopped: the transaction lock owner is gone\n")
-    sys.stderr.flush()
-    os._exit(ORPHANED)
+globals().update(_load_attachment_fs(ATTACHMENT_FS))
 
 
 def checkpoint(label):
     # Called after every durable step. The crash suites substitute this one
     # line in a copy of the program; nothing in the product activates it.
     return None  # crash-test seam
-
-
-def has_controls(value):
-    return any(ord(char) < 32 or ord(char) == 127 for char in value)
-
-
-def valid_absolute(value):
-    if not value.startswith("/") or value == "/" or value.endswith("/"):
-        return False
-    if "//" in value or "/./" in value or "/../" in value:
-        return False
-    if value.endswith("/.") or value.endswith("/.."):
-        return False
-    return not has_controls(value)
-
-
-def lstat_or_none(path):
-    try:
-        return os.lstat(path)
-    except OSError:
-        return None
-
-
-def no_symlink_components(value):
-    if not valid_absolute(value):
-        return False
-    parts = value[1:].split("/")
-    current = ""
-    for index, part in enumerate(parts):
-        if not part:
-            return False
-        current += "/" + part
-        info = lstat_or_none(current)
-        if info is None or stat.S_ISLNK(info.st_mode):
-            return False
-        if index < len(parts) - 1 and not stat.S_ISDIR(info.st_mode):
-            return False
-    return True
-
-
-def canonical_dir(value):
-    # Pins the working directory, like the shell's `cd` + `pwd -P`.
-    if not no_symlink_components(value):
-        return False
-    info = lstat_or_none(value)
-    if info is None or not stat.S_ISDIR(info.st_mode):
-        return False
-    try:
-        os.chdir(value)
-        return os.getcwd() == value
-    except OSError:
-        return False
-
-
-def canonical_file(value):
-    if not no_symlink_components(value):
-        return False
-    info = lstat_or_none(value)
-    if info is None or not stat.S_ISREG(info.st_mode):
-        return False
-    parent, base = os.path.split(value)
-    try:
-        os.chdir(parent or "/")
-        actual = os.getcwd()
-    except OSError:
-        return False
-    return (("/" + base) if actual == "/" else (actual + "/" + base)) == value
-
-
-def identity(path):
-    info = lstat_or_none(path)
-    if info is None:
-        return ""
-    return "%d:%d" % (info.st_dev, info.st_ino)
-
-
-def is_file(path):
-    info = lstat_or_none(path)
-    return info is not None and stat.S_ISREG(info.st_mode)
-
-
-def is_dir(path):
-    info = lstat_or_none(path)
-    return info is not None and stat.S_ISDIR(info.st_mode)
-
-
-def is_link(path):
-    info = lstat_or_none(path)
-    return info is not None and stat.S_ISLNK(info.st_mode)
-
-
-def exists(path):
-    return lstat_or_none(path) is not None
-
-
-def rename_exclusive(source, destination):
-    # rename(2) silently replaces an empty directory, so a directory raced into
-    # the destination would be lost; refuse it instead, as the shell's mv did.
-    libc = ctypes.CDLL(None, use_errno=True)
-    if sys.platform == "darwin":
-        result = libc.renamex_np(source.encode(), destination.encode(), ctypes.c_uint(0x4))  # RENAME_EXCL
-    else:
-        result = libc.renameat2(-100, source.encode(), -100, destination.encode(), ctypes.c_uint(0x1))  # AT_FDCWD, RENAME_NOREPLACE
-    if result != 0:
-        code = ctypes.get_errno()
-        if code in (errno.EEXIST, errno.ENOTEMPTY):
-            refuse(3)
-        raise OSError(code, os.strerror(code), destination)
-
-
-def hold_transaction_lock(holder, owner_pid):
-    # The transaction lock is recorded against the shell that started us, and
-    # a SIGKILL of that shell does not stop us. Hold a flock in the lock's
-    # holder for our whole life: recovery reclaims the lock only once it is
-    # free. A shell that died before we took it may already have been
-    # reclaimed, so stop before any mutation if our parent is not that shell.
-    if not canonical_dir(holder):
-        refuse(3)
-    fd = os.open(holder + "/publisher.lock", os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        refuse(3)
-    if os.getppid() != owner_pid:
-        orphaned()
-    return fd
-
-
-def sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def sha256_text(value):
-    return hashlib.sha256(value.encode("utf-8", "surrogateescape")).hexdigest()
-
-
-def mode_matches(path, expected):
-    info = lstat_or_none(path)
-    return info is not None and format(stat.S_IMODE(info.st_mode), "o") == expected[1:]
-
-
-def identity_matches(path, expected, kind, dir_fd=None):
-    if not expected:
-        return False
-    try:
-        info = os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
-    except OSError:
-        return False
-    if kind == "file" and not stat.S_ISREG(info.st_mode):
-        return False
-    if kind == "symlink" and not stat.S_ISLNK(info.st_mode):
-        return False
-    if kind in ("directory", "parent") and not stat.S_ISDIR(info.st_mode):
-        return False
-    return "%d:%d" % (info.st_dev, info.st_ino) == expected
-
-
-def open_fresh_dir(name):
-    # Pin a directory we just created before changing it: a symlink swapped in
-    # after the mkdir fails O_NOFOLLOW, and the pinned inode must still be the
-    # entry by that name.
-    try:
-        fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-    except OSError:
-        refuse(3)
-    if identity(name) != fd_identity(fd):
-        os.close(fd)
-        refuse(3)
-    return fd
-
-
-def fd_identity(fd):
-    info = os.fstat(fd)
-    return "%d:%d" % (info.st_dev, info.st_ino)
-
-
-def path_exact(path, artifact):
-    kind = artifact["kind"]
-    if kind == "file":
-        if not is_file(path) or sha256_file(path) != artifact["sha256"]:
-            return False
-        return "mode" not in artifact or mode_matches(path, artifact["mode"])
-    if kind == "symlink":
-        return is_link(path) and os.readlink(path) == artifact["target"]
-    if kind == "directory":
-        return is_dir(path) and not os.listdir(path)
-    if kind == "parent":
-        return is_dir(path)
-    return False
-
-
-def path_exact_pinned(name, artifact):
-    # `name` is relative to the pinned working directory.
-    here = os.getcwd()
-    return canonical_dir(here) and path_exact("./" + name, artifact)
-
-
-def parent_safe(root, relative):
-    parent = os.path.dirname(relative)
-    if not parent:
-        return True
-    current = root
-    for part in parent.split("/"):
-        if not part:
-            return False
-        current += "/" + part
-        if not is_dir(current):
-            return False
-    return True
-
-
-def replace_before_matches(path, artifact):
-    replace = artifact["replace"]
-    return (is_file(path) and sha256_file(path) == replace["before_sha256"]
-            and mode_matches(path, replace["before_mode"]))
-
-
-def claim_layout(path, nonce):
-    return os.path.dirname(path) + "/" + REMOVE_PREFIX + sha256_text(nonce + ":" + path)
-
-
-def claim_namespace_valid(path, removal):
-    parent = os.path.dirname(path)
-    expected = None
-    if removal is not None and os.path.dirname(removal["path"]) == parent:
-        expected = claim_layout(removal["path"], removal["nonce"])
-    try:
-        entries = os.listdir(parent)
-    except OSError:
-        return False
-    return all(parent + "/" + entry == expected
-               for entry in entries if entry.startswith(REMOVE_PREFIX))
 
 
 class Commit(object):
@@ -6926,7 +6837,9 @@ _attachment_commit_batch() {
   [ -n "$holder" ] || return 1
   owner_pid=$(jq -r '.pid' "$holder/owner.json") || return 1
   _attachment_ensure_private_dir "$home/state/attachment-progress" || return 1
-  LC_ALL=C "$python_bin" -I -c "$program" \
+  # -B: the program loads attachment_fs.py by path; never cache its bytecode
+  # beside the source (a writable checkout must stay unchanged).
+  LC_ALL=C "$python_bin" -I -B -c "$program" \
     "$journal" "$(_attachment_progress_path "$home" "$attachment")" "${ATTACHMENT_FAULT_PHASE:-}" \
     "$holder" "$owner_pid"
 }
@@ -7125,12 +7038,10 @@ _attachment_detach_owner_data_valid() {
 }
 
 # Record shape and canonical control-plane paths, without requiring a live root.
-_attachment_detach_journal_data_valid() {
-  local file=$1 original next transfer expected after attachment journal_dir state_dir home transfer_path transfer_checkout transfer_worktree
-  _attachment_valid_absolute "$file" || return 2
-  _attachment_json_file "$file" || return 2
-  [ "$(_attachment_mode "$file")" = 600 ] || return 3
-  jq -e '
+# The detach journal's schema and its cross-field invariants (`$original` and
+# `$next` are the journal's owner records), shared by the shell validator and
+# the native detach program, which runs the same jq filters.
+_attachment_detach_journal_schema_filter='
     def exact($allowed): (keys_unsorted | sort) == ($allowed | sort);
     def controls: test("[[:cntrl:]]");
     def abs: type == "string" and startswith("/") and . != "/" and (endswith("/") | not)
@@ -7212,23 +7123,9 @@ _attachment_detach_journal_data_valid() {
     and (.original_owner | type == "object")
     and (if .external.render_pending == null then true else .external.phase == 1 end)
     and (if .external.phase >= 2 then .external.render_pending == null and .removal == null else true end)
-  ' "$file" >/dev/null 2>&1 || return 2
-  original=$(jq -c '.original_owner' "$file") || return 2
-  _attachment_detach_owner_data_valid "$original" || return 2
-  next=$(jq -c '.next_owner' "$file") || return 2
-  if [ "$next" != null ] && [ "$(jq -r '.external.registry_update == null' "$file")" = true ]; then
-    printf 'trellis attachment: legacy partial detach journal lacks a trusted registry snapshot\n' >&2
-    return 2
-  fi
-  [ "$next" = null ] || _attachment_detach_owner_data_valid "$next" || return 2
-  transfer=$(jq -c '.external.transfer' "$file") || return 2
-  if [ "$transfer" != null ]; then
-    expected=$(printf '%s\n' "$transfer" | jq -c '.expected') || return 2
-    after=$(printf '%s\n' "$transfer" | jq -c '.after') || return 2
-    _attachment_detach_owner_data_valid "$expected" || return 2
-    _attachment_detach_owner_data_valid "$after" || return 2
-  fi
-  trellis_jq -e --argjson original "$original" --argjson next "$next" '
+'
+
+_attachment_detach_journal_invariants_filter='
     def paths_unique($items): ($items | map(.path) | unique | length) == ($items | length);
     def no_path_overlap($left; $right):
       all($left[]; .path as $path | any($right[]; .path == $path) | not);
@@ -7364,7 +7261,30 @@ _attachment_detach_journal_data_valid() {
                 else ($external.transfer.after | has("git_hooks") | not)
                 end)
          end)
-  ' "$file" >/dev/null 2>&1 || return 2
+'
+
+_attachment_detach_journal_data_valid() {
+  local file=$1 original next transfer expected after attachment journal_dir state_dir home transfer_path transfer_checkout transfer_worktree
+  _attachment_valid_absolute "$file" || return 2
+  _attachment_json_file "$file" || return 2
+  [ "$(_attachment_mode "$file")" = 600 ] || return 3
+  jq -e "$_attachment_detach_journal_schema_filter" "$file" >/dev/null 2>&1 || return 2
+  original=$(jq -c '.original_owner' "$file") || return 2
+  _attachment_detach_owner_data_valid "$original" || return 2
+  next=$(jq -c '.next_owner' "$file") || return 2
+  if [ "$next" != null ] && [ "$(jq -r '.external.registry_update == null' "$file")" = true ]; then
+    printf 'trellis attachment: legacy partial detach journal lacks a trusted registry snapshot\n' >&2
+    return 2
+  fi
+  [ "$next" = null ] || _attachment_detach_owner_data_valid "$next" || return 2
+  transfer=$(jq -c '.external.transfer' "$file") || return 2
+  if [ "$transfer" != null ]; then
+    expected=$(printf '%s\n' "$transfer" | jq -c '.expected') || return 2
+    after=$(printf '%s\n' "$transfer" | jq -c '.after') || return 2
+    _attachment_detach_owner_data_valid "$expected" || return 2
+    _attachment_detach_owner_data_valid "$after" || return 2
+  fi
+  trellis_jq -e --argjson original "$original" --argjson next "$next" "$_attachment_detach_journal_invariants_filter" "$file" >/dev/null 2>&1 || return 2
   attachment=$(jq -r '.attachment_id' "$file") || return 2
   journal_dir=$(dirname "$file") || return 2
   state_dir=$(dirname "$journal_dir") || return 2
@@ -7489,7 +7409,7 @@ _attachment_detach_render_set_stage_identity_impl() {
 }
 
 _attachment_detach_render_stage_impl() (
-  local journal=$1 pending original root attachment render stage identity recorded bytes expected mode parent base actual_parent stage_rc expected_parent
+  local journal=$1 pending original root attachment render stage identity recorded bytes expected mode parent base actual_parent expected_parent
   [ "$#" -eq 1 ] || return 2
   _attachment_detach_journal_valid "$journal" || return $?
   pending=$(jq -c '.external.render_pending' "$journal") || return 2
@@ -7533,9 +7453,6 @@ _attachment_detach_render_stage_impl() (
     fi
     set +o noclobber
     identity=$(_attachment_fs_identity "./$base") || { exec 9>&-; return 1; }
-    _attachment_detach_render_set_stage_identity_impl "$journal" "$identity"
-    stage_rc=$?
-    if [ "$stage_rc" -ne 0 ]; then exec 9>&-; return "$stage_rc"; fi
     chmod "${mode#0}" "./$base" || { exec 9>&-; return 1; }
     if ! printf '%s' "$bytes" | base64 -D 2>/dev/null >&9; then
       printf '%s' "$bytes" | base64 -d 2>/dev/null >&9 || { exec 9>&-; return 1; }
@@ -7543,6 +7460,10 @@ _attachment_detach_render_stage_impl() (
     exec 9>&-
     _attachment_identity_matches "./$base" "$identity" file || return 3
     [ "$(_attachment_hash "./$base")" = "$expected" ] && _attachment_mode_matches "./$base" "$mode" || return 3
+    # Journaled only once complete: a crash before this leaves an unidentified
+    # stage, which recovery reclaims (up to 1.5.1 the identity came first and
+    # a crash before the bytes left a stage refused forever).
+    _attachment_detach_render_set_stage_identity_impl "$journal" "$identity"
   )
 )
 
@@ -7619,12 +7540,16 @@ _attachment_detach_render_cleanup_impl() {
   if [ "$removal" != null ] && [ "$(printf '%s\n' "$removal" | jq -r '.path')" = "$stage" ]; then
     _attachment_journal_claim_layout "$journal" "$stage" || return 3
     case "$_ATTACHMENT_CLAIM_STATE" in
-      claimed|empty)
+      claimed)
         _attachment_discard_pinned_claim "$journal" "$stage" "$result_artifact" "$identity" || return $?
         ;;
-      absent)
-        [ -e "$stage" ] || [ -L "$stage" ] || return 3
-        _attachment_claim_pinned "$journal" "$stage" "$result_artifact" "$identity" || return $?
+      empty|absent)
+        # A stage still in place is claimed first (up to 1.5.1 an empty
+        # quarantine was discarded and the stage left behind); one already
+        # gone was claimed and discarded, and the discard clears.
+        if [ -e "$stage" ] || [ -L "$stage" ]; then
+          _attachment_claim_pinned "$journal" "$stage" "$result_artifact" "$identity" || return $?
+        fi
         _attachment_discard_pinned_claim "$journal" "$stage" "$result_artifact" "$identity" || return $?
         ;;
       *) return 3 ;;
@@ -7790,6 +7715,77 @@ _attachment_detach_prepare_impl() {
   _attachment_write_json "$journal" "$expected"
 }
 
+# Native detach (1.5.1): the per-artifact removal protocol of a detach commit
+# (preflight, removal intent, quarantine claim, exact check, remove, clear,
+# phase) and owner artifact verification run in one Python process instead of
+# ~50 short processes per artifact. The durable states are the v1 detach
+# journal's, written in the same order through the same atomic replace, so a
+# crash at any step recovers through the same path, and a release that only
+# has the shell protocol can still finish it. The program is
+# scripts/lib/detach_native.py; it loads the filesystem primitives it shares
+# with the attach publisher from scripts/lib/attachment_fs.py, so the claim
+# namespace guard has one Python implementation. Its text is emitted after the
+# module path, so the crash suites can substitute the checkpoint seam.
+_attachment_detach_program() {
+  local fs program
+  fs=$(_attachment_fs_module) || return 1
+  program="${fs%/attachment_fs.py}/detach_native.py"
+  [ -f "$program" ] && [ ! -L "$program" ] && [ -r "$program" ] || return 1
+  printf "ATTACHMENT_FS = r'%s'\n" "$fs"
+  cat -- "$program"
+}
+
+# attachment_detach_owners_batch HOME OWNER...: every check that
+# attachment_verify_detach makes, for all of a checkout's owners in one jq and
+# one Python pass. Prints the owners as [{path,record}] (record as jq -cS
+# prints it) when all pass. Status 10, printing nothing, when any check fails
+# or cannot run: the caller then verifies owner by owner, which names the
+# first refusal exactly as before.
+attachment_detach_owners_batch() {
+  local home=$1 checks expected
+  shift
+  [ "$#" -gt 0 ] || { printf '[]\n'; return 0; }
+  _attachment_prepare_state "$home" >/dev/null 2>&1 || return 10
+  # exact_inputs: one parsed document per requested owner file, in order, or
+  # 10 and the per-owner path refuses (an empty or two-document file).
+  expected=$(_attachment_paths_json "$@") || return 10
+  checks=$(trellis_jq -cS -n --arg home "$home" --argjson expected "$expected" "$_attachment_exact_inputs_def
+    [exact_inputs | .path as \$path | .record | {path: \$path, record: .,
+      valid: (try ($_attachment_owner_schema_filter) catch false),
+      canonical: (try (\$path == (\$home + \"/state/attachments/\" + .checkout_id + \"/\" + .worktree_id + \".json\")) catch false)}]
+  " "$@" 2>/dev/null) || return 10
+  printf '%s\n' "$checks" | _attachment_detach_python verify-owners || return 10
+  printf '%s\n' "$checks" | jq -c 'map({path, record})' || return 10
+}
+
+# The validator filters the native program runs (spec 075 R5: one source).
+_attachment_detach_python_filters() {
+  TRELLIS_DETACH_JOURNAL_SCHEMA="$_attachment_detach_journal_schema_filter" \
+    TRELLIS_DETACH_JOURNAL_INVARIANTS="$_attachment_detach_journal_invariants_filter" \
+    TRELLIS_OWNER_SCHEMA="$_attachment_owner_schema_filter" \
+    _attachment_detach_python "$@"
+}
+
+_attachment_detach_python() {
+  local python_bin program
+  python_bin=$(command -v python3) || return 1
+  case "$python_bin" in /*) ;; *) return 1 ;; esac
+  program=$(_attachment_detach_program) || return 1
+  # -B, as in _attachment_commit_batch: attachment_fs.py loads by path.
+  /usr/bin/env LC_ALL=C "$python_bin" -I -B -c "$program" "$@"
+}
+
+# Finish phases 1 and 2 (mark 1, render restore, mark 2) under the worktree
+# attachment lock, by the shell that holds it. The journal is validated as a
+# whole first, as every shell step did. Status 77: a render must be begun.
+_attachment_detach_renders_batch() {
+  local holder=${_ATTACHMENT_LOCK_HOLDER:-} owner_pid
+  [ -n "$holder" ] || return 1
+  _attachment_detach_journal_valid "$1" || return $?
+  owner_pid=$(jq -r '.pid' "$holder/owner.json") || return 1
+  _attachment_detach_python renders "${ATTACHMENT_ACTION:-}" "$1" "$holder" "$owner_pid"
+}
+
 _attachment_detach_preflight_remaining() {
   local journal=$1 root=$2 artifact relative kind expected has_mode mode target removal_path
   removal_path=$(jq -r '.removal.path // empty' "$journal") || return 2
@@ -7851,61 +7847,13 @@ _attachment_detach_remove_one() {
 }
 
 _attachment_detach_commit_locked() {
-  local home=$1 journal=$2 original next_owner owner root total phase artifact current
-  original=$(jq -c '.original_owner' "$journal") || return 2
-  next_owner=$(jq -c '.next_owner' "$journal") || return 2
-  owner=$(_attachment_ownership_path "$home" "$(printf '%s\n' "$original" | jq -r '.checkout_id')" "$(printf '%s\n' "$original" | jq -r '.worktree_id')")
-  root=$(printf '%s\n' "$original" | jq -r '.worktree_root') || return 2
-  total=$(jq '.remove | length' "$journal") || return 2
-  phase=$(jq -r '.phase' "$journal") || return 2
-  if [ "$(jq -r '.owner_committed' "$journal")" = true ]; then
-    if { [ "$next_owner" = null ] && { [ -e "$owner" ] || [ -L "$owner" ]; }; } ||
-      { [ "$next_owner" != null ] && ! _attachment_detach_file_matches_data "$owner" "$next_owner"; }; then
-      _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
-      return 3
-    fi
-    return 0
-  fi
-  if ! _attachment_detach_file_matches_data "$owner" "$original"; then
-    if [ "$phase" -eq "$total" ]; then
-      if { [ "$next_owner" = null ] && [ ! -e "$owner" ] && [ ! -L "$owner" ]; } ||
-        { [ "$next_owner" != null ] && _attachment_detach_file_matches_data "$owner" "$next_owner"; }; then
-        _attachment_detach_journal_update "$journal" '.owner_committed = true' || return $?
-        return 0
-      fi
-    fi
-    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
-    return 3
-  fi
-  if [ "$phase" -eq 0 ]; then _attachment_detach_preflight_remaining "$journal" "$root" || return $?; fi
-  while [ "$phase" -lt "$total" ]; do
-    artifact=$(jq -c --argjson index "$phase" '.remove[$index]' "$journal") || return 2
-    _attachment_detach_remove_one "$journal" "$root" "$artifact" || return $?
-    phase=$((phase + 1))
-    _attachment_detach_journal_update "$journal" --argjson phase "$phase" '.phase = $phase'
-  done
-  _attachment_detach_file_matches_data "$owner" "$original" || {
-    _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
-    return 3
-  }
-  if [ "$next_owner" = null ]; then
-    # Exhausted registry contention must leave the owner and journal available
-    # for retry, not strand an ownerless transaction at the final registry phase.
-    local_registry_clear_attachment "$home" \
-      "$(printf '%s\n' "$original" | jq -r '.fleet')" \
-      "$(printf '%s\n' "$original" | jq -r '.project_id')" \
-      "$(printf '%s\n' "$original" | jq -r '.checkout_id')" \
-      "$(printf '%s\n' "$original" | jq -r '.worktree_id')" \
-      "$(printf '%s\n' "$original" | jq -r '.attachment_id')" || return $?
-    _attachment_detach_file_matches_data "$owner" "$original" || {
-      _attachment_refuse "${ATTACHMENT_ACTION:-}" owner-changed "$owner"
-      return 3
-    }
-    rm -- "$owner" || return 1
-  else
-    _attachment_write_json "$owner" "$next_owner" || return $?
-  fi
-  _attachment_detach_journal_update "$journal" '.owner_committed = true'
+  local home=$1 journal=$2 holder=${_ATTACHMENT_LOCK_HOLDER:-} owner_pid
+  # The whole commit (removal loop, owner checks, registry clear through the
+  # shell's own writer, owner removal or rewrite, owner_committed) runs in the
+  # native program under this shell's worktree lock (spec 075 T4b).
+  [ -n "$holder" ] || return 1
+  owner_pid=$(jq -r '.pid' "$holder/owner.json") || return 1
+  TRELLIS_DETACH_BASH="$BASH" _attachment_detach_python_filters commit "${ATTACHMENT_ACTION:-}" "$journal" "$holder" "$owner_pid" "$home"
 }
 
 _attachment_detach_commit_impl() (
@@ -8237,8 +8185,8 @@ _attachment_user_destination_safe() {
     "$destination"/*) return 4 ;;
   esac
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
-    folded_trellis=$(LC_ALL=C printf '%s' "$trellis_home" | tr '[:upper:]' '[:lower:]') || return 4
-    folded_destination=$(LC_ALL=C printf '%s' "$destination" | tr '[:upper:]' '[:lower:]') || return 4
+    folded_trellis=$( (export LC_ALL=C && printf '%s' "$trellis_home") | tr '[:upper:]' '[:lower:]') || return 4
+    folded_destination=$( (export LC_ALL=C && printf '%s' "$destination") | tr '[:upper:]' '[:lower:]') || return 4
     case "$folded_destination" in
       "$folded_trellis"|"$folded_trellis"/*) return 4 ;;
     esac
@@ -10798,6 +10746,119 @@ attachment_recover() {
   _attachment_recover_impl "$@"
   status=$?
   _attachment_map_public_status "$status"
+}
+
+# Owner files read as jq inputs must each parse to exactly one JSON document,
+# in the order requested: an empty or whitespace-only file yields no input and
+# a file holding two documents yields two, so a batch would drop or double an
+# owner without any check refusing it. A program that starts with this def,
+# given the requested paths as $expected (_attachment_paths_json), reads its
+# owners through exact_inputs ({path, record} per file, in order) or fails.
+_attachment_exact_inputs_def='def exact_inputs: [inputs | {path: input_filename, record: .}] as $docs | if ($docs | map(.path)) == $expected then $docs[] else error("owner files must each hold one JSON document, as requested") end;'
+
+# The requested owner paths as one JSON array of strings (for $expected), or
+# status 10. jq turns filename bytes that are not UTF-8 into U+FFFD, so
+# distinct files could share one expected path, and exact_inputs would then
+# compare a collapsed list (Sol r152-perf-2 M1-R). Every owner file a batch
+# reads is .../<checkout id>/<worktree id>.json, both 64 lowercase hex digits,
+# so a path whose last two components are not that, or a path requested
+# twice, misses the batch instead: the caller's per-owner path decides it.
+# The digits are matched as an explicit ASCII list, which no other byte can
+# match in any locale.
+_attachment_paths_json() {
+  local path name parent
+  for path in "$@"; do
+    name=${path##*/}
+    parent=${path%/*}
+    parent=${parent##*/}
+    [[ $name =~ ^[0123456789abcdef]{64}[.]json$ ]] && [[ $parent =~ ^[0123456789abcdef]{64}$ ]] || return 10
+  done
+  # Distinct as NUL-framed byte strings, so no character inside a path can
+  # split or merge two of them.
+  [ "$#" -le 1 ] || [ "$(printf '%s\0' "$@" | /usr/bin/env LC_ALL=C sort -zu | tr -cd '\000' | wc -c | tr -d ' ')" -eq "$#" ] || return 10
+  jq -cn '$ARGS.positional' --args "$@"
+}
+
+# Run scripts/lib/owner_verify.py VERB HOME FS ARG... (see that file) on the
+# entries JSON read from stdin; prints its output. 10 when it cannot run.
+_attachment_owner_verify_exec() {
+  local verb=$1 home=$2 lib fs python_bin settings
+  shift 2
+  fs=$(_attachment_fs_module) || return 10
+  lib=${fs%/*}
+  [ -f "$lib/owner_verify.py" ] && [ ! -L "$lib/owner_verify.py" ] || return 10
+  declare -F _settings_owned_json_program >/dev/null || return 10
+  python_bin=$(command -v python3) || return 10
+  case "$python_bin" in /*) ;; *) return 10 ;; esac
+  if [ "${_attachment_owner_verify_readonly:-0}" = 1 ]; then
+    _attachment_state_readonly_ok "$home" || return 10
+  else
+    _attachment_prepare_state "$home" >/dev/null 2>&1 || return 10
+  fi
+  settings=$(_settings_owned_json_program) || return 10
+  # Set locale in the child: Bash 5.3 on macOS can crash while restoring a
+  # temporary LC_ALL assignment inside a captured owner-batch call.
+  /usr/bin/env TRELLIS_SETTINGS_OWNED_JSON_PROGRAM="$settings" LC_ALL=C "$python_bin" -I -B "$lib/owner_verify.py" \
+    "$verb" "$home" "$fs" "$@" 2>/dev/null
+}
+
+# Run scripts/lib/owner_verify.py VERB over OWNER... (see that file); prints
+# its output. 10 when it cannot run.
+_attachment_owner_verify_run() {
+  local verb=$1 home=$2 checks expected
+  shift 2
+  expected=$(_attachment_paths_json "$@") || return 10
+  checks=$(trellis_jq -cS -n --arg home "$home" --argjson expected "$expected" "$_attachment_exact_inputs_def
+    [exact_inputs | .path as \$path | .record | {path: \$path, record: null, data: null,
+      valid: (try ($_attachment_owner_schema_filter) catch false),
+      canonical: (try (\$path == (\$home + \"/state/attachments/\" + .checkout_id + \"/\" + .worktree_id + \".json\")) catch false)}]
+  " "$@" 2>/dev/null) || return 10
+  printf '%s\n' "$checks" | _attachment_owner_verify_exec "$verb" "$home"
+}
+
+# attachment_verify_owners_batch HOME OWNER...: every check attachment_verify
+# makes, for many owners at once. The owner checks run in one Python pass
+# (scripts/lib/owner_verify.py, on the attach and detach programs' shared
+# filesystem helpers); the managed hooks of each hooks-enabled owner, one per
+# checkout, then run through the same shell check attachment_verify uses.
+# 0: every owner passed. 10, printing nothing: any check failed or could not
+# run; the caller then verifies owner by owner, which reports the first
+# refusal exactly as before. Nothing is remembered between calls.
+attachment_verify_owners_batch() {
+  local home=$1 hooks_owner hooks_owners
+  shift
+  [ "$#" -gt 0 ] || return 0
+  hooks_owners=$(_attachment_owner_verify_run verify-owner-records "$home" "$@") || return 10
+  while IFS= read -r hooks_owner; do
+    [ -n "$hooks_owner" ] || continue
+    _attachment_verify_managed_hooks "$home" "$hooks_owner" >/dev/null 2>&1 || return 10
+  done <<EOF
+$hooks_owners
+EOF
+  return 0
+}
+
+# attachment_owner_artifact_verdicts HOME OWNER...: for each OWNER, in order, a
+# line "0<TAB>OWNER" when it passes exactly what _attachment_verify_owner_artifacts
+# OWNER HOME checks (owner_verify.py mode "artifacts"; like that call, it does
+# not judge the owner file's mode, schema or location), else "1<TAB>OWNER". No
+# managed hooks. 0 when the pass ran, 10 when it could not (fall back for every
+# owner). A doctor run that uses these verdicts across its rows reports what
+# held when the pass ran: read-only doctor only; same verify-then-report window
+# as a per-row check, longer at scale.
+attachment_owner_artifact_verdicts() {
+  local home=$1
+  shift
+  [ "$#" -gt 0 ] || return 0
+  _attachment_owner_verify_run owner-verdicts "$home" "$@" || return 10
+}
+
+# Same ordered verdicts, without preparing machine state. Large jq arguments
+# can use temporary scratch under TMPDIR; callers control that location.
+attachment_owner_artifact_verdicts_readonly() {
+  local _attachment_owner_verify_readonly=1
+  export -n _attachment_owner_verify_readonly
+  attachment_owner_artifact_verdicts "$@"
 }
 
 attachment_verify() {

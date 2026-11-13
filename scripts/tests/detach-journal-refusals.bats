@@ -213,7 +213,7 @@ journal_sha() {
   local exclude block_hash
   kill_detach_at attachment_detach_mark_external_phase 2
   block_hash="$(jq -r '.original_owner.exclude.managed_block_sha256' "$(detach_journal_path)")"
-  [[ "$block_hash" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$block_hash" =~ ^[0-9a-f]{64}$ ]] || false
   exclude="$PROJECT/.git/info/exclude"
   sed -n '/^# --- Trellis local attachment exclude block ---$/,/^# --- end Trellis local attachment exclude block ---$/p' "$exclude" > "$SANDBOX/block"
   cat "$SANDBOX/block" >> "$exclude"

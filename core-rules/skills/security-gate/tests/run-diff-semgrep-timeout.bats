@@ -64,7 +64,7 @@ semgrep_timeout_arg() {
   commit_change
   run_diff
   [ "$status" -eq 0 ] || { echo "rc=$status; $output"; false; }
-  [[ "$output" == *"Overall: MERGEABLE"* ]]
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || false
   [ "$(semgrep_timeout_arg)" = 73 ]
 }
 
@@ -76,7 +76,7 @@ semgrep_timeout_arg() {
   commit_change
   run_diff
   [ "$status" -eq 1 ] || { echo "rc=$status; $output"; false; }
-  [[ "$output" == *"base .trellis.json security_gate.semgrep_timeout"* ]]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"base .trellis.json security_gate.semgrep_timeout"* ]] || false
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
   [ ! -e "$SANDBOX/semgrep.args" ]
 }

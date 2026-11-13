@@ -5,6 +5,9 @@
 
 set -u
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 SOURCE_ROOT="$(CDPATH='' cd "$SCRIPT_DIR/.." && pwd -P)"
 # shellcheck source=lib/trellis-home.sh
@@ -44,12 +47,12 @@ migrate_usage_error() {
 migrate_file_mode() {
   local mode
   if mode="$(stat -f '%Lp' "$1" 2>/dev/null)" &&
-    printf '%s' "$mode" | LC_ALL=C grep -Eq '^[0-7]{3,4}$'; then
+    printf '%s' "$mode" | /usr/bin/env LC_ALL=C grep -Eq '^[0-7]{3,4}$'; then
     printf '%s\n' "$mode"
     return 0
   fi
   if mode="$(stat -c '%a' "$1" 2>/dev/null)" &&
-    printf '%s' "$mode" | LC_ALL=C grep -Eq '^[0-7]{3,4}$'; then
+    printf '%s' "$mode" | /usr/bin/env LC_ALL=C grep -Eq '^[0-7]{3,4}$'; then
     printf '%s\n' "$mode"
     return 0
   fi
@@ -101,7 +104,7 @@ migrate_safe_relative() {
   case "$path" in
     ''|/*|.|..|../*|*/../*|*/..|*'//'*) return 1 ;;
   esac
-  printf '%s' "$path" | LC_ALL=C grep -Eq '^[^[:cntrl:]]+$'
+  printf '%s' "$path" | /usr/bin/env LC_ALL=C grep -Eq '^[^[:cntrl:]]+$'
 }
 
 migrate_parent_safe() {
@@ -452,7 +455,7 @@ migrate_sha256_file() {
   output="$(shasum -a 256 "$1" 2>/dev/null)" ||
     output="$(sha256sum "$1" 2>/dev/null)" || return 1
   output="${output%% *}"
-  printf '%s' "$output" | LC_ALL=C grep -Eq '^[a-f0-9]{64}$' || return 1
+  printf '%s' "$output" | /usr/bin/env LC_ALL=C grep -Eq '^[a-f0-9]{64}$' || return 1
   printf '%s\n' "$output"
 }
 

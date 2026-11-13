@@ -195,8 +195,8 @@ SH
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   # T48: the wrapper proves readiness read-only and never reseeds a ready tree.
   [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 2 ]
-  [[ "$(sed -n 1p "$WRAPPER_SEED_LOG")" == "--target "*" --pre-add --quiet" ]]
-  [[ "$(sed -n 2p "$WRAPPER_SEED_LOG")" == "--target "*"/t14-counted-wrapper --verify-only --quiet" ]]
+  [[ "$(sed -n 1p "$WRAPPER_SEED_LOG")" == "--target "*" --pre-add --quiet" ]] || false
+  [[ "$(sed -n 2p "$WRAPPER_SEED_LOG")" == "--target "*"/t14-counted-wrapper --verify-only --quiet" ]] || false
   [ -f "$(t14_owner_for_root "$T14_WORKTREE")" ]
   [ -L "$T14_WORKTREE/.trellis/runtime" ]
   [ -L "$T14_WORKTREE/.claude/rules/trellis.md" ]
@@ -218,7 +218,7 @@ SH
   [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 2 ]
   [ ! -e "$T14_WORKTREE/.trellis/runtime" ]
   [ -z "$(t14_owner_for_root "$T14_WORKTREE" 2>/dev/null || true)" ]
-  [[ "$output" != *"worktree ready:"* ]]
+  [[ "$output" != *"worktree ready:"* ]] || false
 }
 
 @test "wrapper pre-add release refusal still creates no branch or worktree" {
@@ -256,7 +256,7 @@ SH
 
   [ "$status" -ne 0 ] || { echo "$output"; return 1; }
   [ "$(wc -l < "$WRAPPER_SEED_LOG" | tr -d ' ')" -eq 1 ]
-  [[ "$output" != *"worktree ready:"* ]]
+  [[ "$output" != *"worktree ready:"* ]] || false
   [ ! -e "$T14_WORKTREE/.trellis/runtime" ]
   [ -z "$(t14_owner_for_root "$T14_WORKTREE" 2>/dev/null || true)" ]
 }

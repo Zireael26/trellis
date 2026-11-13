@@ -1,5 +1,5 @@
 """A5B synchronous integrity contract, no installed/live home access."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import importlib.util
 import io
@@ -167,6 +167,42 @@ class ExecutedIntegrityTests(unittest.TestCase):
         self.assertIn(b'allow write', subprocess.check_output(['/bin/ls', '-lde', str(path)]))
         with self.assertRaises(ValueError):
             self.verify()
+
+    def _linux_acl(self, listed):
+        """check_fd_acl on Linux with no POSIX ACL; listed is what listxattr
+        returns, or the OSError it raises."""
+        import errno
+
+        def getxattr(fd, name):
+            raise OSError(errno.ENODATA, 'no data')
+
+        def listxattr(fd):
+            if isinstance(listed, OSError):
+                raise listed
+            return listed
+
+        with patch.object(self.module.sys, 'platform', 'linux'), \
+                patch.object(self.module.os, 'getxattr', getxattr, create=True), \
+                patch.object(self.module.os, 'listxattr', listxattr, create=True):
+            return self.module.check_fd_acl(0)
+
+    def test_linux_nfs4_acl_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'carries an ACL'):
+            self._linux_acl(['user.other', 'system.nfs4_acl'])
+
+    def test_linux_richacl_and_file_capability_are_refused(self):
+        # r151-muse LOW-3: RichACL and setcap entries passed as clean.
+        for name in ('system.richacl', 'security.capability'):
+            with self.subTest(xattr=name), self.assertRaisesRegex(ValueError, 'carries an ACL'):
+                self._linux_acl(['user.other', name])
+
+    def test_linux_xattr_enumeration_failure_is_undecided(self):
+        import errno
+        with self.assertRaises(OSError):
+            self._linux_acl(OSError(errno.EOPNOTSUPP, 'unsupported'))
+
+    def test_linux_without_acl_xattrs_is_clean(self):
+        self.assertIsNone(self._linux_acl(['user.other']))
 
     def test_hardlinked_executed_file(self):
         os.link(self.payload / 'scripts/lib/sourced.sh', self.root / 'alias')
@@ -337,7 +373,7 @@ local_registry_propose_register_worktree() { :; }
             return subprocess.run(['/bin/bash', '-c', self.module.PREFLIGHT, 't13-collision', str(script),
                                    str(self.root), str(self.root / 'registry'), str(self.root / 'proposal'),
                                    str(plan), str(self.root / 'authority'), str(self.root / 'donor'),
-                                   str(self.root / 'exclude'), 'exclude.captured'],
+                                   str(self.root / 'exclude'), 'exclude.captured', ''],
                                   env=env, capture_output=True, text=True)
         collision = preflight()
         self.assertNotEqual(collision.returncode, 0)
@@ -451,8 +487,10 @@ class CapturedPreflightInputTests(unittest.TestCase):
         def recheck():
             if not lock_state['held']:
                 raise self.module.LostTransactionLock('injected lock loss')
+        self.order = []
         @contextmanager
         def held_locks(*_args, **_kwargs):
+            self.order.append('scope')
             try:
                 yield SimpleNamespace(recheck=recheck, proof_infos=lambda: [])
             finally:
@@ -461,18 +499,25 @@ class CapturedPreflightInputTests(unittest.TestCase):
         with patch.object(sys, 'argv', self.argv), patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(self.diagnostic))), \
              patch.object(sys, 'stdout', stdout if stdout is not None else io.StringIO()), \
              patch.object(self.module, 'require_private_lock_fds'), \
+             patch.object(self.module, 'hold_publisher_lock', side_effect=lambda *args: self.order.append(('publisher', args))), \
              patch.object(self.module, 'transaction_lock_scope', side_effect=held_locks), \
              patch.object(self.module, 'prepare', side_effect=prepare_impl or (lambda *_args: self.prepared)), \
              patch.object(self.module.subprocess, 'run', side_effect=preflight):
             return self.module.main()
 
-    def test_begin_prints_only_the_canonical_proposal_digest(self):
+    def test_begin_prints_only_the_proposal_and_plan_digests(self):
         def preflight(argv, **_kwargs):
             self.child_path(argv[7]).write_text('{"b":1,"a":[2]}\n')
             return SimpleNamespace(returncode=0, stderr=b'')
         out = io.StringIO()
         self.assertEqual(self.invoke(preflight, stdout=out), 0)
-        self.assertEqual(out.getvalue(), hashlib.sha256(b'{"a":[2],"b":1}').hexdigest() + '\n')
+        plan = self.module.json_bytes(self.prepared[0])
+        self.assertEqual((self.workspace / 'plan.json').read_bytes(), plan)
+        # H2: the attachment holder's publisher flock is held, for this
+        # writer's life, before the lock scope captures its holders.
+        self.assertEqual(self.order, [('publisher', (32, 123)), 'scope'])
+        self.assertEqual(out.getvalue(), hashlib.sha256(b'{"a":[2],"b":1}').hexdigest() + ' '
+                         + hashlib.sha256(plan).hexdigest() + '\n')
 
     def test_begin_miss_prints_no_digest(self):
         def preflight(argv, **_kwargs):
@@ -502,14 +547,20 @@ class CapturedPreflightInputTests(unittest.TestCase):
                 live_reads.append(path)
             return original_read(path, *args, **kwargs)
         def prepare(*args):
-            donor_bytes.append(args[-1])
+            donor_bytes.append(args[13])  # registry_bytes
             reads_at_prepare.extend(live_reads)
             return self.prepared
         def preflight(argv, **_kwargs):
             canonical_bytes.append(self.child_path(argv[6]).read_bytes())
             self.child_path(argv[7]).write_text('{}\n')
             return SimpleNamespace(returncode=0, stderr=b'')
-        with patch.object(self.module, 'read_regular', side_effect=read_regular):
+        original_recheck = self.module.recheck_bound_file
+        def recheck_bound_file(path, *args, **kwargs):
+            if path == str(self.registry):
+                live_reads.append(path)
+            return original_recheck(path, *args, **kwargs)
+        with patch.object(self.module, 'read_regular', side_effect=read_regular), \
+             patch.object(self.module, 'recheck_bound_file', side_effect=recheck_bound_file):
             self.assertEqual(self.invoke(preflight, prepare_impl=prepare), 0)
         self.assertEqual(reads_at_prepare, [], 'donor took a separate live registry read')
         self.assertEqual(live_reads, [str(self.registry)], 'expected exactly one postflight re-read')
@@ -569,7 +620,7 @@ class CapturedPreflightInputTests(unittest.TestCase):
     def test_donor_and_canonical_use_the_same_exclude_capture(self):
         donor, canonical, arguments = [], [], []
         def prepare(*args):
-            donor.append(args[-3])
+            donor.append(args[11])  # exclude_bytes
             return self.prepared
         def preflight(argv, **_kwargs):
             arguments.append(argv[11:13])
@@ -582,21 +633,6 @@ class CapturedPreflightInputTests(unittest.TestCase):
         self.assertEqual(arguments[0][0], str(self.exclude), 'child cannot check owner exclude paths')
         self.assertFalse(os.path.isabs(arguments[0][1]), 'child received an absolute exclude capture')
         self.assertFalse(self.child_path(arguments[0][1]).exists(), 'clean exclude capture was left behind')
-
-    def test_exclude_identities_join_the_fine_ctime_proof(self):
-        proved = []
-        original = self.module.prove_fine_ctime
-        def prove(scratch_fd, inputs):
-            proved.append({(info.st_dev, info.st_ino) for info in inputs})
-            return original(scratch_fd, inputs)
-        def preflight(argv, **_kwargs):
-            self.child_path(argv[7]).write_text('{}\n')
-            return SimpleNamespace(returncode=0, stderr=b'')
-        live = self.exclude.stat()
-        with patch.object(self.module, 'prove_fine_ctime', side_effect=prove):
-            self.assertEqual(self.invoke(preflight), 0)
-        self.assertTrue(any((live.st_dev, live.st_ino) in inputs for inputs in proved),
-                        'exclude reuse skipped the fine-ctime proof')
 
     def test_live_exclude_aba_during_canonical_preflight_misses_before_journal(self):
         seen = []
@@ -619,7 +655,7 @@ class CapturedPreflightInputTests(unittest.TestCase):
         owner.chmod(0o600)
         seen = []
         def prepare(*args):
-            stack = args[-2]
+            stack = args[12]  # owner_stack
             snapshots, infos = stack.enter_context(self.module.captured_owner_records(str(owner_dir), (key,)))
             return (self.plan, str(self.base / 'owner.json'), str(self.journal),
                     str(self.base / 'authority.json'), str(owner), [str(owner)], snapshots, infos)
@@ -710,19 +746,50 @@ class CapturedPreflightInputTests(unittest.TestCase):
         self.assertFalse(self.journal.exists())
         self.assertTrue((self.workspace / 'registry.captured.json').exists(), 'unknown replacement must be retained')
 
-    def test_device_and_coarse_ctime_never_authorize_snapshot_reuse(self):
-        fine = [SimpleNamespace(st_dev=5, st_ctime_ns=1234567891),
-                SimpleNamespace(st_dev=5, st_ctime_ns=1234567892)]
-        self.module.require_fine_ctime(5, fine, [1234567893, 1234567894, 1234567895])
-        for device, infos, ticks in (
-            (9, fine, [1234567893, 1234567894, 1234567895]),
-            (5, [SimpleNamespace(st_dev=5, st_ctime_ns=1234000000), fine[1]], [1234567893, 1234567894, 1234567895]),
-            (5, fine, [1234567893, 1234567893, 1234567895]),
-            (5, fine, [1234567893, 1234000000, 1234567895]),
-        ):
-            with self.subTest(device=device, infos=infos, ticks=ticks):
-                with self.assertRaises(ValueError):
-                    self.module.require_fine_ctime(device, infos, ticks)
+    def ok_preflight(self, mutate=None):
+        def preflight(argv, **_kwargs):
+            self.child_path(argv[7]).write_text('{}\n')
+            if mutate is not None:
+                mutate()
+            return SimpleNamespace(returncode=0, stderr=b'')
+        return preflight
+
+    def aliased_times(self):
+        # A filesystem whose timestamps alias: an in-place, same-size rewrite
+        # leaves every compared metadata field as captured.
+        integrity = self.module.load_integrity()
+        alias = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_nlink, info.st_size)
+        return patch.object(integrity, '_fingerprint', side_effect=alias)
+
+    def test_coarse_clock_still_reuses_the_donor(self):
+        # T13 D1: chmod that does not advance ctime (a coarse kernel clock)
+        # no longer makes the fast path unavailable.
+        with patch.object(self.module.os, 'fchmod', side_effect=lambda *_args: None):
+            self.assertEqual(self.invoke(self.ok_preflight()), 0)
+        self.assertTrue(self.journal.exists())
+
+    def test_unsupported_filesystem_type_is_unavailable(self):
+        stderr = io.StringIO()
+        with patch.object(self.module, 'filesystem_type', return_value='nfs'), patch.object(sys, 'stderr', stderr):
+            self.assertEqual(self.invoke(self.ok_preflight()), 10)
+        self.assertFalse(self.journal.exists())
+        self.assertIn('donor fast path unavailable here', stderr.getvalue())
+
+    def test_live_exclude_rewritten_in_place_misses_even_with_aliased_times(self):
+        def rewrite():
+            with open(self.exclude, 'r+b') as stream:
+                stream.write(b'fixture EXCLUDE\n')
+        with self.aliased_times():
+            self.assertEqual(self.invoke(self.ok_preflight(rewrite)), 10)
+        self.assertFalse(self.journal.exists())
+
+    def test_scratch_registry_copy_rewritten_in_place_misses_even_with_aliased_times(self):
+        def rewrite():
+            with open(self.workspace / 'registry.captured.json', 'r+b') as stream:
+                stream.write(b'{"schema_version":2,"projects":{}}\n')
+        with self.aliased_times():
+            self.assertEqual(self.invoke(self.ok_preflight(rewrite)), 10)
+        self.assertFalse(self.journal.exists())
 
     def test_registry_semantic_comparison_keeps_json_types(self):
         same = self.module.same_registry_snapshot
@@ -766,20 +833,201 @@ class CapturedPreflightInputTests(unittest.TestCase):
         self.assertFalse(seen, 'canonical preflight ran on inconsistent snapshots')
         self.assertFalse(self.journal.exists())
 
-    def test_unproven_ctime_misses_before_preflight(self):
-        seen = []
-        def preflight(argv, **_kwargs):
-            seen.append(True)
-            self.child_path(argv[7]).write_text('{}\n')
-            return SimpleNamespace(returncode=0, stderr=b'')
-        with patch.object(self.module, 'require_fine_ctime', side_effect=ValueError('coarse ctime')):
-            self.assertEqual(self.invoke(preflight), 10)
-        self.assertFalse(seen, 'canonical preflight ran without the ctime proof')
-        self.assertFalse(self.journal.exists())
+class RegistryDonorAdmissionTests(unittest.TestCase):
+    """Stage A: the first canonically valid candidate in the seed's registry
+    order is admitted in one verifier pass; nothing else is attempted."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('fastpath_admission', LIB / 'attach-fastpath.py')
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.home, self.checkout, self.payload = '/h', 'c' * 64, '/h/releases/1.2.3/payload'
+        self.owner_dir = self.home + '/state/attachments/' + self.checkout
+        self.owners, self.snapshots, self.candidates = {}, {}, []
+        for key, root in (('a' * 64, '/w/a'), ('b' * 64, '/w/b'), ('d' * 64, '/w/d')):
+            record = {'checkout_id': self.checkout, 'worktree_id': key, 'worktree_root': root,
+                      'attachment_id': 'att-' + key[0],
+                      'artifacts': [{'path': '.trellis/runtime', 'kind': 'symlink', 'target': self.payload},
+                                    {'path': '.claude/x.md', 'kind': 'file', 'sha256': '0' * 64}]}
+            self.owners[key] = record
+            self.snapshots[self.owner_dir + '/' + key + '.json'] = json.dumps(record).encode()
+            self.candidates.append({'worktree_id': key, 'root': root, 'attachment_id': 'att-' + key[0]})
+        self.schema = {path: True for path in self.snapshots}
+        self.attempts, self.closed = [], []
+        test = self
+        class FakeNode:
+            def __init__(self, path):
+                self.kind, self.data, self.path = 'file', b'data:' + path.encode(), path
+            def close(self):
+                test.closed.append(self.path)
+        def verify(home, entries, mode='verify', opener=None):
+            [entry] = entries
+            self.attempts.append(entry['path'])
+            node = opener(None, 'x.md', 'file', {'path': '.claude/x.md'})
+            self.assertTrue(entry['canonical'])
+            return [{'owner': entry['path'], 'check': 'artifact'}] if entry['path'] in self.failing else []
+        self.failing = set()
+        self.module.owner_verify = SimpleNamespace(
+            verify_owner_records=verify,
+            capture_opener=lambda fd, name, kind, expected=None: FakeNode(expected['path']))
+
+    def admit(self):
+        stack = ExitStack()
+        self.addCleanup(stack.close)
+        return self.module.admit_registry_donor(self.home, self.owner_dir, self.checkout, self.candidates,
+                                                self.owners, self.snapshots, self.schema, self.payload, stack)
+
+    def path(self, key):
+        return self.owner_dir + '/' + key + '.json'
+
+    def test_first_valid_candidate_is_admitted_once_and_later_ones_are_not_tried(self):
+        record, observed = self.admit()
+        self.assertIs(record, self.owners['a' * 64])
+        self.assertEqual(self.attempts, [self.path('a' * 64)])
+        self.assertEqual(observed.data('.claude/x.md'), b'data:.claude/x.md')
+
+    def test_drifted_candidate_is_skipped_in_registry_order(self):
+        self.failing = {self.path('a' * 64)}
+        record, observed = self.admit()
+        self.assertIs(record, self.owners['b' * 64])
+        self.assertEqual(self.attempts, [self.path('a' * 64), self.path('b' * 64)])
+        # The refused candidate's observations are released at once.
+        self.assertEqual(self.closed, ['.claude/x.md'])
+
+    def test_candidates_that_fail_cheap_bindings_are_never_verified(self):
+        self.schema[self.path('a' * 64)] = False
+        self.owners['b' * 64]['artifacts'][0]['target'] = '/h/releases/9.9.9/payload'
+        self.candidates[2]['root'] = '/w/elsewhere'
+        self.assertEqual(self.admit(), (None, None))
+        self.assertEqual(self.attempts, [])
+
+    def test_no_valid_candidate_admits_nothing(self):
+        self.failing = set(self.path(key) for key in self.owners)
+        self.assertEqual(self.admit(), (None, None))
+        self.assertEqual(len(self.attempts), 3)
+
+    def test_unobserved_leaf_is_a_miss_not_a_reread(self):
+        record, observed = self.admit()
+        with self.assertRaises(ValueError):
+            observed.data('.agents/never-verified.md')
+
+
+class CapturedDonorFreshnessTests(unittest.TestCase):
+    """r152-create-code F1: the admitted donor's captures are rechecked,
+    without a second semantic pass, before their bytes are used and at the
+    journal boundary. Any in-place change since the verifier saw them misses."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('fastpath_fresh', LIB / 'attach-fastpath.py')
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.module.load_owner_verify()
+        self.tmp = tempfile.TemporaryDirectory(prefix='t13.fresh.', dir=os.environ.get('TMPDIR', '/tmp'))
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name).resolve() / 'donor'
+        (self.root / '.claude').mkdir(parents=True)
+        (self.root / '.trellis').mkdir()
+        self.render = self.root / '.claude/settings.json'
+        self.render.write_text('{"owned":"value"}\n')
+        (self.root / '.trellis/runtime').symlink_to('/payload')
+        self.collector = self.module.Collector()
+        self.addCleanup(self.collector.close)
+        for path, kind in (('.claude', 'directory'), ('.claude/settings.json', 'file'), ('.trellis/runtime', 'symlink')):
+            parent, name = os.path.split(str(self.root / path))
+            fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                self.assertIsNotNone(self.collector.open(fd, name, kind, {'path': path}))
+            finally:
+                os.close(fd)
+        self.collector.root = str(self.root)
+
+    def test_same_size_rewrite_with_aliased_identity_misses(self):
+        # T13 D1: identity can alias; the held bytes are compared in full.
+        captured = {node.identity[1]: node.identity for node in self.collector.nodes.values()}
+        parents = {node.parent_identity[1]: node.parent_identity for node in self.collector.nodes.values()}
+        real = self.module.owner_verify._identity
+        def aliased(info):
+            return captured.get(info.st_ino) or parents.get(info.st_ino) or real(info)
+        with open(self.render, 'r+b') as stream:
+            stream.write(b'{"owned":"other"}'[:len(self.render.read_bytes()) - 1])
+        with patch.object(self.module.owner_verify, '_identity', side_effect=aliased):
+            with self.assertRaisesRegex(ValueError, 'bytes'):
+                self.collector.require_fresh()
+
+    def test_unchanged_captures_are_fresh(self):
+        self.collector.require_fresh()
+
+    def test_in_place_rewrite_keeping_the_inode_misses(self):
+        inode = self.render.stat().st_ino
+        with open(self.render, 'r+b') as stream:
+            stream.write(b'{"owned":"other"}\n')
+        self.assertEqual(self.render.stat().st_ino, inode)
+        with self.assertRaises(ValueError):
+            self.collector.require_fresh()
+
+    def test_same_bytes_rewritten_still_miss(self):
+        # Nonsemantic: the check never compares meaning, only identity.
+        self.render.write_bytes(self.render.read_bytes())
+        with self.assertRaises(ValueError):
+            self.collector.require_fresh()
+
+    def test_replaced_symlink_misses(self):
+        link = self.root / '.trellis/runtime'
+        link.unlink()
+        link.symlink_to('/payload')
+        with self.assertRaises(ValueError):
+            self.collector.require_fresh()
+
+    def test_parent_change_misses(self):
+        (self.root / '.claude/new.json').write_text('{}\n')
+        with self.assertRaises(ValueError):
+            self.collector.require_fresh()
+
+class FastPathUnavailableNoticeTests(unittest.TestCase):
+    """T13 D3: an unavailable fast path says so once without TRACE; an
+    ordinary donor miss stays quiet."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('fastpath_notice', LIB / 'attach-fastpath.py')
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+
+    def failure(self, error):
+        stderr = io.StringIO()
+        with patch.dict(os.environ, {}, clear=False), patch.object(sys, 'stderr', stderr):
+            os.environ.pop('TRELLIS_FASTPATH_TRACE', None)
+            status = self.module.finish_failure(error, '--begin', False, None)
+        return status, stderr.getvalue()
+
+    def test_unavailable_prints_one_notice_and_misses(self):
+        status, text = self.failure(self.module.FastPathUnavailable('Claude Code version unreadable'))
+        self.assertEqual(status, 10)
+        self.assertEqual(text.splitlines(), ['trellis attach: donor fast path unavailable here (Claude Code version unreadable); running the full attach'])
+
+    def test_only_allowlisted_local_filesystems_are_supported(self):
+        fd = os.open('.', os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        for name in ('apfs', 'ext2/ext3/ext4', 'btrfs', 'xfs', 'tmpfs'):
+            with patch.object(self.module, 'filesystem_type', return_value=name):
+                self.module.require_supported_filesystem(fd)
+        for name in ('nfs', 'smbfs', 'fuse', 'overlay', 'hfs', None):
+            with self.subTest(name=name), patch.object(self.module, 'filesystem_type', return_value=name):
+                with self.assertRaises(self.module.FastPathUnavailable):
+                    self.module.require_supported_filesystem(fd)
+
+    def test_this_machine_reports_a_filesystem_type(self):
+        fd = os.open(os.environ.get('TMPDIR', '/tmp'), os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        self.assertIsInstance(self.module.filesystem_type(fd), str)
+
+    def test_ordinary_miss_stays_quiet(self):
+        status, text = self.failure(ValueError('no exact donor'))
+        self.assertEqual((status, text), (10, ''))
 
 
 class FinishProposalDigestTests(unittest.TestCase):
-    """--finish trusts only the digest --begin read through its held workspace."""
+    """--finish trusts only the digests --begin held: the proposal it read
+    through its workspace and the exact plan bytes it validated."""
 
     def setUp(self):
         spec = importlib.util.spec_from_file_location('fastpath_finish', LIB / 'attach-fastpath.py')
@@ -795,26 +1043,37 @@ class FinishProposalDigestTests(unittest.TestCase):
         plan.write_text(json.dumps({'checkout_id': 'a' * 64, 'worktree_id': 'b' * 64, 'attachment_id': 'fixture',
                                     'exclude': {'git_common_dir': str(base / 'common')}}))
         plan.chmod(0o600)
+        self.plan_digest = hashlib.sha256(plan.read_bytes()).hexdigest()
         self.registry = self.home / 'registry.json'
         self.registry.write_bytes(b'{"projects": {"p": {"x": 1}}, "schema_version": 1}\n')
         self.registry.chmod(0o600)
         self.digest = hashlib.sha256(b'{"projects":{"p":{"x":1}},"schema_version":1}').hexdigest()
 
-    def finish(self, digest, proposal=None):
+    def finish(self, digest, proposal=None, plan_digest=None, publish=None):
+        self.stdout = io.StringIO()
+        if plan_digest is None:
+            plan_digest = self.plan_digest
         if proposal is not None:
             (self.workspace / 'registry.json').write_bytes(proposal)
         published, scopes = [], []
+        self.events = []
         @contextmanager
         def held_scope(*args):
             scopes.append(args)
-            yield SimpleNamespace(recheck=lambda: None)
-        argv = ['attach-fastpath.py', '--finish', str(self.workspace), str(self.home), '1:1', '1:1', digest, '11', '12', '13']
+            scope = SimpleNamespace(recheck=lambda: None, release_checked=lambda: None, committed=False)
+            def mark_committed():
+                scope.committed = True
+                self.events.append('committed')
+            scope.mark_committed = mark_committed
+            yield scope
+        argv = ['attach-fastpath.py', '--finish', str(self.workspace), str(self.home), '1:1', '1:1', digest, plan_digest, '11', '12', '13']
         self.stderr = io.StringIO()
         with patch.object(sys, 'argv', argv), \
              patch.object(self.module, 'require_private_lock_fds'), \
+             patch.object(self.module, 'hold_publisher_lock', side_effect=lambda *args: self.events.append(('publisher', args))), \
              patch.object(self.module, 'transaction_lock_scope', side_effect=held_scope), \
-             patch.object(self.module, 'publish', side_effect=lambda *args: published.append(args)), \
-             patch.object(sys, 'stdout', io.StringIO()), patch.object(sys, 'stderr', self.stderr):
+             patch.object(self.module, 'publish', side_effect=publish or (lambda *args: (published.append(args), self.events.append('published'), args[7]()))), \
+             patch.object(sys, 'stdout', self.stdout), patch.object(sys, 'stderr', self.stderr):
             status = self.module.main()
         if published:
             # Publication ran inside the lock scope bound to begin's holders.
@@ -827,6 +1086,23 @@ class FinishProposalDigestTests(unittest.TestCase):
         status, published = self.finish(self.digest)
         self.assertEqual(status, 0, self.stderr.getvalue())
         self.assertEqual(len(published), 1)
+        self.assertEqual(self.events, [('publisher', (32, 12)), 'published', 'committed'])
+
+    def test_a_failure_after_the_commit_reports_committed(self):
+        def commit_then_fail(*args):
+            self.events.append('published')
+            args[7]()
+            raise ValueError('cleanup failed after the journal unlink')
+        status, published = self.finish(self.digest, publish=commit_then_fail)
+        self.assertEqual(status, 0, self.stderr.getvalue())
+        self.assertTrue(self.stdout.getvalue().endswith('.json\n'), 'the committed owner path is still reported')
+        self.assertNotIn('run trellis recover', self.stderr.getvalue())
+        self.assertIn('committed', self.events)
+
+    def test_refused_finish_never_marks_a_commit(self):
+        status, published = self.finish(self.digest, plan_digest='0' * 64)
+        self.assertEqual(status, 3)
+        self.assertNotIn('committed', self.events)
 
     def test_forged_proposal_written_to_the_registry_refuses_recoverably(self):
         forged = b'{"projects":{"p":{"x":2}},"schema_version":1}\n'
@@ -840,6 +1116,23 @@ class FinishProposalDigestTests(unittest.TestCase):
 
     def test_malformed_digest_refuses(self):
         status, published = self.finish('not-a-digest')
+        self.assertEqual(status, 3)
+        self.assertEqual(published, [])
+
+    def test_substituted_plan_refuses_recoverably(self):
+        # H1: a coordinated plan-plus-journal substitution between --begin
+        # and --finish must not publish; begin's plan digest is the authority.
+        plan = self.workspace / 'plan.json'
+        forged = json.loads(plan.read_text())
+        forged['artifacts'] = [{'path': '.trellis/runtime', 'kind': 'symlink', 'target': 'unexpected'}]
+        plan.write_text(json.dumps(forged))
+        status, published = self.finish(self.digest)
+        self.assertEqual(status, 3)
+        self.assertEqual(published, [])
+        self.assertIn('plan differs from the begin plan', self.stderr.getvalue())
+
+    def test_malformed_plan_digest_refuses(self):
+        status, published = self.finish(self.digest, plan_digest='not-a-digest')
         self.assertEqual(status, 3)
         self.assertEqual(published, [])
 
@@ -886,6 +1179,34 @@ class FinishLockScopeTests(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         self.assertFalse(self.owner.exists())
         self.assertTrue(self.journal.exists())
+
+    def test_lock_loss_after_the_owner_write_keeps_owner_and_journal(self):
+        calls = []
+        def recheck():
+            calls.append(len(calls))
+            # Both pre-commit namespace checks pass; the lock is lost once the
+            # owner exists but before the journal is removed.
+            if self.owner.exists():
+                raise self.module.LostTransactionLock('lock holder changed')
+        with self.assertRaises(self.module.LostTransactionLock):
+            self.publish(recheck)
+        self.assertTrue(self.owner.exists())
+        self.assertTrue(self.journal.exists(), 'journal removed before the final lock check')
+
+    def test_journal_directory_checks_finish_before_the_unlink(self):
+        # r152-create-code F3: once the journal is gone the transaction is
+        # committed; no journal-directory context check may run after it.
+        real_unlink = os.unlink
+        journal_dir = self.journal.parent
+        def unlink(name, *args, **kwargs):
+            real_unlink(name, *args, **kwargs)
+            if name == self.journal.name:
+                journal_dir.rename(journal_dir.with_name('journals-moved'))
+                journal_dir.mkdir(mode=0o700)
+        with patch.object(self.module.os, 'unlink', side_effect=unlink):
+            self.publish(lambda: None)
+        self.assertTrue(self.owner.exists())
+        self.assertFalse((journal_dir.with_name('journals-moved') / self.journal.name).exists())
 
     def test_held_locks_commit(self):
         calls = []
@@ -1148,6 +1469,137 @@ for fd in (31, 32, 33):
                 (self.registry_holder / 'pid').write_text('999999\n')
                 scope.recheck()
 
+    def publisher_busy(self):
+        # The canonical recovery probe, _attachment_publisher_idle.
+        probe = ('import fcntl, os, sys\n'
+                 'fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)\n'
+                 'try:\n    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
+                 'except BlockingIOError:\n    sys.exit(3)\n')
+        result = subprocess.run([sys.executable, '-I', '-c', probe, str(self.attachment_holder / 'publisher.lock')])
+        return result.returncode == 3
+
+    def test_publisher_lock_keeps_recovery_out_and_precedes_the_holder_capture(self):
+        fd = self.module.hold_publisher_lock(self.fds[1], self.pid)
+        try:
+            self.assertTrue(self.publisher_busy(), 'recovery could reclaim a lock whose writer is alive')
+            # Creating it changed the holder; the scope captured afterwards holds.
+            with self.scope() as scope:
+                scope.recheck()
+        finally:
+            os.close(fd)
+        # The writer's exit frees it for recovery.
+        self.assertFalse(self.publisher_busy())
+
+    def test_publisher_lock_held_elsewhere_refuses(self):
+        fd = self.module.hold_publisher_lock(self.fds[1], self.pid)
+        try:
+            child = subprocess.run([sys.executable, '-I', '-c', (
+                'import importlib.util, os, sys\n'
+                'spec = importlib.util.spec_from_file_location("fp", sys.argv[1])\n'
+                'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
+                'fd = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY)\n'
+                'try:\n    m.hold_publisher_lock(fd, os.getpid())\n'
+                'except m.LostTransactionLock:\n    sys.exit(7)\n'), str(LIB / 'attach-fastpath.py'), str(self.attachment_holder)])
+        finally:
+            os.close(fd)
+        self.assertEqual(child.returncode, 7)
+
+    def test_publisher_lock_refuses_a_dead_lock_owner(self):
+        dead = subprocess.Popen([sys.executable, '-c', 'pass'])
+        dead.wait()
+        with self.assertRaises(self.module.LostTransactionLock):
+            self.module.hold_publisher_lock(self.fds[1], dead.pid)
+
+    def test_publisher_lock_refuses_a_reclaimed_holder(self):
+        (self.attachment_holder / 'owner.json').unlink()
+        self.attachment_link.unlink()
+        self.attachment_holder.rmdir()
+        with self.assertRaises(self.module.LostTransactionLock):
+            self.module.hold_publisher_lock(self.fds[1], self.pid)
+
+    def test_publisher_lock_refuses_a_symlink(self):
+        (self.attachment_holder / 'publisher.lock').symlink_to(self.attachment_holder / 'owner.json')
+        with self.assertRaises(self.module.LostTransactionLock):
+            self.module.hold_publisher_lock(self.fds[1], self.pid)
+
+    def test_publisher_lock_refuses_a_fifo_without_blocking(self):
+        # F4: a FIFO with no reader must not block the open; the type check
+        # refuses it, in a bounded child so a hang fails instead of stalling.
+        os.mkfifo(self.attachment_holder / 'publisher.lock', 0o600)
+        child = subprocess.run([sys.executable, '-I', '-c', (
+            'import importlib.util, os, sys\n'
+            'spec = importlib.util.spec_from_file_location("fp", sys.argv[1])\n'
+            'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
+            'fd = os.open(sys.argv[2], os.O_RDONLY | os.O_DIRECTORY)\n'
+            'try:\n    m.hold_publisher_lock(fd, os.getpid())\n'
+            'except m.LostTransactionLock:\n    sys.exit(7)\n'), str(LIB / 'attach-fastpath.py'), str(self.attachment_holder)],
+            timeout=10)
+        self.assertEqual(child.returncode, 7)
+
+    def swap_lock_parent(self):
+        moved = self.state_locks.with_name('locks-moved')
+        self.state_locks.rename(moved)
+        self.state_locks.mkdir(mode=0o700)
+
+    def test_lock_parent_checks_finish_before_the_commit(self):
+        # r152-create-code F3: the lock-parent contexts unwind, with their
+        # checks, before the journal unlink; after the commit the scope's exit
+        # only closes resources.
+        with self.scope() as scope:
+            scope.release_checked()
+            scope.mark_committed()
+            self.swap_lock_parent()
+
+    def test_committed_scope_unwind_never_reports_a_lock_loss(self):
+        # Even without the early unwind, a committed scope's remaining
+        # lock-parent context exits cannot turn the commit into a lock loss.
+        with self.scope() as scope:
+            scope.mark_committed()
+            self.swap_lock_parent()
+
+    def test_lock_parent_change_before_the_commit_is_a_lock_loss(self):
+        with self.assertRaises(self.module.LostTransactionLock):
+            with self.scope() as scope:
+                self.swap_lock_parent()
+                scope.release_checked()
+
+    def test_replaced_publisher_lock_name_is_a_lock_loss(self):
+        # Sol r152-t13-design-2 F1: the name must still bind the flocked inode.
+        fd = self.module.hold_publisher_lock(self.fds[1], self.pid)
+        self.addCleanup(os.close, fd)
+        lock = self.attachment_holder / 'publisher.lock'
+        # Sol's model: the holder directory's times alias (coarse clock and a
+        # step back), so only the name-to-inode binding can tell.
+        integrity = self.module.load_integrity()
+        alias = lambda info: (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink)
+        with patch.object(integrity, '_fingerprint', side_effect=alias), self.assertRaises(self.module.LostTransactionLock):
+            with self.scope() as scope:
+                scope.publisher_fd = fd
+                scope.recheck()
+                lock.unlink()
+                lock.write_text('')
+                lock.chmod(0o600)
+                scope.recheck()
+
+    def test_bound_publisher_lock_rechecks_clean(self):
+        fd = self.module.hold_publisher_lock(self.fds[1], self.pid)
+        self.addCleanup(os.close, fd)
+        with self.scope() as scope:
+            scope.publisher_fd = fd
+            scope.recheck()
+
+    def test_uncommitted_scope_exit_still_detects_lock_loss(self):
+        with self.assertRaises(self.module.LostTransactionLock):
+            with self.scope():
+                (self.registry_holder / 'pid').write_text('999999\n')
+
+    def test_committed_scope_exit_cannot_reclaim_the_committed_transaction(self):
+        # After the journal is removed, no later fallible check may report an
+        # uncommitted transaction: the exit recheck stops at the commit.
+        with self.scope() as scope:
+            scope.mark_committed()
+            (self.registry_holder / 'pid').write_text('999999\n')
+
     def test_lock_parent_replacement_is_detected_at_each_recheck(self):
         for parent in (self.state_locks, self.registry_locks):
             with self.subTest(parent=parent):
@@ -1274,7 +1726,7 @@ class LockPinBenchTests(unittest.TestCase):
         self.assertNotEqual(missing.returncode, 0, 'probe accepted a missing checkout pin')
 
     def test_cli_refuses_unapproved_or_incomplete_measurement(self):
-        with tempfile.TemporaryDirectory(prefix='t13.lockbench.refuse.', dir=os.environ.get('TMPDIR', '/tmp')) as temp:
+        with tempfile.TemporaryDirectory(prefix='t13.lockbench.refuse.') as temp:
             repo = Path(__file__).resolve().parents[2]
             for index, options in enumerate((
                 ['--samples', '30', '--candidate', 'a' * 40],
@@ -1289,7 +1741,7 @@ class LockPinBenchTests(unittest.TestCase):
                 self.assertFalse(output.exists(), 'a refused measurement started a fixture')
 
     def test_functional_cli_checks_real_lock_protocol_without_timing(self):
-        with tempfile.TemporaryDirectory(prefix='t13.lockbench.', dir=os.environ.get('TMPDIR', '/tmp')) as temp:
+        with tempfile.TemporaryDirectory(prefix='t13.lockbench.') as temp:
             output = Path(temp) / 'run'
             repo = Path(__file__).resolve().parents[2]
             result = subprocess.run([sys.executable, '-I', str(self.script), '--repo', str(repo),
@@ -1381,6 +1833,56 @@ class ExclusivePublishTests(unittest.TestCase):
                 self.module.write_json_at(self.fd, 'taken.json', {'a': 1}, exclusive=True)
             self.assertEqual(raised.exception.errno, errno.EEXIST)
             self.assertEqual(Path(self.tmp.name, 'taken.json').read_text(), '{}')
+
+
+
+class PriorHooksStateTests(unittest.TestCase):
+    """r152-create-3 M1: the prior hooks fact changes whenever the shell's
+    passthrough-shim predicates can change, an ACL-only execute change too."""
+
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('fastpath_prior_hooks', LIB / 'attach-fastpath.py')
+        self.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.module)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.prior = os.path.join(self.tmp.name, 'hooks')
+        os.mkdir(self.prior, 0o700)
+        self.hook = os.path.join(self.prior, 'pre-commit')
+        Path(self.hook).write_text('#!/bin/sh\nexit 0\n')
+        os.chmod(self.hook, 0o700)
+
+    def test_mode_and_new_entries_change_the_state(self):
+        before = self.module.prior_hooks_state(self.prior)
+        os.chmod(self.hook, 0o600)
+        self.assertNotEqual(before, self.module.prior_hooks_state(self.prior))
+        os.chmod(self.hook, 0o700)
+        self.assertEqual(before, self.module.prior_hooks_state(self.prior))
+        Path(self.prior, 'commit-msg').write_text('')
+        self.assertNotEqual(before, self.module.prior_hooks_state(self.prior))
+
+    def test_an_execute_answer_change_alone_changes_the_state(self):
+        # Same stat (an ACL deny-execute leaves mode and owner as they are):
+        # only the effective execute answer differs.
+        real_access = os.access
+        before = self.module.prior_hooks_state(self.prior)
+        def denied(path, mode, *args, **kwargs):
+            if path == self.hook and mode == os.X_OK:
+                return False
+            return real_access(path, mode, *args, **kwargs)
+        with patch.object(self.module.os, 'access', denied):
+            self.assertNotEqual(before, self.module.prior_hooks_state(self.prior))
+        self.assertEqual(before, self.module.prior_hooks_state(self.prior))
+
+    def test_an_unreadable_directory_answer_changes_the_state(self):
+        real_access = os.access
+        before = self.module.prior_hooks_state(self.prior)
+        def unreadable(path, mode, *args, **kwargs):
+            if path == self.prior and mode == os.R_OK:
+                return False
+            return real_access(path, mode, *args, **kwargs)
+        with patch.object(self.module.os, 'access', unreadable):
+            self.assertNotEqual(before, self.module.prior_hooks_state(self.prior))
 
 
 if __name__ == '__main__':

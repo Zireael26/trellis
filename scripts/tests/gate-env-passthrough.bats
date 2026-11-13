@@ -65,10 +65,12 @@ seed_protected_manifest() {
   LOCAL_ONLY='not exported'
   export -n LOCAL_ONLY
   trellis_collect_gate_env "$PROJECT"
-  [ "${#caller_gate_env[@]}" -eq 3 ]
+  policy="$(git -C "$PROJECT" rev-parse refs/remotes/origin/HEAD:.trellis.json)"
+  [ "${#caller_gate_env[@]}" -eq 4 ]
   [ "${caller_gate_env[0]}" = "APP_MODE=$APP_MODE" ]
   [ "${caller_gate_env[1]}" = 'EMPTY_OK=' ]
   [ "${caller_gate_env[2]}" = 'name=caller lowercase value' ]
+  [ "${caller_gate_env[3]}" = "TRELLIS_GATE_ENV_POLICY=$policy" ]
   [ ! -e "$PROJECT/injected" ]
   [ "$(local_registry_manifest_project_id "$PROJECT/.trellis.json")" = fixture ]
 
@@ -84,7 +86,8 @@ SH
   (cd "$PROJECT" && /bin/bash -p "$SANDBOX/bootstrap.sh" "$SANDBOX/bootstrap-env")
   [ "$(<"$SANDBOX/bootstrap-env")" = "APP_MODE=$APP_MODE
 EMPTY_OK=
-name=caller lowercase value" ]
+name=caller lowercase value
+TRELLIS_GATE_ENV_POLICY=$policy" ]
   [ ! -e "$PROJECT/injected" ]
 
   export TMPDIR="$SANDBOX/scratch"
@@ -97,9 +100,9 @@ name=caller lowercase value" ]
   caller_xdg_config=''
   cat > "$SANDBOX/gate-payload.sh" <<'SH'
 #!/bin/bash
-printf 'APP_MODE_SET=%s\nAPP_MODE=%s\nEMPTY_OK_SET=%s\nEMPTY_OK=%s\nABSENT_OK_SET=%s\nHEAD_ONLY_SET=%s\nAPI_TOKEN_SET=%s\n' \
+printf 'APP_MODE_SET=%s\nAPP_MODE=%s\nEMPTY_OK_SET=%s\nEMPTY_OK=%s\nABSENT_OK_SET=%s\nHEAD_ONLY_SET=%s\nAPI_TOKEN_SET=%s\nPOLICY=%s\n' \
   "${APP_MODE+x}" "${APP_MODE-}" "${EMPTY_OK+x}" "${EMPTY_OK-}" \
-  "${ABSENT_OK+x}" "${HEAD_ONLY+x}" "${API_TOKEN+x}" > "$TMPDIR/payload-env"
+  "${ABSENT_OK+x}" "${HEAD_ONLY+x}" "${API_TOKEN+x}" "${TRELLIS_GATE_ENV_POLICY-}" > "$TMPDIR/payload-env"
 SH
   trellis_gate_toolchain_path() { printf '/usr/bin:/bin:/usr/sbin:/sbin\n'; }
   trellis_sync_pnpm_global_virtual_store() { return 0; }
@@ -110,7 +113,20 @@ EMPTY_OK_SET=x
 EMPTY_OK=
 ABSENT_OK_SET=
 HEAD_ONLY_SET=
-API_TOKEN_SET=" ]
+API_TOKEN_SET=
+POLICY=$policy" ]
+}
+
+@test "gate.verdict_reuse beside env_passthrough keeps passthrough; a non-boolean drops it" {
+  seed_protected_manifest '{"schema_version":1,"project_id":"fixture","gate":{"verdict_reuse":false,"env_passthrough":["APP_MODE"]}}'
+  load_gate_env_functions
+  export APP_MODE='reuse opt-out'
+  trellis_collect_gate_env "$PROJECT"
+  [ "${#caller_gate_env[@]}" -eq 2 ]
+  [ "${caller_gate_env[0]}" = 'APP_MODE=reuse opt-out' ]
+  seed_protected_manifest '{"schema_version":1,"project_id":"fixture","gate":{"verdict_reuse":"no","env_passthrough":["APP_MODE"]}}'
+  trellis_collect_gate_env "$PROJECT"
+  [ "${caller_gate_env[*]}" = 'TRELLIS_GATE_ENV_POLICY=none' ]
 }
 
 @test "manifest validator and dispatcher reject malformed, secret, and reserved names" {
@@ -129,6 +145,6 @@ API_TOKEN_SET=" ]
     load_gate_env_functions
     export SAFE_VALUE='not authorized by this manifest'
     trellis_collect_gate_env "$PROJECT"
-    [ "${#caller_gate_env[@]}" -eq 0 ] || { echo "dispatcher accepted $bad_name"; false; }
+    [ "${caller_gate_env[*]}" = 'TRELLIS_GATE_ENV_POLICY=none' ] || { echo "dispatcher accepted $bad_name"; false; }
   done
 }

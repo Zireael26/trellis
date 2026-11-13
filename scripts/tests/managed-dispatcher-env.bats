@@ -984,6 +984,32 @@ run_scratch_pre_push() {
     _ "$SCRATCH_PROJECT" "$SCRATCH_PRE_DISPATCHER" "$SCRATCH_REFS"
 }
 
+# Noninteractive Bash cannot trap signals it inherited as ignored. A runner
+# started with nohup may therefore suppress HUP before this fixture starts.
+# Model that inheritance, then reset the dispositions in a non-shell process
+# before execing the real dispatcher, so this test actually delivers signals.
+run_scratch_pre_push_with_signal_defaults() {
+  local python_bin reset
+  python_bin="$(command -v python3)" || return 1
+  case "$python_bin" in /*) ;; *) return 1 ;; esac
+  reset='import os, signal, sys
+if signal.getsignal(signal.SIGHUP) != signal.SIG_IGN:
+    sys.exit("fixture did not inherit ignored HUP")
+for sig in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, signal.SIG_DFL)
+os.chdir(sys.argv[1])
+fd = os.open(sys.argv[3], os.O_RDONLY)
+os.dup2(fd, 0)
+os.close(fd)
+os.execv("/bin/bash", ["/bin/bash", sys.argv[2], "origin", "fixture"])'
+  run env \
+    "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
+    "HOME=$SCRATCH_CALLER_HOME" \
+    "TMPDIR=$SCRATCH_CALLER_TMP" "TMP=$SCRATCH_CALLER_TMP" "TEMP=$SCRATCH_CALLER_TMP" \
+    /bin/bash -c 'trap "" HUP INT TERM; python="$1"; shift; exec "$python" -c "$@"' \
+    _ "$python_bin" "$reset" "$SCRATCH_PROJECT" "$SCRATCH_PRE_DISPATCHER" "$SCRATCH_REFS"
+}
+
 # Extend and re-seal the existing private fixture, keeping code and manifest
 # paired. No attach/sync/recover/adopt commands or user-global state are needed.
 prepare_item8_carrier_fixture() {
@@ -1081,10 +1107,10 @@ PRIOR
     printf '#!/bin/bash\ngit config core.hooksPath .husky/_\n' > "$ROOT/scratch-prior-hooks/pre-push"
     run_scratch_pre_push
     [ "$status" -eq 1 ] || { echo "$output"; false; }
-    [[ "$output" == *"Direct push to refs/heads/main blocked"* ]]
+    [[ "$output" == *"Direct push to refs/heads/main blocked"* ]] || false
     # Require the carrier's finding, not just the dispatcher's safety net.
     [[ "$output" == *"core.hooksPath: local path"* ]] || { echo "$output"; false; }
-    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]] || false
     [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = .husky/_ ]
   done
   ROOT="$fixture_root"
@@ -1101,11 +1127,11 @@ PRIOR
     fi
     run_scratch_pre_push
     [ "$status" -eq 1 ] || { echo "$output"; false; }
-    [[ "$output" == *"trellis pre-push: core.hooksPath"* ]]
-    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+    [[ "$output" == *"trellis pre-push: core.hooksPath"* ]] || false
+    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]] || false
     [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = .husky/_ ]
     if [ "$carrier" = unavailable ]; then
-      [[ "$output" == *"managed immutable release carrier is unavailable"* ]]
+      [[ "$output" == *"managed immutable release carrier is unavailable"* ]] || false
     else
       [ -f "$SCRATCH_WITNESS/carrier.txt" ]
       rm "$SCRATCH_WITNESS/carrier.txt"
@@ -1161,9 +1187,9 @@ PRIOR
 kill -'"$signal"' "$PPID"
 exit 0' prepare_scratch_fixture
     managed="${SCRATCH_PRE_DISPATCHER%/pre-push}"
-    run_scratch_pre_push
+    run_scratch_pre_push_with_signal_defaults
     [ "$status" -eq "$expected" ] || { echo "signal=$signal status=$status"; echo "$output"; false; }
-    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+    [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]] || false
     [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = .husky/_ ]
     [ -z "$(find "$SCRATCH_ROOT_DIR" -mindepth 1 -print)" ]
   done
@@ -1178,7 +1204,7 @@ exit 0' prepare_scratch_fixture
   git -C "$SCRATCH_PROJECT" config --local core.hooksPath .husky/_
   run_scratch_pre_push
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]]
+  [[ "$output" == *"restore with: $(printf 'git config --replace-all core.hooksPath %q' "$managed")"* ]] || false
   [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = "$managed" ]
   [ "$(git -C "$SCRATCH_PROJECT" config --local --get core.hooksPath)" = .husky/_ ]
 }
@@ -1199,8 +1225,8 @@ git config core.hooksPath .husky/_
 PRIOR
   HUSKY=0 run_scratch_pre_push
   [ "$status" -eq 7 ] || { echo "$output"; false; }
-  [[ "$output" == *"PRIOR_GUARDS=__UNSET__|error|__UNSET__"* ]]
-  [[ "$output" == *"prior pnpm: stale dependencies"* ]]
+  [[ "$output" == *"PRIOR_GUARDS=__UNSET__|error|__UNSET__"* ]] || false
+  [[ "$output" == *"prior pnpm: stale dependencies"* ]] || false
   [ "$(git -C "$SCRATCH_PROJECT" config --get core.hooksPath)" = "$managed" ]
 }
 

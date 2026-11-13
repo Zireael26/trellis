@@ -118,7 +118,7 @@ assert_143_stop_block() {
     assert_143_stop_block "$candidate" 'receipts:'
     run bash "$candidate" <<<'{"last_assistant_message":"Done. <!-- dod-receipt cmd=fixture exit=0 diff=+1 --> <!-- follow-ups: none -->"}'
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
   done
   export CLAUDE_PROJECT_DIR="$docs" CODEX_PROJECT_DIR="$docs"
   printf '# documentation\n' > "$docs/readme.md"
@@ -126,7 +126,7 @@ assert_143_stop_block() {
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run bash "$candidate" <<<'{"last_assistant_message":"Done."}'
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
   done
 }
 
@@ -146,7 +146,7 @@ assert_143_stop_block() {
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run bash "$candidate" <<<'{"last_assistant_message":"Done."}'
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
   done
   git -C "$project" mv src/app.ts docs/app.md
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
@@ -167,7 +167,7 @@ assert_143_stop_block() {
     assert_143_stop_block "$candidate" 'git changed files:'
     run bash "$candidate" <<<'{"last_assistant_message":"Done. <!-- dod-receipt cmd=fixture exit=0 diff=+1 --> <!-- follow-ups: none -->"}'
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
   done
 }
 

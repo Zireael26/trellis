@@ -76,6 +76,11 @@ class LinuxAclClasses(unittest.TestCase):
         with patch.object(release_verify.os, 'getxattr', side_effect=error(errno.EOPNOTSUPP), create=True), \
              patch.object(release_verify.os, 'listxattr', return_value=['system.nfs4_acl'], create=True):
             self.assertTrue(release_verify.AclProbe._linux('/held/link', is_symlink=True, follow_symlinks=False))
+        # r151-muse LOW-3: RichACL and file capabilities are refused too.
+        for name in ('system.richacl', 'security.capability'):
+            with patch.object(release_verify.os, 'getxattr', side_effect=error(errno.ENODATA), create=True), \
+                 patch.object(release_verify.os, 'listxattr', return_value=['user.other', name], create=True):
+                self.assertTrue(release_verify.AclProbe._linux('/held/file', follow_symlinks=False), name)
 
     def test_whole_acl_walk_does_not_classify_a_regular_file_as_a_symlink(self):
         with tempfile.TemporaryDirectory(prefix='release-acl-type-') as tmp:

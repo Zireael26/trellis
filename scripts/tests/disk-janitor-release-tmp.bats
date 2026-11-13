@@ -105,10 +105,10 @@ run_dj() {
   local work="$STORE/.tmp.2.0.0-$DIGEST.DryRun01"
   make_tree "$work"; owner "$work" 2147483647 dead
   run_dj
-  [[ "$output" == *"[delete] $work "* ]]
+  [[ "$output" == *"[delete] $work "* ]] || false
   [ -f "$work/payload/marker" ]; [ -f "$work.owner.json" ]
   run_dj --dry-run
-  [[ "$output" == *"[delete] $work "* ]]
+  [[ "$output" == *"[delete] $work "* ]] || false
   [ -f "$work/payload/marker" ]; [ -f "$work.owner.json" ]
   run_dj --apply </dev/null
   [ -f "$work/payload/marker" ]; [ -f "$work.owner.json" ]
@@ -191,10 +191,10 @@ SH
   jq '.disk_janitor.apply_disabled_scopes = ["release-tmp"]' "$TRELLIS_CONFIG" >"$SANDBOX/policy.tmp"
   mv "$SANDBOX/policy.tmp" "$TRELLIS_CONFIG"
   run_dj --apply --yes
-  [[ "$output" == *"apply disabled for scope release-tmp"* ]]
+  [[ "$output" == *"apply disabled for scope release-tmp"* ]] || false
   [ -f "$work/payload/marker" ]
   run_dj --dry-run
-  [[ "$output" == *"[delete] $work "* ]]
+  [[ "$output" == *"[delete] $work "* ]] || false
   [ -f "$work/payload/marker" ]
   jq '.disk_janitor.apply_disabled_scopes = []' "$TRELLIS_CONFIG" >"$SANDBOX/policy.tmp"
   mv "$SANDBOX/policy.tmp" "$TRELLIS_CONFIG"

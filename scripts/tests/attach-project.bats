@@ -250,6 +250,7 @@ SH
   for hook in core-rules/hooks core-rules/codex/hooks; do
     cp "$REPO_ROOT/$hook/session-start.sh" "$repo/$hook/session-start.sh"
     cp "$REPO_ROOT/$hook/lib/deps.sh" "$repo/$hook/lib/deps.sh"
+    cp "$REPO_ROOT/$hook/lib/deps-heavy.sh" "$repo/$hook/lib/deps-heavy.sh"
     chmod 755 "$repo/$hook/session-start.sh"
   done
   printf '# fixture policy\n' > "$repo/core-rules/CLAUDE.md"
@@ -1045,7 +1046,7 @@ reconcile_exposed_verifier() {
   [ ! -e "$RECONCILE_JOURNAL" ] || return 1
 }
 
-@test "exact-owner reconcile accepts adopted historical inventory without materializing new leaves" {
+@test "exact-owner reconcile accepts an adopted inventory whose new leaf adopt linked" {
   local owner before owner_identity registry_before registry_identity
   run_attach
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1056,8 +1057,9 @@ reconcile_exposed_verifier() {
   jq -e '.release == "1.2.4"' "$owner" || return 1
   jq -e '.projects["personal/fixture-project"].checkouts | all(.release == "1.2.4")' "$TRELLIS_HOME/registry.json" || return 1
   [ "$(readlink "$PROJECT/.trellis/runtime")" = "$TRELLIS_HOME/releases/1.2.4/payload" ] || return 1
-  [ ! -e "$PROJECT/.codex/hooks/native-added.md" ] || return 1
-  [ ! -L "$PROJECT/.codex/hooks/native-added.md" ] || return 1
+  # 1.5.1: adopt links the leaf the new release adds and owns it.
+  [ "$(readlink "$PROJECT/.codex/hooks/native-added.md")" = ../../.trellis/runtime/core-rules/native-added.md ] || return 1
+  jq -e 'any(.artifacts[]; .kind == "symlink" and .path == ".codex/hooks/native-added.md")' "$owner" || return 1
   before="$(sha256_file "$owner")"
   owner_identity="$(fixture_dev_ino "$owner")"
   registry_before="$(sha256_file "$TRELLIS_HOME/registry.json")"
@@ -1068,8 +1070,7 @@ reconcile_exposed_verifier() {
   [ "$(fixture_dev_ino "$owner")" = "$owner_identity" ] || return 1
   [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$registry_before" ] || return 1
   [ "$(fixture_dev_ino "$TRELLIS_HOME/registry.json")" = "$registry_identity" ] || return 1
-  [ ! -e "$PROJECT/.codex/hooks/native-added.md" ] || return 1
-  [ ! -L "$PROJECT/.codex/hooks/native-added.md" ] || return 1
+  [ "$(readlink "$PROJECT/.codex/hooks/native-added.md")" = ../../.trellis/runtime/core-rules/native-added.md ] || return 1
   [ -z "$(git -C "$PROJECT" status --porcelain)" ] || return 1
   [ -z "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' -print)" ] || return 1
 }
@@ -1099,6 +1100,12 @@ reconcile_adopted_group_state() {
   jq -e 'length == 2 and all(.release == "1.3.9")' "$SANDBOX/prior-group.json" || return 1
   cp "$PROJECT/.git/info/exclude" "$SANDBOX/prior-exclude" || return 1
   registry_before="$(jq -cS 'del(.projects["personal/fixture-project"].checkouts[].release)' "$TRELLIS_HOME/registry.json")" || return 1
+  # 1.5.1: adopt links native-growth's new leaf and owns any parent it creates.
+  for root in "$PROJECT" "$sibling"; do
+    for dir in .codex .codex/hooks; do
+      [ -e "$root/$dir" ] || printf '%s\t%s\n' "$root" "$dir"
+    done
+  done > "$SANDBOX/new-parents.tsv"
   make_release 1.3.10 native-growth || return 1
   run env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$HOME/.local/bin/trellis" release adopt 1.3.10 --project fixture-project
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
@@ -1110,6 +1117,10 @@ import base64, hashlib, json, pathlib, sys
 sandbox, payload = map(pathlib.Path, sys.argv[1:])
 owners = json.loads((sandbox / "prior-group.json").read_text())
 live = (sandbox / "prior-exclude").read_bytes()
+new_parents = {}
+for line in (sandbox / "new-parents.tsv").read_text().splitlines():
+    root, directory = line.split("\t")
+    new_parents.setdefault(root, []).append({"kind": "parent", "path": directory})
 block = base64.b64decode(owners[0]["exclude"]["managed_block_base64"], validate=True)
 native_lines = b"/.codex/hooks/native-added.md\n"
 runtime_line = b"/.trellis/runtime\n"
@@ -1136,6 +1147,11 @@ for owner in owners:
     owner["exclude"].update(after_base64=b64(after), after_sha256=sha(after),
                             managed_block_base64=b64(new_block), managed_block_sha256=sha(new_block))
     owner["exclude_block_hash"] = sha(new_block)
+    arts = owner["artifacts"]
+    owner["artifacts"] = ([a for a in arts if a["kind"] == "parent"] + new_parents.get(owner["worktree_root"], [])
+        + [a for a in arts if a["kind"] != "parent"]
+        + [{"kind": "symlink", "path": ".codex/hooks/native-added.md",
+            "target": "../../.trellis/runtime/core-rules/native-added.md"}])
 (sandbox / "expected-group.json").write_text(json.dumps(owners))
 (sandbox / "expected-exclude").write_bytes(candidate)
 PYTHON
@@ -1152,12 +1168,10 @@ PYTHON
   managed="$(git -C "$PROJECT" config --local --get core.hooksPath)" || return 1
   for root in "$PROJECT" "$sibling"; do
     [ "$(readlink "$root/.trellis/runtime")" = "$TRELLIS_HOME/releases/1.3.10/payload" ] || return 1
-    [ ! -e "$root/.codex/hooks/native-added.md" ] || return 1
-    [ ! -L "$root/.codex/hooks/native-added.md" ] || return 1
+    [ "$(readlink "$root/.codex/hooks/native-added.md")" = ../../.trellis/runtime/core-rules/native-added.md ] || return 1
     run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.3.10 "$root"
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    [ ! -e "$root/.codex/hooks/native-added.md" ] || return 1
-    [ ! -L "$root/.codex/hooks/native-added.md" ] || return 1
+    [ "$(readlink "$root/.codex/hooks/native-added.md")" = ../../.trellis/runtime/core-rules/native-added.md ] || return 1
     [ "$(git -C "$root" config --local --get-all core.hooksPath)" = "$managed" ] || return 1
     [ -z "$(git -C "$root" status --porcelain)" ] || return 1
   done
@@ -1266,7 +1280,7 @@ reconcile_inventory_check() {
   owner_before="$(sha256_file "$RECONCILE_OWNER")"
   reconcile_attach
   [ "$status" -eq 3 ] || { echo "$output"; return 1; }
-  [[ "$output" == *'live artifacts disagree with recorded inventory'* ]]
+  [[ "$output" == *'live artifacts disagree with recorded inventory'* ]] || false
   [ "$(sha256_file "$TRELLIS_HOME/registry.json")" = "$before" ]
   [ "$(sha256_file "$RECONCILE_OWNER")" = "$owner_before" ]
   [ ! -e "$RECONCILE_JOURNAL" ]

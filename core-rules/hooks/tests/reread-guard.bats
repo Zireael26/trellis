@@ -181,7 +181,7 @@ run_guard_with_home() {
   # Call 2 — block.
   run_guard "$f"
   [ "$status" -eq 0 ]
-  [[ "$output" == *deny* ]]
+  [[ "$output" == *deny* ]] || false
 }
 
 # =============================================================================
@@ -206,7 +206,7 @@ run_guard_with_home() {
   [ -z "$stderr" ]
   [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.hookEventName // empty')" = "PreToolUse" ]
   [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.permissionDecision // empty')" = "deny" ]
-  [[ "$output" == *"$f"* ]]
+  [[ "$output" == *"$f"* ]] || false
 }
 
 @test "policy precedence: legacy project policy falls back ahead of attached runtime" {
@@ -219,7 +219,7 @@ run_guard_with_home() {
   run_guard "$f"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$stderr" == *"warn 1/1"* ]]
+  [[ "$stderr" == *"warn 1/1"* ]] || false
 }
 
 @test "policy precedence: attached immutable runtime supplies Codex fallback and block contract" {
@@ -235,9 +235,9 @@ run_guard_with_home() {
 
   run_codex_guard "$f"
   [ "$status" -eq 2 ]
-  [[ "$stderr" == *'BLOCKED edit'* ]]
+  [[ "$stderr" == *'BLOCKED edit'* ]] || false
   [ "$(printf '%s' "$output" | jq -r '.decision // empty')" = "block" ]
-  [[ "$output" == *"$f"* ]]
+  [[ "$output" == *"$f"* ]] || false
 }
 
 @test "policy resolution: absent attachment ignores machine and source fallback" {
@@ -251,7 +251,7 @@ run_guard_with_home() {
   run_guard_with_home "$f" "$fake_home"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$stderr" == *"warn 1/2"* ]]
+  [[ "$stderr" == *"warn 1/2"* ]] || false
 }
 
 # =============================================================================
@@ -408,7 +408,7 @@ run_guard_with_home() {
 
   # Third — budget exhausted → BLOCK.
   run_guard "$f"
-  [[ "$output" == *deny* ]]
+  [[ "$output" == *deny* ]] || false
 }
 
 # =============================================================================
@@ -454,13 +454,13 @@ run_guard_with_home() {
 @test "fail-open: malformed stdin JSON → permit (no crash, no block)" {
   run_with_stderr "$GUARD" 'this is not json at all'
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]
+  [[ "$output" != *deny* ]] || false
 }
 
 @test "fail-open: empty target → permit" {
   run_with_stderr "$GUARD" "$(jq -nc --arg tp "$TP" '{transcript_path: $tp, tool_input: {}}')"
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]
+  [[ "$output" != *deny* ]] || false
 }
 
 # =============================================================================
@@ -500,7 +500,7 @@ run_guard_with_home() {
   run_guard "$f"
   [ "$status" -eq 0 ]
   [[ "$output" != *deny* ]] || { echo "$output"; false; }
-  [[ "$stderr" == *"not Read this turn"* ]]
+  [[ "$stderr" == *"not Read this turn"* ]] || false
 }
 
 # =============================================================================
@@ -595,7 +595,7 @@ run_guard_with_home() {
     [ ! -s "$STATE_DIR/$KEY.reads.tsv" ]
   done
   run_guard "$f"; run_guard "$f"; run_guard "$f"
-  [[ "$output" == *'"permissionDecision":"deny"'* ]]
+  [[ "$output" == *'"permissionDecision":"deny"'* ]] || false
 
   # A successful object with failure-like source text must still earn credit.
   run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" \
@@ -681,7 +681,7 @@ run_guard_with_home() {
   run_with_stderr "$GUARD" "$(jq -nc --arg tp "$TP" --arg t "$bad" \
     '{transcript_path: $tp, tool_input: {file_path: $t}}')"
   [ "$status" -eq 0 ]
-  [[ "$output" != *deny* ]]        # never a block on an unmatchable path
+  [[ "$output" != *deny* ]] || false # never a block on an unmatchable path
 }
 
 @test "T50: shell and unknown tools cannot manufacture file-read credit" {

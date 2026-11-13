@@ -186,7 +186,7 @@ dj_agent_matches() {
     if ! dj_agent_value "$plist" StartCalendarInterval dictionary; then
       details+=("schedule: StartCalendarInterval is missing or not a single daily interval")
     else
-      keys="$(printf '%s\n' "$DJ_AGENT_VALUE" | LC_ALL=C sort | tr '\n' ' ')"
+      keys="$(printf '%s\n' "$DJ_AGENT_VALUE" | /usr/bin/env LC_ALL=C sort | tr '\n' ' ')"
       if [ "$keys" != "Hour Minute " ]; then
         details+=("schedule: StartCalendarInterval keys are '${keys% }', expected 'Hour Minute'")
       else
@@ -263,7 +263,8 @@ dj_agent_scan() {
         fi
         local dry_run_rc=0 dry_run_out=""
         if [ -n "$dj_script" ] && [ -x "$dj_script" ]; then
-          dry_run_out="$(TRELLIS_HOME="$trellis_home" HOME="$user_home" "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker" --dry-run 2>&1)" || dry_run_rc=$?
+          dry_run_out="$(/usr/bin/env -u TRELLIS_LIBS_PRELOADED TRELLIS_HOME="$trellis_home" HOME="$user_home" \
+            "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker" --dry-run 2>&1)" || dry_run_rc=$?
         else
           dry_run_rc=126
           dry_run_out="janitor script is missing or not executable: ${dj_script:-not found}"
@@ -530,7 +531,7 @@ dj_agent_verify_watchdog_entry() {
   [ -d "$dest_dir" ] || return 1
   [ ! -L "$dest_dir" ] || return 1
 
-  dir_mode="$(stat -f '%Lp' "$dest_dir" 2>/dev/null || stat -c '%a' "$dest_dir" 2>/dev/null || true)"
+  dir_mode="$(stat -f '%Lp' "$dest_dir" 2>/dev/null)" || dir_mode="$(stat -c '%a' "$dest_dir" 2>/dev/null)" || dir_mode=""
   case "$dir_mode" in
     700|0700) ;;
     *) return 1 ;;
@@ -539,7 +540,7 @@ dj_agent_verify_watchdog_entry() {
   [ -f "$dest_file" ] || return 1
   [ ! -L "$dest_file" ] || return 1
 
-  mode="$(stat -f '%Lp' "$dest_file" 2>/dev/null || stat -c '%a' "$dest_file" 2>/dev/null || true)"
+  mode="$(stat -f '%Lp' "$dest_file" 2>/dev/null)" || mode="$(stat -c '%a' "$dest_file" 2>/dev/null)" || mode=""
   case "$mode" in
     500|0500) ;;
     *) return 1 ;;

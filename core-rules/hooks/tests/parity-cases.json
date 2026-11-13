@@ -1987,6 +1987,136 @@
       "expect": "allow"
     },
     {
+      "id": "gate-verdict-redirect",
+      "command": "printf '{}' > ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-tee",
+      "command": "echo x | tee $TRELLIS_HOME/state/gate-verdicts/logs/x.log",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-kill-switch-removal",
+      "command": "cd ~/.trellis/state/gate-verdicts && rm -f reuse-disabled",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read",
+      "command": "ls ~/.trellis/state/gate-verdicts 2>/dev/null",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-dot-path-unlink",
+      "command": "unlink ~/.trellis/state/./gate-verdicts/reuse-disabled",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-double-slash",
+      "command": "printf x > $TRELLIS_HOME/state//gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-dot-dot",
+      "command": "printf x >> ~/.trellis/state/x/../gate-verdicts/logs/a.log",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-trailing-slash-move",
+      "command": "mv /tmp/forged/ ~/.trellis/state/gate-verdicts/",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-alias-hard-link",
+      "command": "ln gv-alias/gate-verdicts/verdicts/k.json k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-link-command",
+      "command": "link ~/.trellis/state/gate-verdicts/logs/a.log a.log",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-relative-after-cd",
+      "command": "cd ~/.trellis/state && unlink ./gate-verdicts/reuse-disabled",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-parent-rename",
+      "command": "mv ~/.trellis/state ~/.trellis/state-backup",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-parent-rename-spelled",
+      "command": "mv $TRELLIS_HOME/./state/. /tmp/state-backup",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-parent-rename-trailing-slash",
+      "command": "mv \"${TRELLIS_HOME}/state/\" /tmp/s",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-parent-rename-dot-dot",
+      "command": "mv ~/.trellis/state/gate-notes/.. /tmp/s",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-home-rename",
+      "command": "mv ~/.trellis ~/.trellis-old",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-parent-rename-after-cd",
+      "command": "cd ~/.trellis && mv state state-backup",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-parent-replace",
+      "command": "rsync -a --delete /tmp/evil/ ~/.trellis/state/",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-home-rename-relative",
+      "command": "cd ~ && mv .trellis trellis-old",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-parent-rename-relative-home",
+      "command": "cd \"$HOME\" && mv ./.trellis/state /tmp/s",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-parent-read",
+      "command": "ls -la ~/.trellis/state 2>/dev/null",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-neighbour-name",
+      "command": "printf x > ~/.trellis/state/gate-verdicts-notes",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-neighbour-name-outside-home",
+      "command": "printf x > ./gate-verdicts-notes",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-fixture-name",
+      "command": "cp scripts/tests/fixtures/process-gate-verdicts.txt out.txt",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-project-state-dir",
+      "command": "mv src/state src/store",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-release-script",
+      "command": "python3 ~/.trellis/releases/1.5.0/payload/scripts/x.py",
+      "expect": "allow"
+    },
+    {
       "id": "sweep-fx1-truncate-bare",
       "command": "clickhouse --query \"TRUNCATE users;\"",
       "expect": "deny:sql-truncate"
@@ -1997,12 +2127,12 @@
       "expect": "deny:sql-truncate"
     },
     {
-      "id": "sweep-fx1-secrets-relative",
+      "id": "sweep-fx1-secdir-relative",
       "command": "cat secrets/token",
       "expect": "deny:secrets-read"
     },
     {
-      "id": "sweep-fx1-secrets-relative-dot",
+      "id": "sweep-fx1-secdir-relative-dot",
       "command": "cat ./secrets/key",
       "expect": "deny:secrets-read"
     },
@@ -2117,17 +2247,17 @@
       "expect": "deny:sql-truncate"
     },
     {
-      "id": "sweep-fx1-M2-secrets-quoted-double",
+      "id": "sweep-fx1-M2-secdir-quoted-double",
       "command": "cat \"secrets/token\"",
       "expect": "deny:secrets-read"
     },
     {
-      "id": "sweep-fx1-M2-secrets-quoted-single",
+      "id": "sweep-fx1-M2-secdir-quoted-single",
       "command": "cat 'secrets/token'",
       "expect": "deny:secrets-read"
     },
     {
-      "id": "sweep-fx1-M2-secrets-redir",
+      "id": "sweep-fx1-M2-secdir-redir",
       "command": "cat <secrets/token",
       "expect": "deny:secrets-read"
     },
@@ -2212,12 +2342,12 @@
       "expect": "allow"
     },
     {
-      "id": "sweep-fx1-L8-curl-secrets-url",
+      "id": "sweep-fx1-L8-curl-secdir-url",
       "command": "curl -s https://api.example.com/repos/org/my-deploy/actions/secrets/public-key",
       "expect": "allow"
     },
     {
-      "id": "sweep-fx1-L9-grep-secrets",
+      "id": "sweep-fx1-L9-grep-secdir",
       "command": "grep -rn secrets/ docs",
       "expect": "allow"
     },
@@ -2295,6 +2425,171 @@
       "id": "sweep-fx1-R2-L1-rm-home-after-or",
       "command": "test -d x || rm -rf ~/cache 2>/dev/null",
       "expect": "deny:rm-outside-cwd"
+    },
+    {
+      "id": "gate-verdict-tar-extract-into-store",
+      "command": "tar -xf /tmp/evil.tar -C $TRELLIS_HOME/state/gate-verdicts",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-unzip-into-store",
+      "command": "unzip -o /tmp/evil.zip -d ~/.trellis/state/gate-verdicts/verdicts",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-ditto-into-store",
+      "command": "ditto -x -k /tmp/evil.zip ~/.trellis/state/gate-verdicts",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-cpio-into-store",
+      "command": "cpio -id -D ~/.trellis/state/gate-verdicts < /tmp/a.cpio",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-7z-into-store",
+      "command": "7z x /tmp/evil.7z -o~/.trellis/state/gate-verdicts",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-patch-store-file",
+      "command": "patch ~/.trellis/state/gate-verdicts/verdicts/k.json < /tmp/p.diff",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-ed-store-file",
+      "command": "ed -s ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-git-work-tree-store",
+      "command": "git --work-tree=~/.trellis/state/gate-verdicts checkout -f",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-rename-store",
+      "command": "rename 's/gate-verdicts/old/' ~/.trellis/state/gate-verdicts",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-chown-store-file",
+      "command": "chown nobody ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-setfattr-store-file",
+      "command": "setfattr -n user.x -v 1 ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read-then-pipe-writer",
+      "command": "cat ~/.trellis/state/gate-verdicts/verdicts/k.json | tee ~/.trellis/state/gate-verdicts/verdicts/k2.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read-then-xargs",
+      "command": "ls ~/.trellis/state/gate-verdicts/verdicts | xargs rm",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read-with-substitution",
+      "command": "cat $(tar -xf /tmp/e.tar -C ~/.trellis/state/gate-verdicts)",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read-then-writer-next-line",
+      "command": "cat ~/.trellis/state/gate-verdicts/verdicts/k.json\ntar -xf /tmp/e.tar -C /tmp/y",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read-redirect-out",
+      "command": "cat /tmp/forged.json > ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read-rw-open",
+      "command": "cat 3<> ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-rename-parent",
+      "command": "rename 's/state/state-backup/' ~/.trellis/state",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-tar-under-state",
+      "command": "tar -xf /tmp/e.tar -C ~/.trellis/state/x",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-unzip-deep-under-state",
+      "command": "unzip /tmp/e.zip -d \"$TRELLIS_HOME/state/x/y\"",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-tar-relative-under-state-after-cd",
+      "command": "cd ~/.trellis && tar -xf /tmp/e.tar -C state/x",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-mv-parent-via-dotdot-after-cd",
+      "command": "cd ~/.trellis/releases && mv ../state /tmp/s",
+      "expect": "deny:gate-verdict-ancestor-write"
+    },
+    {
+      "id": "gate-verdict-allow-cat-store-file",
+      "command": "cat ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-allow-ls-store",
+      "command": "ls -la ~/.trellis/state/gate-verdicts 2>/dev/null",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-allow-read-only-pipeline",
+      "command": "head -c 100 ~/.trellis/state/gate-verdicts/logs/a.log | wc -c && jq . ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-allow-hash-and-test",
+      "command": "sha256sum ~/.trellis/state/gate-verdicts/logs/a.log; test -e ~/.trellis/state/gate-verdicts/reuse-disabled && echo disabled",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-allow-ls-state-after-cd",
+      "command": "cd ~/.trellis/state && ls -la",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-allow-cat-under-state",
+      "command": "cat ~/.trellis/state/roles-resolved.json",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-allow-release-script",
+      "command": "cd ~/.trellis/releases/1.5.0 && ./bin/trellis doctor",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-allow-read-with-fd-duplication",
+      "command": "cat ~/.trellis/state/gate-verdicts/logs/x.log 2>&1 1>&2",
+      "expect": "allow"
+    },
+    {
+      "id": "gate-verdict-read-background-then-writer",
+      "command": "cat ~/.trellis/state/gate-verdicts/k & tar -xf /tmp/e.tar -C ~/.trellis/state/gate-verdicts",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-read-redirect-both",
+      "command": "cat /tmp/forged &> ~/.trellis/state/gate-verdicts/verdicts/k.json",
+      "expect": "deny:gate-verdict-direct-write"
+    },
+    {
+      "id": "gate-verdict-file-compile-in-store",
+      "command": "cd ~/.trellis/state/gate-verdicts/verdicts && file -C -m k.json",
+      "expect": "deny:gate-verdict-direct-write"
     }
   ],
   "reread": [

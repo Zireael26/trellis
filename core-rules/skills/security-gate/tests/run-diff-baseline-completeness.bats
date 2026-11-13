@@ -104,7 +104,7 @@ INCOMPLETE='{"schema":"security-gate.baseline.v2","profile":"web-next","complete
   docs_change
   run_diff
   [ "$status" -eq 0 ] || { echo "rc=$status; $output"; false; }
-  [[ "$output" == *"Overall: MERGEABLE"* ]]
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || false
   [[ "$output" == *"Baseline:          complete — ${BASELINE##*/}"* ]] || { echo "$output"; false; }
 }
 
@@ -113,7 +113,7 @@ INCOMPLETE='{"schema":"security-gate.baseline.v2","profile":"web-next","complete
   docs_change
   run_diff
   [ "$status" -eq 0 ] || { echo "rc=$status; $output"; false; }
-  [[ "$output" == *"Overall: MERGEABLE"* ]]
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || false
   [[ "$output" == *"Baseline:          baseline completeness unknown (pre-1.4.2 baseline) — ${BASELINE##*/}"* ]] || { echo "$output"; false; }
 }
 

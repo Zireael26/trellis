@@ -1830,8 +1830,8 @@ EOF
   : > "$FAKE_STATE/probe-fails"
   run_stop "$harness"; [ "$status" -eq 0 ]; [ "$(calls eslint)" -eq 2 ]
   run_stop "$harness"; [ "$status" -eq 0 ]; [ "$(calls eslint)" -eq 3 ]
-  [[ "$output" != *'checks reused'* ]]
-  [[ "$output" == *'eslint version probe failed'* ]]
+  [[ "$output" != *'checks reused'* ]] || false
+  [[ "$output" == *'eslint version probe failed'* ]] || false
 }
 
 @test "R2 L2: Claude failed ESLint probes cannot reuse an otherwise reusable pass" {

@@ -43,7 +43,7 @@ EOF
   out="$(run_hook "$HOOK")"
   ctx="$(extract_ctx "$out")"
   [[ "$ctx" == *"Unresolved gotchas"* ]] || { echo "$ctx"; false; }
-  [[ "$ctx" == *"## Unresolved"* ]]
+  [[ "$ctx" == *"## Unresolved"* ]] || false
 }
 
 @test "M2.1: gotchas detector matches a deeper heading (### Unresolved gotchas)" {
@@ -54,7 +54,7 @@ EOF
 Body.
 EOF
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
-  [[ "$ctx" == *"### Unresolved gotchas"* ]]
+  [[ "$ctx" == *"### Unresolved gotchas"* ]] || false
 }
 
 @test "M2.1: gotchas detector matches a dated heading containing UNRESOLVED" {
@@ -65,7 +65,7 @@ EOF
 Body.
 EOF
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
-  [[ "$ctx" == *"UNRESOLVED: pre-push gate missing"* ]]
+  [[ "$ctx" == *"UNRESOLVED: pre-push gate missing"* ]] || false
 }
 
 # --- Gotchas detector: status field match ---
@@ -78,7 +78,7 @@ Status: unresolved
 Body.
 EOF
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
-  [[ "$ctx" == *"Status: unresolved"* ]]
+  [[ "$ctx" == *"Status: unresolved"* ]] || false
 }
 
 @test "M2.1: gotchas detector matches a **unresolved** status tag" {
@@ -89,7 +89,7 @@ EOF
 Body.
 EOF
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
-  [[ "$ctx" == *"**unresolved**"* ]]
+  [[ "$ctx" == *"**unresolved**"* ]] || false
 }
 
 # --- Gotchas detector: free-text mentions do NOT match ---
@@ -103,7 +103,7 @@ This issue is now resolved (was unresolved on 2026-04-01).
 EOF
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
   # Section header should not appear at all because no anchored match exists.
-  [[ "$ctx" != *"Unresolved gotchas"* ]]
+  [[ "$ctx" != *"Unresolved gotchas"* ]] || false
 }
 
 @test "M2.1: gotchas detector ignores body text 'mentions unresolved status'" {
@@ -114,7 +114,7 @@ EOF
 Some body text mentions unresolved status in passing.
 EOF
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
-  [[ "$ctx" != *"Unresolved gotchas"* ]]
+  [[ "$ctx" != *"Unresolved gotchas"* ]] || false
 }
 
 @test "M2.1: gotchas detector ignores **Fix.** UNRESOLVED. (different bold label)" {
@@ -125,7 +125,7 @@ EOF
 **Fix.** UNRESOLVED.
 EOF
   ctx="$(extract_ctx "$(run_hook "$HOOK")")"
-  [[ "$ctx" != *"Unresolved gotchas"* ]]
+  [[ "$ctx" != *"Unresolved gotchas"* ]] || false
 }
 
 # --- Codex parity: same gotchas regex must apply ---
@@ -138,7 +138,7 @@ EOF
 This issue is now resolved (was unresolved on 2026-04-01).
 EOF
   ctx="$(extract_ctx "$(run_hook "$CODEX_HOOK")")"
-  [[ "$ctx" != *"Unresolved gotchas"* ]]
+  [[ "$ctx" != *"Unresolved gotchas"* ]] || false
 }
 
 @test "M2.1: Codex copy matches the same heading shape" {
@@ -149,7 +149,7 @@ EOF
 Body.
 EOF
   ctx="$(extract_ctx "$(run_hook "$CODEX_HOOK")")"
-  [[ "$ctx" == *"## Unresolved"* ]]
+  [[ "$ctx" == *"## Unresolved"* ]] || false
 }
 
 # --- Context-log injection size sanity ---
@@ -272,7 +272,7 @@ hookspath_ctx() {
   git -C "$PROJECT_DIR" config --local core.hooksPath .husky/_
   hookspath_ctx "$CODEX_HOOK"
   [[ "$ctx" == *'core.hooksPath is ".husky/_"'*'`trellis doctor --fix`'* ]] || { echo "$ctx"; false; }
-  [[ "$ctx" != *'git config'* ]]
+  [[ "$ctx" != *'git config'* ]] || false
   git -C "$PROJECT_DIR" config --local core.hooksPath "$HP_MANAGED"
   hookspath_ctx "$CODEX_HOOK"
   [[ "$ctx" != *'core.hooksPath'* ]] || { echo "$ctx"; false; }

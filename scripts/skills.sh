@@ -19,6 +19,9 @@
 
 set -euo pipefail
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 case "$0" in
   */*) SKILLS_SCRIPT_DIR="$(CDPATH='' cd -- "${0%/*}" && pwd -P)" ;;
   *)   SKILLS_SCRIPT_DIR="$(CDPATH='' cd -- "." && pwd -P)" ;;
@@ -52,7 +55,7 @@ skills_uuid() {
   if command -v uuidgen >/dev/null 2>&1; then
     raw="$(uuidgen | tr '[:upper:]' '[:lower:]')" || return "$TRELLIS_EX_UNAVAILABLE"
   else
-    raw="$(LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | sed 's/^\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)$/\1-\2-\3-\4-\5/')" || return "$TRELLIS_EX_UNAVAILABLE"
+    raw="$(/usr/bin/env LC_ALL=C od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n' | sed 's/^\(.\{8\}\)\(.\{4\}\)\(.\{4\}\)\(.\{4\}\)\(.\{12\}\)$/\1-\2-\3-\4-\5/')" || return "$TRELLIS_EX_UNAVAILABLE"
   fi
   [ -n "$raw" ] || return "$TRELLIS_EX_UNAVAILABLE"
   printf '%s\n' "$raw"
@@ -200,7 +203,7 @@ skills_all_skill_roots() {
     skill_roots_for_harnesses claude codex pi
     skill_roots_for_harnesses pi
     skill_roots_for_harnesses codex
-  } | LC_ALL=C sort -u
+  } | /usr/bin/env LC_ALL=C sort -u
 }
 
 # Release user skill names: basenames of shipped user-surface link
@@ -244,7 +247,7 @@ skills_store_names() {
       names="$names${d##*/}"$'\n'
     done
   fi
-  [ -z "$names" ] || printf '%s' "$names" | LC_ALL=C sort
+  [ -z "$names" ] || printf '%s' "$names" | /usr/bin/env LC_ALL=C sort
 }
 
 skills_store_names_json() {

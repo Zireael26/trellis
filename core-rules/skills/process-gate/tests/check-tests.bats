@@ -144,7 +144,7 @@ printf '%s|%s|%s|%s\n' "$PWD" "$js" "$python" "$go" >> "$MUTATION_LOG"
 [ "$((js + python + go))" -gt 0 ] || exit 0
 case "${MUTATION_BEHAVIOR:-kill}" in
   survive) exit 0 ;;
-  timeout) sleep 5; exit 0 ;;
+  timeout) exec sleep 30 ;;
   *)       exit 1 ;;
 esac
 SH
@@ -187,6 +187,9 @@ SH
   git -C "$PROJECT_DIR" commit -qm "change test contract"
 }
 
+# The product default ceiling (30s) bounds each clone, checkout, control and
+# mutant step. A 3s ceiling flaked under machine load (load average ~90): one
+# slow `git clone` turned "killed" into "skipped". The timeout test sets 5s.
 run_mutation_gate() {
   run env \
     "MUTATION_LOG=$MUTATION_LOG" \
@@ -195,7 +198,7 @@ run_mutation_gate() {
     "PROCESS_GATE_LINT_CMD=true" \
     "PROCESS_GATE_TEST_CMD=./mutation-runner.sh" \
     "PROCESS_GATE_MUTATION_SPOTCHECK=${PROCESS_GATE_MUTATION_SPOTCHECK:-1}" \
-    "PROCESS_GATE_MUTATION_TIMEOUT=${PROCESS_GATE_MUTATION_TIMEOUT:-3}" \
+    "PROCESS_GATE_MUTATION_TIMEOUT=${PROCESS_GATE_MUTATION_TIMEOUT:-30}" \
     bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
 }
 
@@ -386,7 +389,7 @@ seed_autodetect_javascript() {
   # The guard kept the cmd empty, so npm was never asked to run a missing
   # script — no "Missing script" / "npm error" text in the output.
   [[ "$output" != *"Missing script"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"npm error"* ]]
+  [[ "$output" != *"npm error"* ]] || false
 }
 
 # --- Case 2: no package.json / pyproject / go.mod (pure shell/docs repo) ---
@@ -430,7 +433,7 @@ seed_autodetect_javascript() {
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
   # The broken root-level go commands were never built/run.
   [[ "$output" != *"command not found"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"go vet"* ]]
+  [[ "$output" != *"go vet"* ]] || false
 }
 
 # --- Case 5 (DL-P7-07 Go): go.work workspace ROOT, no Makefile vet/lint/test ---
@@ -460,7 +463,7 @@ seed_autodetect_javascript() {
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
   # The broken root-level workspace commands must not have been constructed.
-  [[ "$output" != *"does not contain modules"* ]]
+  [[ "$output" != *"does not contain modules"* ]] || false
 }
 
 # --- Case 6 (DL-P7-07 Python): pyproject [tool.mypy] but mypy NOT runnable ---
@@ -520,7 +523,7 @@ JSON
   [ "$status" -ne 1 ]
   [ "$status" -eq 0 ] || [ "$status" -eq 2 ]
   # The scoped grep kept the test cmd EMPTY → npm was never invoked.
-  [[ "$output" != *"FAKE-NPM-INVOKED"* ]]
+  [[ "$output" != *"FAKE-NPM-INVOKED"* ]] || false
 }
 
 # --- Case 8 (DL-P7-09 Go): partial Makefile — ONLY a `test:` target ---
@@ -545,7 +548,7 @@ JSON
   # The absent vet/lint targets must NOT have been driven through make.
   [[ "$output" != *"No rule to make target"* ]] || { echo "$output"; false; }
   [[ "$output" != *"make vet"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"make lint"* ]]
+  [[ "$output" != *"make lint"* ]] || false
 }
 
 # --- Case 9 (DL-P7-09 BRIGHT LINE): declared make target whose recipe FAILS ---
@@ -908,12 +911,15 @@ JSON
 @test "mutation command timeout warns and stays bounded" {
   make_mutation_fixture js
   MUTATION_BEHAVIOR=timeout
-  PROCESS_GATE_MUTATION_TIMEOUT=1
+  # The ceiling bounds every step, so the control (which exits at once) must
+  # also fit: 1s flaked under load as "isolated control timed out". The mutant
+  # execs sleep 30, far past the ceiling, and is killed there.
+  PROCESS_GATE_MUTATION_TIMEOUT=5
   run_mutation_gate
   local gate_status="$status" gate_output="$output"
 
   [ "$gate_status" -eq 2 ] || { echo "$gate_output"; false; }
-  [[ "$gate_output" == *"assertion flip timed out after 1s in tests/a.test.js"* ]] ||
+  [[ "$gate_output" == *"assertion flip timed out after 5s in tests/a.test.js"* ]] ||
     { echo "$gate_output"; false; }
 
   run git -C "$PROJECT_DIR" status --porcelain --untracked-files=no
@@ -1214,7 +1220,7 @@ SH
   chmod +x "$PROJECT_DIR/control-runner.sh"
   git -C "$PROJECT_DIR" add control-runner.sh
   git -C "$PROJECT_DIR" commit -q --amend --no-edit
-  run env "PROCESS_GATE_TYPECHECK_CMD=true" "PROCESS_GATE_LINT_CMD=true" "PROCESS_GATE_TEST_CMD=./control-runner.sh" "PROCESS_GATE_MUTATION_SPOTCHECK=1" "PROCESS_GATE_MUTATION_TIMEOUT=3" bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
+  run env "PROCESS_GATE_TYPECHECK_CMD=true" "PROCESS_GATE_LINT_CMD=true" "PROCESS_GATE_TEST_CMD=./control-runner.sh" "PROCESS_GATE_MUTATION_SPOTCHECK=1" "PROCESS_GATE_MUTATION_TIMEOUT=30" bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" == *"isolated control exited 3"* ]] || { echo "$output"; false; }
   [[ "$output" == *"CONTROL-STDERR-SENTINEL"* ]] || { echo "$output"; false; }
@@ -1244,7 +1250,7 @@ SH
   chmod +x "$PROJECT_DIR/mutant-runner.sh"
   git -C "$PROJECT_DIR" add mutant-runner.sh
   git -C "$PROJECT_DIR" commit -q --amend --no-edit
-  run env "PROCESS_GATE_TYPECHECK_CMD=true" "PROCESS_GATE_LINT_CMD=true" "PROCESS_GATE_TEST_CMD=./mutant-runner.sh" "PROCESS_GATE_MUTATION_SPOTCHECK=1" "PROCESS_GATE_MUTATION_TIMEOUT=3" bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
+  run env "PROCESS_GATE_TYPECHECK_CMD=true" "PROCESS_GATE_LINT_CMD=true" "PROCESS_GATE_TEST_CMD=./mutant-runner.sh" "PROCESS_GATE_MUTATION_SPOTCHECK=1" "PROCESS_GATE_MUTATION_TIMEOUT=30" bash -c 'cd "$1" && "$2" --range=HEAD~1..HEAD' _ "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" == *"assertion flip survived"* ]] || { echo "$output"; false; }
   [[ "$output" == *"MUTANT-STDERR-SENTINEL"* ]] || { echo "$output"; false; }

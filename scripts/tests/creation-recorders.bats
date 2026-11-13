@@ -66,8 +66,8 @@ assert_record() {
   git commit --allow-empty -qm b1
   run bash "$DB" resolve --format=kv
   [ "$status" -eq 0 ]
-  [[ "$output" == *"DB_BASE_SHA=$ATIP"* ]]
-  [[ "$output" == *"DB_SOURCE=recorded"* ]]
+  [[ "$output" == *"DB_BASE_SHA=$ATIP"* ]] || false
+  [[ "$output" == *"DB_SOURCE=recorded"* ]] || false
 }
 
 @test "worktree add records A despite null previous head and uses common config" {
@@ -151,7 +151,7 @@ PYFIX
   : > "$REPO/.git/config.lock"
   run git checkout -b feature/b feature/a
   [ "$status" -eq 0 ]
-  [[ "$output" == *"trellis post-checkout: warning: could not record branch creation base"* ]]
+  [[ "$output" == *"trellis post-checkout: warning: could not record branch creation base"* ]] || false
   [ "$(git symbolic-ref --short HEAD)" = feature/b ]
   run git config --local --get branch.feature/b.trellisParent
   [ "$status" -eq 1 ]
@@ -175,7 +175,7 @@ p.write_text(s)
 PY
   run git checkout -b feature/b feature/a
   [ "$status" -eq 0 ]
-  [[ "$output" == *"warning: could not record branch creation base"* ]]
+  [[ "$output" == *"warning: could not record branch creation base"* ]] || false
   run git config --local --get branch.feature/b.trellisParent
   [ "$status" -eq 1 ]
 }
@@ -265,7 +265,7 @@ PY
   git checkout -q feature/a
   run bash "$FEATURE" refused
   [ "$status" -eq 1 ]
-  [[ "$output" == *"expected main/master"* ]]
+  [[ "$output" == *"expected main/master"* ]] || false
   [ "$(git symbolic-ref --short HEAD)" = feature/a ]
   [ ! -e "$REPO/specs/001-refused" ]
 }
@@ -288,9 +288,9 @@ PY
 @test "new-feature rejects --from without a parent or with --no-branch" {
   run bash "$FEATURE" missing --from
   [ "$status" -eq 2 ]
-  [[ "$output" == *"--from requires a parent ref"* ]]
+  [[ "$output" == *"--from requires a parent ref"* ]] || false
   run bash "$FEATURE" conflicting --from feature/a --no-branch
   [ "$status" -eq 2 ]
-  [[ "$output" == *"--from cannot be combined with --no-branch"* ]]
+  [[ "$output" == *"--from cannot be combined with --no-branch"* ]] || false
   [ "$(git symbolic-ref --short HEAD)" = main ]
 }

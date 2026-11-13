@@ -139,8 +139,8 @@ hy_slug() {
     ''|-*|.*|*[[:cntrl:]]*) return 2 ;;
   esac
   slug="$(printf '%s' "$branch" | tr '/' '-')"
-  if [ "$(printf '%s' "$slug" | LC_ALL=C wc -c | tr -d ' ')" -gt "$_HY_SLUG_MAX_BYTES" ]; then
-    slug="$(printf '%s' "$slug" | LC_ALL=C cut -c1-80 | iconv -f UTF-8 -t UTF-8 -c)-$(_hy_sha256 "$branch" | cut -c1-12)"
+  if [ "$(printf '%s' "$slug" | /usr/bin/env LC_ALL=C wc -c | tr -d ' ')" -gt "$_HY_SLUG_MAX_BYTES" ]; then
+    slug="$(printf '%s' "$slug" | /usr/bin/env LC_ALL=C cut -c1-80 | iconv -f UTF-8 -t UTF-8 -c)-$(_hy_sha256 "$branch" | cut -c1-12)"
   fi
   printf '%s\n' "$slug"
 }

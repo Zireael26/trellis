@@ -13,6 +13,9 @@
 # refuse at cutover, so `--fix` reports the owning migration instead.
 set -u
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 DOCTOR_EX_USAGE=2
 DOCTOR_EX_CONFLICT=3
@@ -1145,6 +1148,12 @@ while [ "$#" -gt 0 ]; do
 done
 [ "$DO_DRY_RUN" -eq 0 ] || [ "$DO_FIX" -eq 1 ] || { echo 'doctor: --dry-run requires --fix' >&2; exit 2; }
 [ "$DO_ADOPT_HUSKY" -eq 0 ] || [ "$DO_FIX" -eq 1 ] || { echo 'doctor: --adopt-husky requires --fix' >&2; exit 2; }
+# Read-only runs reuse a checkout's sibling-owner scan across its rows
+# (hc_portable_managed_hooks); --fix can change hook state between rows.
+# shellcheck disable=SC2034  # Read by hc_portable_managed_hooks (health-checks.sh).
+HC_PORTABLE_SCAN_MEMO=0
+# shellcheck disable=SC2034
+[ "$DO_FIX" -eq 1 ] || HC_PORTABLE_SCAN_MEMO=1
 [ -z "$ONLY_FLEET" ] || trellis_home_require_fleet_name "$ONLY_FLEET" || exit "$?"
 [ -z "$ONLY_PROJECT" ] || local_registry_require_project_id "$ONLY_PROJECT" || exit "$?"
 command -v jq >/dev/null 2>&1 || { echo 'doctor: jq is required' >&2; exit "$TRELLIS_EX_UNAVAILABLE"; }
@@ -1346,15 +1355,16 @@ hc_usage_cli() {
   # Bounded parser probes validate the public visibility routes and the private
   # receipt help route without entering watch, receipt begin/bind, refresh,
   # collection, or any provider/network path. Help output is intentionally
-  # discarded so diagnostics remain content-free.
+  # discarded so diagnostics remain content-free. Prevent Python from writing
+  # bytecode into HOME or the release tree during these read-only probes.
   for route in strip watch report receipt; do
-    if ! TRELLIS_HOME="$probe_home" "$cli" "$route" --help >/dev/null 2>&1; then
+    if ! PYTHONDONTWRITEBYTECODE=1 TRELLIS_HOME="$probe_home" "$cli" "$route" --help >/dev/null 2>&1; then
       printf 'usage-federation %s help route failed validation' "$route"
       return "$HC_WARN"
     fi
   done
 
-  probe_json="$(TRELLIS_HOME="$probe_home" "$cli" doctor --json 2>/dev/null)" && rc=0 || rc=$?
+  probe_json="$(/usr/bin/env PYTHONDONTWRITEBYTECODE=1 TRELLIS_HOME="$probe_home" "$cli" doctor --json 2>/dev/null)" && rc=0 || rc=$?
   case "$rc" in
     5)
       if printf '%s' "$probe_json" | jq -e '.store.available == false' >/dev/null 2>&1; then
@@ -2011,7 +2021,7 @@ apply_safe_repair() {
         return 0
       fi
       repair_tool="$(active_cli_repair_tool)" || return "$?"
-      "$repair_tool" attach --home "$HOME_PATH" --fleet "$fleet" --release "$release" "${binding[@]}" "${args[@]}" "$root"
+      /usr/bin/env -u TRELLIS_LIBS_PRELOADED "$repair_tool" attach --home "$HOME_PATH" --fleet "$fleet" --release "$release" "${binding[@]}" "${args[@]}" "$root"
       ;;
     relink)
       [ -n "$owner_sha256" ] && [ -n "$owner_parent_dev_ino" ] || return "$TRELLIS_EX_STATE"
@@ -2021,7 +2031,7 @@ apply_safe_repair() {
         return 0
       fi
       repair_tool="$(active_cli_repair_tool)" || return "$?"
-      "$repair_tool" relink --home "$HOME_PATH" --fleet "$fleet" "${binding[@]}" "$root"
+      /usr/bin/env -u TRELLIS_LIBS_PRELOADED "$repair_tool" relink --home "$HOME_PATH" --fleet "$fleet" "${binding[@]}" "$root"
       ;;
     *) return "$TRELLIS_EX_USAGE" ;;
   esac
@@ -2210,6 +2220,128 @@ EOF
     report '  ' "$HC_ERROR" "local registry: could not inspect rows outside --project $SAFE_ONLY_PROJECT for identity drift" "$DOCTOR_EX_STATE"
   fi
 fi
+# Batch only positive artifact checks; every uncertainty keeps the old row
+# predicate and its diagnostic. TRELLIS_HOME and below keep full tokens;
+# strict ancestors retain identity and mode. If a same-UID process swaps an
+# ancestor away and restores it during the batch, a verdict can describe the
+# other tree. Artifact leaves can also change after verification: read-only doctor only; same verify-then-report window as a per-row check, longer at scale.
+doctor_owner_artifacts_prepare() {
+  local home="$1" snapshot="$2" owner token batch binding expected line checkout worktree i=0 count=0 bound_count=0
+  local -a owners before verdicts bound_owners bound_before
+  shift 2
+  _HC_DOCTOR_OWNER_HOME=""
+  _HC_DOCTOR_OWNER_COUNT=0
+  _HC_DOCTOR_OWNER_PATHS=()
+  _HC_DOCTOR_OWNER_TOKENS=()
+  export -n _HC_DOCTOR_OWNER_HOME _HC_DOCTOR_OWNER_COUNT _HC_DOCTOR_OWNER_PATHS _HC_DOCTOR_OWNER_TOKENS
+  owners=(); before=(); verdicts=(); bound_owners=(); bound_before=()
+  for owner in "$@"; do
+    checkout="${owner%/*}"; checkout="${checkout##*/}"
+    worktree="${owner##*/}"; worktree="${worktree%.json}"
+    # Do not even batch-read an unsafe or absent owner; its row decides alone.
+    if hc_portable_owner_path_is_safe "$home" "$owner" "$checkout" "$worktree" &&
+       [ -f "$owner" ] && [ ! -L "$owner" ] && [ "$(_attachment_mode "$owner")" = 600 ] &&
+       token="$(_local_registry_file_token "${owner%/*}" "$owner" /)" &&
+       token="$(_hc_doctor_owner_chain_token "$owner" "$home" "$token")" && [ -n "$token" ]; then
+      owners[$count]="$owner"
+      before[$count]="$token"
+      count=$((count + 1))
+    fi
+  done
+  [ "$count" -gt 0 ] || return 0
+  doctor_scratch_require || return 0
+  expected="$(_attachment_paths_json "${owners[@]}")" || return 0
+  # Both shell-function calls and their children use private scratch; restore
+  # the caller's TMPDIR and export attribute when this function returns.
+  local TMPDIR="$DOCTOR_SCRATCH_DIR"
+  export TMPDIR
+  # Before the artifact reader visits any recorded root, bind each record to
+  # its selected registry row. Inputs must be exactly one document per path.
+  # shellcheck disable=SC2154  # The exact-inputs jq definition comes from attachment.sh.
+  binding="$(trellis_jq -r -n --arg home "$home" \
+    --argjson expected "$expected" --slurpfile snapshot "$snapshot" "$_attachment_exact_inputs_def
+      [exact_inputs | . as \$d | any(\$snapshot[0].entries[];
+        .kind == \"worktree\" and .availability == \"available\" and .identity.state == \"verified\" and
+        (\$d.path == (\$home + \"/state/attachments/\" + .checkout_id + \"/\" + .worktree_id + \".json\")) and
+        (\$d.record.project_root == .root) and (\$d.record.worktree_root == .root) and
+        (\$d.record.fleet == .fleet) and (\$d.record.project_id == .project_id) and
+        (\$d.record.checkout_id == .checkout_id) and (\$d.record.worktree_id == .worktree_id) and
+        (\$d.record.attachment_id == .attachment_id) and (\$d.record.release == .release) and
+        (\$d.record.status == \"committed\") and
+        (try (\$d.record | ($_attachment_owner_schema_filter)) catch false))] | .[]
+    " "${owners[@]}" 2>/dev/null || exit 1; printf '.')" || return 0
+  binding="${binding%.}"
+  case "$binding" in *$'\n') binding="${binding%$'\n'}" ;; *) return 0 ;; esac
+  while IFS= read -r line; do
+    [ "$i" -lt "$count" ] || return 0
+    case "$line" in
+      true)
+        bound_owners[$bound_count]="${owners[$i]}"
+        bound_before[$bound_count]="${before[$i]}"
+        bound_count=$((bound_count + 1)) ;;
+      false) ;;
+      *) return 0 ;;
+    esac
+    i=$((i + 1))
+  done <<< "$binding"
+  [ "$i" -eq "$count" ] && [ "$bound_count" -gt 0 ] || return 0
+  owners=("${bound_owners[@]}"); before=("${bound_before[@]}"); count="$bound_count"; i=0
+  # Preserve trailing newlines while capturing so extra/unterminated lines
+  # cannot turn a partial stream into a usable proof.
+  batch="$(attachment_owner_artifact_verdicts_readonly "$home" "${owners[@]}" 2>/dev/null || exit 1; printf '.')" || return 0
+  batch="${batch%.}"
+  case "$batch" in *$'\n') batch="${batch%$'\n'}" ;; *) return 0 ;; esac
+  while IFS= read -r line; do
+    [ "$i" -lt "$count" ] || return 0
+    case "$line" in
+      "0"$'\t'"${owners[$i]}") verdicts[$i]=0 ;;
+      "1"$'\t'"${owners[$i]}") verdicts[$i]=1 ;;
+      *) return 0 ;;
+    esac
+    i=$((i + 1))
+  done <<< "$batch"
+  [ "$i" -eq "$count" ] || return 0
+  _HC_DOCTOR_OWNER_HOME="$home"
+  i=0
+  while [ "$i" -lt "$count" ]; do
+    owner="${owners[$i]}"
+    if [ "${verdicts[$i]}" = 0 ] &&
+       token="$(_local_registry_file_token "${owner%/*}" "$owner" /)" &&
+       token="$(_hc_doctor_owner_chain_token "$owner" "$home" "$token")" &&
+       [ -n "$token" ] && [ "$token" = "${before[$i]}" ]; then
+      _HC_DOCTOR_OWNER_PATHS[$_HC_DOCTOR_OWNER_COUNT]="$owner"
+      _HC_DOCTOR_OWNER_TOKENS[$_HC_DOCTOR_OWNER_COUNT]="$token"
+      _HC_DOCTOR_OWNER_COUNT=$((_HC_DOCTOR_OWNER_COUNT + 1))
+    fi
+    i=$((i + 1))
+  done
+  return 0
+}
+
+# The snapshot is already validated and selected by fleet. Project selection
+# is applied here as well as in the row loop. A failed collection is a miss.
+if [ "$DO_FIX" -eq 0 ]; then
+  doctor_owner_candidates=(); doctor_owner_candidate_count=0
+  if doctor_owner_rows="$(jq -r --arg project "$ONLY_PROJECT" '
+    .entries[]
+    | select(.kind == "worktree" and .availability == "available" and .identity.state == "verified")
+    | select((.status // "") != "unavailable")
+    | select($project == "" or .project_id == $project)
+    | select((.attachment_id | type) == "string" and (.attachment_id | length) > 0)
+    | select((.checkout_id | type) == "string" and (.checkout_id | test("^[0-9a-f]{64}$")))
+    | select((.worktree_id | type) == "string" and (.worktree_id | test("^[0-9a-f]{64}$")))
+    | "\(.checkout_id)/\(.worktree_id).json"
+  ' "$SNAPSHOT" 2>/dev/null)"; then
+    while IFS= read -r doctor_owner_row; do
+      [ -n "$doctor_owner_row" ] || continue
+      doctor_owner_candidates[$doctor_owner_candidate_count]="$HOME_PATH/state/attachments/$doctor_owner_row"
+      doctor_owner_candidate_count=$((doctor_owner_candidate_count + 1))
+    done <<< "$doctor_owner_rows"
+    if [ "$doctor_owner_candidate_count" -gt 0 ]; then
+      doctor_owner_artifacts_prepare "$HOME_PATH" "$SNAPSHOT" "${doctor_owner_candidates[@]}" 2>/dev/null
+    fi
+  fi
+fi
 while IFS= read -r row; do
   fleet="$(printf '%s\n' "$row" | jq -r '.fleet')"
   project_id="$(printf '%s\n' "$row" | jq -r '.project_id')"
@@ -2329,7 +2461,8 @@ while IFS= read -r row; do
       if [ "$DO_DRY_RUN" -eq 1 ]; then
         report '  ' "$HC_INFO" 'attachment checks would run now (dry run; nothing was changed)'
       else
-        postjob_output="$(TRELLIS_HOME="$HOME_PATH" bash "$SCRIPT_DIR/lib/attach-postjob.sh" run --sync --target "$root" </dev/null 2>&1)" || true
+        postjob_output="$(/usr/bin/env -u TRELLIS_LIBS_PRELOADED TRELLIS_HOME="$HOME_PATH" \
+          bash "$SCRIPT_DIR/lib/attach-postjob.sh" run --sync --target "$root" </dev/null 2>&1)" || true
         [ -z "$postjob_output" ] || printf '%s\n' "$postjob_output" | sed 's/^/    /'
       fi
     fi
@@ -2348,6 +2481,18 @@ while IFS= read -r row; do
     report '  ' "$HC_ERROR" 'immutable release: registry worktree has no recorded release' "$DOCTOR_EX_STATE"
   fi
   excludes_ok=false; surfaces_ok=false
+  # 1.5.1: excludes, native surfaces and manifest leaves each expand this
+  # release's surface plan. Pin it once; the pin keeps an identical plan across
+  # rows, so a checkout with many worktrees expands it once per run.
+  if [ "$release_ok" = true ] &&
+     pin_normalized="$(hc_portable_normalize_harnesses "$harnesses" 2>/dev/null)"; then
+    pin_harnesses=()
+    while IFS= read -r pin_harness; do
+      [ -n "$pin_harness" ] && pin_harnesses+=("$pin_harness")
+    done < <(printf '%s\n' "$pin_normalized" | jq -r '.[]')
+    [ "${#pin_harnesses[@]}" -eq 0 ] ||
+      hc_portable_surface_plan_pin "$HOME_PATH" "$release" "$payload/payload" "${pin_harnesses[@]}" || :
+  fi
   if [ "$owner_state" = attached ] || [ "$owner_state" = runtime-missing ]; then
     if [ -n "$payload" ] &&
        run_check '  ' hc_portable_excludes "$HOME_PATH" "$owner" "$payload/payload" "$harnesses"; then excludes_ok=true; fi

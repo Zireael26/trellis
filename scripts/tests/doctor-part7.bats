@@ -769,19 +769,19 @@ EOF
   touch "$hp/poetry.lock" "$hp/uv.lock"
   run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]]
+  [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]] || false
 
   rm "$hp/uv.lock"
   run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"python=$fake_bin/python; mypy=$fake_bin/mypy; pytest=$fake_bin/pytest"* ]]
-  [[ "$output" != *"poetry run"* ]]
+  [[ "$output" == *"python=$fake_bin/python; mypy=$fake_bin/mypy; pytest=$fake_bin/pytest"* ]] || false
+  [[ "$output" != *"poetry run"* ]] || false
 
   rm "$hp/poetry.lock"
   touch "$hp/uv.lock"
   run env -u SHARED_INFRA_ROOT PATH="$fake_bin:$PATH" bash "$DOCTOR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]]
+  [[ "$output" == *"python=$fake_bin/uv run python; mypy=$fake_bin/uv run mypy; pytest=$fake_bin/uv run pytest"* ]] || false
 }
 
 @test "gate-interpreters: absent tools are explicit without failing unrelated checks" {

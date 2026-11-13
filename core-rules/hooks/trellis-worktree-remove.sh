@@ -36,7 +36,8 @@ export GIT_OPTIONAL_LOCKS=0
 # Removal is always `git worktree remove`, never rm and never --force. A
 # worktree with a Trellis owner record is detached first (`trellis detach`),
 # because a plain remove orphans the record and breaks later attaches for the
-# checkout. Everything runs in the foreground (spec 074 T49): exit 0 only once
+# checkout. After the remove, its local registry row is retired with
+# `trellis registry deregister --worktree-root` (1.5.1), which detach leaves. Everything runs in the foreground (spec 074 T49): exit 0 only once
 # the directory is gone. The whole removal holds the create hook's per-path
 # creation lock, which a create holds through population and its foreground
 # sync: a create in progress is waited for, and a create that starts
@@ -117,6 +118,22 @@ owner_record() {
   [ -f "$owner" ] && [ ! -L "$owner" ] || return 2
   jq -e 'type == "object" and .status == "committed" and (.artifacts | type == "array") and ((.renders // []) | type == "array")' "$owner" >/dev/null 2>&1 || return 2
   printf '%s\n' "$owner"
+}
+
+# registry_fleets WT — each fleet whose local registry row names WT's exact
+# checkout and worktree identity, one per line; nothing when there is no row
+# or the registry cannot be read. Read before the remove: the identity needs
+# the worktree.
+registry_fleets() {
+  local identity home
+  identity="$(local_registry_identity_for_root "$1" 2>/dev/null)" || return 0
+  home="$(trellis_home_resolve "" 2>/dev/null)" || return 0
+  [ -f "$home/registry.json" ] && [ ! -L "$home/registry.json" ] || return 0
+  printf '%s\n' "$identity" | jq -r --slurpfile registry "$home/registry.json" '
+    .checkout_id as $c | .worktree_id as $w
+    | [$registry[0].projects | objects | .[] | objects
+       | select((.checkouts | objects | .[$c] | objects | .worktrees | objects | .[$w]) != null)
+       | .fleet | strings] | unique | .[]' 2>/dev/null || :
 }
 
 # is_owned WT ENTRY OWNED — ENTRY is one of OWNED (newline-separated relative
@@ -308,7 +325,7 @@ unpushed() {
 finish() {
   local main="$2" branch="$3" owned="${4:-}" owner="${5:-}" proven="${6:-}" proven_sha="${7:-}"
   local waited=0 limit="$WAIT_LIMIT"
-  local reasons sha now_branch owner_rc
+  local reasons sha now_branch owner_rc fleets fleet
   while sync_running "$WT"; do
     [ "$SECONDS" -lt "$limit" ] || keep "its create-time trellis worktree sync is still running after ${limit}s"
     sleep 1
@@ -328,6 +345,10 @@ finish() {
     owner_rc=$?
     [ "$owner_rc" -eq 1 ] || keep "cannot resolve its Trellis owner record"
   fi
+  # Detach keeps the registry row; once the directory is gone that row only
+  # reports "unavailable: retained local registry row". Find it while the
+  # worktree still resolves, and retire it after the remove below.
+  fleets="$(registry_fleets "$WT")"
   # The merge proof covers one commit on one branch. A commit or checkout
   # raced in during the detach (or the sync) is proven afresh or keeps WT.
   sha="$(git -C "$WT" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null)" || keep "cannot resolve HEAD after the detach"
@@ -344,6 +365,13 @@ finish() {
   [ "$(git -C "$WT" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null)" = "$sha" ] || keep "HEAD moved during the final check"
   git -C "$main" worktree remove "$WT" >&2 || keep "git worktree remove refused"
   rm -f "$(state_dir)/$(state_key "$WT").sync.pid"
+  # The path is gone, so deregister needs no --force. A failure leaves only
+  # the dead row, which doctor reports; the worktree is still removed.
+  while IFS= read -r fleet; do
+    [ -n "$fleet" ] || continue
+    trellis registry deregister --fleet "$fleet" --worktree-root "$WT" < /dev/null >&2 ||
+      say "removed $WT; its registry row remains (rerun: trellis registry deregister --fleet $fleet --worktree-root $WT)"
+  done <<< "$fleets"
   case "$branch" in
     worktree-*)
       if [ "$proven" -eq 0 ]; then

@@ -327,7 +327,7 @@ trellis_home_require_absolute_safe_path() {
 }
 
 trellis_home_is_valid_fleet_name() {
-  printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'
+  printf '%s' "$1" | /usr/bin/env LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'
 }
 
 trellis_home_require_fleet_name() {
@@ -341,7 +341,7 @@ trellis_home_require_fleet_name() {
 }
 
 trellis_home_is_valid_lock_name() {
-  printf '%s' "$1" | LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'
+  printf '%s' "$1" | /usr/bin/env LC_ALL=C grep -Eq '^[a-z0-9][a-z0-9._-]{0,63}$'
 }
 
 trellis_home_require_lock_name() {
@@ -355,7 +355,7 @@ trellis_home_require_lock_name() {
 }
 
 trellis_home_is_valid_semver() {
-  printf '%s' "$1" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+  printf '%s' "$1" | /usr/bin/env LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
 }
 
 # NORMATIVE DEFINITION of the release-store execution-payload predicate.
@@ -741,10 +741,10 @@ trellis_process_birth() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     command -v python3 >/dev/null 2>&1 || return 1
     program="$(trellis_process_birth_python)" || return 1
-    LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
+    /usr/bin/env LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
     return 0
   fi
-  LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
+  /usr/bin/env LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
   return 0
 }
 
@@ -808,9 +808,9 @@ trellis_home_lock_is_initializing() {
 # registry and attachment paths.
 trellis_home_lock_stat() {
   if [ "$(/usr/bin/uname -s 2>/dev/null)" = Darwin ]; then
-    LC_ALL=C /usr/bin/stat -f '%d:%i:%u:%Lp:%m:%c:%z:%l' -- "$1" 2>/dev/null
+    /usr/bin/env LC_ALL=C /usr/bin/stat -f '%d:%i:%u:%Lp:%m:%c:%z:%l' -- "$1" 2>/dev/null
   else
-    LC_ALL=C /usr/bin/stat -c '%d:%i:%u:%a:%Y:%Z:%s:%h' -- "$1" 2>/dev/null
+    /usr/bin/env LC_ALL=C /usr/bin/stat -c '%d:%i:%u:%a:%Y:%Z:%s:%h' -- "$1" 2>/dev/null
   fi
 }
 
@@ -828,7 +828,7 @@ trellis_home_lock_pid_is_empty() {
   [ -f "$pid_path" ] && [ ! -L "$pid_path" ] || return 1
   if [ "$size" -eq 0 ]; then [ ! -s "$pid_path" ]; return "$?"; fi
   [ "$size" -le 4096 ] || return 1
-  values="$(LC_ALL=C /usr/bin/od -An -v -tu1 -- "$pid_path" 2>/dev/null)" || return 1
+  values="$(/usr/bin/env LC_ALL=C /usr/bin/od -An -v -tu1 -- "$pid_path" 2>/dev/null)" || return 1
   values="${values//$'\n'/ }"
   IFS=$' \t\n' read -r -a bytes <<< "$values"
   [ "${#bytes[@]}" -eq "$size" ] || return 1

@@ -2,6 +2,7 @@
 # An unreadable claim namespace is not evidence that it is empty.
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 LIB="$REPO_ROOT/scripts/lib/attachment.sh"
+FS_MODULE="$REPO_ROOT/scripts/lib/attachment_fs.py"
 
 setup() {
   SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/w2-claims.XXXXXX")"
@@ -16,17 +17,16 @@ shell_check() {
 }
 
 python_check() {
-  python3 -I - "$LIB" "$SANDBOX/parent/artifact" <<'PY'
-import os
+  # The one Python implementation, shared by the attach publisher and the
+  # native detach program.
+  python3 -I - "$FS_MODULE" "$SANDBOX/parent/artifact" <<'PY'
+import importlib.util
 import sys
 
-with open(sys.argv[1], encoding='utf-8') as f:
-    source = f.read()
-start = source.index('def claim_namespace_valid(path, removal):')
-end = source.index('\n\nclass Commit(object):', start)
-namespace = {'os': os, 'REMOVE_PREFIX': '.trellis-attachment-remove-'}
-exec(compile(source[start:end], sys.argv[1], 'exec'), namespace)
-sys.exit(0 if namespace['claim_namespace_valid'](sys.argv[2], None) else 1)
+spec = importlib.util.spec_from_file_location("attachment_fs", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+sys.exit(0 if module.claim_namespace_valid(sys.argv[2], None) else 1)
 PY
 }
 

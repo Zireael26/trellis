@@ -181,8 +181,8 @@ review() {
   [ "$(calls)" -eq 2 ]
   payload_diff 2 | grep -q '+def epsilon'
   run payload_diff 2
-  [[ "$output" != *'def alpha'* ]]
-  [[ "$output" != *'gamma.py'* ]]
+  [[ "$output" != *'def alpha'* ]] || false
+  [[ "$output" != *'gamma.py'* ]] || false
 }
 
 @test "after a completed review the next one sees only the delta (codex)" {
@@ -193,7 +193,7 @@ review() {
   [ "$(calls)" -eq 2 ]
   payload_diff 2 | grep -q '+def epsilon'
   run payload_diff 2
-  [[ "$output" != *'def alpha'* ]]
+  [[ "$output" != *'def alpha'* ]] || false
 }
 
 @test "a commit that leaves the reviewed tree unchanged is not reviewed again" {
@@ -283,7 +283,7 @@ review() {
     [ "$(calls)" -eq "$((n + 2))" ]
     payload_diff "$((n + 2))" | grep -q '+new_after_history'
     run payload_diff "$((n + 2))"
-    [[ "$output" != *'def alpha'* ]]
+    [[ "$output" != *'def alpha'* ]] || false
   done
 }
 

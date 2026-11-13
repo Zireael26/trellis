@@ -44,9 +44,9 @@ state_dir() { [ "$1" = claude ] && echo "$PROJECT_DIR/.claude/.reread-state" || 
 @test "CLI writes a private, expiring record and a logged breadcrumb" {
   run "$REPO/scripts/trellis" reread override --session "$SID" --reason "operator-approved stale edit"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"override for session key $KEY active for 600s"* ]]
+  [[ "$output" == *"override for session key $KEY active for 600s"* ]] || false
   [ -f "$RECORDS/$KEY" ]
-  [ "$(stat -f %Lp "$RECORDS" 2>/dev/null || stat -c %a "$RECORDS")" = 700 ]
+  [ "$(stat -c %a "$RECORDS" 2>/dev/null || stat -f %Lp "$RECORDS")" = 700 ]
   IFS=$'\t' read -r expires created reason < "$RECORDS/$KEY"
   [ "$((expires - created))" -eq 600 ]
   [ "$reason" = "operator-approved stale edit" ]
@@ -112,7 +112,7 @@ state_dir() { [ "$1" = claude ] && echo "$PROJECT_DIR/.claude/.reread-state" || 
   for t in "$RECORDS/$KEY" "$RECORDS/new" "$RECORDS/../reread-overrides/x" "$TRELLIS_HOME/State/Reread-Overrides/x"; do
     guard claude "$t"
     [ "$status" -eq 0 ] && [[ "$output" == *'"permissionDecision":"deny"'* ]] || { echo "$t: $output"; false; }
-    [[ "$output" == *"written only by trellis reread override"* ]]
+    [[ "$output" == *"written only by trellis reread override"* ]] || false
     guard codex "$t"
     [ "$status" -eq 2 ] && [[ "$output" == *'"decision":"block"'* ]] || { echo "$t: $status $output"; false; }
     [[ "$output" == *"written only by trellis reread override"* ]] || { echo "$t: $output"; false; }

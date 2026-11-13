@@ -244,8 +244,8 @@ launcher_real_directory() {
 launcher_release_has_no_acl() {
   local release_dir="$1" listing
   case "$(uname -s)" in
-    Darwin) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -lde {} + 2>/dev/null)" || return 1 ;;
-    *) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -ld {} + 2>/dev/null)" || return 1 ;;
+    Darwin) listing="$(/usr/bin/env LC_ALL=C find "$release_dir" -exec /bin/ls -lde {} + 2>/dev/null)" || return 1 ;;
+    *) listing="$(/usr/bin/env LC_ALL=C find "$release_dir" -exec /bin/ls -ld {} + 2>/dev/null)" || return 1 ;;
   esac
   printf '%s\n' "$listing" |
     /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }'
@@ -253,7 +253,7 @@ launcher_release_has_no_acl() {
 
 launcher_not_writable() {
   local path="$1" permissions write_bits
-  permissions="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
+  permissions="$(/usr/bin/env LC_ALL=C /bin/ls -ld "$path" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
   case "$permissions" in *+*) return 1 ;; esac
   write_bits="$(/usr/bin/printf '%s' "$permissions" | /usr/bin/awk '{p=substr($0, 1, 10); print substr(p, 3, 1) substr(p, 6, 1) substr(p, 9, 1)}')"
   [ "$write_bits" = "---" ]
@@ -267,12 +267,12 @@ launcher_acl_free_permissions() {
   local path="$1" listing
   # OSTYPE is initialized by the clean Bash, never an inherited selector.
   case "$OSTYPE" in
-    darwin*) listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1 ;;
-    linux*) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
+    darwin*) listing="$(/usr/bin/env LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1 ;;
+    linux*) listing="$(/usr/bin/env LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
     *)
-      listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || {
+      listing="$(/usr/bin/env LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || {
         [ "$(/usr/bin/uname -s 2>/dev/null)" != Darwin ] || return 1
-        listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1
+        listing="$(/usr/bin/env LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1
       }
       ;;
   esac
@@ -325,7 +325,7 @@ launcher_collect_permissions() {
 
   : > "$rows" || return 1
   [ -s "$paths_nul" ] || return 0
-  LC_ALL=C /usr/bin/xargs -0 /bin/ls -fdl < "$paths_nul" > "$ls_rows" || return 1
+  /usr/bin/env LC_ALL=C /usr/bin/xargs -0 /bin/ls -fdl < "$paths_nul" > "$ls_rows" || return 1
   /usr/bin/awk '{
     if ($1 ~ /\+/) exit 42
     print substr($1, 1, 10)
@@ -847,8 +847,8 @@ launcher_verify_release_body() (
       printf '%s\n' "$path" >> "$manifest_dirs"
     done
   done < "$manifest_paths"
-  LC_ALL=C sort "$manifest_paths" > "$tmp/manifest.paths.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
-  LC_ALL=C sort -u "$manifest_dirs" > "$tmp/manifest.dirs.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
+  /usr/bin/env LC_ALL=C sort "$manifest_paths" > "$tmp/manifest.paths.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
+  /usr/bin/env LC_ALL=C sort -u "$manifest_dirs" > "$tmp/manifest.dirs.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
 
   if ! (
     CDPATH='' cd "$payload" || exit 1
@@ -892,8 +892,8 @@ launcher_verify_release_body() (
       return "$TRELLIS_EX_STATE"
     fi
   done < "$actual_raw"
-  LC_ALL=C sort "$actual_paths" > "$tmp/actual.paths.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
-  LC_ALL=C sort "$actual_dirs" > "$tmp/actual.dirs.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
+  /usr/bin/env LC_ALL=C sort "$actual_paths" > "$tmp/actual.paths.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
+  /usr/bin/env LC_ALL=C sort "$actual_dirs" > "$tmp/actual.dirs.sorted" || return "$TRELLIS_EX_UNAVAILABLE"
   if ! diff -u "$tmp/manifest.paths.sorted" "$tmp/actual.paths.sorted" >/dev/null 2>&1; then
     launcher_error "configured release payload has missing or added paths"
     return "$TRELLIS_EX_STATE"
@@ -904,7 +904,7 @@ launcher_verify_release_body() (
   fi
 
   if [ -s "$actual_link_paths_nul" ]; then
-    LC_ALL=C xargs -0 readlink < "$actual_link_paths_nul" > "$actual_link_targets" || {
+    /usr/bin/env LC_ALL=C xargs -0 readlink < "$actual_link_paths_nul" > "$actual_link_targets" || {
       launcher_error "could not read configured release symlink"
       return "$TRELLIS_EX_STATE"
     }
@@ -1838,10 +1838,10 @@ launcher_process_birth() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     command -v python3 >/dev/null 2>&1 || return 1
     program="$(launcher_process_birth_python)" || return 1
-    LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
+    /usr/bin/env LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
     return 0
   fi
-  LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
+  /usr/bin/env LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
   return 0
 }
 
@@ -3210,7 +3210,7 @@ launcher_exec_stamp() {
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
   program="$(launcher_exec_snapshot_python)" || return "$TRELLIS_EX_UNAVAILABLE"
   stamp="$(launcher_release_stamp_python)" || return "$TRELLIS_EX_UNAVAILABLE"
-  LC_ALL=C "$python_bin" -I -c "$program" "$stamp" "$@" 2>/dev/null
+  /usr/bin/env LC_ALL=C "$python_bin" -I -c "$program" "$stamp" "$@" 2>/dev/null
 }
 
 launcher_is_sha256() {
@@ -3566,6 +3566,17 @@ EXCLUDE_PLANNER = (
 )
 RELEASE_TARGET = "scripts/release.sh"
 UPGRADE_TARGET = "scripts/upgrade.sh"
+# The release store's one-process verifier. A bundle has no payload pathname to
+# run it from, so its manifest-checked bytes travel in the bundle as data and
+# release-store.sh runs them with `python3 -I -c` inside this verified bundle
+# only. A payload without it keeps the shell verify pass.
+VERIFY_PROGRAM = "scripts/lib/release_verify.py"
+# Optional pair: older payloads keep the scalar registry classifier. Both
+# programs, when present, travel as manifest-checked data, never as paths.
+REGISTRY_PROGRAMS = (
+    "scripts/lib/registry_identity_batch.py",
+    "scripts/lib/attachment_fs.py",
+)
 UPGRADE_BODY_MARKER = b"# -- trellis upgrade body --\n"
 # The one token a bundle-capable upgrade body must consult before it accepts
 # in-memory release execution. Its absence is the new-launcher/old-payload skew.
@@ -3770,8 +3781,10 @@ try:
         state("snapshot release record is malformed")
 
     planner_sources = EXCLUDE_PLANNER if EXCLUDE_PLANNER[-1] in tree else ()
+    verify_sources = (VERIFY_PROGRAM,) if VERIFY_PROGRAM in tree else ()
+    registry_sources = REGISTRY_PROGRAMS if all(path in tree for path in REGISTRY_PROGRAMS) else ()
     sources = {}
-    for relative in (CARRIER,) + LIBRARIES + planner_sources + TARGETS:
+    for relative in (CARRIER,) + LIBRARIES + planner_sources + verify_sources + registry_sources + TARGETS:
         expected = tree.get(relative)
         if expected is None:
             if command == "upgrade" and relative == UPGRADE_TARGET:
@@ -3797,9 +3810,10 @@ try:
     # check and is already retained in memory.
     token = os.urandom(32).hex().encode("ascii")
     route = command.encode("ascii")
+    # Loaded functions belong to this shell; never export the marker to execs.
     output = [
         b"TRELLIS_LIBS_PRELOADED=1\n",
-        b"export TRELLIS_LIBS_PRELOADED\n",
+        b"export -n TRELLIS_LIBS_PRELOADED\n",
         b"TRELLIS_VERIFIED_COMMAND_BUNDLE=" + route + b"\n",
         b"TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN=" + token + b"\n",
         b"trellis_command_bundle_is_verified() {\n",
@@ -3815,6 +3829,12 @@ try:
     def emit(payload):
         output.extend((b"\n", payload, b"" if payload.endswith(b"\n") else b"\n"))
 
+    for relative in verify_sources:
+        output.append(b"_TRELLIS_BUNDLED_RELEASE_VERIFY_PROGRAM='"
+                      + sources[relative].replace(b"'", b"'\\''") + b"'\n")
+    for relative, variable in zip(registry_sources, (
+            b"_TRELLIS_BUNDLED_REGISTRY_BATCH_PROGRAM", b"_TRELLIS_BUNDLED_ATTACHMENT_FS_PROGRAM")):
+        output.append(variable + b"='" + sources[relative].replace(b"'", b"'\\''") + b"'\n")
     for relative in LIBRARIES + planner_sources:
         emit(sources[relative])
     if command == "upgrade":
@@ -4201,7 +4221,7 @@ launcher_derive_command_scratch() {
   }
   python_bin="$(command -v python3)" || return "$TRELLIS_EX_UNAVAILABLE"
   program="$(launcher_command_scratch_create_program)" || return "$TRELLIS_EX_UNAVAILABLE"
-  record="$(LC_ALL=C "$python_bin" -I -c "$program" "$home")" || return "$?"
+  record="$(/usr/bin/env LC_ALL=C "$python_bin" -I -c "$program" "$home")" || return "$?"
   case "$record" in
     *$'\t'*$'\t'*) ;;
     *) return "$TRELLIS_EX_STATE" ;;

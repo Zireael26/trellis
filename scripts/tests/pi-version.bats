@@ -43,7 +43,7 @@ registry_with() {
   stub_pi "echo 1.0.0"
   run hc_pi_version "$SANDBOX/no-registry.json"
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"1.0.0"* ]]
+  [[ "$output" == *"1.0.0"* ]] || false
 }
 
 @test "at or above 1.1.0 -> silent OK" {
@@ -86,7 +86,7 @@ registry_with() {
   local start=$SECONDS
   run hc_pi_version "$REG"
   [ "$status" -eq "$HC_INFO" ] || { echo "status=$status $output"; return 1; }
-  [[ "$output" == *"unreadable"* ]]
+  [[ "$output" == *"unreadable"* ]] || false
   [ $((SECONDS - start)) -lt 10 ]
 }
 
@@ -94,18 +94,18 @@ registry_with() {
   registry_with '["claude","pi"]'
   run hc_pi_version "$REG"
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"not found"* ]]
-  [[ "$output" == *"1.1.0"* ]]
+  [[ "$output" == *"not found"* ]] || false
+  [[ "$output" == *"1.1.0"* ]] || false
 }
 
 @test "pi absent and not selected by any checkout -> INFO" {
   registry_with '["claude","codex"]'
   run hc_pi_version "$REG"
   [ "$status" -eq "$HC_INFO" ]
-  [[ "$output" == *"not found"* ]]
+  [[ "$output" == *"not found"* ]] || false
   run hc_pi_version "$SANDBOX/no-registry.json"
   [ "$status" -eq "$HC_INFO" ]
-  [[ "$output" == *"not found"* ]]
+  [[ "$output" == *"not found"* ]] || false
 }
 
 @test "portable doctor reports the row only when it is not healthy" {

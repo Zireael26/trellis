@@ -614,3 +614,186 @@ setup() {
 
 # BEGIN LANE serial-tail
 # END LANE serial-tail
+
+# BEGIN LANE upgrade151
+# 1.5.1: adoption converges on the target plan. A leaf the target release adds
+# (1.5.0 added hooks/lib/attach-verdict.sh) is linked, with any missing parent
+# directory, and owned; an interruption removes both again.
+@test "adoption links a leaf the new release adds, with its new parent, and rolls it back on interruption" {
+  local version_a=1.9.6 version_b=1.9.7 repo project owner owner_before payload_a barrier adopt_log hook_swap_pid
+  repo="$(build_release_repo "$version_a")"
+  install_release "$version_a" "$repo"
+  payload_a="$RELEASE_DIR/payload"
+  repo="$(build_retiring_release_repo "$version_b")"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/introducing"
+  make_portable_project "$project" introducing
+  attach_portable_project "$project" personal "$version_a"
+  owner="$(owner_for_root "$project")"
+  [ ! -e "$project/.codex" ] || false
+  owner_before="$(cat "$owner")"
+
+  barrier="$RELEASE_TEST_HOOK_BARRIER"
+  adopt_log="$SANDBOX/introducing-adopt.log"
+  mkdir "$barrier"
+  env TRELLIS_HOME="$TRELLIS_HOME_FIX" \
+    bash "$RELEASE" adopt "$version_b" --project introducing > "$adopt_log" 2>&1 &
+  RELEASE_PROCESS_PID_A=$!
+  wait_for_release_barrier "$barrier/hook-swap-after-exchange.ready" "$RELEASE_PROCESS_PID_A" "$adopt_log"
+  [ "$(readlink "$project/.codex/hooks/retired.md")" = ../../.trellis/runtime/core-rules/retired.md ] || false
+  hook_swap_pid="$(cat "$barrier/hook-swap-after-exchange.pid")"
+  kill -TERM "$hook_swap_pid"
+  wait_for_release_process "$RELEASE_PROCESS_PID_A"
+  [ "$RELEASE_PROCESS_STATUS" -ne 0 ] || { cat "$adopt_log"; false; }
+  RELEASE_PROCESS_PID_A=""
+  rm -rf "$barrier"
+  [ ! -e "$project/.codex" ] || { ls -laR "$project/.codex"; false; }
+  [ ! -L "$project/.codex" ] || false
+  [ "$(readlink "$project/.trellis/runtime")" = "$payload_a" ] || false
+  [ "$(cat "$owner")" = "$owner_before" ] || false
+  group_plan_assert_no_journal
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project introducing
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(readlink "$project/.codex/hooks/retired.md")" = ../../.trellis/runtime/core-rules/retired.md ] || false
+  jq -e --arg version "$version_b" '.release == $version
+    and any(.artifacts[]; .kind == "symlink" and .path == ".codex/hooks/retired.md"
+      and .target == "../../.trellis/runtime/core-rules/retired.md")
+    and any(.artifacts[]; .kind == "parent" and .path == ".codex")
+    and any(.artifacts[]; .kind == "parent" and .path == ".codex/hooks")' "$owner" >/dev/null || { cat "$owner"; false; }
+  [ -z "$(git -C "$project" status --porcelain)" ] || { git -C "$project" status --porcelain; false; }
+
+  # Back to the release without the leaf: the same leaf retires again.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_a" --project introducing
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$project/.codex/hooks/retired.md" ] || false
+  [ ! -L "$project/.codex/hooks/retired.md" ] || false
+  jq -e 'all(.artifacts[]; .path != ".codex/hooks/retired.md")' "$owner" >/dev/null || false
+}
+
+@test "adoption defers a project-authored file at a new leaf and refuses an occupying directory by name" {
+  local version_a=1.9.8 version_b=1.9.9 repo authored occupied owner owner_before
+  repo="$(build_release_repo "$version_a")"
+  install_release "$version_a" "$repo"
+  repo="$(build_retiring_release_repo "$version_b")"
+  install_release "$version_b" "$repo"
+  authored="$SANDBOX/introducing-authored"
+  occupied="$SANDBOX/introducing-occupied"
+  make_portable_project "$authored" introducing-authored
+  make_portable_project "$occupied" introducing-occupied
+  attach_portable_project "$authored" personal "$version_a"
+  attach_portable_project "$occupied" personal "$version_a"
+  mkdir -p "$authored/.codex/hooks" "$occupied/.codex/hooks/retired.md"
+  printf 'the project wrote this\n' > "$authored/.codex/hooks/retired.md"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project introducing-authored
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  owner="$(owner_for_root "$authored")"
+  [ "$(cat "$authored/.codex/hooks/retired.md")" = 'the project wrote this' ] || false
+  jq -e 'all(.artifacts[]; .path != ".codex/hooks/retired.md")
+    and any(.pre_existing[]; .path == ".codex/hooks/retired.md" and .kind == "symlink"
+      and .reason == "project-authored-file")' "$owner" >/dev/null || { cat "$owner"; false; }
+
+  owner="$(owner_for_root "$occupied")"
+  owner_before="$(cat "$owner")"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project introducing-occupied
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *".codex/hooks/retired.md"* ]] || { echo "$output"; false; }
+  [ -d "$occupied/.codex/hooks/retired.md" ] || false
+  [ "$(cat "$owner")" = "$owner_before" ] || false
+}
+
+# 1.5.1: adopt records the attachment-checks verdict for the new owner, as
+# attach does, so the next Stop finds a bound verdict instead of a stale one.
+@test "adoption spawns the attachment checks and records a verdict bound to the new owner" {
+  local version_a=1.9.10 version_b=1.9.11 repo project owner status tries=0 state
+  repo="$(build_release_repo "$version_a")"
+  install_release "$version_a" "$repo"
+  repo="$(build_release_repo "$version_b")"
+  install_release "$version_b" "$repo"
+  project="$SANDBOX/adopt-verdict"
+  make_portable_project "$project" adopt-verdict
+  attach_portable_project "$project" personal "$version_a"
+  owner="$(owner_for_root "$project")"
+  status="$TRELLIS_HOME_FIX/state/attachment-status/${owner#"$TRELLIS_HOME_FIX/state/attachments/"}"
+  [ ! -e "$status" ] || false
+
+  run env -u TRELLIS_ATTACH_POSTJOB TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project adopt-verdict
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r '.release' "$owner")" = "$version_b" ] || false
+  status="$TRELLIS_HOME_FIX/state/attachment-status/${owner#"$TRELLIS_HOME_FIX/state/attachments/"}"
+  until state="$(jq -r '.state' "$status" 2>/dev/null)" && [ "$state" != pending ] && [ "$state" != running ] && [ -n "$state" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 600 ] || { echo "verdict never settled: $(cat "$status" 2>&1)"; false; }
+    sleep 0.1
+  done
+  jq -e --arg version "$version_b" --arg sha "$(shasum -a 256 "$owner" | awk '{print $1}')" --slurpfile owner "$owner" '
+    .state == "ok" and .release == $version and .owner_sha256 == $sha
+    and .attachment_id == $owner[0].attachment_id' "$status" >/dev/null ||
+    { cat "$status"; cat "${status%.json}.log"; false; }
+}
+
+# 1.5.1: a sibling worktree whose owned surfaces were all deleted (two real
+# cases) blocked detach (owned-symlink drift) and relink (missing
+# runtime parent) for the whole checkout. relink --restore-absent recreates
+# them exactly from the owner record, and the ordinary detach then works.
+restore_absent_fixture() {
+  local version="$1" repo
+  repo="$(build_explicit_json_release_repo "$version" medium)"
+  install_release "$version" "$repo"
+  project="$SANDBOX/restore-main"
+  sibling="$SANDBOX/restore-sibling"
+  make_portable_project "$project" restore-absent
+  attach_portable_project "$project" personal "$version"
+  payload_fixture_git -C "$project" worktree add -q --detach "$sibling"
+  attach_portable_project "$sibling" personal "$version"
+  owner="$(owner_for_root "$sibling")"
+  jq -e '.renders | length > 0 and all(.[]; .before_exists == false)' "$owner" >/dev/null ||
+    { echo 'fixture: no attach-created render'; return 1; }
+  owner_before="$(cat "$owner")"
+  # Delete every owned surface, as in the affected worktrees.
+  while IFS= read -r path; do rm -f -- "$sibling/$path"; done < <(jq -r '.artifacts[] | select(.kind != "parent" and .kind != "directory") | .path' "$owner")
+  rm -rf -- "${sibling:?}/.trellis"
+}
+
+@test "relink --restore-absent recreates every deleted owned surface exactly, then detach works" {
+  local project sibling owner owner_before
+  restore_absent_fixture 1.9.12
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" detach --home "$TRELLIS_HOME_FIX" "$sibling"
+  [ "$status" -ne 0 ] || { echo "detach of a stripped worktree passed: $output"; false; }
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" relink --home "$TRELLIS_HOME_FIX" "$sibling"
+  [ "$status" -ne 0 ] || { echo "plain relink passed: $output"; false; }
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" relink --home "$TRELLIS_HOME_FIX" --restore-absent "$sibling"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"restored "*" absent owned leaves"* ]] || { echo "$output"; false; }
+  [ "$(cat "$owner")" = "$owner_before" ] || false
+  jq -r '.artifacts[] | select(.kind == "symlink") | [.path, .target] | @tsv' "$owner" |
+    while IFS=$'\t' read -r path target; do
+      [ "$(readlink "$sibling/$path")" = "$target" ] || { echo "link $path"; exit 1; }
+    done
+  jq -r '.artifacts[] | select(.kind == "file") | [.path, .sha256] | @tsv' "$owner" |
+    while IFS=$'\t' read -r path sha; do
+      [ "$(shasum -a 256 "$sibling/$path" | cut -d' ' -f1)" = "$sha" ] || { echo "file $path"; exit 1; }
+    done
+  [ -z "$(git -C "$sibling" status --porcelain)" ] || { git -C "$sibling" status --porcelain; false; }
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" detach --home "$TRELLIS_HOME_FIX" "$sibling"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$owner" ] || false
+}
+
+@test "relink --restore-absent refuses a present-but-different owned leaf and creates nothing" {
+  local project sibling owner owner_before drifted target
+  restore_absent_fixture 1.9.13
+  drifted="$(jq -r '[.artifacts[] | select(.kind == "symlink" and .path != ".trellis/runtime")][0].path' "$owner")"
+  ln -s /not/the/recorded/target "$sibling/$drifted"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" relink --home "$TRELLIS_HOME_FIX" --restore-absent "$sibling"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"$drifted is present and differs"* ]] || { echo "$output"; false; }
+  [ "$(cat "$owner")" = "$owner_before" ] || false
+  [ ! -e "$sibling/.trellis" ] || false
+  [ "$(jq -r --arg d "$drifted" '[.artifacts[] | select(.kind != "parent" and .kind != "directory" and .path != $d) | .path] | .[]' "$owner" |
+      while IFS= read -r path; do [ -e "$sibling/$path" ] || [ -L "$sibling/$path" ] && echo "$path"; done)" = "" ] || false
+}
+# END LANE upgrade151

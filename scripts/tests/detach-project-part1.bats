@@ -354,7 +354,7 @@ run_detach() {
   )"
   [ -n "$legacy_post" ]
   [ -n "$legacy_pre" ]
-  [[ "$legacy_post" != *"TRELLIS_ALLOW_MAIN_PUSH"* ]]
+  [[ "$legacy_post" != *"TRELLIS_ALLOW_MAIN_PUSH"* ]] || false
   printf '%s\n' "$legacy_post" > "$managed/post-checkout"
   printf '%s\n' "$legacy_pre" > "$managed/pre-push"
   chmod 700 "$managed/post-checkout" "$managed/pre-push"
@@ -558,7 +558,7 @@ PY
     if [ "$selector" = all ]; then run_detach --harness claude --all-worktrees
     else run_detach --harness claude; fi
     [ "$status" -eq 3 ] || { echo "$output"; false; }
-    [[ "$output" == *"exactly one matching registry attachment binding"* ]]
+    [[ "$output" == *"exactly one matching registry attachment binding"* ]] || false
     [ "$(detach_state_snapshot)" = "$before" ]
     [ -L "$WORKTREE/.claude/rules/trellis.md" ]
     [ -L "$WORKTREE/.agents/rules/trellis.md" ]
@@ -606,7 +606,7 @@ partial_registry_proposal() {
     before="$(detach_state_snapshot "$WORKTREE")"
     run_detach --harness claude
     [ "$status" -eq "$expect_status" ] || { echo "$fault: $output"; false; }
-    [[ "$output" == *"$expect_message"* ]]
+    [[ "$output" == *"$expect_message"* ]] || false
     [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
     cp "$SANDBOX/registry-original.json" "$TRELLIS_HOME/registry.json"
     rm -f "$TRELLIS_HOME/state/attachment-journals/pending.json"
@@ -655,7 +655,7 @@ partial_registry_proposal() {
     [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
     run_detach --harness claude
     [ "$status" -eq 3 ] || { echo "$fault: $output"; false; }
-    [[ "$output" == *"$expect_message"* ]]
+    [[ "$output" == *"$expect_message"* ]] || false
     [ "$(detach_state_snapshot "$WORKTREE")" = "$before" ]
     cp "$SANDBOX/registry-both.json" "$TRELLIS_HOME/registry.json"
     if [ "$fault" = binding-without-owner ]; then

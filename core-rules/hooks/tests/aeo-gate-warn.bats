@@ -92,7 +92,7 @@ link_python3() {
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '^\[aeo-gate\]')" -eq 1 ]
   [[ "$output" == *"status=INDETERMINATE"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"diff runner failed"* ]]
+  [[ "$output" == *"diff runner failed"* ]] || false
 }
 
 @test "irrelevant diff is silent and does not invoke runner" {
@@ -163,7 +163,7 @@ EOF
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '^\[aeo-gate\]')" -eq 1 ]
   [[ "$output" == *"status=INDETERMINATE"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"exceeded 1s wall-clock budget"* ]]
+  [[ "$output" == *"exceeded 1s wall-clock budget"* ]] || false
 }
 
 @test "stripped-PATH python3 is a real interpreter even behind a bash-script shim" {
@@ -176,7 +176,7 @@ EOF
   (PATH="$BATS_TEST_TMPDIR/shims:$PATH"; link_python3 "$BATS_TEST_TMPDIR/bare-bin")
   run env PATH="$BATS_TEST_TMPDIR/bare-bin" /bin/bash -c 'python3 --version'
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"Python "* ]]
+  [[ "$output" == *"Python "* ]] || false
 }
 
 @test "configured gate without jq warns exactly once" {
@@ -189,8 +189,8 @@ EOF
     ! command -v jq && python3 --version && git -C "$1" rev-parse --show-toplevel
   ' _ "$REPO"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Python "* ]]
-  [[ "$output" == *"$REPO"* ]]
+  [[ "$output" == *"Python "* ]] || false
+  [[ "$output" == *"$REPO"* ]] || false
   run env PATH="$BATS_TEST_TMPDIR/no-jq-bin" /bin/bash -c 'cd "$1" && /bin/bash "$2"' _ "$REPO" "$HOOK"
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c '^\[aeo-gate\]')" -eq 1 ]

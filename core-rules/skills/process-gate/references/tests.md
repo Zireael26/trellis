@@ -98,29 +98,290 @@ PROCESS_GATE_TEST_TIMEOUT=600
 
 The trade-off (faster gate but theoretically incomplete coverage) must be acknowledged in the project's `CLAUDE.md`.
 
-## Exact-input local battery verdicts
+## Verdict reuse
 
-The canonical `python3 [-I] scripts/run-tests-local.py` command always runs
-uncached. Only `check-tests.sh` can replace that command with a runner-written
-passing verdict; typecheck, lint, coverage and every other gate row still run
-(or static checks are covered by the exact base-declared full-battery tuple).
-`--verdict-status [--head=COMMIT]` is a read-only probe: a miss exits 1.
+A passing Tests verdict is reused by default when nothing changed. The key is
+the committed tree, the test command, the runner, the toolchain, the platform
+and the keyed environment (below). Refs, Git config, the checkout path and
+other session environment are not keyed, so a pass transfers between
+worktrees, fresh clones and agent sessions on one host. Typecheck, lint, coverage and every other gate row still
+run (or static checks are covered by the exact base-declared full-battery
+tuple). Reuse applies to explicit push and merge runs; a narrowed or docs-only
+range, a tag push (other than the verified release-tag path), a dirty checkout,
+a different gated HEAD, a different command, a different toolchain or a
+verdict older than seven days misses and runs the command.
 
-Verdicts live in `${TRELLIS_GATE_STATE_DIR:-$HOME/.local/state/trellis-gate}/verdicts/`
-(mode 0700, records 0600). The default is pinned regardless of `XDG_STATE_HOME`,
+The invariant: a reused verdict equals what rerunning the identical command,
+in the same keyed tree and environment, would give now. Reuse does not judge
+whether the configured command is the project's full suite; a narrow committed
+command runs narrow with or without reuse. A reused row therefore prints
+`Tests: reused: configured command`, never `Tests: full` (run-all and
+accept-branch accept that scope).
+
+Two writers share the key:
+
+- The canonical `python3 [-I] scripts/run-tests-local.py` command writes its
+  own full-battery verdicts under `verdicts/`; `--verdict-status
+  [--head=COMMIT]` is a read-only probe (a miss exits 1). Its runner is the
+  runner, fence and helper blobs. Its key also holds the native-stage decision
+  (`run` or `skip`, as `test_suites_native_decision` makes it): the base that
+  decides whether the cargo stages run comes from refs and branch config, which
+  are not keyed, so a battery that skipped them never satisfies a range that
+  needs them. A run whose plan disagrees with the keyed decision writes no
+  verdict.
+- Any other project `PROCESS_GATE_TEST_CMD` is recorded by `check-tests.sh`
+  in `$TRELLIS_HOME/state/gate-verdicts/` after the command exits 0 for a full
+  run and a recapture shows the run left the head, the clean tree, the runner
+  and the keyed environment unchanged and the toolchain's executables
+  byte-identical (versions are keyed as probed when the run started, so a miss
+  probes them once). Its runner is the process-gate code that decides and
+  records it. The run's output is retained as `logs/<id>.log`; the verdict
+  records its sha256 and every lookup re-hashes it, so a verdict without its
+  execution log is a miss. Before the command runs, the lookup persists an
+  in-flight intent (owner pid, start) under the store lock; while any run of
+  the same tree and command is unresolved, no lookup reuses a pass. A failing
+  run, under that lock, records a failure for the tree and command, drops every
+  pass for them and ends its intent; a pass whose run started before that
+  failure is never recorded, so overlapping pass/fail runs cannot leave a flaky
+  pass behind. A passing run that publishes nothing releases its intent; an
+  owner that exits without finalizing (killed, or its store calls failed)
+  counts as a failure dated when it is resolved, not when it started: it may
+  have failed at any point while unresolved, so it supersedes every pass that
+  overlapped it. A forced-full run (`PG_PUSH_TEST_SCOPE=full`) never reads a
+  pass but is tracked the same way. A run never executes untracked: when the
+  store's metadata is unhealthy (a lock or directory not owner-private, a
+  multi-link lock) or the intent cannot be written, the lookup moves the store
+  aside to `gate-verdicts.unhealthy-<time>-<id>`, so none of its passes is read
+  again whatever is repaired later, and tracks the run in a fresh store,
+  reported as a `tests: verdict store:` finding. When the store cannot be moved
+  aside (lookup exit 3), its passes are still readable after a repair, so the
+  test command does not run and Tests fails with `tests: not run`. A store
+  that was moved aside, or never existed, holds no pass to revive: if a fresh
+  one cannot be made, the run executes and the error is reported. Store errors are never swallowed.
+- The gate's range interface (`PG_TESTS_BASE`, `PG_TESTS_HEAD`,
+  `PG_TESTS_RECEIPT_FILE`, below) is not passed to a generic command whose run
+  the lookup tracks: the verdict is keyed without the range, so committed code
+  that narrowed on it would publish a pass that a wider range then reuses. A
+  project that selects tests through the range interface should set
+  `gate.verdict_reuse: false`. The contained local runner and selector-narrowed
+  runs still receive it.
+
+The command-verdict store is Trellis-guarded state: both reread-guards (and
+the native and Pi guards) deny an agent Write or Edit whose target is under
+`state/gate-verdicts`, also through a symlinked parent, or is another name (a
+hard link or symlink) for a stored file. The block-destructive rules are
+allowlists: `gate-verdict-direct-write` denies any shell command naming a
+`gate-verdicts` path component, and `gate-verdict-ancestor-write` any command
+naming `~/.trellis`, `$TRELLIS_HOME`, their `state` directory or a path under
+`state`, unless every simple command on every line is a read-only tool (cat,
+head, tail, ls, stat, wc, jq, sha256sum, shasum, test, grep, cd, echo,
+printf) and no output redirection other than `N>/dev/null` or `N>&M` appears.
+Archivers, patch and editor tools, git, rename, chown, interpreters and
+command substitutions are therefore denied without being listed. less, file and
+python3 are left out: less -o writes a file, file -C writes a compiled .mgc
+into the working directory, and whether python3 only reads
+cannot be decided from the text. These are pattern guards over the command
+text: a path reached through a glob, a variable, a backslash or brace
+expansion, a custom literal home spelling, or a relative path from a working
+directory already inside the store is not recognised, and a hard link made
+that way is still refused at Write and Edit.
+That stops agent tool calls, not
+the operating system: a process of the same UID outside an agent tool (a
+project test, a script the agent wrote and ran) can still write a verdict and
+a matching log, as for every other same-UID record in the earlier rulings. The
+gate's mktemp inputs file is opened without following links and must be a
+private, single-link regular file; a rewritten one cannot name a toolchain
+whose executables differ.
+
+**The reusable command grammar is an allowlist.** A command is reusable only
+when it parses completely to known test runners started with audited options
+(`RUNNER_SPECS` in `scripts/lib/gate_verdict.py`); any token or form the
+grammar does not know refuses reuse, and the command then runs in full. Simple
+commands may be joined only by `&&` (no `;`, `||`, pipes, redirections,
+subshells or background jobs); no word may contain a shell expansion, and the
+command (or a package script) may contain no control character: the shell
+reads a newline as a command separator. Each is
+an optional run of inline `NAME=value` assignments whose names `ENV_RULES`
+keys or ignores, optionally after a bare `env`, then one of:
+
+| Form | Audited options |
+|---|---|
+| `pytest`, `py.test`, `python[3[.N]] [-B\|-I\|-u] -m pytest`, behind `uv run` or `pdm run` | `-q`/`-v` levels, `-s`, `-x`, `-l`, `--strict-markers`, `--strict-config`, `--tb=`, `--color=`, `--capture=`, `--durations=`, `--maxfail=`, `-n`/`--dist` (xdist), `--import-mode=`, `--junitxml=`, `--cov*`, `--timeout=`, `--basetemp=`, `-p no:cacheprovider`, `-r<chars>`; positionals only tracked directories |
+| `jest` | `--ci`, `--silent`, `--verbose`, `--coverage`, `--runInBand`/`-i`, `--detectOpenHandles`, `--forceExit`, `--passWithNoTests`, `--bail`, `--json`, `--maxWorkers=`, `--testTimeout=`, `--reporters=`¹, `--outputFile=`, coverage reporters¹/directory |
+| `vitest run`, `vitest --run` | `--coverage`, `--silent`, `--passWithNoTests`, `--no-file-parallelism`, `--reporter=`¹, `--pool=`, worker counts, `--testTimeout=`, `--outputFile=`, `--bail=` |
+| `node … --test …` | `--test-reporter=`¹, `--test-reporter-destination=`, `--test-concurrency=`, `--test-timeout=`, `--test-isolation=process`, `--experimental-test-coverage`, `--test-force-exit`, `--enable-source-maps`, `--no-warnings`; no positionals |
+| `cargo test` | `--workspace`, `--all-features`, `--no-default-features`, `--features`, `--locked`, `--frozen`, `--offline`, `--release`, `--all-targets`, `--no-fail-fast`, `-j`, `--color`, `--target-dir`, quiet/verbose; after `--`: `--nocapture`, `--show-output`, `--test-threads`, `--color`, `--format` |
+| `cargo nextest run` | the cargo set, `--no-capture`, `--test-threads`, output and status levels |
+| `go test` | `-v`, `-race`, `-cover*`, `-failfast`, `-json`, `-count`, `-timeout`, `-p`, `-parallel`, `-tags`, `-mod`, `-shuffle`; positionals `./…` patterns under tracked directories |
+| `npm`, `pnpm`, `yarn` `[-s] test\|t\|run <script> [-- args]` | the committed root `package.json` script, parsed by this grammar with the args appended; a `pre`/`post` script for it, workspace, directory, config, prefix and script-shell options all refuse |
+
+¹ A built-in reporter name, or a `./` module file tracked in HEAD. A bare
+specifier resolves as a package from `node_modules`; that, or a path outside
+the tree, is code the key does not bind, and a reporter module can end the run
+before any test executes. The same contract applies to reporters named in
+committed runner configuration: Jest's `reporters`, `coverageReporters` and
+`testResultsProcessor` in `package.json` `jest` or `jest.config.json` are
+checked entry by entry (`<rootDir>/` counts as `./`), and a JS/TS Jest or
+Vitest configuration that mentions a reporter at all refuses, because its
+value cannot be read without running it. Every root `jest.config.*`,
+`vite.config.*`, `vitest.config.*` and `vitest.workspace.*`/`vitest.projects.*`
+file is checked. Jest's other module options (`preset`, `globalSetup`,
+`globalTeardown`, `setupFiles`, `setupFilesAfterEnv`, `testEnvironment`,
+`testRunner`, `runner`, `resolver`, `snapshotResolver`, `testSequencer`,
+`transform`, `watchPlugins`, `dependencyExtractor`, `prettierPath`,
+`moduleLoader`) and its path options (`rootDir`, `roots`, `modulePaths`,
+`moduleDirectories`, `moduleNameMapper`, `projects`) may name a package or an
+in-tree path, resolved as Jest resolves `<rootDir>`; an absolute or outside
+path refuses, and each object in `projects` is checked the same way. A string
+`projects` entry (a project directory or glob, at any depth) refuses: Jest
+loads that project's own configuration, which this check does not read.
+Path values are checked physically as well: the resolved path, symlinks
+followed, must stay inside the real tree root.
+
+**Symlinks and submodules.** A tracked symlink (Git mode 120000) must
+resolve, as the filesystem resolves it, to a file tracked in HEAD; one whose
+target is absolute, a directory (ignored files under it would be discovered
+under a name no runner skips), outside the real tree root, untracked,
+ignored or in `.git` (any letter case) refuses reuse for every command, the
+full battery included. The tree key binds the link's
+target spelling, not the files it reaches, so a link out of the keyed tree (a
+Jest `rootDir`, a test directory, a config file) would let an unkeyed file
+decide the run. A gitlink (submodule) refuses too: its content and any
+committed ignore setting for it are outside this tree. Jest path values into
+`.git` (any letter case, also through a link) refuse.
+
+Everything else refuses: name, file, shard, changed-file and only-filters;
+help, list, dry-run and no-execution modes (`--help`, `--listTests`,
+`--test-only`, `-- --help`, `-args -test.list`, `make -n`); execution
+replacement (`go test -exec`, `cargo +toolchain`); `make`, `npx`, `bun`, shell
+wrappers (`bash -c`) and path-qualified programs.
+
+**What is keyed or refused.** One table, `ENV_RULES`, decides every
+environment name; the first matching row wins:
+
+| Action | Names |
+|---|---|
+| refuse (narrowing) | `PG_PUSH_TEST_SCOPE`, Bats filters, `TRELLIS_TEST_*` (not `TRELLIS_TEST_SHARDS`), non-operational `TRELLIS_LOCAL_GATE_*`, `TRELLIS_HEAVY_TEST*`, `PYTEST_*`, `JEST_*`, `VITEST`/`VITEST_*`, `NEXTEST_*` (not `NEXTEST_TEST_THREADS`), `CARGO_*` including `CARGO_HOME` and every target, rustflags, runner, wrapper and config override (not `CARGO_TARGET_DIR`, `CARGO_TERM_*`, `CARGO_BUILD_JOBS`, `CARGO_NET_OFFLINE`), `RUSTFLAGS`, `RUSTDOCFLAGS`, `RUSTC*`, `GOFLAGS`, `GOENV`, `GOROOT`, `GOWORK` (not `GOWORK=off`, which is keyed), `MAKEFLAGS`, `GNUMAKEFLAGS`, `MFLAGS`, `MAKEFILES` |
+| refuse (injection) | `LD_*`, `DYLD_*`, `BASH_ENV`, `ENV`, `SHELLOPTS`, `BASHOPTS`, `IFS`, `POSIXLY_CORRECT`, `PYTHON*` (not `PYTHONDONTWRITEBYTECODE`, `PYTHONUNBUFFERED`), `PERL*`, `RUBY*`, `GEM_*`, `BUNDLE_*`, `NODE_*` (not `NODE_ENV`, `NODE_EXTRA_CA_CERTS`), `npm_config_*`, `pnpm_config_*` (not `pnpm_config_verify_deps_before_run`), `JAVA_TOOL_OPTIONS`, `JDK_JAVA_OPTIONS`, `_JAVA_OPTIONS`, `JAVA_OPTS`, `CLASSPATH`, `MAVEN_OPTS`, `MAVEN_ARGS`, `GRADLE_OPTS` |
+| key (value) | exported shell functions (`BASH_FUNC_*`), `CDPATH`, `CI`, `TZ`, `LANG`, `LANGUAGE`, `LC_*`, `NODE_ENV`, `NODE_EXTRA_CA_CERTS`, `COREPACK_*` (not `COREPACK_HOME`), `DOCKER_*`, `GOTOOLCHAIN`, `GOEXPERIMENT`, `GODEBUG`, `GOOS`, `GOARCH`, `CGO_ENABLED`, `RUST_TEST_THREADS`, `NEXTEST_TEST_THREADS`, `CARGO_NET_OFFLINE`, `UV_*`, `PDM_*`, `YARN_*`, `pnpm_config_verify_deps_before_run`, and every `gate.env_passthrough` name (set, empty or unset) |
+| ignore (speed only) | `CARGO_BUILD_JOBS`: build parallelism changes how fast, not what is built or run (the release qualification run exports it) |
+| refuse (path-valued) | `DOCKER_CONFIG`; a `UV_*`, `PDM_*` or `YARN_*` name ending `_FILE`, `_FILENAME`, `_PATH`, `_DIR`, `_HOME`, `_ENVIRONMENT`, `_PROJECT`, `_DIRECTORY`, `_FOLDER`, `_PYTHON` or `_RC` (`UV_CONFIG_FILE`, `PDM_CONFIG_FILE`, `YARN_RC_FILENAME`, `UV_PYTHON`), or whose value is a path (an `http(s)` URL is not; `file:` is): keying it binds the name, not what it points at |
+
+A refused name neither records nor reuses: the command runs. The managed
+pre-push dispatcher starts the gate under `env -i` with only its fixed
+environment, the passthrough names and `DOCKER_HOST`, and it forwards the
+passthrough names of the remote-default (`origin/HEAD`) `.trellis.json`. The
+verdict keys that same policy: the names it declares, plus any the candidate
+HEAD declares, and the policy's blob as `policy`. The dispatcher passes that
+blob as `TRELLIS_GATE_ENV_POLICY`; a gate whose own reading differs (the remote
+default moved under it) refuses.
+
+**External configuration.** Configuration a runner reads from outside the
+tree is keyed by content, present or absent: Cargo's `$HOME/.cargo/config*`
+and every ancestor `.cargo/config*`; the user and global `npmrc` (and pnpm's
+and yarn's rc files) for package scripts; Go's env file; for `uv run` and
+`pdm run`, the project environment's interpreter and the managers' config.
+An explicit Cargo home (`CARGO_HOME`, inherited or inline) refuses instead. So
+does any of that configuration that replaces the program a run executes, or
+redirects it to code or configuration the key does not bind, since hashing
+the file binds its text, not what it names: a Cargo `runner`, `rustc`,
+`rustc-wrapper`, `rustc-workspace-wrapper`, `rustdoc`, `linker`, `ar`,
+`include`, `paths`, `patch`, `path`, `replace-with`, `directory`,
+`local-registry` or a `linker` in `rustflags`; an npmrc `script-shell`,
+`shell`, `node-options`, `userconfig`, `globalconfig`, `onload-script`,
+`shell-emulator`, `use-node-version`, `node-version`, `npm-path` or pnpmfile;
+a Yarn `script-shell`, `yarn-path`, `yarnPath`, `plugins`,
+`injectEnvironmentFiles` or a `--` CLI line; a Go env `GOFLAGS`, `GOTOOLCHAIN`,
+`GOROOT`, `GOWORK`, `CC`, `CXX`, `AR` or `GOENV`. Any pytest configuration file or
+`conftest.py` above the checkout, and any ancestor `go.work`, refuses too.
+For package scripts, every ancestor `.npmrc`, `.yarnrc` and `.yarnrc.yml` from
+the checkout up to `/` is inventoried the same way: keyed by content, and
+refused when it sets any of those settings.
+
+**Committed executor settings.** The committed root `.npmrc`, `.yarnrc` and
+`.yarnrc.yml` (for package scripts) and `.cargo/config*` (for Cargo) are
+checked for the same settings, because the tree key binds the file, not the
+program it names. A program or path setting (a Cargo `runner`, `linker`,
+`rustc`, wrapper, `rustdoc`, `ar`, `path`, `directory` or `local-registry`; an
+npm `script-shell` or `shell`; a Yarn `script-shell`, `yarn-path` or
+`yarnPath`) is allowed only as a relative path to a file or directory tracked
+in the tree; a program named without a `/` is looked up on `PATH` and refuses,
+as does an absolute or outside path. Every other setting in that list refuses
+whenever it is set.
+
+**Native stages.** Their Cargo adapter runs cargo from `/` with a private,
+fresh `CARGO_HOME`, so the only Cargo configuration they load is
+`/.cargo/config*`: it is keyed, and an executor setting there refuses. The
+pinned `+1.97.1` cargo, rustc and rustdoc, the `rustc -vV` answer (through the
+caller's probe) and the offline registry files are keyed whatever the rustup
+default is; a changed pin misses and a missing or unusable one refuses. A
+candidate whose `rustc -vV` probe fails costs reuse even when another
+installed candidate answers, since the stage's own longer probe may select it.
+
+**Ignored files.** Any git-ignored path refuses reuse unless it is a
+`.DS_Store` file or lies in a directory every runner of the command skips by
+default: pytest's `__pycache__` and default `norecursedirs` (`.*`, `build`,
+`dist`, `node_modules`, `venv`, `*.egg`, `CVS`, `_darcs`, `{arch}`); jest,
+vitest and `node --test` `node_modules`; cargo `target`; go any `.`/`_` path
+(not `testdata` or `vendor`). No cache directory is exempt for every runner
+(`node --test` discovers tests in `__pycache__`), and there is no coverage or
+output-directory allowance: pytest and `node --test` discover tests there. A
+directory the command names explicitly (`pytest .hidden`, `go test
+./_tools/...`) is traversed whatever its name, so a path under it is judged by
+its components below that root; an ignored directory holding a root, or an
+ignored `conftest.py` on the way to one, refuses. A committed pytest discovery
+setting (`norecursedirs`, `testpaths`, `rootdir`, `confcutdir`), or a committed
+runner config that names the skipped directory (a Cargo `[[test]] path`, a jest
+`roots` entry, a pytest `addopts` path), refuses it again. Ignored `.env` files
+therefore refuse.
+
+**Toolchain dispatchers.** A tool reached through rustup, a pyenv, rbenv,
+nodenv, goenv, jenv or asdf shim, mise or volta binds the executable the
+manager selects for the project (`rustup show active-toolchain` plus the hashed
+`rustup which` binary; `<manager> which <tool>` otherwise), not the proxy. A
+rustup proxy is recognised by what the executable is, not by its name: a
+hard-linked or copied proxy answers `RUSTUP_FORCE_ARG0=rustup … --version` as
+rustup, and is queried through itself. Every identity probe goes through the
+caller's version probe, so the local runner contains it like a `--version`
+probe. When the selection cannot be
+established (an unknown `shims` directory, a manager that fails or names
+nothing), reuse is refused. rustup with no installed toolchain is keyed as
+"none". nvm switches `PATH` itself, so its `node` is already the resolved
+binary.
+
+**Kill switches.** `.trellis.json` `gate.verdict_reuse: false` per project;
+`$TRELLIS_HOME/state/gate-verdicts/reuse-disabled` (any file, created by the
+operator outside an agent session) for every project on the machine; and the
+weekly backstop's `reuse-disabled.json` in the gate state directory.
+
+Opt out per project when tests depend on external state (a live database, a
+remote service, time-sensitive fixtures) in the committed `.trellis.json`:
+
+```json
+{ "gate": { "verdict_reuse": false } }
+```
+
+An unreadable or mistyped policy also refuses reuse; it never widens it.
+
+Full-battery verdicts live in `${TRELLIS_GATE_STATE_DIR:-$HOME/.local/state/trellis-gate}/`
+(directories mode 0700, records 0600). The default is pinned regardless of `XDG_STATE_HOME`,
 so cron and interactive agents share the queue and disable marker. An explicit
 state override must be absolute, outside every checkout, and shared by all
 callers; invalid roots refuse before creating state. Queue metadata uses
 `queue.lock`; admitted runners retain the legacy `lock` flock until close, so
-pre-072 runners cannot overlap them. Inputs over-include the clean tree, test inventory and
-suite blobs, runner/fence/helper blobs, tool paths/binaries/versions, platform,
-Git refs/config and a digest of the effective environment. Only queue/output and
-heavy-slot transport variables are excluded. The heavy exclusions are exactly
-`FD`, `TOKEN`, `SLOT`, `POOL` and `DIR_ID` under `TRELLIS_HEAVY_`; other heavy
-configuration is bound, and `TRELLIS_HEAVY_TEST*` refuses reuse. Checkout HEAD
+pre-072 runners cannot overlap them. The toolchain binds each discovered tool's
+resolved path and executable bytes, plus a version for tools with a uniform
+`--version`. Narrowing and test-seam variables (`PG_PUSH_TEST_SCOPE`, Bats
+filters, `TRELLIS_TEST_*` other than `TRELLIS_TEST_SHARDS`, non-operational
+`TRELLIS_LOCAL_GATE_*`, `TRELLIS_HEAVY_TEST*`, and the rest of `ENV_RULES`) refuse reuse. Checkout HEAD
 must be the gated head. Ignored files matching any non-recursive suite-discovery
 glob also refuse reuse, including files under ignored parent directories.
-A failed version probe refuses reuse. `mktemp`, `lsof`, `ps` and the npm/npx
+A failed version probe refuses reuse, and that is all it does: a probe that
+times out (2 s) is a miss, and the test command runs as if no verdict existed;
+it never fails or blocks the gate. When the command was otherwise reusable,
+the run is still tracked by its tree and command alone: a failure supersedes
+every earlier pass for them, and a pass publishes nothing. A refused command
+never touches the store. `mktemp`, `lsof`, `ps` and the npm/npx
 entrypoints bind resolved executable bytes without invoking a version command;
 normal npm/npx installations additionally bind the resolved package metadata,
 so an npm-only upgrade changes the key even if its entrypoint is unchanged.
@@ -130,16 +391,19 @@ pass for the same inputs before starting. Changing inputs during a run also
 prevents a write. The retained aggregate and its digest must still validate.
 Wrong modes, symlinked records, missing evidence and verdicts older than seven
 days are misses, never passes. The weekly uncached backstop compares tree-matched
-candidates even when scheduler environment/toolchain inputs differ, records the
+candidates even when scheduler toolchain inputs differ, records the
 differing field names, and raises P1 on a failing unchanged tree.
 A `reuse-disabled.json` marker in the state directory disables reads and writes
-until an operator reviews the divergence and removes it.
+for both writers until an operator reviews the divergence and removes it.
 
-Residual inputs: unrelated ignored dependency/cache contents, Python installed
-package contents, npm/npx imported contents beyond entrypoints/package metadata
-(and package metadata hidden by nonstandard wrappers),
-and external Git exclude/config file bytes are not individually hashed. Fresh
-Git discovery still checks ignored suites on every lookup. The seven-day cap
+Residual inputs: contents of the allowed ignored dependency/cache directories
+(`node_modules`, virtualenvs), Python installed package contents, npm/npx
+imported contents beyond entrypoints/package metadata (and package metadata
+hidden by nonstandard wrappers), environment names outside `ENV_RULES` on a direct (unmanaged) gate
+run, external services, external Git exclude/config file bytes, and same-UID
+writes from outside an agent tool are not covered.
+Projects whose results depend on these should set `gate.verdict_reuse: false`.
+Fresh Git discovery still checks ignored suites on every lookup. The seven-day cap
 and conservative weekly tree-divergence backstop limit, but do not eliminate,
 those residuals; retain uncached release qualification.
 
@@ -159,10 +423,10 @@ full tests, not the ordinary docs-only or exact-HEAD shortcuts.
 
 The checkout must be clean and byte-identical to the approved release-commit
 tree (the payload's sole parent). T30 must validate exactly one retained passing
-verdict with the same tree, runner/fence, inventory, toolchain, environment,
-platform and Git configuration. The only permitted ref difference is addition
-of this verified tag; other ref changes or an occupied/disabled/stale/tampered
-verdict miss. No new reusable full verdict is written by the tag-reading rerun.
+verdict with the same tree, command, runner/fence, toolchain and platform.
+Refs are not keyed, so creating the verified tag changes nothing; the tag's
+identity is verified separately. An occupied/disabled/stale/tampered verdict
+misses. No new reusable full verdict is written by the tag-reading rerun.
 
 T32's `scripts/tests/release-metadata-audit.json` is read from the approved
 release tree. It must be complete, source-digest matched and internally
@@ -178,7 +442,7 @@ coverage; installing this code alone never promotes that evidence.
 
 ## Push scope and command receipts
 
-Only push Tests receives gate-owned `PG_TESTS_BASE` and `PG_TESTS_HEAD`, full commit SHAs for the exact resolved range (not hard-coded trunk or necessarily checkout HEAD); `A...B` uses merge-base(A, B).
+Only push Tests receives gate-owned `PG_TESTS_BASE` and `PG_TESTS_HEAD`, full commit SHAs for the exact resolved range (not hard-coded trunk or necessarily checkout HEAD); `A...B` uses merge-base(A, B). A generic command whose run the verdict lookup tracks receives none of the range interface (see "Verdict reuse"); a project that selects through it sets `gate.verdict_reuse: false`.
 `run-all.sh` snapshots them before rows; `check-tests.sh` resolves argv. Both unset inherited interface values. Only Tests receives them, even through the heavy clean-env boundary; Claude and Codex share the scripts.
 
 Merge, release, unknown and missing modes provide no interface and run the existing command unchanged. Standalone `check-tests.sh --mode=push` also needs explicit `--range` or `--base`.

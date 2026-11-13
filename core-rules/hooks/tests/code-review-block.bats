@@ -142,7 +142,8 @@ reviewer_call_count() {
 # capturing rc/stdout/stderr. Mirrors helpers.bash::run_with_stderr but pins the
 # Stop-payload default so callers don't repeat it.
 run_hook() {
-  local payload="${1:-\{\}}"
+  local payload='{}'
+  [ -z "${1:-}" ] || payload="$1"
   run_with_stderr "$HOOK" "$payload"
 }
 
@@ -201,15 +202,15 @@ run_hook() {
     export TEST_SEVERITY='not-a-severity'
     run_with_stderr "$hook" '{}'
     [ "$status" -eq 0 ]
-    [[ "$stderr" == *'malformed'* ]]
+    [[ "$stderr" == *'malformed'* ]] || false
     run_with_stderr "$hook" '{}'
     [ "$status" -eq 0 ]
-    [[ "$stderr" == *'malformed'* ]]
+    [[ "$stderr" == *'malformed'* ]] || false
     export TEST_SEVERITY=Important
     run_with_stderr "$hook" '{}'
     [ "$status" -eq 0 ]
-    [[ "$output" == *'[important]'* ]]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" == *'[important]'* ]] || false
+    [[ "$output" != *'"decision":"block"'* ]] || false
   done
   printf '# another change\n' >> "$PROJECT_DIR/alpha.py"
   stub="$(make_reviewer_stub 'printf "%s\n" '\''{"status":"completed","findings":[{"severity":"unknown","file":"x","msg":"unknown"},{"severity":"Critical","file":"x","msg":"must block"}]}'\''')"
@@ -236,7 +237,7 @@ run_hook() {
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'secret'* ]] || { echo "$output"; false; }
   # A blocked turn must NOT advise; it blocks.
-  [[ "$output" != *'additionalContext'* ]]
+  [[ "$output" != *'additionalContext'* ]] || false
 }
 
 # =========================================================================
@@ -255,7 +256,7 @@ run_hook() {
   [[ "$output" == *'<review>'* ]] || { echo "$output"; false; }
   [[ "$output" == *'[minor]'* ]] || { echo "$output"; false; }
   [[ "$output" == *'prefer a constant'* ]] || { echo "$output"; false; }
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
 }
 
 @test "advisory: important finding → exit 0 with an <review> additionalContext (no block)" {
@@ -269,7 +270,7 @@ run_hook() {
   [[ "$output" == *'"additionalContext"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'[important]'* ]] || { echo "$output"; false; }
   [[ "$output" == *'missing error handling'* ]] || { echo "$output"; false; }
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
 }
 
 # =========================================================================
@@ -285,7 +286,7 @@ run_hook() {
   run_hook
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
 }
 
 @test "degraded: reviewer nonzero leaves no marker and retries the same diff" {
@@ -352,7 +353,7 @@ run_hook() {
   run_hook
   [ "$status" -eq 0 ]
   [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
-  [[ "$output" != *'additionalContext'* ]]
+  [[ "$output" != *'additionalContext'* ]] || false
   marker_count=$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' | wc -l | tr -d ' ')
   [ "$marker_count" -eq 1 ]
 }
@@ -381,7 +382,7 @@ run_hook() {
   # A line matching the dated format session-context.sh keys off: "- 20YY-...".
   run grep -E '^- 20[0-9][0-9]' "$log"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'TRELLIS_REVIEW_OVERRIDE'* ]]
+  [[ "$output" == *'TRELLIS_REVIEW_OVERRIDE'* ]] || false
 }
 
 # =========================================================================
@@ -449,7 +450,7 @@ EOF
   # And its critical finding propagated to a block.
   [ "$status" -eq 2 ]
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
-  [[ "$output" == *'eval injection'* ]]
+  [[ "$output" == *'eval injection'* ]] || false
 }
 
 # =========================================================================
@@ -468,7 +469,7 @@ EOF
   run_hook
   [ "$status" -eq 2 ]
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
-  [[ "$output" == *'planted'* ]]
+  [[ "$output" == *'planted'* ]] || false
 }
 
 @test "M3 untracked-only: reviewer receives the untracked file CONTENTS (non-hollow diff)" {
@@ -489,7 +490,7 @@ EOF
   # The envelope's .diff must carry the NEW file's path AND its actual content.
   run jq -r '.diff' "$CAP"
   [[ "$output" == *'gamma.py'* ]] || { echo "$output"; false; }
-  [[ "$output" == *'untracked-content-xyz'* ]]
+  [[ "$output" == *'untracked-content-xyz'* ]] || false
 }
 
 @test "M3 untracked-only: scanning untracked files is mutation-free (no git add -N)" {
@@ -509,7 +510,7 @@ EOF
   [[ "$after"  == *'?? alpha.py'* ]] || { echo "$after"; false; }
   [[ "$after"  == *'?? gamma.py'* ]] || { echo "$after"; false; }
   [[ "$after" != *'A  alpha.py'* ]] || { echo "$after"; false; }
-  [[ "$after" != *'A  gamma.py'* ]]
+  [[ "$after" != *'A  gamma.py'* ]] || false
 }
 
 # =========================================================================
@@ -613,7 +614,7 @@ EOF
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
   [[ "$stderr" != *"malformed"* ]] || { echo "$stderr"; false; }
   # Clean review writes a marker so the same diff is not re-reviewed.
   [ "$(find "$PROJECT_DIR/.claude" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]

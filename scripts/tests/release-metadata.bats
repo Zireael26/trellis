@@ -18,6 +18,7 @@ check_metadata() {
 @test "metadata incomplete and stale audits run full tests" { check_metadata test_incomplete_or_stale_audit_never_narrows; }
 @test "metadata bad versions mixed paths modes deletion and hidden reverts run full tests" { check_metadata test_bad_version_mixed_mode_and_hidden_revert_never_narrow; }
 @test "metadata changed tags or other refs invalidate the green base" { check_metadata test_changed_tag_or_other_ref_invalidates_base; }
+@test "metadata base verdict without ref evidence never narrows" { check_metadata test_base_verdict_without_ref_evidence_never_narrows; }
 @test "metadata trace parser records actual read opens not writes" { check_metadata test_file_open_parser_excludes_writes_and_keeps_metadata_and_tags; }
 @test "metadata head helper cannot self-certify a mixed range (P2)" { check_metadata test_head_helper_cannot_self_certify_its_mixed_range; }
 @test "metadata bash path floor survives a permissive base helper" { check_metadata test_bash_floor_rejects_mixed_range_even_if_base_helper_is_buggy; }

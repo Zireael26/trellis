@@ -79,7 +79,9 @@ _release_stamp_run() {
     python_bin="$(command -v python3)" || return 1
     case "$python_bin" in /*) ;; *) return 1 ;; esac
   fi
-  LC_ALL=C "$python_bin" -I "$_RELEASE_STAMP_PROGRAM" "$@" 2>/dev/null
+  # Bash 5.3 on macOS can crash in a command-substitution child while
+  # applying a temporary locale assignment. Let env set it after exec instead.
+  /usr/bin/env LC_ALL=C "$python_bin" -I "$_RELEASE_STAMP_PROGRAM" "$@" 2>/dev/null
 }
 
 # BEGIN T11 STAMP-STAT CORE — pinned verbatim in scripts/trellis-launcher.sh

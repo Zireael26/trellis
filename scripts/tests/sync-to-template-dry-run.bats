@@ -1033,7 +1033,7 @@ PY
     run project_manifest_with_publisher_program "$SANDBOX/input.json"
     echo "destination_home=$value raw_exit=$status $output"
     [ "$status" -eq 4 ]
-    [[ "$output" == *'does not match the withheld shape'* ]]
+    [[ "$output" == *'does not match the withheld shape'* ]] || false
     cmp "$SANDBOX/before.json" "$SANDBOX/input.json"
   done
 }
@@ -1064,7 +1064,7 @@ PY
         run project_manifest_with_publisher_program "$SANDBOX/input.json"
         echo "$harness $key $mode raw_exit=$status $output"
         [ "$status" -eq 4 ]
-        [[ "$output" == *'misplaced or cross-array private source'* ]]
+        [[ "$output" == *'misplaced or cross-array private source'* ]] || false
         cmp "$SANDBOX/before.json" "$SANDBOX/input.json"
       done
     done
@@ -1091,7 +1091,7 @@ PY
   run project_manifest_with_publisher_program "$SANDBOX/input.json"
   echo "extra-key raw_exit=$status $output"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'does not match the withheld shape'* ]]
+  [[ "$output" == *'does not match the withheld shape'* ]] || false
   cmp "$SANDBOX/before.json" "$SANDBOX/input.json"
 }
 

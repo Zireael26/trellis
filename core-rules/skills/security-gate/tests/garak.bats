@@ -203,7 +203,7 @@ teardown() {
 
   run bash "$GARAK_SCRIPT"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"project-dir required"* ]]
+  [[ "$output" == *"project-dir required"* ]] || false
 
   run env SECURITY_GATE_GARAK_TARGET="" bash "$GARAK_SCRIPT" "$TEST_ROOT/not-a-project" "$out"
   [ "$status" -eq 2 ]
@@ -218,7 +218,7 @@ teardown() {
   [ "$status" -eq 2 ]
   [ ! -s "$INVOCATION_LOG" ] || { echo "garak should not have been invoked"; cat "$INVOCATION_LOG"; false; }
   [ ! -s "$out" ]
-  [[ "$output" == *"neither timeout nor gtimeout is available"* ]]
+  [[ "$output" == *"neither timeout nor gtimeout is available"* ]] || false
 }
 
 @test "garak execution errors preserve stderr and return indeterminate" {
@@ -229,8 +229,8 @@ teardown() {
     bash "$GARAK_SCRIPT" "$PROJECT" "$out"
   [ "$status" -eq 2 ]
   [ ! -s "$out" ]
-  [[ "$output" == *"garak execution failed (rc=7)"* ]]
-  [[ "$output" == *"garak backend diagnostic sentinel"* ]]
+  [[ "$output" == *"garak execution failed (rc=7)"* ]] || false
+  [[ "$output" == *"garak backend diagnostic sentinel"* ]] || false
 }
 
 @test "garak malformed JSON records return indeterminate" {
@@ -240,7 +240,7 @@ teardown() {
     bash "$GARAK_SCRIPT" "$PROJECT" "$out"
   [ "$status" -eq 2 ]
   [ ! -s "$out" ]
-  [[ "$output" == *"malformed JSON at line 1"* ]]
+  [[ "$output" == *"malformed JSON at line 1"* ]] || false
 }
 
 @test "garak attempt records without status return indeterminate" {
@@ -250,7 +250,7 @@ teardown() {
     bash "$GARAK_SCRIPT" "$PROJECT" "$out"
   [ "$status" -eq 2 ]
   [ ! -s "$out" ]
-  [[ "$output" == *"attempt at line 3 has no status"* ]]
+  [[ "$output" == *"attempt at line 3 has no status"* ]] || false
 }
 
 @test "a real-format garak report yields one finding per evaluated attempt with a detector hit" {
@@ -340,7 +340,7 @@ assert "promptinject.AttackRogueString" in rows[0]["message"], rows
   run env PATH="$BIN:$PATH" GARAK_MODE=cut-after-finding SECURITY_GATE_GARAK_TARGET="openai:test-model" \
     bash "$GARAK_SCRIPT" "$PROJECT" "$out"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"garak did not complete: report has no completion record after its last attempt"* ]]
+  [[ "$output" == *"garak did not complete: report has no completion record after its last attempt"* ]] || false
   grep -q '"rule": "promptinject.HijackHateHumans"' "$out"
 }
 

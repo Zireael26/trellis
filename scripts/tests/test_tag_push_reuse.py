@@ -23,6 +23,20 @@ MANIFEST = "scripts/tests/release-metadata-audit.json"
 ZERO = "0" * 40
 
 
+def patient_probe(command, env, cwd):
+    """receipt_provenance.probe without its 2 s bound, for fixture seeding only."""
+    result = subprocess.run(command, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            timeout=120, check=False)
+    if result.returncode:
+        return "unavailable: probe exit {}".format(result.returncode)
+    text = result.stdout.decode("utf-8", errors="replace").strip()
+    if not text:
+        return "unavailable: empty probe"
+    # As receipt_provenance.probe: native verdicts bind the full rustc -vV
+    # host/release identity, every other probe its first line.
+    return text if command and command[-1] == "-vV" else text.splitlines()[0]
+
+
 class TagReuseTests(FIXTURE.VerdictTests):
     def setUp(self):
         super().setUp()
@@ -104,7 +118,10 @@ class TagReuseTests(FIXTURE.VerdictTests):
     def seed_release(self):
         self.release = self.git("rev-parse", "HEAD").decode().strip()
         self.git("update-ref", "refs/remotes/origin/main", self.release)
-        self.inputs = FIXTURE.VERDICT.capture_inputs(self.root)
+        # Seed without the 2 s probe bound: a seed that times out under load is
+        # a fixture failure, not the product's. The gate's own lookup keeps it;
+        # test_slow_version_probe_runs_full asserts what a timeout costs there.
+        self.inputs = FIXTURE.VERDICT.capture_inputs(self.root, version_probe=patient_probe)
         self.keep()  # The real runner writer, retained aggregate and T30 reader.
         payload = subprocess.check_output(["bash", str(ROOT / "scripts/release-payload-commit.sh"), self.release],
                                          cwd=self.root, text=True).strip()
@@ -188,6 +205,14 @@ class TagReuseTests(FIXTURE.VerdictTests):
             self.assertIn("exited 1", result.stdout)
             self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
 
+    def test_slow_version_probe_runs_full(self):
+        # A probe timeout costs only reuse: the tag path falls back to the full
+        # battery, and the gate passes on its result.
+        with self.environment():
+            self.seed_release()
+            with mock.patch.dict(os.environ, {"PATH": str(self.slow_probe_dir()) + os.pathsep + os.environ["PATH"]}):
+                self.assert_full(self.row())
+
     def test_verify_tag_failure_runs_full(self):
         self.tag = "refs/tags/v1.4.1"  # Annotated, but not the payload's VERSION.
         with self.environment():
@@ -195,11 +220,15 @@ class TagReuseTests(FIXTURE.VerdictTests):
             result = self.row()
             self.assert_full(result)
 
-    def test_ref_changes_stale_or_ambiguous_verdicts_run_full(self):
+    def test_ref_changes_reuse_but_stale_verdicts_run_full(self):
         with self.environment():
             self.seed_release()
+            # Refs are not keyed: an unrelated branch keeps the exact-tree verdict.
             self.git("branch", "unrelated", "HEAD")
-            self.assert_full(self.row())
+            result = self.row()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("reused verdict " + self.id, result.stdout)
+            self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
             self.git("branch", "-D", "unrelated")
             self.log.unlink()
             original = self.path.read_bytes()
@@ -214,10 +243,13 @@ class TagReuseTests(FIXTURE.VerdictTests):
             self.path.write_bytes(original)
             metadata.write_bytes(original_metadata)
             self.log.unlink()
+            # A verdict written after the tag exists has the same key as before it.
+            before_tag = self.path
             self.inputs = FIXTURE.VERDICT.capture_inputs(self.root)
             self.id = "b" * 32
-            self.keep()  # Both before-tag and after-tag candidates now validate.
-            self.assert_full(self.row())
+            self.keep()
+            self.assertEqual(self.path, before_tag)
+            self.assertIn("reused verdict " + self.id, self.row().stdout)
 
     def test_tag_push_without_verified_identity_cannot_use_ordinary_t30_reuse(self):
         with self.environment():
@@ -244,7 +276,8 @@ class TagReuseTests(FIXTURE.VerdictTests):
             result = self.row(push_scope="branch")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("reused verdict " + self.id, result.stdout)
-            self.assertIn("Tests: full", result.stdout)
+            self.assertIn("Tests: reused: configured command", result.stdout)
+            self.assertNotIn("Tests: full", result.stdout)
             self.assertNotIn("Tests: narrowed", result.stdout)
             self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
             self.log.unlink()

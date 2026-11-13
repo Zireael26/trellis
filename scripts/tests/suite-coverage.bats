@@ -85,9 +85,9 @@ teardown() {
   local extra missing expected record suite scope
   [ -n "$(test_suites_for local)" ] || { echo 'local suite set is empty'; false; }
   [ -n "$(test_suites_for ci)" ] || { echo 'ci suite set is empty'; false; }
-  extra="$(comm -13 <(test_suites_for local) <(test_suites_for ci))"
+  extra="$(/usr/bin/env LC_ALL=C comm -13 <(test_suites_for local) <(test_suites_for ci))"
   [ -z "$extra" ] || { echo "ci runs suites local does not: $extra"; false; }
-  missing="$(comm -23 <(test_suites_for local) <(test_suites_for ci))"
+  missing="$(/usr/bin/env LC_ALL=C comm -23 <(test_suites_for local) <(test_suites_for ci))"
   expected=""
   for record in ${TEST_SUITE_EXCLUSIONS[@]+"${TEST_SUITE_EXCLUSIONS[@]}"}; do
     suite="${record%%|*}"
@@ -96,7 +96,7 @@ teardown() {
     expected="$expected$suite
 "
   done
-  expected="$(printf '%s' "$expected" | LC_ALL=C sort)"
+  expected="$(printf '%s' "$expected" | /usr/bin/env LC_ALL=C sort)"
   [ "$missing" = "$expected" ] || { echo "ci drops suites local runs beyond ci-scoped exclusions: missing=[$missing] expected=[$expected]"; false; }
 }
 
@@ -267,7 +267,7 @@ check_core_inventory() {
   printf 'setup_file() { skip "disabled"; }\n' >> "$suite"
   check_core_inventory
   [ "$status" -ne 0 ] || { echo "setup_file bypass passed: $output"; false; }
-  [[ "$output" == *"suite-coverage"* ]]
+  [[ "$output" == *"suite-coverage"* ]] || false
 
   git -C "$INVENTORY_REPO" show "$INVENTORY_BASE:scripts/tests/suite-coverage.bats" > "$suite"
   printf '\n@test "new coverage" {\n  true\n}\n' >> "$suite"
@@ -347,7 +347,7 @@ check_core_inventory() {
   printf '\n@test "new coverage" {\n  true\n}\n' >> "$suite"
   check_core_inventory
   [ "$status" -ne 0 ] || { echo "multiline helper change passed: $output"; false; }
-  [[ "$output" == *'suite-coverage non-test content changed'* ]]
+  [[ "$output" == *'suite-coverage non-test content changed'* ]] || false
 }
 
 @test "immutable inventory rejects quoted protected paths without rejecting benign paths" {
@@ -360,7 +360,7 @@ check_core_inventory() {
   printf 'changed\n' > "$INVENTORY_REPO/core-rules/skills/process-gate/hooks/gäte.sh"
   check_core_inventory
   [ "$status" -ne 0 ] || { echo "quoted protected path passed: $output"; false; }
-  [[ "$output" == *"protected process-gate path changed"* ]]
+  [[ "$output" == *"protected process-gate path changed"* ]] || false
 }
 
 @test "payload scan exemption rejects content resembling diff headers" {
@@ -389,7 +389,7 @@ check_core_inventory() {
   core_inventory_fixture
   check_core_inventory
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == "inventory: PASS "* ]]
+  [[ "$output" == "inventory: PASS "* ]] || false
 }
 
 @test "immutable inventory rejects dropped or doubled hook and skill files even with complete head evidence" {
@@ -412,7 +412,7 @@ path.write_text(''.join(lines))
 PY
       check_core_inventory
       [ "$status" -eq 1 ] || { echo "$group $mutation incorrectly passed: $output"; false; }
-      [[ "$output" == *"head inventory changed"* || "$output" == *"duplicate canonical inventory"* ]]
+      [[ "$output" == *"head inventory changed"* || "$output" == *"duplicate canonical inventory"* ]] || false
     done
   done
 }
@@ -427,7 +427,7 @@ PY
   printf '@test "doctor" {\n  false\n}\n' > "$INVENTORY_REPO/scripts/tests/doctor-fix-part1.bats"
   check_core_inventory
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"doctor-fix files changed without a doctor split"* ]]
+  [[ "$output" == *"doctor-fix files changed without a doctor split"* ]] || false
 }
 
 @test "release-store parts and their equivalence guard are scheduled locally and in CI" {

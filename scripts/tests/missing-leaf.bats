@@ -138,6 +138,18 @@ run_missing_leaf_doctor() {
   missing_leaf_adopt_release_with_new_skill
   owner="$(t25_owner_path "$T25_PROJECT")"
 
+  # 1.5.1: adopt links the leaves the new release adds and owns them.
+  [ -L "$T25_PROJECT/.claude/skills/adopted-only" ] || false
+  jq -e '[.artifacts[].path] | index(".claude/skills/adopted-only") != null' "$owner" >/dev/null || false
+  # A checkout an older CLI adopted lacks them in both the tree and the owner.
+  for leaf in .claude/skills/adopted-only .agents/skills/adopted-only; do
+    rm -f "$T25_PROJECT/$leaf"
+  done
+  jq '.artifacts |= map(select(.path != ".claude/skills/adopted-only" and .path != ".agents/skills/adopted-only"))' \
+    "$owner" > "$owner.next"
+  chmod 600 "$owner.next"
+  mv "$owner.next" "$owner"
+
   [ ! -e "$T25_PROJECT/.claude/skills/adopted-only" ]
   jq -e '[.artifacts[].path] | index(".claude/skills/adopted-only") == null' \
     "$owner" >/dev/null

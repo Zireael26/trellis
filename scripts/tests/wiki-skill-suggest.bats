@@ -318,19 +318,19 @@ EOF
        | select(.hookEventName == "SessionStart")
        | .additionalContext')"
     [[ "$context" == *RUNTIME_GOTCHA_SENTINEL* ]]
-    [[ "$context" != *WIKI_INDEX_SENTINEL* ]]
-    [[ "$context" != *WIKI_PATTERN_SENTINEL* ]]
-    [[ "$context" != *runtime-fixture* ]]
-    [[ "$context" != *wiki/index.md* ]]
+    [[ "$context" != *WIKI_INDEX_SENTINEL* ]] || false
+    [[ "$context" != *WIKI_PATTERN_SENTINEL* ]] || false
+    [[ "$context" != *runtime-fixture* ]] || false
+    [[ "$context" != *wiki/index.md* ]] || false
   done
 
   index_bytes="$(cat "$PROJECT/wiki/index.md")"
-  [[ "$index_bytes" == *WIKI_INDEX_SENTINEL* ]]
+  [[ "$index_bytes" == *WIKI_INDEX_SENTINEL* ]] || false
   relative_pattern="${index_bytes#*](}"
   relative_pattern="${relative_pattern%%)*}"
   [ "$relative_pattern" = 'patterns/runtime-fixture.md' ]
   pattern_bytes="$(cat "$PROJECT/wiki/$relative_pattern")"
-  [[ "$pattern_bytes" == *WIKI_PATTERN_SENTINEL* ]]
+  [[ "$pattern_bytes" == *WIKI_PATTERN_SENTINEL* ]] || false
 }
 
 @test "hook and maintainer paths stay within scope and check-change is read-only" {

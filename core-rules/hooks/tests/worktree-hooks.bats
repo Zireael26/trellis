@@ -161,7 +161,7 @@ EOF
   run_create feat1
   [ "$status" -eq 5 ] || { echo "status $status stderr: $stderr"; false; }
   [ -z "$output" ]
-  [[ "$stderr" == *"$path is not ready"* ]]
+  [[ "$stderr" == *"$path is not ready"* ]] || false
   # Recovery evidence: the populated tree, its branch and the log stay.
   [ "$(cat "$path/sub/file.txt")" = nested ]
   [ "$(git -C "$path" symbolic-ref --short HEAD)" = worktree-feat1 ]
@@ -283,7 +283,7 @@ EOF
   [ "$status" -ne 0 ]
   [ -z "$output" ]
   [ "$(cat "$path/wip.txt")" = keep ]
-  [[ "$stderr" == *"unpopulated"* ]]
+  [[ "$stderr" == *"unpopulated"* ]] || false
 }
 
 @test "A7.1: interrupted population is remembered even when Git already wrote the index" {
@@ -307,7 +307,7 @@ STUB
   printf 'keep\n' > "$path/wip.txt"
   run bash "$CREATE_HOOK" <<< "$(create_input feat1)"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"population"* ]]
+  [[ "$output" == *"population"* ]] || false
   [ "$(cat "$path/wip.txt")" = keep ]
 }
 
@@ -437,7 +437,7 @@ STUB
   first_rc=0; wait "$first_pid" || first_rc=$?
   unset HOLD_WORKTREE_ADD
   [ "$second_rc" -ne 0 ]
-  [[ "$second_output" == *"creation already in progress"* ]]
+  [[ "$second_output" == *"creation already in progress"* ]] || false
   [ "$marker_held" = yes ]
   [ ! -e "$HOLD_SECOND" ]
   [ "$first_rc" -eq 0 ] || { echo "first create failed"; false; }
@@ -521,11 +521,11 @@ STUB
   [ "$done_rc" -eq 0 ] && [ "$exit_rc" -eq 0 ]
   [ "$second_rc" -ne 124 ] || { echo 'second create timed out'; false; }
   [ "$second_rc" -ne 0 ]
-  [[ "$second_output" == *"creation already in progress"* ]]
+  [[ "$second_output" == *"creation already in progress"* ]] || false
   [ -d "$path" ] && [ -d "$marker" ]
   [ "$final_rc" -ne 124 ] || { echo 'final create timed out'; false; }
   [ "$final_rc" -ne 0 ]
-  [[ "$final_output" == *"interrupted population marker"* ]]
+  [[ "$final_output" == *"interrupted population marker"* ]] || false
 }
 
 @test "A7.1: retrying a populated registered worktree reruns sync before stdout" {
@@ -608,7 +608,7 @@ STUB
   [ -z "$output" ]
   [ -d "$ROOT/myproj/cc-feat1" ]
   grep -q 'trellis is not on PATH' "$TRELLIS_HOME/state/worktree-hooks/myproj_cc-feat1.sync.log"
-  [[ "$stderr" == *"trellis is not on PATH"* ]]
+  [[ "$stderr" == *"trellis is not on PATH"* ]] || false
 }
 
 # --- WorktreeRemove ---------------------------------------------------------
@@ -674,7 +674,7 @@ owner_record() {
   [ "$status" -ne 0 ]
   [ -d "$WT" ]
   [ "$(cat "$WT/README.md")" = changed ]
-  [[ "$stderr" == *"uncommitted or untracked"* ]]
+  [[ "$stderr" == *"uncommitted or untracked"* ]] || false
   branch_exists worktree-feat1
 }
 
@@ -685,7 +685,7 @@ owner_record() {
 
   [ "$status" -ne 0 ]
   [ "$(cat "$WT/new.txt")" = new ]
-  [[ "$stderr" == *"new.txt"* ]]
+  [[ "$stderr" == *"new.txt"* ]] || false
 }
 
 @test "A7.2: an ignored file outside the regenerable set is refused" {
@@ -699,7 +699,7 @@ owner_record() {
 
   [ "$status" -ne 0 ]
   [ "$(cat "$WT/.env.local")" = "SECRET=1" ]
-  [[ "$stderr" == *".env.local"* ]]
+  [[ "$stderr" == *".env.local"* ]] || false
 }
 
 @test "A7.2: nested ignored environment and database files block removal even under dist" {
@@ -717,8 +717,8 @@ owner_record() {
   [ "$status" -ne 0 ]
   [ "$(cat "$WT/dist/nested/.env.local")" = private ]
   [ "$(cat "$WT/dist/nested/prod.db")" = data ]
-  [[ "$stderr" == *"dist/nested/.env.local"* ]]
-  [[ "$stderr" == *"dist/nested/prod.db"* ]]
+  [[ "$stderr" == *"dist/nested/.env.local"* ]] || false
+  [[ "$stderr" == *"dist/nested/prod.db"* ]] || false
 }
 
 @test "A7.2: an ignored regenerable directory does not block removal" {
@@ -744,7 +744,7 @@ owner_record() {
 
   [ "$status" -ne 0 ]
   [ -d "$WT" ]
-  [[ "$stderr" == *"not on any remote"* ]]
+  [[ "$stderr" == *"not on any remote"* ]] || false
   branch_exists worktree-feat1
 }
 
@@ -816,7 +816,7 @@ owner_record() {
 
   [ "$status" -ne 0 ]
   [ -d "$WT" ]
-  [[ "$stderr" == *"it is locked (busy)"* ]]
+  [[ "$stderr" == *"it is locked (busy)"* ]] || false
 }
 
 @test "A7.2: the main checkout is refused" {
@@ -836,7 +836,7 @@ owner_record() {
 
   [ "$status" -ne 0 ]
   [ "$(cat "$SANDBOX/inaccessible/wt/note")" = work ]
-  [[ "$stderr" == *"cannot"* ]]
+  [[ "$stderr" == *"cannot"* ]] || false
 }
 
 @test "A7.2: a path that is already gone is a no-op success" {
@@ -854,7 +854,7 @@ owner_record() {
 
   [ "$status" -ne 0 ]
   [ -d "$WT" ]
-  [[ "$stderr" == *"owner"* ]]
+  [[ "$stderr" == *"owner"* ]] || false
   [ ! -e "$SANDBOX/trellis-calls" ]
 }
 
@@ -868,7 +868,7 @@ owner_record() {
     run_remove "$WT"
     [ "$status" -ne 0 ]
     [ -d "$WT" ]
-    [[ "$stderr" == *"owner"* ]]
+    [[ "$stderr" == *"owner"* ]] || false
   done
 }
 
@@ -890,10 +890,66 @@ STUB
 
   # T49: exit 0 only once detach, removal and the branch proof are done.
   [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
-  [[ "$stderr" != *"continue in the background"* ]]
+  [[ "$stderr" != *"continue in the background"* ]] || false
   path_missing "$WT"
   [ "$(cat "$SANDBOX/trellis-calls")" = "detach $WT" ]
   branch_missing worktree-feat1
+}
+
+# registry_row WT FLEET — a local registry row naming WT's exact identity.
+registry_row() {
+  local wt="$1" fleet="$2" common checkout_id worktree_id
+  common="$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)"
+  common="$(CDPATH='' cd "$common" && pwd -P)"
+  checkout_id="$(printf '%s' "$common" | shasum -a 256 | cut -d ' ' -f 1)"
+  worktree_id="$(printf '%s' "$wt" | shasum -a 256 | cut -d ' ' -f 1)"
+  jq -n --arg fleet "$fleet" --arg c "$checkout_id" --arg w "$worktree_id" --arg root "$wt" --arg common "$common" '{
+    schema_version: 1,
+    projects: {("\($fleet)/myproj"): {fleet: $fleet, project_id: "myproj", status: "active",
+      checkouts: {($c): {git_common_dir: $common, worktrees: {($w): {root: $root}}}}}}
+  }' > "$TRELLIS_HOME/registry.json"
+}
+
+# 1.5.1: detach keeps the registry row, so a removed worktree left
+# "unavailable: retained local registry row" in doctor. The hook retires it.
+@test "1.5.1: a removed worktree's registry row is deregistered after the remove" {
+  printf '.trellis-leaf\n' >> "$REPO/.git/info/exclude"
+  make_cc feat1
+  ln -s /payload/leaf "$WT/.trellis-leaf"
+  owner_record "$WT" .trellis-leaf
+  registry_row "$WT" personal
+  cat > "$SANDBOX/bin/trellis" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$SANDBOX/trellis-calls"
+[ "\$1" = detach ] && rm -f "\$2/.trellis-leaf"
+if [ "\$1" = registry ]; then [ ! -e "$WT" ] || { echo "deregister ran before the remove" >&2; exit 3; }; fi
+exit 0
+STUB
+  export DJ_MERGED_OVERRIDE=merged
+  run_remove "$WT"
+
+  [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
+  path_missing "$WT"
+  [ "$(cat "$SANDBOX/trellis-calls")" = "detach $WT
+registry deregister --fleet personal --worktree-root $WT" ] || { cat "$SANDBOX/trellis-calls"; false; }
+}
+
+@test "1.5.1: a failed deregister still reports the worktree removed and names the rerun" {
+  make_cc feat1
+  registry_row "$WT" personal
+  cat > "$SANDBOX/bin/trellis" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$SANDBOX/trellis-calls"
+[ "\$1" != registry ] || exit 5
+exit 0
+STUB
+  export DJ_MERGED_OVERRIDE=merged
+  run_remove "$WT"
+
+  [ "$status" -eq 0 ] || { echo "stderr: $stderr"; false; }
+  path_missing "$WT"
+  [[ "$stderr" == *"its registry row remains (rerun: trellis registry deregister --fleet personal --worktree-root $WT)"* ]] ||
+    { echo "$stderr"; false; }
 }
 
 @test "A7.2: an attached worktree with an unowned ignored file is refused before detach" {
@@ -907,11 +963,11 @@ STUB
 
   [ "$status" -ne 0 ]
   [ -d "$WT" ]
-  [[ "$stderr" == *".env.local"* ]]
-  [[ "$stderr" != *".trellis-leaf"* ]]
+  [[ "$stderr" == *".env.local"* ]] || false
+  [[ "$stderr" != *".trellis-leaf"* ]] || false
   local log="$TRELLIS_HOME/state/worktree-hooks/_unregistered_myrepo_cc-feat1.remove.log"
   grep -qF "kept $WT: ignored, not regenerable: .env.local" "$log"
-  [[ "$stderr" != *"continue in the background"* ]]
+  [[ "$stderr" != *"continue in the background"* ]] || false
   [ ! -e "$SANDBOX/trellis-calls" ]
 }
 
@@ -926,8 +982,8 @@ STUB
 
   # T49: a failed detach is an explicit kept failure, never success.
   [ "$status" -eq 1 ] || { echo "status $status stderr: $stderr"; false; }
-  [[ "$stderr" == *"kept $WT: trellis detach failed"* ]]
-  [[ "$stderr" == *"detach refused"* ]]
+  [[ "$stderr" == *"kept $WT: trellis detach failed"* ]] || false
+  [[ "$stderr" == *"detach refused"* ]] || false
   [ -d "$WT" ]
   branch_exists worktree-feat1
 }
@@ -947,7 +1003,7 @@ STUB
   [ "$status" -ne 0 ]
   [ -d "$WT" ]
   [ "$(git -C "$REPO" rev-parse worktree-feat1)" = "$tip" ]
-  [[ "$stderr" == *"not on any remote"* ]]
+  [[ "$stderr" == *"not on any remote"* ]] || false
 }
 
 @test "A7.2: gh absent means unknown merge state: a unique commit keeps the worktree" {
@@ -1038,8 +1094,8 @@ fake_sync() {
   run_remove "$WT"
 
   [ "$status" -eq 1 ] || { echo "status $status stderr: $stderr"; false; }
-  [[ "$stderr" == *"ignored, not regenerable: .env.local"* ]]
-  [[ "$stderr" != *"continue in the background"* ]]
+  [[ "$stderr" == *"ignored, not regenerable: .env.local"* ]] || false
+  [[ "$stderr" != *"continue in the background"* ]] || false
   [ "$(cat "$WT/.env.local")" = "SECRET=1" ]
 }
 
@@ -1052,7 +1108,7 @@ fake_sync() {
   [ "$status" -eq 1 ] || { echo "status $status stderr: $stderr"; false; }
   local log="$TRELLIS_HOME/state/worktree-hooks/_unregistered_myrepo_cc-feat1.remove.log"
   grep -q "kept $WT: its create-time trellis worktree sync is still running after 1s" "$log"
-  [[ "$stderr" != *"continue in the background"* ]]
+  [[ "$stderr" != *"continue in the background"* ]] || false
   [ -d "$WT" ]
 }
 

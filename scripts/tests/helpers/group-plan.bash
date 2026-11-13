@@ -127,12 +127,12 @@ group_plan_case_lease__start_time() {
   case "$pid" in
     ""|*[!0-9]*) return 1 ;;
   esac
-  state="$(LC_ALL=C ps -o state= -p "$pid" 2>/dev/null)" || return 1
+  state="$(/usr/bin/env LC_ALL=C ps -o state= -p "$pid" 2>/dev/null)" || return 1
   [ -n "$state" ] || return 1
   case "$state" in
     *Z*) return 1 ;;
   esac
-  raw="$(LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null)" || return 1
+  raw="$(/usr/bin/env LC_ALL=C ps -o lstart= -p "$pid" 2>/dev/null)" || return 1
   [ -n "$raw" ] || return 1
   raw="$(printf '%s\n' "$raw" | tr -s ' ' | sed -e 's/^ *//' -e 's/ *$//')"
   [ -n "$raw" ] || return 1

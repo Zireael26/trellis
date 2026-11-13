@@ -7,7 +7,7 @@ SKILL_SIZE_BUDGET_BYTES=65536
 skill_size__safe_text() {
   local value="${1:-}" codes
   [ -n "$value" ] || return 1
-  codes="$(printf '%s' "$value" | LC_ALL=C od -An -t u1)" || return 1
+  codes="$(printf '%s' "$value" | /usr/bin/env LC_ALL=C od -An -t u1)" || return 1
   if printf '%s\n' "$codes" | awk '
     {
       for (i = 1; i <= NF; i++) {
@@ -51,7 +51,7 @@ skill_size__declared_name() {
   name="$(
     # One lookahead byte prevents a truncated closing-fence line from looking
     # complete. Only a closing fence ending within the first 4096 bytes counts.
-    head -c 4097 "$root/SKILL.md" 2>/dev/null | LC_ALL=C awk '
+    head -c 4097 "$root/SKILL.md" 2>/dev/null | /usr/bin/env LC_ALL=C awk '
       { line_end = offset + length($0); offset = line_end + 1; sub(/\r$/, "") }
       NR == 1 {
         sub("^" sprintf("%c%c%c", 239, 187, 191), "")
@@ -78,7 +78,7 @@ skill_size__declared_name() {
 # separately; an unavailable grep or a read error is a refusal, not a match miss.
 skill_size__valid_utf8() {
   iconv -f UTF-8 -t UTF-8 "$1" >/dev/null 2>&1 || return 1
-  if LC_ALL=C grep -a -q -E $'\364[\220-\277]|[\365-\377]' "$1" >/dev/null 2>&1; then
+  if /usr/bin/env LC_ALL=C grep -a -q -E $'\364[\220-\277]|[\365-\377]' "$1" >/dev/null 2>&1; then
     return 1
   else
     [ "$?" -eq 1 ]

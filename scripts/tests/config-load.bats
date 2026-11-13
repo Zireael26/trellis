@@ -221,7 +221,7 @@ run_loader_with_ajv_probe() {
   run_loader_with_ajv_probe 1 0
 
   [ "$status" -eq 4 ]
-  [[ "$output" == *"portable policy failed schema validation"* ]]
+  [[ "$output" == *"portable policy failed schema validation"* ]] || false
   [ "$(< "$PROBE_LOG")" = "npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json" ]
 }
 
@@ -241,7 +241,7 @@ npx --no-install --offline --no-update-notifier ajv validate --spec=draft2020 --
   run_loader_with_ajv_probe 0 1
 
   [ "$status" -eq 4 ]
-  [[ "$output" == *"portable policy failed schema validation"* ]]
+  [[ "$output" == *"portable policy failed schema validation"* ]] || false
   [ "$(< "$PROBE_LOG")" = "npx --no-install --offline --no-update-notifier ajv compile --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json
 npx --no-install --offline --no-update-notifier ajv validate --spec=draft2020 --strict=false -s $ROOT/scripts/lib/trellis.config.schema.json -d $POLICY" ]
 }

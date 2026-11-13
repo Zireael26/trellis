@@ -40,7 +40,10 @@ def probe(command: Sequence[str], env: dict[str, str], cwd: Path) -> str:
         if child.returncode:
             return "unavailable: probe exit {}".format(child.returncode)
         text = output.decode("utf-8", errors="replace").strip()
-        return text.splitlines()[0] if text else "unavailable: empty probe"
+        if not text:
+            return "unavailable: empty probe"
+        # Native test verdicts bind the complete rustc host/release identity.
+        return text if command and command[-1] == "-vV" else text.splitlines()[0]
     except OSError:
         return "unavailable: probe could not execute"
 

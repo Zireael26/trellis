@@ -257,7 +257,7 @@ assert doc["summary"]["historical"]["by_severity"]["high"] == 1
   run env PATH="$BIN:$PATH" GITLEAKS_MODE=error-current \
     bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"current scanner diagnostic sentinel"* ]]
+  [[ "$output" == *"current scanner diagnostic sentinel"* ]] || false
 }
 
 @test "gitleaks missing reports return indeterminate instead of an empty list" {
@@ -267,7 +267,7 @@ assert doc["summary"]["historical"]["by_severity"]["high"] == 1
     bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
   [ "$status" -eq 2 ]
   [ ! -s "$out" ]
-  [[ "$output" == *"current-tree report is missing"* ]]
+  [[ "$output" == *"current-tree report is missing"* ]] || false
 }
 
 @test "gitleaks malformed reports return indeterminate instead of an empty list" {
@@ -277,7 +277,7 @@ assert doc["summary"]["historical"]["by_severity"]["high"] == 1
     bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
   [ "$status" -eq 2 ]
   [ ! -s "$out" ]
-  [[ "$output" == *"current-tree report is malformed"* ]]
+  [[ "$output" == *"current-tree report is malformed"* ]] || false
 }
 
 @test "gitleaks non-list reports return indeterminate instead of an empty list" {
@@ -287,7 +287,7 @@ assert doc["summary"]["historical"]["by_severity"]["high"] == 1
     bash "$SCRIPT_ROOT/scripts/lib/gitleaks.sh" "$PROJECT" "$out"
   [ "$status" -eq 2 ]
   [ ! -s "$out" ]
-  [[ "$output" == *"current-tree report must be a JSON list"* ]]
+  [[ "$output" == *"current-tree report must be a JSON list"* ]] || false
 }
 
 @test "local.config.sh openai provider with explicit model reaches llm child and audit provenance" {

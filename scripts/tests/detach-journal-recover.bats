@@ -33,11 +33,17 @@ recover_and_assert_detached() {
 
 @test "recover finishes a detach killed at every step of the phase-8 removal" {
   local point journal removal
+  local expected
   for point in intent q_mkdir q_claim q_rm q_rmdir clear; do
     detach_journal_setup
     kill_detach_at "$point" 9
     journal="$(detach_journal_path)"
-    jq -e '.status == "detaching" and .phase == 8 and .owner_committed == false and .next_owner == null' "$journal" >/dev/null ||
+    # Owner ruling 2026-11-11 (1.5.1, option A): the clear of a removal and the
+    # phase advance are one durable write, so a kill at the ninth clear finds
+    # phase 9 (the shell protocol journaled phase 8 here, then phase 9).
+    expected=8
+    [ "$point" != clear ] || expected=9
+    jq -e --argjson phase "$expected" '.status == "detaching" and .phase == $phase and .owner_committed == false and .next_owner == null' "$journal" >/dev/null ||
       { echo "kill at $point: $(jq -c '{phase,owner_committed,removal}' "$journal")"; false; }
     if [ "$point" = q_rmdir ]; then
       # The field journal's shape: the claim is journaled, its leaf and its

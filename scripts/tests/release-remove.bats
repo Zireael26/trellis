@@ -213,7 +213,7 @@ zombie_fixture() {
   run sourced 'TRELLIS_TEST_RELEASE_PROC_ROOT="$SANDBOX/proc" remove_release "$TRELLIS_HOME" 1.0.0 apply'
   chmod 700 "$SANDBOX/proc"
   assert_refused 4 "running processes could not be checked: $RELEASES/1.0.0"
-  [[ "$output" == *"$SANDBOX/proc"* ]]
+  [[ "$output" == *"$SANDBOX/proc"* ]] || false
   # A holder found before the EACCES still refuses, so cwd points elsewhere here.
   rm "${SANDBOX:?}/proc/42/cwd"
   ln -s /elsewhere "$SANDBOX/proc/42/cwd"
@@ -556,7 +556,7 @@ zombie_fixture() {
   run sourced 'remove_reference_paths "$SANDBOX/hidden/config.json" 0 ""'
   chmod 700 "$SANDBOX/hidden"
   [ "$status" -eq 4 ] || { echo "$output"; false; }
-  [[ "$output" == *"$SANDBOX/hidden/config.json"* ]]
+  [[ "$output" == *"$SANDBOX/hidden/config.json"* ]] || false
   assert_intact 1.0.0
 }
 
@@ -673,14 +673,14 @@ zombie_fixture() {
   probe="$SANDBOX/lsof"
   run sourced 'TRELLIS_TEST_RELEASE_LSOF="$SANDBOX/lsof" remove_release "$TRELLIS_HOME" 1.0.0 apply'
   assert_refused 4 "running processes could not be checked: $RELEASES/1.0.0"
-  [[ "$output" == *"$probe"* ]]
+  [[ "$output" == *"$probe"* ]] || false
   for body in 'exit 42' 'exit 0' 'printf "bad\\n"' 'printf "p42\\n"' \
     'printf "p42\\nu$(id -u)\\nn/elsewhere\\n"; printf "partial snapshot\\n" >&2'; do
     printf '#!/bin/sh\n%s\n' "$body" > "$probe"
     chmod 700 "$probe"
     run sourced 'TRELLIS_TEST_RELEASE_LSOF="$SANDBOX/lsof" remove_release "$TRELLIS_HOME" 1.0.0 apply'
     assert_refused 4 "running processes could not be checked: $RELEASES/1.0.0"
-    [[ "$output" == *"$probe"* ]]
+    [[ "$output" == *"$probe"* ]] || false
   done
   printf '#!/bin/sh\nprintf "p42\\nu%s\\nn%%s\\n" "%s"\n' "$(id -u)" "$RELEASES/1.0.0/payload" > "$probe"
   run sourced 'TRELLIS_TEST_RELEASE_LSOF="$SANDBOX/lsof" remove_release "$TRELLIS_HOME" 1.0.0 apply'
@@ -796,9 +796,9 @@ zombie_fixture() {
     diagnostic="$(< "$SANDBOX/probe.stderr")"
     [ "$diagnostic" = "trellis release: process check could not inspect 1 processes (1 of uid $(id -u) the kernel will not let it inspect: 42 $quoted); it covers uid $(id -u)'s inspectable processes only" ] ||
       { echo "$kind: $diagnostic"; false; }
-    [[ "$diagnostic" != *$'\033'* ]]
-    [[ "$diagnostic" != *$'\t'* ]]
-    [[ "$diagnostic" != *$'\n'* ]]
+    [[ "$diagnostic" != *$'\033'* ]] || false
+    [[ "$diagnostic" != *$'\t'* ]] || false
+    [[ "$diagnostic" != *$'\n'* ]] || false
     assert_intact 1.0.0
   done
 }
@@ -951,12 +951,12 @@ zombie_fixture() {
   chmod 600 "$first.owner.json"
   run trellis release remove 1.0.0 --apply
   [ "$status" -eq 4 ] || { echo "$output"; false; }
-  [[ "$output" == *"ambiguous removal stages or installed release"* ]]
+  [[ "$output" == *"ambiguous removal stages or installed release"* ]] || false
   assert_intact 1.0.0
   mv "$RELEASES/1.0.0" "$second"
   run trellis release remove 1.0.0 --apply
   [ "$status" -eq 4 ] || { echo "$output"; false; }
-  [[ "$output" == *"ambiguous removal stages or installed release"* ]]
+  [[ "$output" == *"ambiguous removal stages or installed release"* ]] || false
   [ -d "$first" ] && [ -f "$second/payload/scripts/blob" ]
 }
 
@@ -1052,9 +1052,9 @@ zombie_fixture() {
     release_store_remove_entries finish 1.0.0 "$2" staged
   ' finish "$RELEASE_STORE_LIB" "$stage_name" "$stage"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *$'release\t'"$RELEASES/1.0.0"$'\t'* ]]
+  [[ "$output" == *$'release\t'"$RELEASES/1.0.0"$'\t'* ]] || false
   for hash in "$HASH" "$other_hash"; do
-    [[ "$output" == *$'exec-snapshot\t'"$RELEASES/.exec/1.0.0-$hash"$'\t'* ]]
+    [[ "$output" == *$'exec-snapshot\t'"$RELEASES/.exec/1.0.0-$hash"$'\t'* ]] || false
   done
   assert_gone 1.0.0
   for entry in "$stage" "$stage.owner.json" "$other_snapshot" \

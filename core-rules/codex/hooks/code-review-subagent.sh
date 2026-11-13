@@ -134,7 +134,7 @@ _cr_changed_names() {
         *) printf '%s\n' "$f" ;;
       esac
     done
-  } | LC_ALL=C sort -u | LC_ALL=C sed '/^$/d'
+  } | /usr/bin/env LC_ALL=C sort -u | /usr/bin/env LC_ALL=C sed '/^$/d'
 }
 
 # --- TRELLIS_REVIEW_OVERRIDE escape ---
@@ -352,7 +352,7 @@ fi
 # path segment only, so a doc anywhere in the tree (e.g. `src/notes.md`) still
 # counts as a doc and a non-doc under `docs/` still counts as a non-doc.
 NONDOC_COUNT=$(_cr_changed_names \
-  | LC_ALL=C grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
+  | /usr/bin/env LC_ALL=C grep -vE '(^|/)[^/]+\.(md|mdx|rst|txt)$' \
   | awk 'END{print NR}')
 if [ "$NONDOC_COUNT" -eq 0 ]; then
   exit 0

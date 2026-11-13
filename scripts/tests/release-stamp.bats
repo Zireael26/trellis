@@ -38,7 +38,7 @@ mode_of() {
 seal_release() {
   local version="$1" rel="$TRELLIS_HOME/releases/$1" work path full idx=0
   work="$(mktemp -d "$SANDBOX/manifest.XXXXXX")"
-  (CDPATH='' cd "$rel/payload" && find . -mindepth 1 \( -type f -o -type l \) -print | sed 's|^\./||' | LC_ALL=C sort) > "$work/paths"
+  (CDPATH='' cd "$rel/payload" && find . -mindepth 1 \( -type f -o -type l \) -print | sed 's|^\./||' | /usr/bin/env LC_ALL=C sort) > "$work/paths"
   : > "$work/hash"
   : > "$work/modes"
   while IFS= read -r path; do
@@ -156,7 +156,7 @@ restamped_by_full_verify() {
   sealed "$rel/payload/core-rules/CLAUDE.md"
   run stamped_verify "$rel"
   refused_by_full_verify
-  [[ "$output" == *'changed release content: core-rules/CLAUDE.md'* ]]
+  [[ "$output" == *'changed release content: core-rules/CLAUDE.md'* ]] || false
 }
 
 @test "chmod falls back to the full verify, which refuses the new mode" {
@@ -223,7 +223,7 @@ assert after.st_ctime_ns != before.st_ctime_ns
   tamper_keeping_size_and_mtime "$rel/payload/core-rules/CLAUDE.md"
   run stamped_verify "$rel"
   refused_by_full_verify
-  [[ "$output" == *'changed release content: core-rules/CLAUDE.md'* ]]
+  [[ "$output" == *'changed release content: core-rules/CLAUDE.md'* ]] || false
 }
 
 # Mutation check: a stamp that ignores ctime is fooled by the case above, so
@@ -1349,6 +1349,21 @@ reseal_release() {
   tamper_keeping_size_and_mtime "$rel/payload/scripts/lib/release_verify.py"
   run dispatcher_check trellis_verify_release_executed "$rel"
   [ "$status" -ne 0 ] || { echo 'a changed release_verify.py passed the executed check'; false; }
+}
+
+# Registry batching is optional in older payloads, but its bytes are executed
+# on new ones. The optional path must not become an integrity bypass.
+@test "dispatcher: the executed check covers registry identity batch only when present" {
+  rel="$(install_executed_release)"
+  [ ! -e "$rel/payload/scripts/lib/registry_identity_batch.py" ]
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -eq 0 ] || { echo "without: $output"; false; }
+  reseal_release "$rel" cp "$LIB/registry_identity_batch.py" scripts/lib/registry_identity_batch.py
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -eq 0 ] || { echo "with: $output"; false; }
+  tamper_keeping_size_and_mtime "$rel/payload/scripts/lib/registry_identity_batch.py"
+  run dispatcher_check trellis_verify_release_executed "$rel"
+  [ "$status" -ne 0 ] || { echo 'a changed registry_identity_batch.py passed the executed check'; false; }
 }
 
 # The executed check writes no stamp (it is not a full verify). A stamp that

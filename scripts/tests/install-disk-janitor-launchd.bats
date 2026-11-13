@@ -320,7 +320,7 @@ SH
   run_installer --with-apply
   [ "$status" -ne 0 ]
   [[ "$output" == *"refusing to load org.trellis.disk-janitor-apply"*"nightly apply argv failed dry-run"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"is degraded"* ]]
+  [[ "$output" != *"is degraded"* ]] || false
 }
 
 @test "--with-apply replaces an existing degraded apply plist when dry-run succeeds" {
@@ -418,7 +418,7 @@ EOF
   # First run uses active release 1.2.3
   run env TRELLIS_HOME="$TRELLIS_HOME" "$stable_entry" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"WATCHDOG_123 --dry-run"* ]]
+  [[ "$output" == *"WATCHDOG_123 --dry-run"* ]] || false
 
   # Switch active to 1.2.4 without re-running installer
   cat > "$TRELLIS_HOME/config.json" <<'EOF'
@@ -428,19 +428,19 @@ EOF
   # Next run uses 1.2.4
   run env TRELLIS_HOME="$TRELLIS_HOME" "$stable_entry" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"WATCHDOG_124 --dry-run"* ]]
+  [[ "$output" == *"WATCHDOG_124 --dry-run"* ]] || false
 
   # Prune version 1.2.3: no error loop, still runs 1.2.4
   rm -rf "$TRELLIS_HOME/releases/1.2.3"
   run env TRELLIS_HOME="$TRELLIS_HOME" "$stable_entry" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"WATCHDOG_124 --dry-run"* ]]
+  [[ "$output" == *"WATCHDOG_124 --dry-run"* ]] || false
 
   # Prune active version 1.2.4: logs and exits 0 (no error loop in launchd)
   rm -rf "$TRELLIS_HOME/releases/1.2.4"
   run env TRELLIS_HOME="$TRELLIS_HOME" "$stable_entry" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"missing"* || "$output" == *"not executable"* || "$output" == *"not available"* ]]
+  [[ "$output" == *"missing"* || "$output" == *"not executable"* || "$output" == *"not available"* ]] || false
 
   # Symlink escape: watchdog script escaping the release store is rejected
   local r3_dir="$TRELLIS_HOME/releases/1.2.5/payload/scripts"
@@ -457,8 +457,8 @@ EOF
 EOF
   run env TRELLIS_HOME="$TRELLIS_HOME" "$stable_entry" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"symlink"* || "$output" == *"escaped"* ]]
-  [[ "$output" != *"PWNED"* ]]
+  [[ "$output" == *"symlink"* || "$output" == *"escaped"* ]] || false
+  [[ "$output" != *"PWNED"* ]] || false
 }
 
 @test "watchdog install enforces state dir to 0700 and entry point mode to 0500 atomically" {
@@ -504,8 +504,8 @@ EOF
 
   run env TRELLIS_HOME="$TRELLIS_HOME" "$stable_entry" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"manifest verification failed"* || "$output" == *"hash mismatch"* ]]
-  [[ "$output" != *"WATCHDOG_TAMPERED"* ]]
+  [[ "$output" == *"manifest verification failed"* || "$output" == *"hash mismatch"* ]] || false
+  [[ "$output" != *"WATCHDOG_TAMPERED"* ]] || false
 }
 
 @test "watchdog entry point rejects payload script when release manifest is missing" {
@@ -528,8 +528,8 @@ EOF
 
   run env TRELLIS_HOME="$TRELLIS_HOME" "$stable_entry" --dry-run
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"manifest missing"* ]]
-  [[ "$output" != *"WATCHDOG_LEGIT"* ]]
+  [[ "$output" == *"manifest missing"* ]] || false
+  [[ "$output" != *"WATCHDOG_LEGIT"* ]] || false
 }
 
 @test "atomically replaces an allowed owned regular destination and loads only its final path" {

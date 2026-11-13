@@ -345,7 +345,7 @@ PY
     run /bin/bash -c '. "$1/lib/skill-size.sh"; . "$1/lib/skill-preload.sh"; skill_preload_check known "$2" "$3"' \
       _ "$tree" "$PROJECT/missing" "$USER_HOME"
     [ "$status" -eq 2 ]
-    [[ "$output" == *"invalid name or discovery root"* ]]
+    [[ "$output" == *"invalid name or discovery root"* ]] || false
   done
 }
 

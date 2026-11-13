@@ -27,6 +27,9 @@
 
 set -euo pipefail
 
+# This executable must source its own libraries even if its caller preloaded.
+unset TRELLIS_LIBS_PRELOADED
+
 # Never import a seal verdict from the invoking environment.
 _TRELLIS_RELEASE_STORE_VERIFY_MEMO=""
 
@@ -119,15 +122,17 @@ fi
 # release's older attach payload can reject a stale plan without explaining it.
 seed_exclude_diagnostic() (
   local script_dir="$1" source_owner="$2" payload="$3" harnesses_json="$4"
-  local home="$5" checkout="$6" common="$7" release="$8" root="$9"
+  local home="$5" checkout="$6" common="$7" release="$8" root="$9" schema_proven="${10:-}"
   local surfaces scratch
   set +e
   . "$script_dir/attach-project.sh"
   surfaces="$(attach_owner_surface_plan "$source_owner" "$payload" "$harnesses_json")" || return "$?"
   scratch="$(mktemp -d "${TMPDIR:-/tmp}/trellis.worktree-plan.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   trap 'rm -rf "$scratch"' EXIT
+  # Pre-add: the donor's schema was judged by its complete verify a moment
+  # ago; only those exact owner bytes skip the shared-exclude repeat.
   attach_exclude_preflight "$home" "$checkout" "$common" \
-    "$scratch/before" "$scratch/after" "$surfaces" "$root" >/dev/null
+    "$scratch/before" "$scratch/after" "$surfaces" "$root" ${schema_proven:+"$schema_proven"} >/dev/null
 )
 
 # ---------------------------------------------------------------------------
@@ -139,7 +144,7 @@ attachment_reconcile() {
   local script_dir home registry state identity checkout worktree common registration
   local fleet project_id release payload owner rc harness attachment_id harnesses_json verified_memo
   local donor_worktree donor_root donor_attachment donor_owner donor_identity donor_ok
-  local donor_checkout donor_worktree_actual donor_root_actual donor_common
+  local donor_checkout donor_worktree_actual donor_root_actual donor_common donor_digest donor_candidates
   local -a attach_args=() expected_args=() donor_args=()
 
   script_dir="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 1
@@ -308,7 +313,24 @@ attachment_reconcile() {
   # the exact owner bytes judged here and this release. Never inherit one.
   _ATTACHMENT_DONOR_PROOF=""
   export -n _ATTACHMENT_DONOR_PROOF
-  if [ -z "$attachment_id" ] || [ "$PRE_ADD" -eq 1 ]; then
+  donor_candidates=""
+  if [ -z "$attachment_id" ] && [ "$PRE_ADD" -eq 0 ] &&
+     grep -q '^attach_donor_select_canonical()' "$payload/scripts/attach-project.sh" 2>/dev/null; then
+    # Once per boundary: this payload's attach admits the donor itself, under
+    # its transaction locks, from these registry-ordered candidates (and
+    # falls back to this same selection on a fast miss). Verify none here.
+    donor_candidates="$(printf '%s\n' "$registration" | jq -c '
+      [ .checkout.worktrees | to_entries[]
+        | select((.value.attachment_id? | type == "string"))
+        | {worktree_id:.key, root:.value.root, attachment_id:.value.attachment_id} ]')" || return "$TRELLIS_EX_STATE"
+    if [ "$donor_candidates" = '[]' ]; then
+      printf 'trellis worktree: invalid donor ownership in %s/state/attachments/%s for %s; remedy: restore a verified committed sibling before sync/add\n' "$home" "$checkout" "$TARGET" >&2
+      return "$TRELLIS_EX_STATE"
+    fi
+    # Only the conflict diagnostic below reads this; it verifies nothing.
+    donor_owner="$home/state/attachments/$checkout/$(printf '%s\n' "$donor_candidates" | jq -r '.[0].worktree_id').json"
+    donor_args=("--donor-candidates" "$donor_candidates")
+  elif [ -z "$attachment_id" ] || [ "$PRE_ADD" -eq 1 ]; then
     donor_ok=0
     while IFS=$'\t' read -r donor_worktree donor_root donor_attachment; do
       [ -n "$donor_worktree" ] && [ -n "$donor_root" ] && [ -n "$donor_attachment" ] || continue
@@ -370,7 +392,7 @@ attachment_reconcile() {
   # payload; only its refusal needs the newer invoking code's diagnosis.
   if [ "$PRE_ADD" -eq 1 ]; then
     seed_exclude_diagnostic "$script_dir" "$donor_owner" "$payload" "$harnesses_json" \
-      "$home" "$checkout" "$common" "$release" "$TARGET" || return "$?"
+      "$home" "$checkout" "$common" "$release" "$TARGET" "$donor_owner"$'\t'"$donor_digest" || return "$?"
     return 0
   fi
   if [ -n "$attachment_id" ]; then

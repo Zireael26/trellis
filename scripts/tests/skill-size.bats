@@ -66,10 +66,10 @@ make_named_skill() {
     [ "$output" = 25000000 ]
     run /bin/bash -c '. "$1"; skill_size_check_root "$2"' _ "$lib" "$SANDBOX/custom"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"65537 bytes; budget is 65536 bytes"* ]]
+    [[ "$output" == *"65537 bytes; budget is 65536 bytes"* ]] || false
     run /bin/bash -c '. "$1"; skill_size_check_root "$2" 65537' _ "$lib" "$SANDBOX/custom"
     [ "$status" -eq 2 ]
-    [[ "$output" == *"not valid UTF-8"* ]]
+    [[ "$output" == *"not valid UTF-8"* ]] || false
     make_skill "$SANDBOX/custom" 65537
     run /bin/bash -c '. "$1"; skill_size_check_root "$2" 65537' _ "$lib" "$SANDBOX/custom"
     [ "$status" -eq 0 ]
@@ -83,16 +83,20 @@ make_named_skill() {
   for lib in "$LIB" "$REPO_ROOT/core-rules/hooks/lib/skill-size.sh" \
       "$REPO_ROOT/core-rules/codex/hooks/lib/skill-size.sh"; do
     for tool in iconv grep wc; do
-      run /bin/bash -c '
+      # The locale for external grep is now set by env after exec, so use an
+      # executable PATH shim rather than an in-process shell-function override.
+      mkdir -p "$SANDBOX/fail-bin"
+      : > "$SANDBOX/fail.log"
+      failure=1; [ "$tool" != grep ] || failure=2
+      printf '#!/bin/sh\nprintf "%%s\\n" "$0" >> "$FAIL_LOG"\nexit %s\n' "$failure" > "$SANDBOX/fail-bin/$tool"
+      chmod +x "$SANDBOX/fail-bin/$tool"
+      run env PATH="$SANDBOX/fail-bin:$PATH" FAIL_LOG="$SANDBOX/fail.log" /bin/bash -c '
         . "$1"
-        case "$3" in
-          iconv) iconv() { return 1; } ;;
-          grep) grep() { return 2; } ;;
-          wc) wc() { return 1; } ;;
-        esac
         skill_size_manifest_bytes "$2"
-      ' _ "$lib" "$SANDBOX/small" "$tool"
+      ' _ "$lib" "$SANDBOX/small"
       [ "$status" -eq 2 ] || { echo "$lib accepted failing $tool: $output"; false; }
+      [ -s "$SANDBOX/fail.log" ] || { echo "$tool shim did not run"; false; }
+      rm "$SANDBOX/fail-bin/$tool"
     done
   done
 }
@@ -319,7 +323,7 @@ PY
     for root in non-scalar non-scalar-after-nul obsolete-five-byte surrogate exact-invalid; do
       run /bin/bash -c '. "$1"; skill_size_manifest_bytes "$2"' _ "$lib" "$SANDBOX/$root"
       [ "$status" -eq 2 ] || { echo "$lib $root allowed: $output"; false; }
-      [[ "$output" == *"not valid UTF-8"* ]]
+      [[ "$output" == *"not valid UTF-8"* ]] || false
     done
   done
 }

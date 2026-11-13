@@ -77,7 +77,7 @@ teardown() {
   [ "$status" -eq 2 ]
   [ ! -s "$INVOCATION_LOG" ] || { echo "llm should not have been invoked"; cat "$INVOCATION_LOG"; false; }
   [ ! -s "$OUT_FILE" ]
-  [[ "$output" == *"requires LLM_MODEL"* ]]
+  [[ "$output" == *"requires LLM_MODEL"* ]] || false
 }
 
 @test "gemini without LLM_MODEL exits 2 before llm invocation" {
@@ -85,7 +85,7 @@ teardown() {
   [ "$status" -eq 2 ]
   [ ! -s "$INVOCATION_LOG" ] || { echo "llm should not have been invoked"; cat "$INVOCATION_LOG"; false; }
   [ ! -s "$OUT_FILE" ]
-  [[ "$output" == *"requires LLM_MODEL"* ]]
+  [[ "$output" == *"requires LLM_MODEL"* ]] || false
 }
 
 @test "ollama without LLM_MODEL exits 2 before llm invocation" {
@@ -93,7 +93,7 @@ teardown() {
   [ "$status" -eq 2 ]
   [ ! -s "$INVOCATION_LOG" ] || { echo "llm should not have been invoked"; cat "$INVOCATION_LOG"; false; }
   [ ! -s "$OUT_FILE" ]
-  [[ "$output" == *"requires LLM_MODEL"* ]]
+  [[ "$output" == *"requires LLM_MODEL"* ]] || false
 }
 
 @test "openai with explicit LLM_MODEL forwards the model to llm" {
@@ -147,7 +147,7 @@ teardown() {
   [ "$status" -eq 2 ]
   [ ! -s "$INVOCATION_LOG" ] || { echo "llm should not have been invoked"; cat "$INVOCATION_LOG"; false; }
   [ ! -s "$OUT_FILE" ]
-  [[ "$output" == *"neither timeout nor gtimeout is available"* ]]
+  [[ "$output" == *"neither timeout nor gtimeout is available"* ]] || false
 }
 
 @test "successful llm call removes its private diagnostic" {
@@ -194,5 +194,5 @@ teardown() {
   [ "$status" -eq 2 ]
   [ ! -s "$INVOCATION_LOG" ] || { echo "llm should not have been invoked"; cat "$INVOCATION_LOG"; false; }
   [ ! -s "$OUT_FILE" ]
-  [[ "$output" == *"unable to allocate private llm diagnostic at $DIAG_DIR/security-gate-llm.XXXXXX"* ]]
+  [[ "$output" == *"unable to allocate private llm diagnostic at $DIAG_DIR/security-gate-llm.XXXXXX"* ]] || false
 }

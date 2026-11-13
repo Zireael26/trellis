@@ -101,7 +101,7 @@ json_assert() {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: "sol",
-    reviewerAgent: "luna",
+    reviewerAgent: "terra-medium",
     __agentOutputByLabel: {
       "refresh-refs": {complete:true, refs:[{project:"repo", repo_path:"/tmp/repo", main_sha:$sha}], notes:"ok"},
       rank: {generated_for:"2026-07-14", ranked:[{id:"alpha", project:"repo", title:"alpha", score:1, reasons:"top", eligible_auto_spec:true, auto_spec:null, delivered_on_main:false, existing_spec_path:"", auto_spec_exclusions:[], safe:null, surgical:false, status:"todo"}]},
@@ -293,7 +293,7 @@ json_assert() {
   json_assert "!r.error && r.result.routing_status === \"DEGRADED\" && r.result.routing_reason === \"family-mismatch\" && r.result.auto_execute_hold === true && !r.prompts.some(p=>p.opts.label===\"review:alpha\")"
   json_assert "r.logs.some(l=>l.includes(\"DEGRADED\") && l.includes(\"family-mismatch\"))"
 
-  # sol/luna cannot be spoofed as different families via explicit override
+  # sol/terra-medium cannot be spoofed as different families via explicit override
   local spoofArgs
   spoofArgs="$(jq -nc --arg sha "$SHA" '{
     today: "2026-07-14",
@@ -302,7 +302,7 @@ json_assert() {
     autoSpecTopN: 1,
     autoExecuteTopN: 1,
     authorAgent: "sol",
-    reviewerAgent: "luna",
+    reviewerAgent: "terra-medium",
     authorFamily: "openai",
     reviewerFamily: "anthropic",
     __agentOutputByLabel: {

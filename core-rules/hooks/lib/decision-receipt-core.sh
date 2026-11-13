@@ -87,6 +87,7 @@ decision_receipt_run() {
   [ -r "$autonomy_lib" ] || _dr_infrastructure_block "missing sibling lib at $autonomy_lib — re-run sync-hooks"
   # shellcheck source=lib/deps.sh disable=SC1090,SC1091
   . "$deps_lib" || _dr_infrastructure_block "unable to load $deps_lib — re-run sync-hooks"
+  _se_load_heavy || _dr_infrastructure_block "unable to load deps-heavy.sh beside $deps_lib — re-run sync-hooks"
   # shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
   . "$autonomy_lib" || _dr_infrastructure_block "unable to load $autonomy_lib — re-run sync-hooks"
   # Mandatory policy cannot become a warning-only no-op through degradation.

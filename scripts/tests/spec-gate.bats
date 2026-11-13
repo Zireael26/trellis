@@ -91,6 +91,7 @@ _deploy_native_spec_gate() {
   cp "$GATE" "$REPO_DIR/.claude/hooks/spec-gate.sh"
   cp "$CORE" "$REPO_DIR/.claude/hooks/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/hooks/lib/deps.sh" "$REPO_DIR/.claude/hooks/lib/deps.sh"
+  cp "$REPO/core-rules/hooks/lib/deps-heavy.sh" "$REPO_DIR/.claude/hooks/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$REPO_DIR/.claude/hooks/lib/autonomy.sh"
 }
 
@@ -409,7 +410,7 @@ JSON
     git add -A && git commit -qm "feat: production near miss $n" >/dev/null
     run _gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *"over floor"* ]]
+    [[ "$output" == *"over floor"* ]] || false
     git checkout -q main
     n=$(( n + 1 ))
   done
@@ -796,6 +797,21 @@ NODE
   [ -z "$output" ] || { echo "$output"; false; }
 }
 
+@test "triad completeness probe does not break a pipe on a large in-range list" {
+  run bash -c '
+    . "$1"
+    # More than a pipe can buffer, with the probed name first: an early
+    # match must not leave a writer behind it. Ignore SIGPIPE so a broken
+    # writer shows as a write error instead of a silent signal.
+    git() { python3 -c '\''print("specs/001-a/spec.md\nspecs/001-a/plan.md\nspecs/001-a/tasks.md\n" * 65536, end="")'\''; }
+    trap "" PIPE
+    sg_triad_in_range "$2" HEAD
+  ' _ "$CORE" "$REPO_DIR"
+  [[ "$output" != *"write error"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Broken pipe"* ]] || { echo "$output"; false; }
+  [ "$status" -ne 2 ] || { echo "$output"; false; }
+}
+
 @test "T27 SC11: enabled pipeline with detached HEAD blocks uncertain branch identity" {
   _config true 80 400
   _write_lines src/f.js 200
@@ -804,7 +820,7 @@ NODE
   git checkout -q --detach HEAD
   run _gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *detached-or-unknown-branch* ]]
+  [[ "$output" == *detached-or-unknown-branch* ]] || false
 }
 
 # --- determinism (SC2) -------------------------------------------------------
@@ -832,6 +848,7 @@ NODE
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$CORE" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   _config false
   for gate in "$GATE" "$cdir/spec-gate.sh"; do
@@ -863,6 +880,7 @@ _t27_no_jq_path() {
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$CORE" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   _t27_no_jq_path "$nojq"
   _config true
@@ -885,16 +903,17 @@ _t27_no_jq_path() {
   # This reaches sg_verdict's nojq arm, not Stop's envelope guard.
   run env PATH="$nojq" /bin/bash -c '. "$1"; sg_verdict "$2"' _ "$CORE" "$REPO_DIR"
   [ "$status" -eq 0 ]
-  [[ "$output" == $'block\t'*'jq required but not found'* ]]
+  [[ "$output" == $'block\t'*'jq required but not found'* ]] || false
   mkdir -p "$cdir/lib"
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$CORE" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   for gate in "$GATE" "$cdir/spec-gate.sh"; do
     run env PATH="$nojq" /bin/bash "$gate" --gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *'jq required but not found'* ]]
+    [[ "$output" == *'jq required but not found'* ]] || false
   done
 }
 
@@ -904,6 +923,7 @@ _t27_no_jq_path() {
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$CORE" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   for enabled in false true; do
     _config "$enabled"
@@ -921,10 +941,10 @@ _t27_no_jq_path() {
   done
   rm -f "$TRELLIS_FIXTURE/trellis.config.json"
   run bash -c '. "$1"; sg_verdict "$2"' _ "$CORE" "$nongit"
-  [[ "$output" == $'pass\t'* ]]
+  [[ "$output" == $'pass\t'* ]] || false
   printf '{broken\n' > "$TRELLIS_FIXTURE/trellis.config.json"
   run bash -c '. "$1"; sg_verdict "$2"' _ "$CORE" "$nongit"
-  [[ "$output" == $'block\t'*malformed* ]]
+  [[ "$output" == $'block\t'*malformed* ]] || false
 }
 
 @test "T27 R1 O3: missing diff resolver is a block verdict, not an advisory" {
@@ -932,7 +952,7 @@ _t27_no_jq_path() {
   git checkout -q -b feature/no-resolver
   run bash -c '. "$1"; sg_find_resolver() { return 1; }; sg_verdict "$2"' _ "$CORE" "$REPO_DIR"
   [ "$status" -eq 0 ]
-  [[ "$output" == $'block\t'*'diff-base resolver missing'* ]]
+  [[ "$output" == $'block\t'*'diff-base resolver missing'* ]] || false
 }
 
 @test "T27 R1: emergency audit runs before Boolean reentry on both shell transports" {
@@ -941,6 +961,7 @@ _t27_no_jq_path() {
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$CORE" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   _config true
   _write_lines src/emergency.js 500
@@ -978,11 +999,11 @@ _t27_no_jq_path() {
   for kind in --numstat --name-only; do
     run _verdict_with_git_diff_failure "$kind"
     [ "$status" -eq 0 ]
-    [[ "$output" == $'block\t'* ]]
+    [[ "$output" == $'block\t'* ]] || false
   done
   run _verdict_with_triad_grep_failure
   [ "$status" -eq 0 ]
-  [[ "$output" == $'block\t'* ]]
+  [[ "$output" == $'block\t'* ]] || false
 }
 
 @test "Stop-hook mode: over-floor no-spec -> block JSON + exit 2 (Claude)" {
@@ -1024,6 +1045,7 @@ _t27_no_jq_path() {
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$REPO/core-rules/hooks/lib/spec-gate-core.sh" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   _config true 80 400
   _write_lines src/f.js 200
@@ -1040,6 +1062,7 @@ _t27_no_jq_path() {
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$CORE" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   # Compare the actual twin scripts' shared executable prefix, not the core
   # against its own deployed copy. Headers and Stop emitters are harness-specific.
@@ -1068,6 +1091,7 @@ _t27_no_jq_path() {
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$REPO/core-rules/hooks/lib/spec-gate-core.sh" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   _config true 80 400
   _write_lines src/f.js 200
@@ -1086,6 +1110,7 @@ _t27_no_jq_path() {
   cp "$CODEX_GATE" "$cdir/spec-gate.sh"
   cp "$REPO/core-rules/hooks/lib/spec-gate-core.sh" "$cdir/lib/spec-gate-core.sh"
   cp "$REPO/core-rules/codex/hooks/lib/deps.sh" "$cdir/lib/deps.sh"
+  cp "$REPO/core-rules/codex/hooks/lib/deps-heavy.sh" "$cdir/lib/deps-heavy.sh"
   cp "$REPO/core-rules/hooks/lib/autonomy.sh" "$cdir/lib/autonomy.sh"
   export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   cat > "$TRELLIS_FIXTURE/trellis.config.json" <<'JSON'

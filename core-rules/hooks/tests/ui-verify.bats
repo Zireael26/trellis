@@ -72,6 +72,7 @@ deploy_wrapper() {
   mkdir -p "$deploy/lib"
   cp "$wrapper" "$deploy/ui-verify.sh"
   cp "$deps" "$deploy/lib/deps.sh"
+  cp "${deps%/*}/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   cp "$CORE" "$deploy/lib/ui-verify-core.sh"
   printf '%s' "$deploy/ui-verify.sh"
 }
@@ -284,7 +285,7 @@ _r2_l3_busy_writer() {
     printf '%s' "$output" | jq -e '.decision == "block"' >/dev/null
     run --separate-stderr env PATH="$tools:$PATH" UI_SHOT_CMD="$tools/screenshot" UI_VERIFY_TIMEOUT=2 bash "$hook" <<<"$event"
     [ "$status" -eq 0 ]
-    [[ "$output" == *'screenshot saved'* ]]
+    [[ "$output" == *'screenshot saved'* ]] || false
     run /bin/bash "$prompt" <<<"$event"
     [ "$status" -eq 0 ]
     run --separate-stderr env PATH="$tools:$PATH" UI_SHOT_CMD=/usr/bin/true UI_VERIFY_TIMEOUT=2 bash "$hook" <<<"$event"
@@ -302,7 +303,7 @@ _r2_l3_busy_writer() {
     git -C "$project" commit -qm another-ui-change
     run --separate-stderr env PATH="$tools:$PATH" UI_SHOT_CMD=/usr/bin/true UI_VERIFY_TIMEOUT=2 bash "$hook" <<<"$event"
     [ "$status" -eq 0 ]
-    [[ "$output" == *'turn baseline unavailable'* ]]
+    [[ "$output" == *'turn baseline unavailable'* ]] || false
 
     run /bin/bash "$prompt" <<<"$event"
     [ "$status" -eq 0 ]
@@ -335,7 +336,7 @@ _r2_l3_busy_writer() {
   for hook in "$CANONICAL_HOOK" "$CODEX_HOOK"; do
     run --separate-stderr bash "$hook" <<<'{"session_id":"missing"}'
     [ "$status" -eq 0 ]; [[ "$output" == *'turn baseline unavailable'* ]]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
   done
 }
 
@@ -394,7 +395,7 @@ _r2_l3_busy_writer() {
 
   [ "$status" -eq 0 ]
   [ "$(json_field '.verdict')" = "advisory" ]
-  [[ "$(json_field '.reason')" == *"UI_REGEX"* ]]
+  [[ "$(json_field '.reason')" == *"UI_REGEX"* ]] || false
 }
 
 @test "git inspection failure produces an advisory rather than a skip" {
@@ -405,7 +406,7 @@ _r2_l3_busy_writer() {
 
   [ "$status" -eq 0 ]
   [ "$(json_field '.verdict')" = "advisory" ]
-  [[ "$(json_field '.reason')" == *"git"* ]]
+  [[ "$(json_field '.reason')" == *"git"* ]] || false
 }
 
 @test "missing Perl is advisory and does not invoke an uncapped visual probe" {
@@ -417,7 +418,7 @@ _r2_l3_busy_writer() {
 
   [ "$status" -eq 0 ]
   [ "$(json_field '.verdict')" = "advisory" ]
-  [[ "$(json_field '.reason')" == *"Perl"* ]]
+  [[ "$(json_field '.reason')" == *"Perl"* ]] || false
   [ ! -e "$marker" ]
 }
 
@@ -444,7 +445,7 @@ SH
   [ "$status" -eq 0 ]
   [ "$canonical_output" = "$output" ]
   [ "$(printf '%s' "$output" | jq -r '.decision')" = "block" ]
-  [[ "$(printf '%s' "$output" | jq -r '.reason')" == "UI-visible change requires visual verification. "* ]]
+  [[ "$(printf '%s' "$output" | jq -r '.reason')" == "UI-visible change requires visual verification. "* ]] || false
 }
 
 @test "sweep-fx1: run_with_timeout kills the whole process group (no orphan)" {
@@ -473,7 +474,7 @@ SH
   . "$CORE"
   run run_with_timeout abc sh -c 'echo hi; exit 7'
   [ "$status" -eq 7 ]
-  [[ "$output" == *"hi"* ]]
+  [[ "$output" == *"hi"* ]] || false
   run run_with_timeout abc sleep 25
   [ "$status" -eq 142 ]
 }

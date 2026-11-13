@@ -398,6 +398,13 @@ class ReceiptProvenanceTests(unittest.TestCase):
             self.assertEqual(child.communicate.call_args_list[-1].kwargs, {"timeout": 0.2})
             child.stdout.close.assert_called_once()
 
+    def test_rustc_verbose_probe_preserves_the_full_host_identity(self):
+        tool = self.script("rustc-probe", 'printf "rustc 1.97.1\\nhost: fixture\\nrelease: 1.97.1\\n"\n')
+        self.assertEqual(provenance.probe([str(tool), "-vV"], self.env, self.root),
+                         "rustc 1.97.1\nhost: fixture\nrelease: 1.97.1")
+        self.assertEqual(provenance.probe([str(tool), "--version"], self.env, self.root),
+                         "rustc 1.97.1")
+
     def test_setup_failure_still_has_start(self):
         runner = self.runner_fixture()
         env = self.env | {"TRELLIS_TEST_REAL_GIT": str(self.base / "missing")}

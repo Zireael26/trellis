@@ -266,3 +266,42 @@ commit_branch() {
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
   assert_fast
 }
+
+# The dispatcher generator embeds the canonical owner and manifest schemas only
+# while every helper it pins (require_known) is byte-identical to its source;
+# otherwise it writes empty schemas and the current-worktree fast path never
+# hits. A source edit without a repin (the 1.5.1 locale sweep did this to
+# local_registry_require_project_id) must fail here, not silently in the field.
+@test "every require_known pin in the post-checkout dispatcher generator matches its current source" {
+  run python3 - "$REPO_ROOT/scripts/lib" <<'PY'
+import hashlib
+import re
+import sys
+
+lib = sys.argv[1]
+sources = {'library': lib + '/attachment.sh', 'registry': lib + '/local-registry.sh', 'home': lib + '/trellis-home.sh'}
+texts = {key: open(path, encoding='utf-8').read() for key, path in sources.items()}
+pins = re.findall(r'require_known\((\w+), "(\w+)", "([0-9a-f]{64})"\)', texts['library'])
+if not pins:
+    sys.exit('no require_known pins found in the generator')
+bad = []
+for source, name, expected in pins:
+    if source not in texts:
+        bad.append('unknown generator source %s for %s' % (source, name))
+        continue
+    found = re.findall(r'(?ms)^' + re.escape(name) + r'\(\) \{\n.*?^\}\n', texts[source])
+    actual = hashlib.sha256(found[0].encode()).hexdigest() if len(found) == 1 else 'missing or duplicate'
+    if actual != expected:
+        bad.append('%s:%s pinned %s, source hashes to %s' % (source, name, expected, actual))
+print('\n'.join(bad))
+sys.exit(1 if bad else 0)
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "the generated managed post-checkout dispatcher carries non-empty owner and manifest schemas" {
+  grep -Eq '^trellis_owner_schema_b64=[A-Za-z0-9+/=]+$' "$MANAGED/post-checkout" ||
+    { grep -n 'schema_b64' "$MANAGED/post-checkout"; return 1; }
+  grep -Eq '^trellis_manifest_schema_b64=[A-Za-z0-9+/=]+$' "$MANAGED/post-checkout" ||
+    { grep -n 'schema_b64' "$MANAGED/post-checkout"; return 1; }
+}

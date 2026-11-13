@@ -59,7 +59,7 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"foo — FRESH"* ]]
+  [[ "$output" == *"foo — FRESH"* ]] || false
 }
 
 # Lean C04: startup no longer counts commits (`rev-list <pin>..HEAD -- paths`
@@ -180,7 +180,7 @@ EOS
   [ "$status" -eq 0 ]
   ctx="$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')"
   [ "${#ctx}" -le 1500 ] || { echo "context is ${#ctx} chars"; false; }
-  [[ "$ctx" == *"...[trimmed]" ]]
+  [[ "$ctx" == *"...[trimmed]" ]] || false
 }
 
 @test "v031: emits MISSING_PATHS when entry-point file deleted" {
@@ -205,7 +205,7 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"MISSING_PATHS"* ]]
+  [[ "$output" == *"MISSING_PATHS"* ]] || false
 }
 
 @test "v031: source=compact is a no-op" {
@@ -236,7 +236,7 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"NO_ENTRY_POINTS"* ]]
+  [[ "$output" == *"NO_ENTRY_POINTS"* ]] || false
 }
 
 @test "v031: skips fenced code-block content in INDEX.md" {
@@ -268,7 +268,7 @@ EOF
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
   [[ "$output" == *"real"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"<slug>"* ]]
+  [[ "$output" != *"<slug>"* ]] || false
 }
 
 @test "v031: skips template-placeholder slugs containing angle brackets" {
@@ -281,7 +281,7 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"<placeholder>"* ]]
+  [[ "$output" != *"<placeholder>"* ]] || false
 }
 
 @test "v031: skips example rows inside a multi-line HTML comment" {
@@ -315,10 +315,10 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"real"* ]]
-  [[ "$output" != *"MISSING_FILE"* ]]
-  [[ "$output" != *"marketing-chatbot-core"* ]]
-  [[ "$output" != *"persona-system"* ]]
+  [[ "$output" == *"real"* ]] || false
+  [[ "$output" != *"MISSING_FILE"* ]] || false
+  [[ "$output" != *"marketing-chatbot-core"* ]] || false
+  [[ "$output" != *"persona-system"* ]] || false
 }
 
 @test "v031: handles entry-point paths containing spaces" {
@@ -342,7 +342,7 @@ EOF
 
   run bash -c "echo '{\"source\":\"startup\"}' | CLAUDE_PROJECT_DIR='$PROJECT_DIR' '$HOOK'"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"s — FRESH"* ]]
+  [[ "$output" == *"s — FRESH"* ]] || false
 }
 
 # --- v032 guards: no-git, drift-comparison error, multiline comment (both twins) ---

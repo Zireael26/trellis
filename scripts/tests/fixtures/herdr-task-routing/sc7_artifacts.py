@@ -141,13 +141,15 @@ def cases(cfg, policy_bytes, scope, terminal, nonce):
             scope, terminal, nonce, **kw,
         )
 
-    # Grok retired 2026-10-08 and Muse 2026-11-01: beside a producer and a
-    # reviewer in two of the three remaining families, only one refuter family
-    # is left, so a healthy panel is 1/3 and the refuter is DEGRADED in every
-    # artifact. Implementers come from the implementer chain (anthropic or
-    # openai) and every verdict seat from its own role's chain, since the
-    # validators reject any row outside policy.
-    healthy_seats = ["opus"]
+    # Owner roster 2026-11-10: five families exist (openai, anthropic, google,
+    # meta, deepseek), so beside a producer and a reviewer in two of them three
+    # refuter families remain and a healthy panel is 3/3 once the prepaid
+    # OpenCode Go seats (muse, deepseek) are live. Implementers come from the
+    # implementer chain (anthropic or openai) and every verdict seat from its
+    # own role's chain, since the validators reject any row outside policy.
+    # Argon is the reviewer in most cases (Carbon's live probe failing, today's
+    # state); case b seats Carbon itself.
+    healthy_seats = ["opus", "muse", "deepseek"]
     out = []
 
     def add(case, expect, implementer, why, artifact, resolver=True):
@@ -156,31 +158,34 @@ def cases(cfg, policy_bytes, scope, terminal, nonce):
     add("a", "accept", "haiku",
         "merge reviewer sol-xhigh shares the security reviewer sol-xhigh's "
         "family (openai)",
-        art("haiku", "argon", "sol-xhigh", "sol-xhigh", ["sol"]))
-    add("b", "accept", "luna",
-        "refuter seat opus shares the security and merge family (anthropic)",
-        art("luna", "argon", "opus", "opus", healthy_seats))
+        art("haiku", "argon", "sol-xhigh", "sol-xhigh",
+            ["sol", "muse", "deepseek"]))
+    add("b", "accept", "terra-medium",
+        "refuter seat opus shares the security and merge family (anthropic); "
+        "Carbon reviews and the Go seats complete a 3/3 panel",
+        art("terra-medium", "carbon", "opus", "opus", healthy_seats))
     add("c", "reject", "haiku",
         "security reviewer sol-xhigh shares the reviewer sol's family",
-        art("haiku", "sol", "sol-xhigh", "sol-xhigh", ["gemini"]))
-    add("d-reviewer", "reject", "luna",
-        "reviewer sol shares the producer luna's family",
-        art("luna", "sol", "opus", "opus", healthy_seats))
-    add("d-merge", "reject", "luna",
-        "merge reviewer sol-xhigh shares the producer luna's family",
-        art("luna", "argon", "opus", "sol-xhigh", healthy_seats))
-    add("d-refuter", "reject", "luna",
-        "refuter seat sol shares the producer luna's family",
-        art("luna", "argon", "opus", "opus", ["opus", "sol"]))
-    add("e", "reject", "luna",
+        art("haiku", "sol", "sol-xhigh", "sol-xhigh",
+            ["gemini", "muse", "deepseek"]))
+    add("d-reviewer", "reject", "terra-medium",
+        "reviewer sol shares the producer terra-medium's family",
+        art("terra-medium", "sol", "opus", "opus", healthy_seats))
+    add("d-merge", "reject", "terra-medium",
+        "merge reviewer sol-xhigh shares the producer terra-medium's family",
+        art("terra-medium", "argon", "opus", "sol-xhigh", healthy_seats))
+    add("d-refuter", "reject", "terra-medium",
+        "refuter seat sol shares the producer terra-medium's family",
+        art("terra-medium", "argon", "opus", "opus", ["opus", "sol"]))
+    add("e", "reject", "terra-medium",
         "refuter seat gemini shares the reviewer argon's family (google)",
-        art("luna", "argon", "opus", "opus", ["opus", "gemini"]))
-    add("f", "reject", "luna",
+        art("terra-medium", "argon", "opus", "opus", ["opus", "gemini"]))
+    add("f", "reject", "terra-medium",
         "refuter seats gemini and argon are both family google",
-        art("luna", None, "opus", "opus", ["gemini", "argon", "opus"]))
+        art("terra-medium", None, "opus", "opus", ["gemini", "argon", "opus"]))
     # 1.3.4 layout: every verdict family distinct from every other, so the
-    # merge reviewer had no candidate and, with three families left, the
-    # refuter none either. No launcher field, as in an artifact written before
+    # merge reviewer had no candidate and, with the three families then left,
+    # the refuter none either. No launcher field, as in an artifact written before
     # spec 052.
     old_refusals = {
         "merge_reviewer": [
@@ -194,53 +199,54 @@ def cases(cfg, policy_bytes, scope, terminal, nonce):
             ("opus", "verdict-family-in-use"),
         ],
     }
-    old = art("luna", "argon", "opus", None, [],
+    old = art("terra-medium", "argon", "opus", None, [],
               launcher=False, refusals=old_refusals)
     assert old["degraded_roles"] == ["merge_reviewer", "refuter"]
-    add("g", "accept", "luna",
+    add("g", "accept", "terra-medium",
         "1.3.4 layout: independence holds; merge and refuter stay DEGRADED",
         old)
     # Launcher binding (SC4): optional, but when present it is the catalog
     # harness's value and a chosen row agrees with its trail.
-    forged = art("luna", "argon", "opus", "opus", healthy_seats)
+    forged = art("terra-medium", "argon", "opus", "opus", healthy_seats)
     forged["roles"]["merge_reviewer"]["chosen"]["launcher"] = "pi"
     forged["roles"]["merge_reviewer"]["trail"][0]["launcher"] = "pi"
-    add("h-launcher-forged", "reject", "luna",
+    add("h-launcher-forged", "reject", "terra-medium",
         "the opus merge row claims launcher pi; its catalog harness is "
         "claude-code", forged)
-    split = art("luna", "argon", "opus", "opus", healthy_seats)
+    split = art("terra-medium", "argon", "opus", "opus", healthy_seats)
     del split["roles"]["merge_reviewer"]["trail"][0]["launcher"]
-    add("h-launcher-split", "reject", "luna",
+    add("h-launcher-split", "reject", "terra-medium",
         "the opus merge chosen row says apex but its trail entry has no "
         "launcher", split)
     # Every eligible verdict fallback obeys the rules, not only the chosen row.
-    add("i-fallbacks-ok", "accept", "luna",
+    add("i-fallbacks-ok", "accept", "terra-medium",
         "eligible fallbacks in allowed families: reviewer gemini behind argon",
-        art("luna", ["argon", "gemini"], ["opus"], ["opus"], ["opus"]))
-    add("i-reviewer-trail", "reject", "luna",
+        art("terra-medium", ["argon", "gemini"], ["opus"], ["opus"], ["opus"]))
+    add("i-reviewer-trail", "reject", "terra-medium",
         "reviewer argon is chosen but sol, the producer's family, is an "
         "eligible fallback",
-        art("luna", ["argon", "sol"], "opus", "opus", healthy_seats))
-    # With three families no security fallback can share the reviewer's family
-    # while its chosen seat stays valid, so this case exercises rule 1 instead.
-    add("i-security-trail", "reject", "luna",
+        art("terra-medium", ["argon", "sol"], "opus", "opus", healthy_seats))
+    # The security chain (sol-xhigh, opus) holds no Google agent, so no security
+    # fallback can share the Google reviewer's family while its chosen seat stays
+    # valid; this case exercises rule 1 instead.
+    add("i-security-trail", "reject", "terra-medium",
         "security reviewer's eligible fallback sol-xhigh shares the "
         "producer's family",
-        art("luna", "argon", ["opus", "sol-xhigh"], "opus", healthy_seats))
-    add("i-merge-trail", "reject", "luna",
+        art("terra-medium", "argon", ["opus", "sol-xhigh"], "opus", healthy_seats))
+    add("i-merge-trail", "reject", "terra-medium",
         "merge reviewer's eligible fallback sol-xhigh shares the producer's "
         "family",
-        art("luna", "argon", "opus", ["opus", "sol-xhigh"], healthy_seats))
-    add("e-late", "reject", "luna",
+        art("terra-medium", "argon", "opus", ["opus", "sol-xhigh"], healthy_seats))
+    add("e-late", "reject", "terra-medium",
         "valid refuter seats followed by an eligible entry in the reviewer's "
         "family",
-        art("luna", "argon", "opus", "opus",
+        art("terra-medium", "argon", "opus", "opus",
             healthy_seats + ["gemini"], healthy_seats))
     unbound = json.loads(json.dumps(old))
     unbound["roles_policy"]["roles_sha256"] = hashlib.sha256(
         policy_bytes + b"\n"
     ).hexdigest()
-    add("g-policy-sha", "reject", "luna",
+    add("g-policy-sha", "reject", "terra-medium",
         "1.3.4 layout bound to another policy's bytes", unbound,
         resolver=False)
     undegraded = json.loads(json.dumps(old))
@@ -248,7 +254,7 @@ def cases(cfg, policy_bytes, scope, terminal, nonce):
     undegraded["degraded_verdict_roles"] = []
     undegraded["approval_ready"] = True
     undegraded["resolution_scope"]["verdict_families_distinct"] = True
-    add("g-missing-seats", "reject", "luna",
+    add("g-missing-seats", "reject", "terra-medium",
         "1.3.4 layout claiming its missing seats are not DEGRADED", undegraded,
         resolver=False)
     return out

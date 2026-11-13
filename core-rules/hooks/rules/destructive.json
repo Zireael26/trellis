@@ -8,7 +8,7 @@
     "A firing `warn` rule prints its message to stderr and evaluation continues. The first firing `deny` rule ends evaluation with its reason.",
     "`ignore_case` folds ASCII letters only. Bytes and characters outside ASCII are never letters, digits or space.",
     "Matching is locale-independent: the bash guards run in the C locale on bytes, and a JavaScript engine must not use Unicode-aware matching (no u or v flag), so a decision is the same on every host. A non-ASCII character such as é, U+00A0 or U+2003 is never a letter, digit or space; a command split only by U+00A0 is not split, as bash and zsh do not split it either.",
-    "`exempt` applies only for the listed engines and only to its own rule, before its patterns run. This exemption guards against accidental secret reads by agents; a deliberate same-user bypass, such as writing a script file and running it, is out of scope, as it is for every pattern guard. If any line matches a `refuse_if_line_matches` pattern, nothing is exempt. Otherwise each line is cut into simple commands at every `boundaries` character, and each simple command into blank-separated words. A simple command is exempt when its words, exactly as written, start with one of the `allowed_commands` word sequences, optionally after one `command_prefixes` word. Nothing is exempt unless every simple command on every line that has a word is exempt, nor if an exempt simple command has a word that starts with a `refuse_short_flags` flag, a word starting with - whose text after its first = holds a match of `identifier` after a character in `identifier_boundary` (or at its start), or such a match at the start of or inside the word right after a word starting with -- that has no =. Otherwise, in each simple command, every non-overlapping match of `identifier` that follows a character in `identifier_boundary` (or the start of the simple command) is replaced, left to right, by `replacement`. Everything else is kept as it was.",
+    "`exempt` applies only for the listed engines and only to its own rule, before its patterns run. This exemption guards against accidental secret reads by agents; a deliberate same-user bypass, such as writing a script file and running it, is out of scope, as it is for every pattern guard. If any line matches a `refuse_if_line_matches` pattern, nothing is exempt. Otherwise each line is cut into simple commands at every `boundaries` character, and each simple command into blank-separated words. A simple command is exempt when its words, exactly as written, start with one of the `allowed_commands` word sequences, optionally after one `command_prefixes` word. Nothing is exempt unless every simple command on every line that has a word is exempt, nor if an exempt simple command has a word that starts with a `refuse_short_flags` flag, a word starting with - whose text after its first = holds a match of `identifier` after a character in `identifier_boundary` (or at its start), or such a match at the start of or inside the word right after a word starting with -- that has no =. Otherwise, in each simple command, every non-overlapping match of `identifier` that follows a character in `identifier_boundary` (or the start of the simple command) is replaced, left to right, by `replacement`. Everything else is kept as it was. The replacement must not match any of the rule's own `match` patterns, so exempting can only stop a rule from firing; an engine may therefore skip the exemption when the patterns do not all match the raw text.",
     "Engines: `claude` is the Claude Code guard; `codex` is the Codex guard, which pi runs.",
     "Patterns use the common subset of POSIX ERE and JavaScript RegExp that scripts/gen-guard-rules.py enforces: no `.`, no backslash classes or backreferences, no POSIX [:classes:], no lookaround or lazy quantifiers, no backslash or leading ] inside brackets. Spell whitespace as [ \\t\\n\\v\\f\\r]."
   ],
@@ -162,6 +162,108 @@
         "state/reread-overrides",
         "(^|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))|(^|[ \t\n\u000b\f\r|;&(`])(tee|cp|mv|ln|install|touch|dd|rsync|mkdir|chmod|truncate|perl|python[0-9]*|ruby|node|osascript)([ \t\n\u000b\f\r]|$)|sed[^|;&]*[ \t\n\u000b\f\r]-i"
       ]
+    },
+    {
+      "id": "gate-verdict-direct-write",
+      "effect": "deny",
+      "ignore_case": true,
+      "reason": "Blocked a command that names the process-gate verdict store — only read-only tools (cat, head, tail, ls, stat, wc, jq, sha256sum, shasum, test, grep, cd, echo, printf) may name it; only the gate writes or removes verdicts, their execution logs and the reuse kill switch, and an operator changes them outside the agent.",
+      "match": [
+        "(^|[^A-Za-z0-9_.-])gate-verdicts([^A-Za-z0-9_.-]|$)"
+      ],
+      "exempt": {
+        "engines": [
+          "claude",
+          "codex"
+        ],
+        "why": "The rule is an allowlist: a command that names the store is denied unless every simple command on every line is one of `allowed_commands`, which only read files or print. Nothing is exempt when a line has an output redirection other than N>/dev/null or N>&M, when an identifier is given to a flag, or when any other command (a writer, an archiver, a patch or editor tool, git, rename, chown, a script interpreter, xargs, a command substitution) appears anywhere in the text. less (-o writes a log file), file (-C writes a compiled .mgc into the working directory) and python3 (reading only cannot be decided from the text) are left out on purpose. The digits 0 to 9 are listed because the & boundary cuts a descriptor duplication such as 2>&1 into a segment that starts with the target descriptor; a redirection to a file is refused by the line pattern instead.",
+        "allowed_commands": [
+          "cat",
+          "head",
+          "tail",
+          "ls",
+          "stat",
+          "wc",
+          "jq",
+          "sha256sum",
+          "shasum",
+          "test",
+          "grep",
+          "cd",
+          "echo",
+          "printf",
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9"
+        ],
+        "command_prefixes": [],
+        "refuse_if_line_matches": [
+          "(^|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))"
+        ],
+        "refuse_short_flags": [],
+        "boundaries": ";&|()`",
+        "identifier": "gate-verdicts",
+        "identifier_boundary": "[^A-Za-z0-9_.-]",
+        "replacement": "<exempt-identifier>"
+      }
+    },
+    {
+      "id": "gate-verdict-ancestor-write",
+      "effect": "deny",
+      "ignore_case": true,
+      "reason": "Blocked a command that names the Trellis home, its state directory or a path under it, which holds the process-gate verdict store — only read-only tools may name them; an operator moves, removes or replaces them outside the agent.",
+      "match": [
+        "(((^|[ \t\"'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/*([\"' \t\n\u000b\f\r;&|)<>]|$)|((^|[ \t\"'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/+state(/|[\"' \t\n\u000b\f\r;&|)<>]|$)|((^|[ \t\"'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)/([^ \t\n\u000b\f\r;&|\"'<>]*/)?\\.\\.([/\"' \t\n\u000b\f\r;&|)<>]|$)|(^|[ \t;&|(])cd[ \t]+[\"']?[^ \t;&|\"']*((^|[ \t\"'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)[^ \t;&|\"']*[\"']?[ \t]*(&&|;)[^\n]*[ \t\"'=](\\./)*(\\.\\./)*(state|\\.\\.)(/|[\"' \t\n\u000b\f\r;&|)<>]|$))"
+      ],
+      "exempt": {
+        "engines": [
+          "claude",
+          "codex"
+        ],
+        "why": "The rule is an allowlist: a command that names the Trellis home, its state directory or a path under state is denied unless every simple command on every line is one of `allowed_commands`, which only read files or print. Nothing is exempt when a line has an output redirection other than N>/dev/null or N>&M, when an identifier is given to a flag, or when any other command (a writer, an archiver, a patch or editor tool, git, rename, chown, a script interpreter, xargs, a command substitution) appears anywhere in the text. less (-o writes a log file), file (-C writes a compiled .mgc into the working directory) and python3 (reading only cannot be decided from the text) are left out on purpose. The digits 0 to 9 are listed because the & boundary cuts a descriptor duplication such as 2>&1 into a segment that starts with the target descriptor; a redirection to a file is refused by the line pattern instead.",
+        "allowed_commands": [
+          "cat",
+          "head",
+          "tail",
+          "ls",
+          "stat",
+          "wc",
+          "jq",
+          "sha256sum",
+          "shasum",
+          "test",
+          "grep",
+          "cd",
+          "echo",
+          "printf",
+          "0",
+          "1",
+          "2",
+          "3",
+          "4",
+          "5",
+          "6",
+          "7",
+          "8",
+          "9"
+        ],
+        "command_prefixes": [],
+        "refuse_if_line_matches": [
+          "(^|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))"
+        ],
+        "refuse_short_flags": [],
+        "boundaries": ";&|()`",
+        "identifier": "\\.trellis|\\$\\{?TRELLIS_HOME[}]?",
+        "identifier_boundary": "[^A-Za-z0-9_.-]",
+        "replacement": "<exempt-identifier>"
+      }
     }
   ]
 }

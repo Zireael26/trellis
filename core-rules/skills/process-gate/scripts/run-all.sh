@@ -965,7 +965,7 @@ printf "## process-gate verdict (mode=%s)\n\n" "$PG_MODE"
 printf "%s\n\n" "$DIFF_BASE_RECEIPT"
 # Only the checker's own two-space finding counts, never captured command
 # output (four spaces). The checker's final receipt wins over earlier findings.
-tests_scope="$(printf '%s\n' "${FINDINGS[3]}" | sed -nE 's/^  Tests: (full|partial|not run|unknown|narrowed: [1-9][0-9]* selected|no-tests: docs-only|narrowed \((docs-only|release-metadata): [0-9]+ files\))$/\1/p' | tail -n 1)"
+tests_scope="$(printf '%s\n' "${FINDINGS[3]}" | sed -nE 's/^  Tests: (full|partial|not run|unknown|reused: configured command|narrowed: [1-9][0-9]* selected|no-tests: docs-only|narrowed \((docs-only|release-metadata): [0-9]+ files\))$/\1/p' | tail -n 1)"
 tests_scope="${tests_scope:-unknown}"
 for i in 0 1 2 3 4 5 6 7 8; do
   printf "%-18s %s" "${LABELS[$i]}:" "$(glyph "${RESULTS[$i]}")"

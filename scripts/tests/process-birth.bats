@@ -510,7 +510,7 @@ SH
     run call_sink "$failure"
     printf 'direct sink birth exit %s: sink exit=%s stdout/stderr=%s\n' "$failure" "$status" "$output" >&3
     [ "$status" -ne 0 ]
-    [[ "$output" == *"owner process birth could not be read"* ]]
+    [[ "$output" == *"owner process birth could not be read"* ]] || false
     sink_preserved "failure$failure"
   done
 }
@@ -534,7 +534,7 @@ SH
   sink_fixture mutation
   run call_sink 69 "$copied"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"owner process birth could not be read"* ]]
+  [[ "$output" == *"owner process birth could not be read"* ]] || false
   sink_preserved mutation
   python3 -I - "$copied" <<'PY'
 from pathlib import Path
@@ -550,6 +550,6 @@ PY
   run sink_preserved mutation
   printf 'mutated preservation assertion: exit=%s stdout/stderr=%s\n' "$status" "$output" >&3
   [ "$status" -ne 0 ]
-  [[ "$output" == *"target disappeared"* ]]
+  [[ "$output" == *"target disappeared"* ]] || false
   [ ! -e "$TARGET" ] && [ ! -e "$TARGET.owner.json" ]
 }

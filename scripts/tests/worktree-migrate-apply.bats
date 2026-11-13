@@ -117,7 +117,7 @@ teardown() {
   rm -rf "$HOME/projects/alpha-wt/gone"
   run bash -c 'bash "$1" migrate --apply < /dev/null' _ "$SCRIPT"
   [ "$status" -eq 2 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"--yes"* ]]
+  [[ "$output" == *"--yes"* ]] || false
   git -C "$HOME/projects/alpha" worktree list --porcelain | grep -q '^prunable'
   [ ! -d "$TRELLIS_HOME/state/worktree-migrate" ] || [ -z "$(ls "$TRELLIS_HOME/state/worktree-migrate")" ]
 }

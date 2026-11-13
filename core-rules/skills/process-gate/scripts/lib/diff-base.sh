@@ -6,6 +6,13 @@
 case "${BASH_SOURCE[0]:-$0}" in "$0") set -u ;; esac
 DB_BASE_SHA=""; DB_BASE_REF=""; DB_SOURCE=""; DB_REASON=""
 DB_RANGE=""; DB_HEAD_SHA=""; DB_HEAD_REF=""; DB_POLICY_OVERRIDE=""
+# A memo is only ever a caller's unexported shell variable (db_memo_print).
+# When any memo name arrives through the environment, no memo is trusted:
+# the keys are emptied, not unset, because unsetting a caller's local would
+# expose the inherited value beneath it.
+case "$(export -p)" in
+  *_db_memo_*) _db_memo_key=""; _db_memo_rkey=""; _db_memo_bkey="" ;;
+esac
 db_short() { printf '%s' "$1" | cut -c1-12; }
 db_sref() {
   case "$1" in
@@ -22,10 +29,31 @@ db_cbranch() {
   case "$s" in refs/heads/*) printf '%s' "${s#refs/heads/}" ;; *) return 1 ;; esac
 }
 db_cfg() { git config --get "$1" 2>/dev/null || true; }
+# Per-call memo. A caller that resolves the default branch more than once in
+# the same checkout and policy (spec-gate's protected-branch check and its
+# diff range) may run db_memo_print once in a resolver subshell and set the
+# fields it prints as _db_memo_* in the caller's shell; later resolver
+# subshells inherit them. A memo never applies to another directory or policy
+# override, and an absent memo changes nothing.
+db_memo_fresh() { [ "$1" = "$PWD|$DB_POLICY_OVERRIDE" ]; }
+db_memo_print() {
+  local rc=0 key="$PWD|$DB_POLICY_OVERRIDE" us=$'\037'
+  _db_memo_rkey=""; _db_memo_bkey=""; _db_memo_key=""
+  _db_memo_remote="$(db_remote)"; _db_memo_rkey="$key"
+  _db_memo_base_policy="$(db_base_policy)"; _db_memo_bkey="$key"
+  db_defbranch || rc=$?
+  # A field holding the separator or a newline (template.branch is free
+  # JSON text) could shift the others: print no memo at all.
+  case "$key$_db_memo_remote$_db_memo_base_policy$_dd_ref$_dd_tip$_dd_reason" in
+    *"$us"*|*$'\n'*) return 1 ;;
+  esac
+  printf '%s' "$key$us$_db_memo_remote$us$_db_memo_base_policy$us$rc$us$_dd_ref$us$_dd_tip$us$_dd_reason"
+}
 # template.branch as the base declares it: the remote default's tree, else local
 # main/master's. Never the checkout under test, whose range could set it.
 db_base_policy() {
   local rm sym c ref f b
+  if db_memo_fresh "${_db_memo_bkey-}"; then printf '%s' "$_db_memo_base_policy"; return 0; fi
   command -v jq >/dev/null 2>&1 || return 0
   rm="$(db_remote)"; ref=""
   if [ -n "$rm" ]; then
@@ -60,6 +88,7 @@ db_policy() {
 }
 db_remote() {
   local r
+  if db_memo_fresh "${_db_memo_rkey-}"; then printf '%s' "$_db_memo_remote"; return; fi
   if git rev-parse --verify -q refs/remotes/origin/HEAD >/dev/null 2>&1; then printf 'origin'; return; fi
   if git for-each-ref --format='%(refname)' refs/remotes/origin 2>/dev/null | grep -q . 2>/dev/null; then printf 'origin'; return; fi
   r="$(git remote 2>/dev/null | head -n 1)" || r=""
@@ -87,6 +116,11 @@ db_polname() {
 db_defbranch() {
   _dd_ref=""; _dd_reason=""; _dd_tip=""
   local rm pol sym c ref remote_tip
+  # shellcheck disable=SC2154 # the memo's caller sets _db_memo_* (db_memo_print)
+  if db_memo_fresh "${_db_memo_key-}" && case "${_db_memo_dd_rc-}" in 0|1|2) true ;; *) false ;; esac; then
+    _dd_ref="$_db_memo_dd_ref"; _dd_reason="$_db_memo_dd_reason"; _dd_tip="$_db_memo_dd_tip"
+    return "$_db_memo_dd_rc"
+  fi
   rm="$(db_remote)"; pol="$(db_policy)"
   if [ -n "$pol" ]; then
     if ref="$(db_polname "$pol" "$rm")" && git show-ref --verify -q "$ref" &&

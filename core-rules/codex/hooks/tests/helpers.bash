@@ -52,6 +52,7 @@ setup_deployed_hook() {
   # Real libs the hook actually sources (deps.sh + pm.sh). Copy from the Codex
   # sibling lib; these are the same bytes as the canonical Claude core libs.
   cp "$(_codex_lib_dir)/deps.sh" "$deploy/lib/deps.sh"
+  cp "$(_codex_lib_dir)/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   cp "$(_codex_lib_dir)/pm.sh"   "$deploy/lib/pm.sh"
   # Spec 074 T14 (amended): Stop step 0 sources the attachment-verdict lib.
   cp "$(_codex_lib_dir)/attach-verdict.sh" "$deploy/lib/attach-verdict.sh"
@@ -63,7 +64,11 @@ setup_deployed_hook() {
   # Separate project root: a fresh git repo, NOT containing the deployment.
   PROJECT_DIR="$BATS_TEST_TMPDIR/project"
   mkdir -p "$PROJECT_DIR"
-  ( cd "$PROJECT_DIR" && git init -q && git commit --allow-empty -q -m init )
+  # The init commit carries its own identity: a host without a global Git
+  # identity (or with user.useConfigOnly) must not fail every test at setup.
+  ( cd "$PROJECT_DIR" && git init -q \
+      && git -c user.name='Trellis CI' -c user.email=ci-bats@trellis.test \
+        commit --allow-empty -q -m init )
   export CODEX_PROJECT_DIR="$PROJECT_DIR"
   # Defensive: ensure no stray Claude precedence leaks in from the env.
   unset CLAUDE_PROJECT_DIR

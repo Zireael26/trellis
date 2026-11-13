@@ -59,7 +59,7 @@ with_pattern() {
   jq '.rules[0].reason = "changed"' "$HOOKS_DIR/rules/destructive.json" > "$ROOT/core-rules/hooks/rules/destructive.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"stale"*"core-rules/hooks/lib/guard-rules.sh"*"core-rules/codex/hooks/lib/guard-rules.sh"* ]]
+  [[ "$output" == *"stale"*"core-rules/hooks/lib/guard-rules.sh"*"core-rules/codex/hooks/lib/guard-rules.sh"* ]] || false
   run python3 -I "$GEN" --write --root "$ROOT"
   [ "$status" -eq 0 ]
   run python3 -I "$GEN" --check --root "$ROOT"
@@ -72,8 +72,8 @@ with_pattern() {
   printf '# hand edit\n' >> "$ROOT/core-rules/codex/hooks/lib/guard-rules.sh"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"stale"*"core-rules/codex/hooks/lib/guard-rules.sh"* ]]
-  [[ "$output" != *"core-rules/hooks/lib/guard-rules.sh,"* ]]
+  [[ "$output" == *"stale"*"core-rules/codex/hooks/lib/guard-rules.sh"* ]] || false
+  [[ "$output" != *"core-rules/hooks/lib/guard-rules.sh,"* ]] || false
 }
 
 @test "drift: a runtime edit without regenerating fails --check" {
@@ -144,40 +144,40 @@ EOF
     > "$ROOT/core-rules/hooks/rules/destructive.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"replacement is printable ASCII without /"* ]]
+  [[ "$output" == *"replacement is printable ASCII without /"* ]] || false
   jq '(.rules[] | select(.exempt) | .exempt.identifier_boundary) = "x"' "$HOOKS_DIR/rules/destructive.json" \
     > "$ROOT/core-rules/hooks/rules/destructive.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"one bracket expression"* ]]
+  [[ "$output" == *"one bracket expression"* ]] || false
   jq '(.rules[] | select(.exempt) | .exempt.boundaries) = ";;"' "$HOOKS_DIR/rules/destructive.json" \
     > "$ROOT/core-rules/hooks/rules/destructive.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"distinct printable"* ]]
+  [[ "$output" == *"distinct printable"* ]] || false
   jq '(.rules[] | select(.exempt) | .exempt.refuse_short_flags) += ["--x"]' "$HOOKS_DIR/rules/destructive.json" \
     > "$ROOT/core-rules/hooks/rules/destructive.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"refuse_short_flags"* ]]
+  [[ "$output" == *"refuse_short_flags"* ]] || false
   jq '(.rules[] | select(.exempt) | .exempt.allowed_commands) += ["gcloud  secrets"]' \
     "$HOOKS_DIR/rules/destructive.json" > "$ROOT/core-rules/hooks/rules/destructive.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"allowed_commands"* ]]
+  [[ "$output" == *"allowed_commands"* ]] || false
   jq '.rules[1].id = .rules[0].id' "$HOOKS_DIR/rules/destructive.json" > "$ROOT/core-rules/hooks/rules/destructive.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"unique"* ]]
+  [[ "$output" == *"unique"* ]] || false
   cp "$HOOKS_DIR/rules/destructive.json" "$ROOT/core-rules/hooks/rules/destructive.json"
   jq '.warn_budget.by_level["4"] = 0' "$HOOKS_DIR/rules/reread.json" > "$ROOT/core-rules/hooks/rules/reread.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"budgets of at least 1"* ]]
+  [[ "$output" == *"budgets of at least 1"* ]] || false
   jq '.messages.block = "blocked {file}"' "$HOOKS_DIR/rules/reread.json" > "$ROOT/core-rules/hooks/rules/reread.json"
   run python3 -I "$GEN" --check --root "$ROOT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"placeholders"* ]]
+  [[ "$output" == *"placeholders"* ]] || false
 }
 
 # Every pattern (match, unless, exempt identifier, boundary and refusals, markers) with its case flag,

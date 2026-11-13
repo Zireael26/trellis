@@ -32,7 +32,7 @@ write_unparseable() { printf '{\n // comment\n "tasks": {"build": {"outputs": ["
   run hc_turbo_outputs "$PROJECT"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" == *"could not check"*"$PROJECT/turbo.json"*"parse error"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"outputs are scoped"* ]]
+  [[ "$output" != *"outputs are scoped"* ]] || false
   PATH="$STUB_BIN" run hc_turbo_outputs "$PROJECT"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
   [[ "$output" == *"jq unavailable"* ]] || { echo "$output"; false; }

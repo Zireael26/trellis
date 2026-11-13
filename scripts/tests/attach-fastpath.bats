@@ -5,10 +5,53 @@ ATTACH="$REPO_ROOT/scripts/attach-project.sh"
 load helpers/release-fixture
 load helpers/native-render-fixture
 
+# mask_claude_path PATH DIR: PATH with every directory holding a claude
+# replaced by a mirror under DIR that links all its other entries, so tools
+# installed beside claude (jq, python3, git) stay found and claude does not.
+mask_claude_path() {
+  local dir kept='' n=0 mirror
+  local IFS=:
+  for dir in $1; do
+    if [ -n "$dir" ] && { [ -e "$dir/claude" ] || [ -L "$dir/claude" ]; }; then
+      n=$((n + 1)) mirror="$2/$n"
+      mkdir -p "$mirror" || return 1
+      # Links name the physical directory: a relative entry would dangle.
+      case "$dir" in /*) ;; *) dir="$PWD/$dir" ;; esac
+      dir="$(cd -P -- "$dir" && pwd -P)" || return 1
+      ln -s "$dir"/* "$mirror"/ 2>/dev/null
+      rm -f "$mirror/claude"
+      dir="$mirror"
+    fi
+    kept="${kept:+$kept:}$dir"
+  done
+  printf '%s\n' "$kept"
+}
+
 setup() {
   SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/a5b.fixture.XXXXXX")"
   SANDBOX="$(CDPATH= cd "$SANDBOX" && pwd -P)"
   export HOME="$SANDBOX/user" TRELLIS_HOME="$SANDBOX/home" GIT_CONFIG_NOSYSTEM=1
+  # Claude Code decides the Claude settings render, so no case may find the
+  # caller's claude: its --version runs under a 10 s alarm, and on a loaded
+  # host a timeout flips one attach to the shell form and a later one to exec
+  # form. A post-checkout attach sees only the system PATH and so never finds
+  # a stub either: the one decision every attach in a case shares is "absent".
+  # T13 D2 cases name a stub version instead (it logs each invocation).
+  PATH="$(mask_claude_path "$PATH" "$SANDBOX/path-mask")" || return 1
+  # A forwarded caller PATH is searched first; the runner's must not leak in.
+  unset TRELLIS_ATTACH_CALLER_PATH
+  case "$BATS_TEST_DESCRIPTION" in
+    'D2 claude '*)
+      mkdir -p "$SANDBOX/claude-bin"
+      CLAUDE_STUB_VERSION="$(printf '%s\n' "$BATS_TEST_DESCRIPTION" | awk '{print $3}')"
+      # A version ending in -exit1 prints its X.Y.Z line, then exits nonzero.
+      printf '#!/bin/sh\nprintf "%%s\\n" "$*" >> %s\n[ "$1" = --version ] && printf "%%s (Claude Code)\\n" %s\ncase %s in *-exit1) exit 1 ;; esac\nexit 0\n' \
+        "'$SANDBOX/claude-calls'" "'${CLAUDE_STUB_VERSION%-exit1}'" "'$CLAUDE_STUB_VERSION'" > "$SANDBOX/claude-bin/claude"
+      chmod 755 "$SANDBOX/claude-bin/claude"
+      PATH="$SANDBOX/claude-bin:$PATH"
+      ;;
+  esac
+  export PATH
   # The A4 job is stubbed below, so no verdict job ever starts: say so as
   # scripts/run-tests.sh does, instead of depending on the caller's runner.
   export TRELLIS_ATTACH_POSTJOB=off
@@ -44,6 +87,27 @@ setup() {
     mkdir -p "$SANDBOX/source/${path%/*}"
     cp "$REPO_ROOT/$path" "$SANDBOX/source/$path"
   done < <(sed -n '/^  local -a paths=($/,/^  )$/p' "$REPO_ROOT/scripts/lib/attachment.sh" | sed '1d;$d;s/^ *//')
+  # post-PREFLIGHT cases run attach from a private copy of scripts/ whose
+  # fast path, right after the real canonical PREFLIGHT returns 0, runs the
+  # case's mutation once (the coordinator runs beside its attach-project.sh).
+  if [[ "$BATS_TEST_DESCRIPTION" == 'post-PREFLIGHT '* ]]; then
+    mkdir -p "$SANDBOX/scripts-copy"
+    cp "$REPO_ROOT"/scripts/*.sh "$SANDBOX/scripts-copy/"
+    cp -R "$REPO_ROOT/scripts/lib" "$SANDBOX/scripts-copy/lib"
+    python3 - "$SANDBOX/scripts-copy/lib/attach-fastpath.py" "$SANDBOX/post-preflight.sh" <<'PY'
+import sys
+from pathlib import Path
+path, mark = Path(sys.argv[1]), sys.argv[2]
+text = path.read_text()
+old = "                    require(result.returncode == 0, 'existing attachment preflight refused: ' + result.stderr.decode(errors='replace')[-2000:])\n"
+assert text.count(old) == 1
+new = old + ("                    if os.path.exists(%r):\n"
+             "                        subprocess.run(['/bin/sh', %r], check=False)\n"
+             "                        os.rename(%r, %r + '.ran')\n") % (mark, mark, mark, mark)
+path.write_text(text.replace(old, new))
+PY
+    ATTACH="$SANDBOX/scripts-copy/attach-project.sh"
+  fi
   printf '%s\n' '{"schema_version":1,"harnesses":{"claude":{"links":[{"source":"core-rules/CLAUDE.md","destination":".claude/rules/trellis.md"}],"render":[{"template":"core-rules/templates/claude-settings.local.json","destination":".claude/settings.local.json","merge":"explicit-json","mode":"0600","required":true}]},"codex":{"links":[{"source":"core-rules/CLAUDE.md","destination":".agents/rules/trellis.md"}],"render":[{"template":"core-rules/templates/codex-hooks.local.json","destination":".codex/hooks.json","merge":"explicit-json","mode":"0600","required":true}]}}}' > "$SANDBOX/source/core-rules/inheritance-manifest.json"
   release_fixture_install "$HOME" "$TRELLIS_HOME" 1.2.3 "$SANDBOX/source"
   PROJECT="$SANDBOX/project"
@@ -51,6 +115,11 @@ setup() {
   printf '{"schema_version":1,"project_id":"a5b-fixture"}\n' > "$PROJECT/.trellis.json"
   git -C "$PROJECT" add .trellis.json
   git -C "$PROJECT" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm initial
+  if [[ "$BATS_TEST_DESCRIPTION" == 'post-PREFLIGHT F2 relative prior'* ]]; then
+    # A relative predecessor hooks path, recorded from the project's config.
+    mkdir -p "$PROJECT/.githooks"
+    git -C "$PROJECT" config core.hooksPath .githooks
+  fi
   "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$PROJECT"
   DONOR="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' -type f)"
   TARGET="$SANDBOX/target"
@@ -81,7 +150,7 @@ PY
   ' incremental "$ATTACH" "$TRELLIS_HOME" "$TARGET"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'already attached:'* ]]
+  [[ "$output" == *'already attached:'* ]] || false
   printf 'drift\n' >> "$TARGET/.claude/settings.local.json"
   run "$ATTACH" attach --home "$TRELLIS_HOME" "$TARGET"
   [ "$status" -eq 3 ]
@@ -128,7 +197,7 @@ PY
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$NEW_TARGET"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
   NEW_TARGET="$SANDBOX/fourth"
   git -C "$PROJECT" worktree add -q -b fourth "$NEW_TARGET"
   mkdir -p "$NEW_TARGET/.claude"
@@ -136,7 +205,7 @@ PY
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$NEW_TARGET"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" != *'donor fast path'* ]]
+  [[ "$output" != *'donor fast path'* ]] || false
   [ "$(jq -r .project_note "$NEW_TARGET/.claude/settings.local.json")" = keep ]
 }
 
@@ -158,7 +227,7 @@ PY
   [ ! -e "$TARGET/.trellis/runtime" ]
   [ ! -L "$TARGET/.trellis/runtime" ]
   [ ! -e "$TARGET/.agents" ]
-  [[ "$output" == *"shared exclude managed hooks verification failed for owner $DONOR"* ]]
+  [[ "$output" == *"shared exclude managed hooks verification failed for owner $DONOR"* ]] || false
   # Adoption owns hook validation/repair at its own boundary, not this helper.
   run bash -c '
     . "$1"
@@ -182,7 +251,345 @@ PY
     attach_shared_exclude_state "$2" "$5" "$(jq -r .exclude.git_common_dir "$3")" "$4/block" "$4/before" "$4/after"
   ' f2 "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX" "$checkout"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"shared exclude owner binding mismatch for owner $DONOR"* ]]
+  [[ "$output" == *"shared exclude owner binding mismatch for owner $DONOR"* ]] || false
+}
+
+@test "shared exclude schema proof covers only the exact owner bytes it names" {
+  local judged
+  judged="$(shasum -a 256 "$DONOR" | awk '{print $1}')"
+  # The bytes change after the caller's complete verify: the repeat check runs.
+  jq '.unexpected_field = 1' "$DONOR" > "$SANDBOX/changed"
+  chmod 600 "$SANDBOX/changed"
+  mv "$SANDBOX/changed" "$DONOR"
+  run bash -c '
+    . "$1"
+    attach_decode_base64 "$(jq -r .exclude.managed_block_base64 "$3")" > "$4/block"
+    : > "$4/before"
+    attach_shared_exclude_state "$2" "$(jq -r .checkout_id "$3")" "$(jq -r .exclude.git_common_dir "$3")" \
+      "$4/block" "$4/before" "$4/after" "" "$5"
+  ' proof "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX" "$DONOR"$'\t'"$judged"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"shared exclude owner record is invalid: $DONOR"* ]] || false
+  # Named exactly, the judged bytes skip only the schema repeat.
+  run bash -c '
+    . "$1"
+    attach_decode_base64 "$(jq -r .exclude.managed_block_base64 "$3")" > "$4/block"
+    : > "$4/before"
+    attach_shared_exclude_state "$2" "$(jq -r .checkout_id "$3")" "$(jq -r .exclude.git_common_dir "$3")" \
+      "$4/block" "$4/before" "$4/after" "" "$5"
+  ' proof "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX" "$DONOR"$'\t'"$(shasum -a 256 "$DONOR" | awk '{print $1}')"
+  [[ "$output" != *"shared exclude owner record is invalid"* ]] || false
+}
+
+@test "shared exclude schema proof never skips the owner's current 0600 check" {
+  local judged
+  judged="$(shasum -a 256 "$DONOR" | awk '{print $1}')"
+  # Same bytes, so the proof matches; only the mode changed (r152-create-code F2).
+  chmod 666 "$DONOR"
+  run bash -c '
+    . "$1"
+    attach_decode_base64 "$(jq -r .exclude.managed_block_base64 "$3")" > "$4/block"
+    : > "$4/before"
+    attach_shared_exclude_state "$2" "$(jq -r .checkout_id "$3")" "$(jq -r .exclude.git_common_dir "$3")" \
+      "$4/block" "$4/before" "$4/after" "" "$5"
+  ' proof "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX" "$DONOR"$'\t'"$judged"
+  [ "$status" -ne 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"shared exclude owner record is invalid: $DONOR"* ]] || { echo "$output"; return 1; }
+  proof_status=$status
+  # Without the proof the canonical check refuses with the same status.
+  run bash -c '
+    . "$1"
+    attach_decode_base64 "$(jq -r .exclude.managed_block_base64 "$3")" > "$4/block"
+    : > "$4/before"
+    attach_shared_exclude_state "$2" "$(jq -r .checkout_id "$3")" "$(jq -r .exclude.git_common_dir "$3")" \
+      "$4/block" "$4/before" "$4/after" ""
+  ' proof "$ATTACH" "$TRELLIS_HOME" "$DONOR" "$SANDBOX"
+  [ "$status" -eq "$proof_status" ] || { echo "proof $proof_status canonical $status: $output"; return 1; }
+}
+
+claude_calls() {
+  if [ -f "$SANDBOX/claude-calls" ]; then grep -c -- '--version' "$SANDBOX/claude-calls"; else echo 0; fi
+}
+
+@test "the claude mask keeps tools that share claude's directory" {
+  local bin="$SANDBOX/co-located" masked
+  mkdir -p "$bin"
+  printf '#!/bin/sh\necho 9.9.9\n' > "$bin/claude"
+  printf '#!/bin/sh\necho jq-stub\n' > "$bin/jq"
+  chmod 755 "$bin/claude" "$bin/jq"
+  masked="$(mask_claude_path "$bin:/usr/bin:/bin" "$SANDBOX/mask-check")"
+  [ "$(PATH="$masked" command -v jq)" != '' ] || { echo "jq lost: $masked"; return 1; }
+  [ "$(PATH="$masked" jq)" = jq-stub ] || { echo "wrong jq: $(PATH="$masked" command -v jq)"; return 1; }
+  ! PATH="$masked" command -v claude >/dev/null || { echo "claude kept: $(PATH="$masked" command -v claude)"; return 1; }
+  [ "${masked#*:}" = /usr/bin:/bin ] || { echo "other entries changed: $masked"; return 1; }
+  # A relative entry holding claude: the kept jq is still the stub beside it.
+  masked="$(cd "$SANDBOX" && mask_claude_path "co-located:/usr/bin:/bin" "$SANDBOX/mask-relative")"
+  [ "$(PATH="$masked" jq)" = jq-stub ] || { echo "relative entry lost jq: $(PATH="$masked" command -v jq)"; return 1; }
+  ! PATH="$masked" command -v claude >/dev/null || { echo "claude kept: $(PATH="$masked" command -v claude)"; return 1; }
+}
+
+@test "D2 no claude on PATH: the donor fast path still fires" {
+  ! command -v claude >/dev/null || { echo "claude still on PATH: $(command -v claude)"; return 1; }
+  fast_attach
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
+}
+
+@test "D2 claude 2.1.295 stub: the donor fast path fires with the exec-form render" {
+  fast_attach
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
+  jq -e '[.. | objects | select(has("command") and .command == "/usr/bin/env")] | length > 0' "$TARGET/.claude/settings.local.json" >/dev/null || false
+}
+
+@test "D2 claude 2.1.0 stub: the donor fast path fires with the shell-form render" {
+  fast_attach
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
+  ! jq -e '[.. | objects | select(has("args"))] | length > 0' "$TARGET/.claude/settings.local.json" >/dev/null || false
+}
+
+@test "D2 claude 2.1.322 stub: a fast hit probes Claude Code once for the whole attach" {
+  local before
+  before="$(claude_calls)"
+  [ "$before" -ge 1 ] || { echo 'the setup attach never probed the stub'; return 1; }
+  fast_attach
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
+  [ "$(claude_calls)" -eq $((before + 1)) ] || { echo "probes for one attach: $(( $(claude_calls) - before ))"; return 1; }
+}
+
+@test "D2 claude 2.1.322-exit1 stub: a version line before a nonzero exit is still read" {
+  fast_attach
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
+  jq -e '[.. | objects | select(has("command") and .command == "/usr/bin/env")] | length > 0' "$TARGET/.claude/settings.local.json" >/dev/null || false
+}
+
+@test "D2 claude unreadable stub: the fast path is unavailable, says so once, and the full attach probes no more" {
+  local before
+  before="$(claude_calls)"
+  fast_attach
+  [ "$status" -eq 0 ] || return 1
+  [[ "$output" != *'attached (donor fast path):'* ]] || false
+  [ "$(grep -c 'donor fast path unavailable here' <<<"$output")" -eq 1 ] || false
+  [[ "$output" == *'Claude Code version unreadable'* ]] || false
+  # One decision for the attach: the full attach after the miss reuses it.
+  [ "$(claude_calls)" -eq $((before + 1)) ] || { echo "probes for one attach: $(( $(claude_calls) - before ))"; return 1; }
+}
+
+# Portable inode (BSD and GNU stat differ).
+file_inode() {
+  python3 -I -c 'import os, sys; print(os.lstat(sys.argv[1]).st_ino)' "$1"
+}
+
+post_preflight() {
+  cat > "$SANDBOX/post-preflight.sh"
+}
+
+rewrite_donor_settings() {
+  post_preflight <<EOF
+python3 - '$PROJECT/.claude/settings.local.json' <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path, 'r+', encoding='utf-8') as stream:
+    data = json.load(stream)
+    data['hooks']['PreToolUse'][0]['hooks'][0]['command'] = '/bin/false'
+    stream.seek(0)
+    stream.write(json.dumps(data, sort_keys=True) + '\n')
+    stream.truncate()
+PY
+EOF
+}
+
+assert_post_preflight_miss() {
+  [ -e "$SANDBOX/post-preflight.sh.ran" ] || { echo "the post-PREFLIGHT mutation never ran: $output"; return 1; }
+  [[ "$output" != *'attached (donor fast path):'* ]] || { echo "published from stale evidence: $output"; return 1; }
+}
+
+@test "post-PREFLIGHT F1 ordinary attach: a donor render rewritten in place misses" {
+  local inode
+  inode="$(file_inode "$PROJECT/.claude/settings.local.json")"
+  rewrite_donor_settings
+  fast_attach
+  assert_post_preflight_miss || return 1
+  [ "$(file_inode "$PROJECT/.claude/settings.local.json")" = "$inode" ] || { echo 'rewrite replaced the inode'; return 1; }
+  ! grep -qF '/bin/false' "$TARGET/.claude/settings.local.json" 2>/dev/null || { echo 'stale donor bytes reached the target'; return 1; }
+}
+
+@test "post-PREFLIGHT F1 explicit donor binding: a donor render rewritten in place misses" {
+  rewrite_donor_settings
+  run bash -c '
+    . "$1"
+    target="$3"; donor="$4"
+    identity="$(local_registry_identity_for_root "$target")"
+    checkout="$(printf "%s\n" "$identity" | jq -r .checkout_id)"
+    worktree="$(printf "%s\n" "$identity" | jq -r .worktree_id)"
+    attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 \
+      --expected-fleet personal --expected-project-id a5b-fixture \
+      --expected-root "$target" --expected-checkout-id "$checkout" \
+      --expected-worktree-id "$worktree" --expected-attachment-id "" \
+      --expected-release 1.2.3 --expected-harnesses-json '\''["claude","codex"]'\'' \
+      --expected-donor-root "$(jq -r .worktree_root "$donor")" --expected-donor-checkout-id "$checkout" \
+      --expected-donor-worktree-id "$(jq -r .worktree_id "$donor")" --expected-donor-attachment-id "$(jq -r .attachment_id "$donor")" \
+      --expected-donor-release 1.2.3 --expected-donor-harnesses-json '\''["claude","codex"]'\'' \
+      "$target"
+  ' post "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$DONOR"
+  assert_post_preflight_miss || return 1
+  ! grep -qF '/bin/false' "$TARGET/.claude/settings.local.json" 2>/dev/null || { echo 'stale donor bytes reached the target'; return 1; }
+}
+
+@test "post-PREFLIGHT F2 donor manifest rewritten in place misses" {
+  post_preflight <<EOF
+python3 - '$PROJECT/.trellis.json' <<'PY'
+import sys
+with open(sys.argv[1], 'r+b') as stream:
+    data = stream.read().replace(b'a5b-fixture', b'a5b-fixturX')
+    stream.seek(0)
+    stream.write(data)
+PY
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+@test "post-PREFLIGHT F2 managed pre-push dispatcher appended to misses" {
+  local checkout
+  checkout="$(jq -r .checkout_id "$DONOR")"
+  post_preflight <<EOF
+printf '# appended after PREFLIGHT\n' >> '$TRELLIS_HOME/state/git-hooks/$checkout/pre-push'
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+@test "post-PREFLIGHT F2 target CLAUDE.md created after planning misses" {
+  post_preflight <<EOF
+printf '# project rules\n' > '$TARGET/CLAUDE.md'
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+@test "post-PREFLIGHT F2 target manifest rewritten in place misses" {
+  post_preflight <<EOF
+python3 - '$TARGET/.trellis.json' <<'PY'
+import sys
+with open(sys.argv[1], 'r+b') as stream:
+    data = stream.read().replace(b'a5b-fixture', b'a5b-fixturX')
+    stream.seek(0)
+    stream.write(data)
+PY
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+@test "post-PREFLIGHT F2 managed hook sidecar rewritten in place misses" {
+  local managed sidecar=''
+  managed="$TRELLIS_HOME/state/git-hooks/$(jq -r .checkout_id "$DONOR")"
+  for name in previous-hooks-path release-payload pre-push-source; do
+    [ -f "$managed/$name" ] && { sidecar="$managed/$name"; break; }
+  done
+  [ -n "$sidecar" ] || { ls -la "$managed"; echo 'no managed sidecar in this fixture'; return 1; }
+  post_preflight <<EOF
+python3 - '$sidecar' <<'PY'
+import sys
+with open(sys.argv[1], 'r+b') as stream:
+    first = stream.read(1)
+    stream.seek(0)
+    stream.write(b'X' if first != b'X' else b'Y')
+PY
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+@test "post-PREFLIGHT F2 render-context launcher made non-executable misses" {
+  local launcher
+  launcher="$(jq -r '.render_context.launcher // empty' "$DONOR")"
+  [ -n "$launcher" ] && [ -x "$launcher" ] || { echo "no executable render-context launcher: '$launcher'"; return 1; }
+  post_preflight <<EOF
+chmod a-x '$launcher'
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+# r152-create-3: PREFLIGHT refuses a managed hooks directory that is not 0700
+# and a prior hook that would need a passthrough shim; neither changes the
+# managed names or bytes, so both must be facts of their own.
+@test "post-PREFLIGHT F2 managed hooks directory made 0755 misses" {
+  local managed
+  managed="$TRELLIS_HOME/state/git-hooks/$(jq -r .checkout_id "$DONOR")"
+  [ -d "$managed" ] || { echo "no managed hooks directory: $managed"; return 1; }
+  post_preflight <<EOF
+chmod 0755 '$managed'
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+@test "post-PREFLIGHT F2 git-hooks state directory made 0755 misses" {
+  [ -d "$TRELLIS_HOME/state/git-hooks" ] || { echo 'no git-hooks state directory'; return 1; }
+  post_preflight <<EOF
+chmod 0755 '$TRELLIS_HOME/state/git-hooks'
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+@test "post-PREFLIGHT F2 prior hook made executable misses" {
+  local previous prior
+  previous="$(jq -r '.git_hooks.previous_hooks_path // ""' "$DONOR")"
+  case "$previous" in
+    '') prior="$(git -C "$PROJECT" rev-parse --path-format=absolute --git-common-dir)/hooks" ;;
+    /*) prior="$previous" ;;
+    *) prior="$TARGET/$previous" ;;
+  esac
+  mkdir -p "$prior"
+  [ ! -e "$prior/pre-commit" ] || { echo "fixture already has $prior/pre-commit"; return 1; }
+  printf '#!/bin/sh\nexit 0\n' > "$prior/pre-commit"
+  chmod 0644 "$prior/pre-commit"
+  post_preflight <<EOF
+chmod 0755 '$prior/pre-commit'
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+# r152-create-3: an ACL can deny execute without changing the mode; removing
+# it changes the shell's [ -x ] answer alone. Needs chmod +a (macOS).
+@test "post-PREFLIGHT F2 prior hook execute ACL removed misses" {
+  local prior hook
+  prior="$(git -C "$PROJECT" rev-parse --path-format=absolute --git-common-dir)/hooks"
+  [ -z "$(jq -r '.git_hooks.previous_hooks_path // ""' "$DONOR")" ] || skip 'fixture prior hooks path is not the default'
+  hook="$prior/pre-commit"
+  mkdir -p "$prior"
+  printf '#!/bin/sh\nexit 0\n' > "$hook"
+  chmod 0700 "$hook"
+  chmod +a "user:$(id -un) deny execute" "$hook" 2>/dev/null || skip 'no chmod +a ACLs on this host'
+  [ ! -x "$hook" ] || skip 'the execute-deny ACL does not apply to the owner here'
+  post_preflight <<EOF
+chmod -N '$hook'
+EOF
+  fast_attach
+  assert_post_preflight_miss
+}
+
+# r152-create-3: a relative prior hooks path is the hooks authority's (the
+# donor project's), never the target's.
+@test "post-PREFLIGHT F2 relative prior hook under the authority root made executable misses" {
+  [ "$(jq -r '.git_hooks.previous_hooks_path // ""' "$DONOR")" = .githooks ] ||
+    { echo "previous_hooks_path: $(jq -r '.git_hooks.previous_hooks_path // ""' "$DONOR")"; return 1; }
+  [ ! -e "$TARGET/.githooks/pre-commit" ] || { echo 'target already has the prior hook'; return 1; }
+  printf '#!/bin/sh\nexit 0\n' > "$PROJECT/.githooks/pre-commit"
+  chmod 0644 "$PROJECT/.githooks/pre-commit"
+  post_preflight <<EOF
+chmod 0755 '$PROJECT/.githooks/pre-commit'
+EOF
+  fast_attach
+  assert_post_preflight_miss
 }
 
 @test "F2 current-owner sibling hook refusal names the record" {
@@ -192,7 +599,7 @@ PY
   printf '# tampered\n' >> "$TRELLIS_HOME/state/git-hooks/$(jq -r .checkout_id "$DONOR")/post-checkout"
   fast_attach
   [ "$status" -eq 3 ]
-  [[ "$output" == *"managed hooks verification failed for owner $DONOR"* ]]
+  [[ "$output" == *"managed hooks verification failed for owner $DONOR"* ]] || false
   cmp "$SANDBOX/registry-before" "$TRELLIS_HOME/registry.json"
 }
 
@@ -212,7 +619,7 @@ PY
   ' f2 "$ATTACH" "$TRELLIS_HOME" "$PROJECT"
   printf '%s\n' "$output"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"owner snapshot conflict at $DONOR"* ]]
+  [[ "$output" == *"owner snapshot conflict at $DONOR"* ]] || false
   cmp "$SANDBOX/registry-before" "$TRELLIS_HOME/registry.json"
 }
 
@@ -233,7 +640,7 @@ PY
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$NEW_TARGET"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
   cmp "$SANDBOX/refreshed-before" "$first"
 }
 
@@ -252,7 +659,7 @@ PY
   ' f2 "$ATTACH" "$REPO_ROOT/scripts/lib/health-checks.sh" "$TRELLIS_HOME" "$owner" "$root"
   [ "$status" -ne 0 ]
   LC_ALL=C printf -v hint 'trellis attach --refresh-artifacts --home %q %q' "$TRELLIS_HOME" "$root"
-  [[ "$output" == *"$hint"* ]]
+  [[ "$output" == *"$hint"* ]] || false
 }
 
 @test "L2 exclude refusal diagnoses invalid ownership rather than claiming no owner" {
@@ -262,8 +669,8 @@ PY
   run "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 1.2.3 "$TARGET"
   printf '%s\n' "$output"
   [ "$status" -eq 3 ]
-  [[ "$output" == *'shared exclude block hash mismatch for owner'* ]]
-  [[ "$output" != *'managed exclude block has no matching committed checkout ownership'* ]]
+  [[ "$output" == *'shared exclude block hash mismatch for owner'* ]] || false
+  [[ "$output" != *'managed exclude block has no matching committed checkout ownership'* ]] || false
 }
 
 @test "L2 refresh artifacts retires only tracked native takeovers without changing shared state" {
@@ -317,7 +724,7 @@ PY
   chmod 600 "$journal"
   run "$ATTACH" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT"
   [ "$status" -eq 3 ]
-  [[ "$output" == *'pending journal:'* ]]
+  [[ "$output" == *'pending journal:'* ]] || false
   cmp "$SANDBOX/owner-before" "$DONOR"
   rm "$journal"
   printf '{"schema_version":1,"project_id":"foreign-project"}\n' > "$PROJECT/.trellis.json"
@@ -337,8 +744,8 @@ PY
   ' incremental "$ATTACH" "$REPO_ROOT/scripts/lib/health-checks.sh" "$TRELLIS_HOME" "$DONOR" "$PROJECT"
   printf '%s\n' "$output"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"$PROJECT/.claude/settings.local.json"* ]]
-  [[ "$output" == *'--refresh-artifacts'* ]]
+  [[ "$output" == *"$PROJECT/.claude/settings.local.json"* ]] || false
+  [[ "$output" == *'--refresh-artifacts'* ]] || false
 }
 
 @test "L2 checkout lock waits beyond a twelve minute attach and remains bounded" {
@@ -400,7 +807,9 @@ fast_attach() {
 t13_owner_validation_wrapper() {
   local mini="$1"
   mkdir -p "$mini/lib"
-  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$REPO_ROOT/scripts/lib/release-executed.py" "$mini/lib/"
+  # The coordinator loads the shared verifier from beside itself on every route.
+  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$REPO_ROOT/scripts/lib/release-executed.py" \
+    "$REPO_ROOT/scripts/lib/owner_verify.py" "$REPO_ROOT/scripts/lib/attachment_fs.py" "$mini/lib/"
   cat > "$mini/attach-project.sh" <<'BASH'
 . "$T13_REAL_ATTACH" || exit 1
 eval "$(declare -f _attachment_owner_json_valid | sed '1s/_attachment_owner_json_valid/t13_original_owner_valid/')"
@@ -707,7 +1116,9 @@ PY
   fi
   [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" = 0 ]
   [ "$status" -eq 5 ] && [[ "$output" == *'canonical-fallback'* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *'guard template differs'* ]] || { echo "$output"; return 1; }
+  # The Claude settings render is checked through the canonical renderer
+  # (T13 D2), which names a donor that differs from its own root's render.
+  [[ "$output" == *'donor render differs from its own root render'* ]] || { echo "$output"; return 1; }
 }
 
 @test "T13 holds three lock descriptors during capture and closes them before registry publication" {
@@ -1057,8 +1468,8 @@ t13_assert_post_begin_lock_replacement() {
   ' a5b "$ATTACH" "$PROJECT" "$TRELLIS_HOME" "$TARGET"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
-  [[ "$output" == *'postjob:'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
+  [[ "$output" == *'postjob:'* ]] || false
   run bash -c '. "$1"; attachment_verify "$2" "$3"' a5b "$REPO_ROOT/scripts/lib/attachment.sh" "$TRELLIS_HOME" "$(find "$TRELLIS_HOME/state/attachments" -name '*.json' ! -path "$DONOR")"
   [ "$status" -eq 0 ]
   if [ -n "${A5B_BENCH_REPORT:-}" ]; then
@@ -1072,7 +1483,7 @@ t13_assert_post_begin_lock_replacement() {
   printf '{"project_note":"keep me"}\n' > "$TARGET/.claude/settings.local.json"
   fast_attach
   [ "$status" -eq 0 ]
-  [[ "$output" != *'donor fast path'* ]]
+  [[ "$output" != *'donor fast path'* ]] || false
   [ "$(jq -r .project_note "$TARGET/.claude/settings.local.json")" = 'keep me' ]
 }
 
@@ -1111,7 +1522,7 @@ t13_assert_post_begin_lock_replacement() {
       attach_cmd_attach --home "$3" --fleet personal --release 1.2.3 "${args[@]+"${args[@]}"}" "$4"
     ' a5b "$ATTACH" "$PROJECT" "$TRELLIS_HOME" "$TARGET" "$failure" "$DONOR" "$SANDBOX"
     [ "$status" -eq 5 ]
-    [[ "$output" == *'full-path'* ]]
+    [[ "$output" == *'full-path'* ]] || false
     [ ! -e "$TARGET/.trellis/runtime" ]
     /usr/bin/python3 - "$SANDBOX" "$DONOR" "$PROJECT" "$TARGET" "$TRELLIS_HOME" <<'PY'
 import os, shutil, sys
@@ -1136,7 +1547,8 @@ PY
 
 @test "A5B unreadable or unimportable helpers miss before publication" {
   mkdir -p "$SANDBOX/mini/lib"
-  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$SANDBOX/mini/lib/"
+  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$REPO_ROOT/scripts/lib/owner_verify.py" \
+    "$REPO_ROOT/scripts/lib/attachment_fs.py" "$SANDBOX/mini/lib/"
   cp "$REPO_ROOT/scripts/lib/release-executed.py" "$SANDBOX/mini/lib/"
   for broken in attach-fastpath.py release-executed.py; do
     chmod 000 "$SANDBOX/mini/lib/$broken"
@@ -1147,7 +1559,7 @@ PY
       attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
     ' a5b "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$SANDBOX/mini"
     [ "$status" -eq 5 ]
-    [[ "$output" == *'full-path'* ]]
+    [[ "$output" == *'full-path'* ]] || false
     [ ! -e "$TARGET/.trellis/runtime" ]
     chmod 600 "$SANDBOX/mini/lib/$broken"
   done
@@ -1159,7 +1571,7 @@ PY
     attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
   ' a5b "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$SANDBOX/mini"
   [ "$status" -eq 5 ]
-  [[ "$output" == *'full-path'* ]]
+  [[ "$output" == *'full-path'* ]] || false
   [ ! -e "$TARGET/.trellis/runtime" ]
   [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 0 ]
 }
@@ -1185,7 +1597,7 @@ PY
       "$target"
   ' a5b "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$DONOR"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
 }
 
 @test "A5B repair selection mismatch refuses without publication" {
@@ -1283,7 +1695,7 @@ PY
     attach_cmd_attach --home "$2" --fleet personal --release 1.2.3 "$3"
   ' a5b "$ATTACH" "$TRELLIS_HOME" "$TARGET"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'registry-api-called'* ]]
+  [[ "$output" == *'registry-api-called'* ]] || false
   [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 1 ]
   run "$ATTACH" recover --home "$TRELLIS_HOME" "$TARGET"
   [ "$status" -eq 0 ]
@@ -1293,7 +1705,7 @@ assert_fast_slow_parity() {
   cp "$TRELLIS_HOME/registry.json" "$SANDBOX/registry-before"
   fast_attach
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
   FAST_OWNER="$(find "$TRELLIS_HOME/state/attachments" -name '*.json' ! -path "$DONOR")"
   cp "$FAST_OWNER" "$SANDBOX/fast-owner"
   /usr/bin/python3 - "$TARGET" "$SANDBOX/fast-owner" "$SANDBOX/artifact-bytes.json" <<'PY'
@@ -1421,7 +1833,7 @@ PY
   native_render_fixture_strings "$PROJECT/.claude/settings.local.json" | grep -qF "$PROJECT"
   native_render_fixture_strings "$PROJECT/.codex/hooks.json" | grep -qF "$PROJECT"
   assert_fast_slow_parity
-  [[ "$output" != *'donor not reused'* ]]
+  [[ "$output" != *'donor not reused'* ]] || false
   for file in .claude/settings.local.json .codex/hooks.json; do
     native_render_fixture_strings "$TARGET/$file" | grep -qF "$NATIVE_COMPANION"
     native_render_fixture_strings "$TARGET/$file" | grep -qF "$TARGET"
@@ -1461,9 +1873,9 @@ PY
     ' t34b "$ATTACH" "$TRELLIS_HOME" "$TARGET"
     printf '%s: %s\n' "$case" "$output"
     [ "$status" -eq 5 ]
-    [[ "$output" == *'full-path'* ]]
-    [[ "$output" == *"trellis attach: donor not reused ($label"* ]]
-    [[ "$output" != *'attached (donor fast path)'* ]]
+    [[ "$output" == *'full-path'* ]] || false
+    [[ "$output" == *"trellis attach: donor not reused ($label"* ]] || false
+    [[ "$output" != *'attached (donor fast path)'* ]] || false
     [ ! -e "$TARGET/.trellis/runtime" ] && [ ! -L "$TARGET/.trellis/runtime" ]
     [ ! -e "$TARGET/.claude" ]
     [ "$(find "$TRELLIS_HOME/state/attachment-journals" -name '*.json' | wc -l | tr -d ' ')" -eq 0 ]
@@ -1478,7 +1890,7 @@ PY
   # Restored, the same donor takes the fast path: every miss above was the render check.
   fast_attach
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
 }
 
 @test "T34B native donor with drifted, unrecorded bytes falls back without reuse" {
@@ -1490,8 +1902,8 @@ PY
   ' t34b "$ATTACH" "$TRELLIS_HOME" "$TARGET"
   printf '%s\n' "$output"
   [ "$status" -eq 5 ]
-  [[ "$output" == *'full-path'* ]]
-  [[ "$output" != *'attached (donor fast path)'* ]]
+  [[ "$output" == *'full-path'* ]] || false
+  [[ "$output" != *'attached (donor fast path)'* ]] || false
   [ ! -e "$TARGET/.trellis/runtime" ] && [ ! -L "$TARGET/.trellis/runtime" ]
 }
 
@@ -1514,7 +1926,7 @@ PY
   ' t34b "$ATTACH" "$TRELLIS_HOME" "$TARGET" "$DONOR"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
   native_render_fixture_strings "$TARGET/.claude/settings.local.json" | grep -qF "$TARGET"
 }
 
@@ -1524,7 +1936,9 @@ PY
 t2a_leaf_wrapper() {
   local mini="$1"
   mkdir -p "$mini/lib"
-  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$REPO_ROOT/scripts/lib/release-executed.py" "$mini/lib/"
+  # The coordinator loads the shared verifier from beside itself on every route.
+  cp "$REPO_ROOT/scripts/lib/attach-fastpath.py" "$REPO_ROOT/scripts/lib/release-executed.py" \
+    "$REPO_ROOT/scripts/lib/owner_verify.py" "$REPO_ROOT/scripts/lib/attachment_fs.py" "$mini/lib/"
   cat > "$mini/attach-project.sh" <<'BASH'
 . "$T2A_REAL_ATTACH" || exit 1
 eval "$(declare -f _attachment_verify_owner_artifacts | sed '1s/_attachment_verify_owner_artifacts/t2a_original_owner_artifacts/')"
@@ -1572,8 +1986,8 @@ t2a_attach() {
   t2a_attach 'attachment_verify "$home" "$donor" || exit 9
     _ATTACHMENT_DONOR_PROOF="$$"${tab}"$donor"${tab}"$digest"${tab}1.2.3'
   [ "$status" -eq 0 ]
-  [[ "$output" == *'attached (donor fast path):'* ]]
-  [[ "$output" == *'donor proof shared'* ]]
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
+  [[ "$output" == *'donor proof shared'* ]] || false
   [ "$(grep -Fxc "$DONOR proven-leaves" "$T2A_TRACE")" -eq 1 ]
   [ "$(grep -Fxc "$DONOR all" "$T2A_TRACE")" -eq 0 ]
 }
@@ -1594,22 +2008,25 @@ t2a_attach() {
     T2A_STOP=1 t2a_attach "$proof"
     printf '%s: %s\n' "$case" "$(cat "$T2A_TRACE")"
     [ "$status" -eq 5 ]
-    [[ "$output" == *'donor proof not shared'* ]]
+    [[ "$output" == *'donor proof not shared'* ]] || false
     [ "$(grep -Fxc "$DONOR all" "$T2A_TRACE")" -eq 1 ]
     [ "$(grep -Fxc "$DONOR proven-leaves" "$T2A_TRACE")" -eq 0 ]
     [ ! -e "$TARGET/.trellis/runtime" ] && [ ! -L "$TARGET/.trellis/runtime" ]
   done
 }
 
-@test "T2A seed shares its canonical donor verify with the fast path" {
+@test "T2A seed hands donor admission to the fast path instead of verifying it first" {
   local wt="$SANDBOX/t2a-seed-target"
   # The fixture's seed is a stub; this case runs the installed real one on a
-  # worktree added without the post-checkout reconcile.
+  # worktree added without the post-checkout reconcile. Stage A (t152): the
+  # seed passes registry-ordered candidates and verifies none; the fast path
+  # admits the donor once under its locks. No seed proof is handed over.
   git -C "$PROJECT" -c core.hooksPath=/dev/null worktree add -q -b t2a-seed "$wt"
   run env TRELLIS_ATTACH_POSTJOB=off TRELLIS_FASTPATH_TRACE=1 \
     bash "$TRELLIS_HOME/releases/1.2.3/payload/scripts/seed-inheritance-symlinks.sh" --target "$wt"
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'donor proof shared'* ]]
-  [[ "$output" == *'attached (donor fast path):'* ]]
+  [[ "$output" == *'donor admitted from registry candidates'* ]] || false
+  [[ "$output" != *'donor proof shared'* ]] || false
+  [[ "$output" == *'attached (donor fast path):'* ]] || false
 }

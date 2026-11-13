@@ -13,9 +13,15 @@ CORE = {"scripts/tests/" + name + ".bats" for name in (
     "posix-bootstrap-prologue", "suite-coverage", "push-test-map", "release-tag-consumers",
     "check-process-liveness", "test-fencing", "release-payload-commit", "live-model-roster",
     "gpt6-roster-sweep", "diff-base-sync", "no-legacy-herdr",
+    # 1.5.1: refuses bare [[ ]] in any Bats suite or helper, which bash 3.2
+    # errexit ignores; a narrowed push that edits a suite must still run it.
+    "bats-conditionals-lint",
     # T39: its Bash 3.2 compatibility scan reads every shipped shell source,
     # including the narrowing leaf entrypoints, so no narrowed push may skip it.
-    "native-hooks-delivery")}
+    "native-hooks-delivery",
+    # Its lint greps every tracked product shell file for a BSD stat -f probe
+    # chained into GNU stat -c, so a push editing any shell source must run it.
+    "attach-verdict-stat-dialect")}
 TARGET = "scripts/tests/check-decisions-log.bats"
 SOURCE = "scripts/check-decisions-log.sh"
 DOCS = {"scripts/tests/gpt6-roster-sweep.bats"}

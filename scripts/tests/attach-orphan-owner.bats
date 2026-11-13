@@ -306,13 +306,13 @@ EOF
   run env PATH="$SANDBOX/stub:$PATH" bash -c \
     '. "$1"; attachment_owner_orphan_reason "$2"' _ "$ATTACH" "$SIBLING_OWNER"
   [ "$status" -eq 0 ]
-  [[ "$output" == "undetermined "* ]]
+  [[ "$output" == "undetermined "* ]] || false
 
   run --separate-stderr env PATH="$SANDBOX/stub:$PATH" "$ATTACH" attach --home "$TRELLIS_HOME" \
     --fleet personal --release 1.2.3 "$target"
 
   assert_owner_identity_refusal "shared exclude owner no longer names its canonical worktree in this checkout"
-  [[ "$stderr" != *orphan-owner-record* ]]
+  [[ "$stderr" != *orphan-owner-record* ]] || false
   [ -z "$(owner_for_root "$target")" ]
 }
 
@@ -379,7 +379,7 @@ EOF
   [ -f "$(owner_for_root "$target")" ]
   attach_root "$PROJECT"
   [ "$status" -eq 0 ] || { echo "$stderr"; false; }
-  [[ "$output" == *"already attached:"* ]]
+  [[ "$output" == *"already attached:"* ]] || false
 }
 
 @test "the orphan predicate classifies every O1 fixture" {

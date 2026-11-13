@@ -565,7 +565,7 @@ setup() {
   run wait_for_release_barrier "$SANDBOX/late.ready" "$RELEASE_PROCESS_PID_A" "$SANDBOX/late.log"
   RELEASE_PROCESS_PID_A=""
   [ "$status" -eq 1 ]
-  [[ "$output" == *"release process exited before barrier"*"adopt refused"* ]]
+  [[ "$output" == *"release process exited before barrier"*"adopt refused"* ]] || false
 }
 
 @test "release barrier wait heartbeats with the release pid and elapsed seconds" {

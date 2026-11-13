@@ -52,7 +52,7 @@ publish_pair() {
   chmod +a 'everyone allow read' "$RELEASE/payload/scripts/trellis-launcher.sh"
   publish_pair
   [ "$status" -eq 4 ] || { echo "ACL file publisher: $status $output"; return 1; }
-  [[ "$output" == *'ACL on pair entry'* ]]
+  [[ "$output" == *'ACL on pair entry'* ]] || false
   [ ! -e "$HOME/.local/bin/trellis" ]
 }
 
@@ -61,7 +61,7 @@ publish_pair() {
   chmod +a 'everyone allow add_file' "$HOME/.local/bin"
   publish_pair
   [ "$status" -eq 4 ] || { echo "ACL directory publisher: $status $output"; return 1; }
-  [[ "$output" == *'ACL on pair entry'* ]]
+  [[ "$output" == *'ACL on pair entry'* ]] || false
   [ ! -e "$HOME/.local/bin/trellis" ]
 }
 

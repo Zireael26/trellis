@@ -1,4 +1,4 @@
-import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdtempSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { basename, delimiter, dirname, extname, relative, resolve } from "node:path";
 import { homedir, tmpdir } from "node:os";
@@ -345,15 +345,48 @@ function isSubagentControl(pi: ExtensionAPI, name: string): boolean {
 // case-folded (macOS volumes usually are) and also through the real path of the
 // deepest existing ancestor, so a symlinked spelling cannot reach the records.
 function isOverrideRecordPath(path: string): boolean {
+  return isGuardedStatePath(path, "/state/reread-overrides");
+}
+
+// Mirrors read_state.rs is_gate_verdict_path and _gr_gate_verdict_path: only
+// the process gate writes verdicts, their execution logs and the kill switch.
+function isGateVerdictPath(path: string): boolean {
+  return isGuardedStatePath(path, "/state/gate-verdicts");
+}
+
+function isGuardedStatePath(path: string, directory: string): boolean {
   const named = (spelling: string) => {
     const folded = spelling.toLowerCase();
-    return folded.endsWith("/state/reread-overrides") || folded.includes("/state/reread-overrides/");
+    return folded.endsWith(directory) || folded.includes(`${directory}/`);
   };
   if (named(path)) return true;
   for (let ancestor = path, rest = ""; ; rest = rest ? `${basename(ancestor)}/${rest}` : basename(ancestor), ancestor = dirname(ancestor)) {
     try { return named(rest ? `${realpathSync.native(ancestor)}/${rest}` : realpathSync.native(ancestor)); }
     catch { if (dirname(ancestor) === ancestor) return false; }
   }
+}
+
+// Mirrors read_state.rs guarded_inode and _gr_guarded_state_path: a hard link to
+// a guarded state file, made anywhere and spelled any way, is that file (device
+// and inode). Only a file with more than one link is looked up, so an ordinary
+// edit never walks the store; a symlink is answered by the real-path check.
+function guardedInode(path: string): "reread-overrides" | "gate-verdicts" | undefined {
+  const home = process.env.TRELLIS_HOME || (process.env.HOME ? `${process.env.HOME.replace(/\/+$/, "")}/.trellis` : "");
+  let target;
+  try { target = statSync(path, { bigint: true }); } catch { return undefined; }
+  if (!home || !target.isFile() || target.nlink < 2n) return undefined;
+  const holds = (directory: string, depth: number): boolean => {
+    let entries;
+    try { entries = readdirSync(directory); } catch { return false; }
+    return entries.some(name => {
+      try {
+        const entry = lstatSync(resolve(directory, name), { bigint: true });
+        if (entry.isDirectory()) return depth < 8 && holds(resolve(directory, name), depth + 1);
+        return entry.dev === target.dev && entry.ino === target.ino;
+      } catch { return false; }
+    });
+  };
+  return (["reread-overrides", "gate-verdicts"] as const).find(directory => holds(resolve(home, "state", directory), 0));
 }
 
 function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cwd: string, root: string, state: ReadState, rules: GuardRules): Decision {
@@ -384,9 +417,14 @@ function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cw
   // Override records authorize stale edits for Claude/Codex/native guards, so
   // they are refused before the create and already-read exemptions.
   for (const named of action.targets.flatMap(t => [t.path, t.destination])) {
-    if (named !== undefined && isOverrideRecordPath(resolve(cwd, named))) {
+    const inode = named === undefined ? undefined : guardedInode(resolve(cwd, named));
+    if (named !== undefined && (inode === "reread-overrides" || isOverrideRecordPath(resolve(cwd, named)))) {
       return { schema_version: 1, capability_status: "enforced", decision: "deny",
         reason: `reread-guard: BLOCKED edit of ${resolve(cwd, named)} — reread override records are written only by trellis reread override --session <id> --reason <why>.` };
+    }
+    if (named !== undefined && (inode === "gate-verdicts" || isGateVerdictPath(resolve(cwd, named)))) {
+      return { schema_version: 1, capability_status: "enforced", decision: "deny",
+        reason: `reread-guard: BLOCKED edit of ${resolve(cwd, named)} — gate verdicts and their execution logs are written only by the process gate.` };
     }
   }
   try {
@@ -939,6 +977,10 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   const pendingKey = (epoch: number, ctx: HandlerContext, id: string) => JSON.stringify([epoch, ctx.session_id, ctx.cwd, id]);
   let pendingContext: { identity: string; text: string } | undefined;
   let lifecycleEpoch = 0;
+  // A failed or interrupted prompt must never let an older carry stand in for
+  // this turn. The native verifier treats false as unknown, not as an opt-out.
+  let allowTurnBaseline = false;
+  let baselineAttempt = 0;
   let shutdownTask: { identity: string; task: Promise<void> } | undefined;
   const deliveredReasons = new Set<string>();
 
@@ -967,6 +1009,8 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
 
   function resetSession() {
     lifecycleEpoch++;
+    baselineAttempt++;
+    allowTurnBaseline = false;
     shutdownTask = undefined;
     pending.clear();
     resetReads();
@@ -1013,6 +1057,8 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
       }
     } catch { restored = undefined; }
     completion = restored ?? freshCompletion(binding);
+    // Only an accepted prior completion may have published a usable carry.
+    allowTurnBaseline = completion.status === "accepted";
   }
 
   // A verifier that could not run is unknown enforcement, not a lint finding;
@@ -1063,6 +1109,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   }
 
   function blockSettle(event: AgentBeforeSettleEvent, ctx: HandlerContext | undefined, reason: string, unknown: boolean): BoundaryResult {
+    allowTurnBaseline = false;
     const same = completion.status === "blocked" && completion.reason === reason;
     completion = { ...completion, status: "blocked", unknown, reason, noProgress: same ? completion.noProgress + 1 : 0 };
     const canContinue = event.context?.canContinue === true && completion.continuations < MAX_CONTINUATIONS && completion.noProgress < MAX_NO_PROGRESS;
@@ -1091,6 +1138,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     }
     const decision = await dispatch(pi, { schema_version: 1, harness: "pi", phase: "agent_before_settle", ...session(ctx),
       turn_id: `${ctx.session_id}:${completion.turn}`, generation: completion.turn,
+      allow_turn_baseline: allowTurnBaseline,
       can_continue: event.context?.canContinue === true, last_assistant_message: lastAssistantText(event),
       // Pi has no host-reentrant Stop: a continuation this gate requested is a
       // fresh attempt, and reentry would short-circuit the mandatory checks.
@@ -1101,6 +1149,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     // Accepted: finalized once here; the native batch already ran stamp-turn
     // only because it accepted. Settled notifications never change this.
     completion = { ...freshCompletion(readBinding(ctx.cwd)), status: "accepted", turn: completion.turn };
+    allowTurnBaseline = true;
     persistCompletion();
     if (decision.decision === "warn") show(ctx, decision);
     return undefined;
@@ -1258,6 +1307,34 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
       ctx.ui.notify(reason, "error");
       pi.sendMessage({ customType: "trellis-context", content: reason, display: true });
       return { action: "handled" as const };
+    }
+  });
+
+  // Publish before the user-started run can execute tools. This is a separate
+  // handler so policy assembly remains synchronous; Pi awaits both handlers.
+  // Do not rebaseline a standing failed completion: doing so could launder the
+  // failing tree into a no-edit turn. Retries and custom starts use the carry.
+  pi.on("before_agent_start", async (event, nativeContext) => {
+    if (event.messageType !== "user") return;
+    const attempt = ++baselineAttempt;
+    allowTurnBaseline = false;
+    if (completion.status === "blocked") return;
+    try {
+      const ctx = snapshot(nativeContext), epoch = lifecycleEpoch, identity = lifecycleIdentity(ctx);
+      const decision = await lifecycle("before_agent_start", ctx);
+      if (attempt !== baselineAttempt || epoch !== lifecycleEpoch) return;
+      if (identity && !currentLifecycle(ctx, identity, epoch)) return;
+      if (identity && decision.decision === "allow" && decision.capability_status === "enforced") {
+        allowTurnBaseline = true;
+        return;
+      }
+      const text = `Trellis turn baseline unavailable; Stop will conservatively re-verify: ${decision.reason ?? "publication failed"}`;
+      ctx.notify(text, "warning");
+      return { message: { customType: "trellis-context", content: text, display: false } };
+    } catch (error) {
+      const text = `Trellis turn baseline unavailable; Stop will conservatively re-verify: ${error instanceof Error ? error.message : String(error)}`;
+      try { nativeContext.ui.notify(text, "warning"); } catch { /* retain the model-visible warning */ }
+      return { message: { customType: "trellis-context", content: text, display: false } };
     }
   });
 

@@ -1090,7 +1090,7 @@ STUB
   run bash -c '. "$1"; local_registry_update_harnesses "$2" personal attached "$3" "$4"' \
     _ "$REGISTRY_LIB" "$TRELLIS_HOME_FIX" "$checkout" "$update"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"checkout snapshot conflict"* ]]
+  [[ "$output" == *"checkout snapshot conflict"* ]] || false
   [ "$(registry_file_sha256)" = "$before" ]
 }
 

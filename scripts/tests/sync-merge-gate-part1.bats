@@ -439,7 +439,7 @@ remove_claude_owner_artifacts() {
   owner_before="$(shasum -a 256 "$OWNER" | awk '{print $1}')"
   dispatcher_before="$(shasum -a 256 "$MANAGED_HOOKS/pre-push" | awk '{print $1}')"
 
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+  run env -u TRELLIS_CONFIG TRELLIS_LIBS_PRELOADED=1 TRELLIS_HOME="$HOME_PATH" \
     bash "$MOVED_RUNNER/scripts/sync-merge-gate.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qF "attachment-managed immutable dispatcher for $VERSION" <<<"$output"

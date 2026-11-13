@@ -16,10 +16,10 @@ setup() {
     "$RUNTIME/core-rules/codex/hooks" "$RUNTIME/core-rules/skills/process-gate/scripts/lib"
   chmod 700 "$HOME" "$TRELLIS_HOME"
   : > "$GIT_CONFIG_GLOBAL"
-  cp "$REPO/core-rules/hooks/"{spec-gate.sh,lib/deps.sh,lib/autonomy.sh} "$SANDBOX/"
+  cp "$REPO/core-rules/hooks/"{spec-gate.sh,lib/deps.sh,lib/deps-heavy.sh,lib/autonomy.sh} "$SANDBOX/"
   cp "$SANDBOX/spec-gate.sh" "$RUNTIME/core-rules/hooks/spec-gate.sh"
   cp "$REPO/core-rules/codex/hooks/spec-gate.sh" "$RUNTIME/core-rules/codex/hooks/spec-gate.sh"
-  cp "$SANDBOX/"{deps.sh,autonomy.sh} "$RUNTIME/core-rules/hooks/lib/"
+  cp "$SANDBOX/"{deps.sh,deps-heavy.sh,autonomy.sh} "$RUNTIME/core-rules/hooks/lib/"
   cp "$REPO/core-rules/skills/process-gate/scripts/lib/diff-base.sh" \
     "$RUNTIME/core-rules/skills/process-gate/scripts/lib/"
   cp "$REPO/core-rules/hooks/lib/spec-gate-core.sh" "$SANDBOX/candidate-core"

@@ -8,6 +8,7 @@ setup() {
   mkdir -p "$deploy/lib"
   cp "$BATS_TEST_DIRNAME/../decision-receipt.sh" "$deploy/decision-receipt.sh"
   cp "$BATS_TEST_DIRNAME/../lib/deps.sh" "$deploy/lib/deps.sh"
+  cp "$BATS_TEST_DIRNAME/../lib/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   cp "$BATS_TEST_DIRNAME/../lib/autonomy.sh" "$deploy/lib/autonomy.sh"
   cp "$BATS_TEST_DIRNAME/../../../hooks/lib/decision-receipt-core.sh" "$deploy/lib/decision-receipt-core.sh"
   HOOK="$deploy/decision-receipt.sh"
@@ -68,7 +69,7 @@ assert_block() {
     printf '%s\n' "$policy" > "$PROJECT_DIR/.trellis.json"
     run_preserving_log "$(make_envelope 'Read only.')"
     assert_block
-    [[ "$output" == *malformed* ]]
+    [[ "$output" == *malformed* ]] || false
   done
 }
 
@@ -79,7 +80,7 @@ assert_block() {
   for active in '"true"' '"false"' 'null' '1' '[]' '{}' '"true\\u0000\\n"'; do
     run_preserving_log "$(make_envelope 'Read only.' '' "$active")"
     assert_block
-    [[ "$output" == *stop_hook_active*Boolean* ]]
+    [[ "$output" == *stop_hook_active*Boolean* ]] || false
   done
   run_preserving_log "$(make_envelope 'Read only.' '' true)"
   [ "$status" -eq 0 ]
@@ -98,7 +99,7 @@ assert_block() {
   export TRELLIS_ROOT="$runtime"
   run_preserving_log "$(make_envelope 'Done without a block.')"
   assert_block
-  [[ "$output" == *L4* ]]
+  [[ "$output" == *L4* ]] || false
 }
 
 @test "T27 R1 M3: schema-invalid autonomy and preset fields deny independently" {
@@ -119,10 +120,10 @@ assert_block() {
     printf '%s\n' "$policy" > "$PROJECT_DIR/.trellis.json"
     run_preserving_log "$(make_envelope 'Done without a block.')"
     assert_block
-    [[ "$output" == *malformed* ]]
+    [[ "$output" == *malformed* ]] || false
     run_preserving_log "$(make_envelope "$(message_with_entry 4 "$VALID_ENTRY")")"
     assert_block
-    [[ "$output" == *malformed* ]]
+    [[ "$output" == *malformed* ]] || false
   done
 }
 
@@ -137,7 +138,7 @@ assert_block() {
     printf '{"autonomy":%s}\n' "$number" > "$PROJECT_DIR/.trellis.json"
     run_preserving_log "$(make_envelope 'Done without a block.')"
     assert_block
-    [[ "$output" == *L4* ]]
+    [[ "$output" == *L4* ]] || false
     run_preserving_log "$(make_envelope "$(message_with_entry 4 "$VALID_ENTRY")")"
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -161,7 +162,7 @@ assert_block() {
   printf '\n%s\n' "$malformed" >>"$PROJECT_DIR/decisions-log.md"
   run_preserving_log "$(make_envelope "$(message_with_entry 4 "$malformed")")"
   assert_block
-  [[ "$output" == *"malformed decision entry"* ]]
+  [[ "$output" == *"malformed decision entry"* ]] || false
 }
 
 @test "blank decision clauses are rejected without changing the log" {
@@ -183,7 +184,7 @@ assert_block() {
   make_dirty_code
   run_preserving_log "$(make_envelope "Done without a decision block.")"
   assert_block
-  [[ "$output" == *"requires exactly one"* ]]
+  [[ "$output" == *"requires exactly one"* ]] || false
 }
 
 @test "receipt absent from canonical log blocks without changing the log" {
@@ -191,7 +192,7 @@ assert_block() {
   local missing="- ${TODAY}T13:00:00Z [L4] [pattern] Keep one parser. Reasoning: Duplicate parsers drift. Alternatives considered: Harness-specific parsing."
   run_preserving_log "$(make_envelope "$(message_with_entry 4 "$missing")")"
   assert_block
-  [[ "$output" == *"absent from canonical-root decisions-log.md"* ]]
+  [[ "$output" == *"absent from canonical-root decisions-log.md"* ]] || false
 }
 
 @test "L1-L3 substantive turn passes without a decision block" {
@@ -207,7 +208,7 @@ assert_block() {
   printf '\n%s\n' "$cross" >>"$PROJECT_DIR/decisions-log.md"
   run_preserving_log "$(make_envelope "$(message_with_entry 5 "$cross")")"
   assert_block
-  [[ "$output" == *"does not match resolved L4"* ]]
+  [[ "$output" == *"does not match resolved L4"* ]] || false
 }
 
 @test "stale-date receipt is rejected" {
@@ -216,7 +217,7 @@ assert_block() {
   printf '\n%s\n' "$stale" >>"$PROJECT_DIR/decisions-log.md"
   run_preserving_log "$(make_envelope "$(message_with_entry 4 "$stale")")"
   assert_block
-  [[ "$output" == *"malformed decision entry"* ]]
+  [[ "$output" == *"malformed decision entry"* ]] || false
 }
 
 @test "transcript supplies the current receipt when final message is absent" {
@@ -233,7 +234,7 @@ assert_block() {
   transcript="$(write_transcript "Current answer without a decision block." "$(message_with_entry 4 "$VALID_ENTRY")")"
   run_preserving_log "$(make_envelope "" "$transcript")"
   assert_block
-  [[ "$output" == *"requires exactly one"* ]]
+  [[ "$output" == *"requires exactly one"* ]] || false
 }
 
 @test "prior conflicting block does not contaminate a valid current transcript turn" {
@@ -251,7 +252,7 @@ assert_block() {
   printf '\n%s\n' "$architectural" >>"$PROJECT_DIR/decisions-log.md"
   run_preserving_log "$(make_envelope "$(message_with_entry 4 "$architectural")")"
   assert_block
-  [[ "$output" == *"missing SURFACED INLINE"* ]]
+  [[ "$output" == *"missing SURFACED INLINE"* ]] || false
 }
 
 @test "continuation short-circuits before validation" {
@@ -285,7 +286,7 @@ assert_block() {
   local message='Done. <!-- dod-receipt cmd="bats decision-receipt.bats" exit=0 diff="+1/-0 (1 files)" -->'
   run_preserving_log "$(make_envelope "$message")"
   assert_block
-  [[ "$output" == *"requires exactly one"* ]]
+  [[ "$output" == *"requires exactly one"* ]] || false
 }
 
 make_envelope_sid() {
@@ -497,7 +498,7 @@ resume_stop_verify() {
   git -C "$PROJECT_DIR" reset -q --hard HEAD~1
   run bash "$HOOK" <<<"$(make_envelope_sid 'Done without a decision block.' "$sid")"
   assert_codex_block
-  [[ "$output" == *"requires exactly one"* ]]
+  [[ "$output" == *"requires exactly one"* ]] || false
 }
 
 @test "sweep-fx1-R2-L6: pi is not armed by a Claude- or Codex-armed project" {

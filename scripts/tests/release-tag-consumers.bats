@@ -50,7 +50,6 @@ scripts/tests/test_full_trace.py|2|6dd620a2450f57ea|T32 fixtures: captured fd an
 core-rules/hooks/trellis-worktree-remove.sh|1|b1520ea92ca3ed9c|worktree remove gate: merged-branch check between HEAD and a commit, never walks tags
 core-rules/hooks/code-review-subagent.sh|3|a58ca3e4f87b1023|delta review: is-ancestor between the last reviewed HEAD and HEAD, and between reviewed commit oids, never reads a tag
 core-rules/codex/hooks/code-review-subagent.sh|3|09f01e1b758f5ba0|codex twin: the same delta-review ancestry check between two commits
-core-rules/hooks/tests/spec-gate-cache.bats|1|240120e0d4f4acb3|fixture: creates an unrelated tag ref to prove any ref change invalidates the spec-gate cache key; no release read
 core-rules/skills/herdr-foreman/scripts/accept-branch.sh|1|abcaa62ca08b5f1f|is-ancestor between two branch SHAs, no tag involved
 core-rules/skills/process-gate/scripts/lib/diff-base.sh|1|f2894e8dac5d879b|is-ancestor between two commits for base refinement, no tag involved
 scripts/verify-conductor-spec-inventory.mjs|2|b24ec11275dc1812|is-ancestor between main refs, no tag involved

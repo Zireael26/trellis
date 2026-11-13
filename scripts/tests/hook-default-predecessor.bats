@@ -172,7 +172,7 @@ assert_full() {
   git -C "$PROJECT" add one.txt
   run git -C "$PROJECT" commit -qm one
   [ "$status" -ne 0 ]
-  [[ "$output" == *refused* ]]
+  [[ "$output" == *refused* ]] || false
   [ "$(git -C "$PROJECT" rev-list --count HEAD)" -eq 1 ]
 }
 
@@ -308,13 +308,18 @@ PY
 # release.sh runs only from an installed payload, so its hook adoption
 # functions are loaded alone, as written there, over this library.
 load_release_hook_functions() {
-  local name
+  local name range
   set +u
   # shellcheck disable=SC1090
   source "$REPO_ROOT/scripts/attach-project.sh"
   set +u
   for name in release_err max_status hook_payload_matches write_hook_state_file; do
-    eval "$(sed -n "/^$name() {\$/,/^}\$/p" "$REPO_ROOT/scripts/release.sh")"
+    # Build the sed range outside the command substitution: bash 3.2 keeps the
+    # backslash of a nested "\$" literally, so sed refused the range and no
+    # function was defined there.
+    range="/^$name() {\$/,/^}\$/p"
+    eval "$(sed -n "$range" "$REPO_ROOT/scripts/release.sh")"
+    [ "$(type -t "$name")" = function ] || { echo "release.sh: $name not loaded" >&2; return 1; }
   done
   eval "$(sed -n '/^replace_hook_payload() ($/,/^)$/p' "$REPO_ROOT/scripts/release.sh")"
 }

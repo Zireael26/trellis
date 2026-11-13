@@ -229,7 +229,7 @@ run_registered() {
   mv "$manifest_copy.tmp" "$manifest_copy"
   run registered_hooks SessionStart "$manifest_copy"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'unrecognised-command-fixture'* ]]
+  [[ "$output" == *'unrecognised-command-fixture'* ]] || false
 }
 
 @test "unique registered hook count equals the hooks exercised" {
@@ -311,7 +311,7 @@ assert_tool_block() {
   run --separate-stderr bash "$DEPLOY/block-destructive.sh" \
     <<<'{"tool_name":"Bash","tool_input":{"command":"rm -rf /absolute-fixture"}}'
   assert_tool_block PreToolUse
-  [[ "$stderr" == *'Blocked destructive rm'* ]]
+  [[ "$stderr" == *'Blocked destructive rm'* ]] || false
 }
 
 @test "reread-guard PreToolUse budget block sends blocking reason to stderr" {
@@ -326,7 +326,7 @@ assert_tool_block() {
   done
   run --separate-stderr bash "$DEPLOY/reread-guard.sh" <<<"$payload"
   assert_tool_block PreToolUse
-  [[ "$stderr" == *'BLOCKED edit'* ]]
+  [[ "$stderr" == *'BLOCKED edit'* ]] || false
 }
 
 @test "post-edit-verify PostToolUse lint failure sends feedback to stderr" {
@@ -339,7 +339,7 @@ assert_tool_block() {
     '{cwd:$cwd,tool_name:"Edit",tool_input:{file_path:"edited.py"},tool_response:{success:true}}')"
   run --separate-stderr env PATH="$bindir:$PATH" bash "$DEPLOY/post-edit-verify.sh" <<<"$payload"
   assert_tool_block PostToolUse
-  [[ "$stderr" == *'fixture-lint'* ]]
+  [[ "$stderr" == *'fixture-lint'* ]] || false
 }
 
 # Curated path has the real tools needed to start the hooks, but no jq.
@@ -370,21 +370,21 @@ no_jq_path() {
         [ "$status" -eq 0 ]
         assert_codex_output Stop "$output"
         printf '%s' "$output" | jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null
-        [[ "$output$stderr" == *jq* ]]
+        [[ "$output$stderr" == *jq* ]] || false
       elif [ "$degrade" -eq 0 ] && [ "$hook" = stop-verify.sh ]; then
         [ "$status" -eq 0 ]
         assert_codex_output Stop "$output"
         printf '%s' "$output" | jq -e '.decision == "block" and (.reason | length > 0)' >/dev/null
-        [[ "$stderr" == *'jq required but not found'* ]]
+        [[ "$stderr" == *'jq required but not found'* ]] || false
       else
         [ "$status" -eq "$((1 - degrade))" ] || {
           echo "$hook degrade=$degrade rc=$status stdout=$output stderr=$stderr" >&2; return 1;
         }
         [ -z "$output" ]
         if [ "$degrade" -eq 1 ]; then
-          [[ "$stderr" == *'degrading to no-op'* ]]
+          [[ "$stderr" == *'degrading to no-op'* ]] || false
         else
-          [[ "$stderr" == *'jq required but not found'* ]]
+          [[ "$stderr" == *'jq required but not found'* ]] || false
         fi
       fi
     done
@@ -395,7 +395,7 @@ no_jq_path() {
   printf '{"mandatory_pipeline":' > "$PROJECT_DIR/.trellis.json"
   run_stop spec-gate.sh "$(stop_payload)"
   assert_run_block
-  [[ "$output" == *'spec-gate'* ]]
+  [[ "$output" == *'spec-gate'* ]] || false
 }
 
 @test "spec-gate re-entrancy guard suppresses a second block on the same state" {
@@ -412,7 +412,7 @@ no_jq_path() {
   run --separate-stderr env CODEX_PROJECT_DIR="$missing" bash "$DEPLOY/stop-verify.sh" \
     <<<"$(stop_payload)"
   assert_run_block
-  [[ "$output" == *'could not enter configured project directory'* ]]
+  [[ "$output" == *'could not enter configured project directory'* ]] || false
 }
 
 @test "stop-verify receipts block has Codex output and retains fail-counter" {
@@ -431,7 +431,7 @@ no_jq_path() {
   chmod +x "$bindir/curl"
   UI_SHOT_CMD=true PATH="$bindir:$PATH" run_stop ui-verify.sh "$(stop_payload)"
   assert_run_block
-  [[ "$output" == *'screenshot produced no artifact'* ]]
+  [[ "$output" == *'screenshot produced no artifact'* ]] || false
 }
 
 @test "code-review critical finding blocks with Codex output and no marker" {
@@ -443,7 +443,7 @@ no_jq_path() {
   unset TRELLIS_REVIEW_OVERRIDE
   CODE_REVIEWER_CMD="$reviewer" REVIEW_MIN_FILES=1 run_stop code-review-subagent.sh "$(stop_payload)"
   assert_run_block
-  [[ "$output" == *'fixture critical'* ]]
+  [[ "$output" == *'fixture critical'* ]] || false
   [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -name '.review-done-*' -print 2>/dev/null)" ]
 }
 
@@ -451,17 +451,17 @@ no_jq_path() {
   printf '{"autonomy":4}\n' > "$PROJECT_DIR/.trellis.config.json"
   run_stop decision-receipt.sh "$(stop_payload)"
   assert_run_block
-  [[ "$output" == *'decision-receipt:'* ]]
+  [[ "$output" == *'decision-receipt:'* ]] || false
 }
 
 @test "missing-core Stop blocks (spec 055 R1.3) keep Codex output" {
   rm -f "$DEPLOY/lib/spec-gate-core.sh" "$DEPLOY/lib/ui-verify-core.sh"
   run_stop spec-gate.sh "$(stop_payload)"
   assert_run_block
-  [[ "$output" == *'core library missing'* ]]
+  [[ "$output" == *'core library missing'* ]] || false
   run_stop ui-verify.sh "$(stop_payload)"
   assert_run_block
-  [[ "$output" == *'core library missing'* ]]
+  [[ "$output" == *'core library missing'* ]] || false
 }
 
 @test "missing-core spec-gate block is valid JSON without jq on a hostile path" {
@@ -480,7 +480,7 @@ no_jq_path() {
 @test "Stop exit 2 is rejected even with a valid JSON object and stderr continuation" {
   run assert_stop_block 2 '{"decision":"block","reason":"valid"}' 'continuation prompt'
   [ "$status" -ne 0 ]
-  [[ "$output" == *'unexpected Stop exit: 2'* ]]
+  [[ "$output" == *'unexpected Stop exit: 2'* ]] || false
 }
 
 @test "M1: invalid metrics key on deployed Stop fixture is rejected and restored" {
@@ -496,7 +496,7 @@ no_jq_path() {
   [ "$status" -eq 0 ]
   run assert_codex_output Stop "$output"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'violates the Codex'* ]]
+  [[ "$output" == *'violates the Codex'* ]] || false
   cp "$original" "$hook"
   run_stop stamp-turn.sh "$payload"
   [ "$status" -eq 0 ]
@@ -514,7 +514,7 @@ no_jq_path() {
   [ "$mutated_status" -eq 2 ]
   run assert_stop_block "$mutated_status" "$mutated_output"
   [ "$status" -ne 0 ]
-  [[ "$output" == *'unexpected Stop exit: 2'* ]]
+  [[ "$output" == *'unexpected Stop exit: 2'* ]] || false
   cp "$original" "$hook"
   run_stop stop-verify.sh "$(stop_payload)"
   assert_run_block

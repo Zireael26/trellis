@@ -45,7 +45,7 @@ run_hook() {
 
   [ "$status" -eq 0 ]
   [ -n "$output" ]
-  [[ "$(printf '%s' "$output" | jq -r '.additionalContext')" == *"truncated"* ]]
+  [[ "$(printf '%s' "$output" | jq -r '.additionalContext')" == *"truncated"* ]] || false
 }
 
 @test "a 100K response still emits an advisory" {
@@ -58,5 +58,5 @@ run_hook() {
 
   [ "$status" -eq 0 ]
   [ -n "$output" ]
-  [[ "$(printf '%s' "$output" | jq -r '.additionalContext')" == *"≥100K"* ]]
+  [[ "$(printf '%s' "$output" | jq -r '.additionalContext')" == *"≥100K"* ]] || false
 }

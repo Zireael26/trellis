@@ -104,7 +104,7 @@ FIXTURE_SPEC.loader.exec_module(FIXTURE)
 
 
 class WeeklyIntegrationTests(FIXTURE.VerdictTests):
-    def test_scheduler_environment_drift_still_disables_tree_reuse(self):
+    def test_scheduler_toolchain_drift_still_disables_tree_reuse(self):
         self.run_scheduler_case()
 
     def test_occupied_holder_snapshot_still_raises_p1(self):
@@ -120,8 +120,9 @@ class WeeklyIntegrationTests(FIXTURE.VerdictTests):
         # Real capture, writer, reader and candidate snapshot. Only the external
         # battery command is replaced, including its normal tree invalidation.
         if pinned:
+            # The fixture HOME (with its offline Cargo/Rustup stand-ins) is the
+            # agent and cron HOME alike; only XDG_STATE_HOME differs.
             home = self.base / "home"
-            home.mkdir()
             os.environ.pop("TRELLIS_GATE_STATE_DIR")
             os.environ.update(HOME=str(home), XDG_STATE_HOME=str(self.base / "agent-state"))
             self.state = home / ".local/state/trellis-gate"
@@ -132,8 +133,11 @@ class WeeklyIntegrationTests(FIXTURE.VerdictTests):
         for name in ("bash", "git", "python3"):
             (bin_dir / name).symlink_to(sys.executable if name == "python3" else shutil.which(name))
         mktemp = bin_dir / "mktemp"
-        mktemp.write_text('#!/bin/sh\nif [ "$1" = --version ]; then echo "fixture mktemp 1"; else exec /usr/bin/mktemp "$@"; fi\n')
-        mktemp.chmod(0o755)
+        def toolchain_version(version):
+            # mktemp binds its executable bytes, so each version is a distinct toolchain.
+            mktemp.write_text('#!/bin/sh\n# toolchain ' + version + '\nif [ "$1" = --version ]; then echo "fixture mktemp 1"; else exec /usr/bin/mktemp "$@"; fi\n')
+            mktemp.chmod(0o755)
+        toolchain_version("agent")
         original_run = subprocess.run
         self.tools.stop()
         try:
@@ -142,10 +146,10 @@ class WeeklyIntegrationTests(FIXTURE.VerdictTests):
                 self.inputs = FIXTURE.VERDICT.capture_inputs(self.root)
                 self.keep()
                 first = self.path
-                with mock.patch.dict(os.environ, {"TERM": "another-agent"}):
-                    self.id = "b" * 32
-                    self.inputs = FIXTURE.VERDICT.capture_inputs(self.root)
-                    self.keep()
+                toolchain_version("another-agent")
+                self.id = "b" * 32
+                self.inputs = FIXTURE.VERDICT.capture_inputs(self.root)
+                self.keep()
                 occupied = None
                 if occupancy is not None:
                     occupied = self.state / ("gate-holder.json" if occupancy == "holder" else "runs/dead.json")
@@ -162,6 +166,7 @@ class WeeklyIntegrationTests(FIXTURE.VerdictTests):
                         self.assertFalse(self.path.exists())
                         return mock.Mock(returncode=7)
                     return original_run(command, *args, **kwargs)
+                toolchain_version("scheduler")
                 scheduler = {"TERM": "dumb-scheduler"}
                 if pinned:
                     scheduler["XDG_STATE_HOME"] = str(self.base / "cron-state")
@@ -176,7 +181,7 @@ class WeeklyIntegrationTests(FIXTURE.VerdictTests):
                 self.assertTrue(report["p1_divergence"])
                 self.assertEqual({candidate["id"] for candidate in report["candidate_verdicts"]}, {"a" * 32, "b" * 32})
                 for candidate in report["candidate_verdicts"]:
-                    self.assertEqual(candidate["differing_key_fields"], ["environment"])
+                    self.assertEqual(candidate["differing_key_fields"], ["toolchain"])
                 self.assertIn("P1:", stderr.getvalue())
                 self.assertTrue((self.state / "reuse-disabled.json").exists())
                 self.assertEqual(FIXTURE.GATE.gate_state_root(), self.state)

@@ -45,6 +45,9 @@ privacy_spy_awk() {
 }
 '''
 text = '\n'.join(functions)
+# The launcher applies the locale in env, after exec. Replace the whole external
+# command so the in-process spy still observes the identical listing arguments.
+text = text.replace('/usr/bin/env LC_ALL=C /bin/ls', 'privacy_spy_ls')
 for path, name in (('/bin/ls', 'ls'), ('/usr/bin/uname', 'uname'), ('/usr/bin/printf', 'printf'), ('/usr/bin/awk', 'awk')):
     text = text.replace(path, 'privacy_spy_'+name)
 script = r/'privacy.sh'

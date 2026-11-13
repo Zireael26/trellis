@@ -44,7 +44,7 @@ race_run() {
   echo 0 >"$STUB/exit1"
   run_jobs
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"bats-jobs: bats-core wait race in scripts/tests/x.bats: rerun with --jobs 1 decides"* ]]
+  [[ "$output" == *"bats-jobs: bats-core wait race in scripts/tests/x.bats: rerun with --jobs 1 decides"* ]] || false
   run cat "$STUB/calls"
   [ "${lines[0]}" = "--jobs 2 --no-parallelize-across-files scripts/tests/x.bats" ]
   [ "${lines[1]}" = "--jobs 1 scripts/tests/x.bats" ]
@@ -118,7 +118,7 @@ SH
   echo 0 >"$STUB/exit"
   run_jobs
   [ "$status" -eq 0 ]
-  [[ "$output" != *"bats-jobs:"* ]]
+  [[ "$output" != *"bats-jobs:"* ]] || false
   run cat "$STUB/calls"
   [ "${#lines[@]}" -eq 1 ]
 }

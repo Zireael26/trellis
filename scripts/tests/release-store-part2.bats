@@ -329,8 +329,9 @@ setup() {
   group_plan_assert_no_journal
 }
 
-@test "Pi adoption permits missing new leaves and treats hooks-other as outside the hooks tree" {
-  local version_a=1.10.2 version_b=1.10.3 version_c=1.10.4 repo manifest project non_pi payload_b payload_c
+@test "Pi adoption links new leaves and treats hooks-other as outside the hooks tree" {
+  local version_a=1.10.2 version_b=1.10.3 version_c=1.10.4 repo manifest project non_pi payload_b payload_c owner leaf
+  local target=../../.trellis/runtime/core-rules/CLAUDE.md
   repo="$(build_pi_release_repo "$version_a" legacy)"
   install_release "$version_a" "$repo"
   repo="$(build_pi_release_repo "$version_b" legacy)"
@@ -355,6 +356,7 @@ setup() {
   project="$SANDBOX/pi-forward-leaves"
   make_portable_project "$project" pi-forward-leaves
   attach_pi_project "$project" "$version_a"
+  owner="$(owner_for_root "$project")" || { echo 'Pi owner not found'; false; }
   non_pi="$SANDBOX/non-pi-forward"
   make_portable_project "$non_pi" non-pi-forward
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
@@ -362,13 +364,16 @@ setup() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   wait_for_attachment_statuses 2
 
-  # A retained hook inventory permits forward adoption with a new missing hook.
+  # A retained hook inventory permits forward adoption; 1.5.1 links the new hook.
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project pi-forward-leaves
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(readlink "$project/.trellis/runtime")" = "$payload_b" ]
   [ -L "$project/.pi/hooks/dispatch.sh" ]
-  [ ! -e "$project/.pi/hooks/added.sh" ]
-  [ ! -L "$project/.pi/hooks/added.sh" ]
+  [ -L "$project/.pi/hooks/added.sh" ] || false
+  [ "$(readlink "$project/.pi/hooks/added.sh")" = "$target" ] || { echo 'new Pi hook target differs'; false; }
+  jq -e --arg target "$target" '
+    [.artifacts[] | select(.path == ".pi/hooks/added.sh" and .kind == "symlink" and .target == $target)] | length == 1
+  ' "$owner" >/dev/null || { echo 'new Pi hook is not owned at its exact target'; false; }
   # A manifest's Pi hooks do not constrain an attachment without Pi selected.
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_b" --project non-pi-forward
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -379,12 +384,20 @@ setup() {
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_c" --project pi-forward-leaves
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(readlink "$project/.trellis/runtime")" = "$payload_c" ]
-  [ ! -e "$project/.pi/hooks" ]
-  [ ! -L "$project/.pi/hooks" ]
-  [ ! -e "$project/.pi/hooks-other/dispatch.sh" ]
-  [ ! -L "$project/.pi/hooks-other/dispatch.sh" ]
-  [ ! -e "$project/.pi/extensions/added.md" ]
-  [ ! -L "$project/.pi/extensions/added.md" ]
+  [ ! -e "$project/.pi/hooks" ] || false
+  [ ! -L "$project/.pi/hooks" ] || false
+  # The retired .pi/hooks tree does not swallow its prefix neighbour: the new
+  # .pi/hooks-other leaf is linked like any other leaf the release adds.
+  [ -L "$project/.pi/hooks-other/dispatch.sh" ] || false
+  [ -L "$project/.pi/extensions/added.md" ] || false
+  for leaf in .pi/hooks-other/dispatch.sh .pi/extensions/added.md; do
+    [ "$(readlink "$project/$leaf")" = "$target" ] || { echo "Pi leaf target differs: $leaf"; false; }
+    jq -e --arg path "$leaf" --arg target "$target" '
+      [.artifacts[] | select(.path == $path and .kind == "symlink" and .target == $target)] | length == 1
+    ' "$owner" >/dev/null || { echo "Pi leaf is not owned at its exact target: $leaf"; false; }
+  done
+  jq -e 'all(.artifacts[]; (.path | startswith(".pi/hooks/")) | not)' "$owner" >/dev/null ||
+    { echo 'retired Pi hooks remain in the owner'; false; }
   # With no hook inventory left, the prefix neighbour still must not refuse.
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt "$version_c" --project pi-forward-leaves
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -1366,7 +1379,7 @@ PY
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt 1.5.0 --project b1-owned-arrays
   [ "$status" -eq 4 ] || { echo "$output"; return 1; }
   [[ "$output" == *"native render before-image reconstruction disagrees at .claude/settings.local.json"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"preserve settings and owner evidence"* ]]
+  [[ "$output" == *"preserve settings and owner evidence"* ]] || false
   [ "$(b1_published_state)" = "$before" ]
 }
 # END LANE B1

@@ -242,8 +242,8 @@ release_store_release_has_no_acl() {
   # Do not fall back to an ACL-blind listing after a Darwin read error. find
   # propagates enumeration failures instead of hiding them behind a pipeline.
   case "$(uname -s)" in
-    Darwin) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -lde {} + 2>/dev/null)" || return 1 ;;
-    *) listing="$(LC_ALL=C find "$release_dir" -exec /bin/ls -ld {} + 2>/dev/null)" || return 1 ;;
+    Darwin) listing="$(/usr/bin/env LC_ALL=C find "$release_dir" -exec /bin/ls -lde {} + 2>/dev/null)" || return 1 ;;
+    *) listing="$(/usr/bin/env LC_ALL=C find "$release_dir" -exec /bin/ls -ld {} + 2>/dev/null)" || return 1 ;;
   esac
   printf '%s\n' "$listing" |
     /usr/bin/awk '/^ *[0-9]+: / { acl = 1 } $1 ~ /\+/ { acl = 1 } END { exit acl }'
@@ -450,7 +450,7 @@ release_store_first_symlink_component() {
 
 release_store_is_writable_mode() {
   local path="$1" perms write_bits
-  perms="$(LC_ALL=C /bin/ls -ld -- "$path" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
+  perms="$(/usr/bin/env LC_ALL=C /bin/ls -ld -- "$path" 2>/dev/null | /usr/bin/awk '{print $1}')" || return 1
   case "$perms" in
     *+*) return 1 ;;
   esac
@@ -465,7 +465,7 @@ release_store_mode_for_path() {
     return 0
   fi
   [ -f "$path" ] || return 1
-  perms="$(LC_ALL=C ls -ld "$path" 2>/dev/null | awk '{print $1}')" || return 1
+  perms="$(/usr/bin/env LC_ALL=C ls -ld "$path" 2>/dev/null | awk '{print $1}')" || return 1
   exec_bits="$(printf '%s' "$perms" | awk '{print substr($0,4,1) substr($0,7,1) substr($0,10,1)}')"
   case "$exec_bits" in
     ---) printf '100644\n' ;;
@@ -515,7 +515,7 @@ release_store_collect_permissions() {
 
   : > "$rows" || return 1
   [ -s "$paths_nul" ] || return 0
-  LC_ALL=C /usr/bin/xargs -0 /bin/ls -fdl < "$paths_nul" > "$ls_rows" || return 1
+  /usr/bin/env LC_ALL=C /usr/bin/xargs -0 /bin/ls -fdl < "$paths_nul" > "$ls_rows" || return 1
   /usr/bin/awk '{ print $1 }' "$ls_rows" > "$permissions" || return 1
 
   exec 3< "$permissions" || return 1
@@ -835,14 +835,28 @@ if [ -n "${_RELEASE_STORE_LIB_DIR:-}" ]; then
 fi
 
 release_store_verify_batch() {
-  local release_canon="$1" skip_writable="$2" python_bin="${TRELLIS_PYTHON:-}" verdict="" rc=0
-  [ -n "$_RELEASE_STORE_VERIFY_PROGRAM" ] && [ -f "$_RELEASE_STORE_VERIFY_PROGRAM" ] || return 1
+  local release_canon="$1" skip_writable="$2" python_bin="${TRELLIS_PYTHON:-}" verdict="" rc=0 bundled=""
+  # A verified launcher command bundle (`trellis release`, `trellis upgrade`)
+  # has no payload pathname; it carries release_verify.py's manifest-checked
+  # bytes as data instead. Only that bundle's own attestation admits them.
+  if [ -z "$_RELEASE_STORE_VERIFY_PROGRAM" ] && [ -n "${_TRELLIS_BUNDLED_RELEASE_VERIFY_PROGRAM:-}" ] &&
+    declare -F trellis_command_bundle_is_verified >/dev/null &&
+    trellis_command_bundle_is_verified "${TRELLIS_VERIFIED_COMMAND_BUNDLE:-}" "${TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN:-}"; then
+    bundled="$_TRELLIS_BUNDLED_RELEASE_VERIFY_PROGRAM"
+  fi
+  if [ -z "$bundled" ]; then
+    [ -n "$_RELEASE_STORE_VERIFY_PROGRAM" ] && [ -f "$_RELEASE_STORE_VERIFY_PROGRAM" ] || return 1
+  fi
   case "$python_bin" in /*) [ -x "$python_bin" ] || python_bin="" ;; *) python_bin="" ;; esac
   if [ -z "$python_bin" ]; then
     python_bin="$(command -v python3)" || return 1
     case "$python_bin" in /*) ;; *) return 1 ;; esac
   fi
-  verdict="$(LC_ALL=C "$python_bin" -I "$_RELEASE_STORE_VERIFY_PROGRAM" "$release_canon" "$skip_writable")" || rc=$?
+  if [ -n "$bundled" ]; then
+    verdict="$(/usr/bin/env LC_ALL=C "$python_bin" -I -c "$bundled" "$release_canon" "$skip_writable")" || rc=$?
+  else
+    verdict="$(/usr/bin/env LC_ALL=C "$python_bin" -I "$_RELEASE_STORE_VERIFY_PROGRAM" "$release_canon" "$skip_writable")" || rc=$?
+  fi
   if [ "$rc" -eq 0 ] && [ "$verdict" = ok ]; then
     return 0
   fi
@@ -1073,7 +1087,7 @@ release_store_verify_path_body() (
   fi
 
   if [ "$tree_ok" = "1" ] && [ -s "$link_paths_nul" ]; then
-    LC_ALL=C xargs -0 readlink < "$link_paths_nul" > "$link_targets" || {
+    /usr/bin/env LC_ALL=C xargs -0 readlink < "$link_paths_nul" > "$link_targets" || {
       release_store_err "could not read release symlink"
       rc=4
       tree_ok=0
@@ -1541,10 +1555,10 @@ release_store_process_birth() {
   if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
     command -v python3 >/dev/null 2>&1 || return 1
     program="$(release_store_process_birth_python)" || return 1
-    LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
+    /usr/bin/env LC_ALL=C python3 -I -c "$program" "$pid" 2>/dev/null || return "$?"
     return 0
   fi
-  LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
+  /usr/bin/env LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null || return 1
   return 0
 }
 
@@ -3715,8 +3729,9 @@ try:
         sources.append(payload)
 
     # Do not emit any byte until every carrier source is already in memory and
-    # has matched the exact release record supplied by the caller.
-    output = [b"TRELLIS_LIBS_PRELOADED=1\n", b"export TRELLIS_LIBS_PRELOADED\n"]
+    # has matched the exact release record supplied by the caller. The marker
+    # applies only in this shell, not to any subsequently executed child.
+    output = [b"TRELLIS_LIBS_PRELOADED=1\n", b"export -n TRELLIS_LIBS_PRELOADED\n"]
     for payload in sources:
         output.append(b"\n")
         output.append(payload)
@@ -4439,3 +4454,13 @@ release_store_adopt_runtime_anchor() (
   trap - EXIT INT TERM
   printf '%s -> %s\n' "$anchor" "$target"
 )
+
+# A sync-local inventory cache must not bypass a caller's overridden release
+# helpers. Capture the sourced definitions once; a mismatch disables caching.
+_release_store_sync_cache_helpers() {
+  declare -f release_store_locate release_store_normalize_version release_store_releases_dir \
+    release_store_release_path release_store_canonical_releases_dir release_store_verify_installed \
+    release_store_release_has_no_acl release_store_verify_batch release_store_verify_memo_key \
+    release_store_verify_memo_hit release_store_verify_path release_store_release_json_sha256_no_follow
+}
+_RELEASE_STORE_SYNC_CACHE_HELPERS_ORIGINAL="$(_release_store_sync_cache_helpers)"

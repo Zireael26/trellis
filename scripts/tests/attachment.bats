@@ -1406,7 +1406,7 @@ assert_one_lock_winner() {
     seen="$seen $shell"
     run "$shell" "$BATS_TEST_DIRNAME/helpers/builtin-differential.bash" "$BATS_TEST_DIRNAME/../.."
     [ "$status" -eq 0 ]
-    [[ "$output" == *": 0 mismatches" ]]
+    [[ "$output" == *": 0 mismatches" ]] || false
   done
   [ -n "$seen" ]
 }
@@ -1420,16 +1420,17 @@ t56_native_render_fixture() {
   chmod 700 "$HOME" "$TRELLIS_HOME"
   cp -R "$repo/core-rules/native" "$T56_PAYLOAD/core-rules/native"
   digest="$(jq -r --arg target "$target" '.assets[$target].sha256' "$T56_PAYLOAD/core-rules/native/artifacts.json")"
-  T56_COMPANION="$TRELLIS_HOME/bin/native/1.5.0/$target/$digest/trellis-hooks"
+  T56_VERSION="$(jq -r .version "$T56_PAYLOAD/core-rules/native/artifacts.json")"
+  T56_COMPANION="$TRELLIS_HOME/bin/native/$T56_VERSION/$target/$digest/trellis-hooks"
   mkdir -p "${T56_COMPANION%/*}"
   cp "$T56_PAYLOAD/core-rules/native/$target/trellis-hooks" "$T56_COMPANION"
   chmod 500 "$T56_COMPANION"
-  python3 -I - "$repo/scripts/trellis-launcher.sh" "$HOME/.local/bin/trellis" "$T56_COMPANION" "$digest" <<'PY'
+  python3 -I - "$repo/scripts/trellis-launcher.sh" "$HOME/.local/bin/trellis" "$T56_COMPANION" "$digest" "$T56_VERSION" <<'PY'
 from pathlib import Path
 import sys
-source,dest,entry,digest=sys.argv[1:]
+source,dest,entry,digest,version=sys.argv[1:]
 s=Path(source).read_text(); q=lambda x:"'"+x.replace("'", "'\\''")+"'"
-for k,v in (('launcher_native_entry',entry),('launcher_native_sha256',digest),('launcher_native_version','1.5.0')):
+for k,v in (('launcher_native_entry',entry),('launcher_native_sha256',digest),('launcher_native_version',version)):
     s=s.replace(k+"=''\n",k+'='+q(v)+'\n')
 p=Path(dest); p.write_text(s); p.chmod(0o755)
 PY
@@ -1590,6 +1591,26 @@ PY
   printf '%s\n' "$output" | jq -e '.[0].state == "changed"' >/dev/null
   run settings_owned_json merge "$base" "$keys" "$template"
   [ "$status" -eq 3 ] || { echo "$output"; return 1; }
+}
+
+# The settings program is a bash single-quoted literal (_settings_owned_json_program):
+# a stray single quote ends it early and the program breaks only at runtime.
+# Every adopt mode runs here: "false" refuses an identical unowned value,
+# "identical-values" adopts it outside the hook events, "true" adopts both.
+@test "settings program parses, holds no single quote, and honours every adopt mode" {
+  local value="$BATS_TEST_TMPDIR/adopt-value.json" hook="$BATS_TEST_TMPDIR/adopt-hook.json" mode expected
+  run bash -c '_settings_owned_json_program | python3 -I -c "import ast, sys; ast.parse(sys.stdin.read())"'
+  [ "$status" -eq 0 ] || { echo "program does not parse: $output"; return 1; }
+  [ "$(_settings_owned_json_program | tr -cd "'" | wc -c | tr -d ' ')" -eq 0 ] || { echo "program holds a single quote"; return 1; }
+  printf '%s\n' '{"workflowSizeGuideline":"large"}' > "$value"
+  printf '%s\n' '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"same"}]}]}}' > "$hook"
+  for mode in false:3:3 identical-values:0:3 true:0:0; do
+    run settings_owned_json merge "$value" '[]' "$value" '' '[]' "${mode%%:*}"
+    expected="${mode#*:}"; expected="${expected%%:*}"
+    [ "$status" -eq "$expected" ] || { echo "value, mode ${mode%%:*}: status $status, expected $expected: $output"; return 1; }
+    run settings_owned_json merge "$hook" '[]' "$hook" '' '[]' "${mode%%:*}"
+    [ "$status" -eq "${mode##*:}" ] || { echo "hook, mode ${mode%%:*}: status $status, expected ${mode##*:}: $output"; return 1; }
+  done
 }
 
 @test "T56 owned-only merge preserves appended project hooks through inverse" {

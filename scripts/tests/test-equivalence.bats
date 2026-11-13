@@ -213,19 +213,19 @@ expect_fails() {
   printf 't/sample.bats\t%s\ttest\tdelta uses the helper\topenai\tx\ty\n' "$P2" > "$BATS_TEST_TMPDIR/review"
   run_diff --review "$BATS_TEST_TMPDIR/review"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"cannot be reviewed"* ]]
+  [[ "$output" == *"cannot be reviewed"* ]] || false
 }
 
 @test "the naming convention refuses a gap and a surviving original" {
   mv "$SPLIT/$P2" "$SPLIT/t/sample-part3.bats"
   run_diff
   [ "$status" -eq 2 ]
-  [[ "$output" == *"t/sample-part2.bats is missing"* ]]
+  [[ "$output" == *"t/sample-part2.bats is missing"* ]] || false
   mv "$SPLIT/t/sample-part3.bats" "$SPLIT/$P2"
   cp "$BASE/t/sample.bats" "$SPLIT/t/sample.bats"
   run_diff
   [ "$status" -eq 2 ]
-  [[ "$output" == *"has both t/sample.bats and its -partN files"* ]]
+  [[ "$output" == *"has both t/sample.bats and its -partN files"* ]] || false
 }
 
 @test "an unsplit file maps to itself" {

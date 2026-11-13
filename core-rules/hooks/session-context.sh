@@ -63,11 +63,11 @@ command -v trellis_python >/dev/null 2>&1 && trellis_python || TRELLIS_PYTHON=py
 _se_utf8_head() {
   local text="$1" max="$2" cut size run byte need drop
   [ "$max" -gt 0 ] || return 0
-  cut="$(printf '%s' "$text" | LC_ALL=C head -c "$max")"
+  cut="$(printf '%s' "$text" | /usr/bin/env LC_ALL=C head -c "$max")"
   run=0
   byte=""
   while [ "$run" -lt 4 ]; do
-    byte="$(printf '%s' "$cut" | LC_ALL=C tail -c "$((run + 1))" | LC_ALL=C head -c 1 | od -An -tu1 | tr -d '[:space:]')"
+    byte="$(printf '%s' "$cut" | /usr/bin/env LC_ALL=C tail -c "$((run + 1))" | /usr/bin/env LC_ALL=C head -c 1 | od -An -tu1 | tr -d '[:space:]')"
     [ -n "$byte" ] || break
     [ "$byte" -ge 128 ] && [ "$byte" -le 191 ] || break
     run=$((run + 1))
@@ -88,8 +88,8 @@ _se_utf8_head() {
     fi
   fi
   if [ "$drop" -gt 0 ]; then
-    size="$(printf '%s' "$cut" | LC_ALL=C wc -c | tr -d '[:space:]')"
-    cut="$(printf '%s' "$cut" | LC_ALL=C head -c "$((size - drop))")"
+    size="$(printf '%s' "$cut" | /usr/bin/env LC_ALL=C wc -c | tr -d '[:space:]')"
+    cut="$(printf '%s' "$cut" | /usr/bin/env LC_ALL=C head -c "$((size - drop))")"
   fi
   printf '%s' "$cut"
 }
@@ -214,7 +214,7 @@ _se_task_context_block() {
     _se_task_context_unavailable "empty_advisory"
     return 0
   fi
-  bytes=$(printf '%s\n' "$advisory" | LC_ALL=C wc -c | tr -d '[:space:]')
+  bytes=$(printf '%s\n' "$advisory" | /usr/bin/env LC_ALL=C wc -c | tr -d '[:space:]')
   if [ "$bytes" -gt 512 ]; then
     _se_task_context_unavailable "advisory_bound"
     return 0
@@ -893,15 +893,15 @@ fi
 # RESERVED: the surrounding context is trimmed around them, never the other way
 # round, and the cut lands on a UTF-8 character boundary. Normal output retains
 # the established section order.
-FULL_CTX_BYTES=$(printf '%s' "$FULL_CTX" | LC_ALL=C wc -c | tr -d '[:space:]')
+FULL_CTX_BYTES=$(printf '%s' "$FULL_CTX" | /usr/bin/env LC_ALL=C wc -c | tr -d '[:space:]')
 if [ "$FULL_CTX_BYTES" -gt 2000 ]; then
   TRIM_MARKER="
 ...[trimmed]
 
 "
   RESERVED_CTX="${AUTONOMY_CTX}${TASK_CTX}"
-  RESERVED_BYTES=$(printf '%s' "$RESERVED_CTX" | LC_ALL=C wc -c | tr -d '[:space:]')
-  MARKER_BYTES=$(printf '%s' "$TRIM_MARKER" | LC_ALL=C wc -c | tr -d '[:space:]')
+  RESERVED_BYTES=$(printf '%s' "$RESERVED_CTX" | /usr/bin/env LC_ALL=C wc -c | tr -d '[:space:]')
+  MARKER_BYTES=$(printf '%s' "$TRIM_MARKER" | /usr/bin/env LC_ALL=C wc -c | tr -d '[:space:]')
   NONCRITICAL_BUDGET=$((2000 - RESERVED_BYTES - MARKER_BYTES))
   [ "$NONCRITICAL_BUDGET" -ge 0 ] || NONCRITICAL_BUDGET=0
   NONCRITICAL_CTX="${CTX}${CTX_TAIL}"

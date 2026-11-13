@@ -304,6 +304,9 @@ case "$case_name" in
     # The test deliberately exercises either real harness twin.
     # shellcheck disable=SC1090
     . "$deps"
+    # Load deps-heavy.sh before installing the seams: its first-call stubs
+    # source it again, which would replace them with the real definitions.
+    _se_load_heavy || exit 1
     _se_unmasked_index() {
       local allocated
       allocated=$(mktemp -d "$TEST_ROOT/tmp/trellis-flags.XXXXXX") || return 1

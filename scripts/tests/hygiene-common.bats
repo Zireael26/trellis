@@ -561,8 +561,11 @@ run_doctor_from() {
 
 # write_janitor_home [DISK_JANITOR_JSON] — policy, machine home, empty registry.
 write_janitor_home() {
+  # Not "${1:-{\}}": bash 3.2 keeps that backslash and jq refuses "{\}".
+  local dj='{}'
+  [ -z "${1:-}" ] || dj="$1"
   mkdir -p "$SANDBOX/canonical/audits" "$SANDBOX/projects"
-  jq -n --argjson dj "${1:-{\}}" \
+  jq -n --argjson dj "$dj" \
     '{schema_version: 2, maintainer_name: "T", github_user: "t", harnesses: ["claude"], disk_janitor: $dj}' \
     > "$SANDBOX/canonical/trellis.config.json"
   cat > "$TRELLIS_HOME/config.json" <<JSON
@@ -624,7 +627,7 @@ SH
   run_janitor_from "$SANDBOX/copy/scripts" --report --dehydrate --scopes worktrees,logs
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(sed -n 1p "$CALLS")" = "dj_dehydrate_scan report 1 worktrees,logs" ]
-  [[ "$(sed -n 2p "$CALLS")" == "dj_host_scan PATH="* ]]
+  [[ "$(sed -n 2p "$CALLS")" == "dj_host_scan PATH="* ]] || false
   grep -qx 'dj_dehydrate_render report 1 worktrees,logs' "$CALLS"
   # The host scan's plan row is visible to its renderer.
   grep -qx 'dj_host_render rows=1' "$CALLS"

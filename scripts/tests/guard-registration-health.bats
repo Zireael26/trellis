@@ -52,7 +52,7 @@ render() {
   for tool in bash sh; do ln -s "$(command -v "$tool")" "$SANDBOX/bin/$tool"; done
   if output="$(PATH="$SANDBOX/bin" hc_guard_supervisor_perl)"; then status=0; else status=$?; fi
   [ "$status" -eq "$HC_ERROR" ] || { echo "status=$status $output"; false; }
-  [[ "$output" == *"perl not found"* ]]
+  [[ "$output" == *"perl not found"* ]] || false
 }
 
 @test "freshly rendered templates -> silent OK; no rendered settings -> silent OK" {
@@ -72,7 +72,7 @@ render() {
   run hc_guard_registrations "$ROOT"
   [ "$status" -eq "$HC_WARN" ] || { echo "status=$status $output"; false; }
   [[ "$output" == *".claude/settings.local.json: block-destructive (timeout 5)"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"detach + attach"* ]]
+  [[ "$output" == *"detach + attach"* ]] || false
   f="$ROOT/.codex/hooks.json"
   jq '(.hooks.PreToolUse[].hooks[] | select(.command | contains("/reread-guard.sh")) | .command) =
       "\"$PWD/.trellis/runtime/core-rules/codex/hooks/reread-guard.sh\""' "$f" > "$f.next" && mv "$f.next" "$f"
@@ -341,7 +341,7 @@ native_health_codex() {
   rm -f "${NATIVE_RELEASE:?}/payload/core-rules/templates/claude-settings.local.json"
   run hc_guard_registrations "$ROOT"
   [ "$status" -eq "$HC_ERROR" ] || { echo "missing owned Claude template: $status $output"; return 1; }
-  [[ "$output" == *"claude native wiring or companion could not be verified"* ]]
+  [[ "$output" == *"claude native wiring or companion could not be verified"* ]] || false
 }
 
 @test "B9 owned Codex with missing template is a guard ERROR" {
@@ -353,7 +353,7 @@ native_health_codex() {
   rm -f "${NATIVE_RELEASE:?}/payload/core-rules/templates/codex-hooks.local.json"
   run hc_guard_registrations "$ROOT"
   [ "$status" -eq "$HC_ERROR" ] || { echo "missing owned Codex template: $status $output"; return 1; }
-  [[ "$output" == *"codex native wiring or companion could not be verified"* ]]
+  [[ "$output" == *"codex native wiring or companion could not be verified"* ]] || false
 }
 
 @test "T62 Codex native guard coverage and prompt binding are enforced" {
@@ -769,11 +769,35 @@ PY
   run hc_launcher_currency "$HOME" "$TRELLIS_HOME"
   [ "$status" -eq "$HC_ERROR" ] || { echo "changed launcher: $status $output"; return 1; }
   cp "$SANDBOX/good-launcher" "$launcher"
-  printf '{"active_cli_release":"1.5.1"}\n' > "$TRELLIS_HOME/config.json"
+  printf '{"active_cli_release":"9.9.9"}\n' > "$TRELLIS_HOME/config.json"
   run hc_launcher_currency "$HOME" "$TRELLIS_HOME"
   [ "$status" -eq "$HC_ERROR" ] || { echo "wrong release: $status $output"; return 1; }
-  printf '{"active_cli_release":"1.5.0"}\n' > "$TRELLIS_HOME/config.json"
+  printf '{"active_cli_release":"%s"}\n' "$(jq -r .version "$NATIVE_RELEASE/payload/core-rules/native/artifacts.json")" > "$TRELLIS_HOME/config.json"
   mv "$companion" "$SANDBOX/missing-companion"
   run hc_launcher_currency "$HOME" "$TRELLIS_HOME"
   [ "$status" -eq "$HC_ERROR" ] || { echo "missing companion: $status $output"; return 1; }
+}
+
+# 1.5.1: `release adopt` renders without the caller's PATH, so it finds no
+# claude and writes the adapter (R2) form; doctor runs with the caller's PATH,
+# finds a supporting claude and expected the direct (R1) form: a false ERROR on
+# every correctly adopted checkout. R2 is a valid render of the same release.
+@test "native guard health accepts the R2 render when doctor sees an onFailure-capable claude" {
+  native_health_fixture
+  local f="$ROOT/.claude/settings.local.json" source context original="$SANDBOX/r2.json"
+  source="$NATIVE_RELEASE/payload/core-rules/templates/claude-settings.local.json"
+  context="$(attachment_contextual_render_context "$TRELLIS_HOME")"
+  rm -f "$SANDBOX/claude-bin/claude"
+  attachment_contextual_template_render "$source" core-rules/templates/claude-settings.local.json "$context" "$ROOT" > "$f"
+  jq -e 'all(.hooks.PreToolUse[].hooks[]; has("args") | not)' "$f" >/dev/null || { cat "$f"; false; }
+  native_health_owner claude
+  stub_claude 2.1.300
+  run hc_guard_registrations "$ROOT"
+  [ "$status" -eq "$HC_OK" ] || { echo "R2 under a capable client: $status $output"; false; }
+  # Still exact: a mutated R2 member is an ERROR under either expectation.
+  cp "$f" "$original"
+  jq '.hooks.PreToolUse[0].hooks[0].command |= . + " tampered"' "$original" > "$f"
+  run hc_guard_registrations "$ROOT"
+  [ "$status" -eq "$HC_ERROR" ] || { echo "tampered R2: $status $output"; false; }
+  [[ "$output" == *"native member coverage or wiring differs"* ]] || { echo "$output"; false; }
 }

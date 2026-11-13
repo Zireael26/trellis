@@ -80,7 +80,7 @@ local_registry_schema_path() {
 
 local_registry_require_project_id() {
   local project_id="${1:-}"
-  if [[ "$project_id" == *$'\n'* ]] || ! printf '%s' "$project_id" | LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+  if [[ "$project_id" == *$'\n'* ]] || ! printf '%s' "$project_id" | /usr/bin/env LC_ALL=C grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
     local_registry_err "invalid project ID $project_id; expected ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
     return "$TRELLIS_EX_USAGE"
   fi
@@ -343,7 +343,7 @@ local_registry_normalize_release() {
 local_registry_require_attachment_id() {
   local attachment_id="${1:-}"
   [ -z "$attachment_id" ] && return 0
-  if ! printf '%s' "$attachment_id" | LC_ALL=C grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+  if ! printf '%s' "$attachment_id" | /usr/bin/env LC_ALL=C grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
     local_registry_err "attachment ID must be a UUID when supplied: $attachment_id"
     return "$TRELLIS_EX_USAGE"
   fi
@@ -949,6 +949,116 @@ EOF
   return "$rc"
 }
 
+# local_registry_validate_bound_rows STATE CHECKOUT_ID WORKTREE_ID...: the
+# strict identity validation local_registry_validate_bound_row_identity makes
+# for each (checkout, worktree) pair, with the checkout row checked once and
+# each named worktree row once (stage B item 3). From
+# LOCAL_REGISTRY_BOUND_ROWS_BATCH_MIN rows up, the batch classifier
+# (_local_registry_batch_run: positive-only proofs, observed twice) runs on
+# exactly these rows; rows it proves verified skip the scalar classifier and
+# every miss takes it in input order. After each scalar pass the proven rows
+# are observed again, as the listing does (r152-registry M1): a row that lost
+# its proof meanwhile takes the scalar classifier next, so a slow miss never
+# lets an earlier proof stand. The first refusal, its diagnostic and its
+# status are the scalar ones. Any batch or recheck failure validates every row
+# scalar.
+LOCAL_REGISTRY_BOUND_ROWS_BATCH_MIN=4
+local_registry_validate_bound_rows() {
+  local_registry_require_hash_command || return "$?"
+  local state="${1:-}" checkout_id="${2:-}" rows row rc=0 count dir="" batch="" input
+  [ "$#" -ge 2 ] || return "$TRELLIS_EX_USAGE"
+  shift 2
+  [ -n "$checkout_id" ] || return 0
+  rows="$(printf '%s\n' "$state" | jq -c --arg checkout "$checkout_id" '
+    ($ARGS.positional | map(select(. != "")) | reduce .[] as $w ([]; if index([$w]) then . else . + [$w] end)) as $wanted
+    | .projects | to_entries[] as $project
+    | $project.value.checkouts | to_entries[] as $entry
+    | select($entry.key == $checkout)
+    | {kind: "checkout", checkout_id: $entry.key,
+       checkout_root: $entry.value.root,
+       git_common_dir: $entry.value.git_common_dir,
+       worktree_id: null, root: $entry.value.root},
+      ($wanted[] as $worktree
+       | $entry.value.worktrees | to_entries[]?
+       | select(.key == $worktree)
+       | {kind: "worktree", checkout_id: $entry.key,
+          checkout_root: $entry.value.root,
+          git_common_dir: $entry.value.git_common_dir,
+          worktree_id: .key, root: .value.root})
+  ' --args "$@")" || return "$TRELLIS_EX_STATE"
+  # r152-create-3 (the r152-registry L3 class): a generator that succeeds
+  # with a short or altered stream must not drop a candidate. Count the
+  # selected rows independently and match every row to the state: exactly
+  # the generator's fields, each (kind, worktree) once.
+  # Both reach jq on stdin (the rows as one JSON string), never as an
+  # argument, so a large candidate set cannot hit the exec size limit.
+  if ! { printf '%s\n' "$state"; printf '%s' "$rows" | jq -Rs .; } | jq -e -s --arg checkout "$checkout_id" '
+    .[0] as $s | .[1] as $raw
+    | ($raw | type == "string") and (length == 2)
+    | if . then $s else error("framing") end
+    | (reduce ($ARGS.positional[] | select(. != "")) as $w ({}; .[$w] = true)) as $wanted
+    | [ $s.projects[] | .checkouts | to_entries[] | select(.key == $checkout) ] as $entries
+    | ($entries | map(1 + ([.value.worktrees | objects | keys[]
+        | select($wanted[.] == true)] | length)) | add // 0) as $expected
+    | (if $raw == "" then [] else ($raw | split("\n")) end) as $lines
+    | ($lines | length) == $expected
+      and ([$lines[] | try (fromjson | [.kind, .worktree_id]) catch null] | unique | map(select(. != null)) | length) == $expected
+      and all($lines[]; try (fromjson as $r
+        | ($r | type == "object" and (keys == ["checkout_id", "checkout_root", "git_common_dir", "kind", "root", "worktree_id"]))
+        and any($entries[]; .value as $e
+            | $r.checkout_id == .key and $r.checkout_root == $e.root
+              and $r.git_common_dir == $e.git_common_dir
+              and (if $r.kind == "checkout" then $r.worktree_id == null and $r.root == $e.root
+                   elif $r.kind == "worktree" then ($r.worktree_id | type == "string")
+                     and $wanted[$r.worktree_id] == true
+                     and ($e.worktrees | objects | has($r.worktree_id))
+                     and $r.root == $e.worktrees[$r.worktree_id].root
+                   else false end))) catch false)
+  ' --args "$@" >/dev/null 2>&1; then
+    local_registry_err 'registry row generator produced an incomplete or invalid stream'
+    return "$TRELLIS_EX_STATE"
+  fi
+  [ -n "$rows" ] || return 0
+  input="$rows"
+  count="$(printf '%s\n' "$rows" | grep -c .)"
+  if [ "$count" -ge "$LOCAL_REGISTRY_BOUND_ROWS_BATCH_MIN" ] &&
+     dir="$(mktemp -d "${TMPDIR:-/tmp}/trellis.registry.bound.XXXXXX" 2>/dev/null)"; then
+    if printf '%s\n' "$state" > "$dir/state" && printf '%s\n' "$rows" > "$dir/rows" && mkdir "$dir/batch" &&
+       _local_registry_batch_run "$dir/state" "$dir/rows" "$dir/batch" 2>/dev/null &&
+       input="$(cat "$dir/batch/row-misses")"; then
+      batch="$dir/batch"
+    else
+      input="$rows"
+    fi
+  fi
+  while :; do
+    while IFS= read -r row; do
+      [ -n "$row" ] || continue
+      local_registry_validate_identity_row "$row" || { rc="$?"; break 2; }
+    done <<EOF
+$input
+EOF
+    [ -n "$batch" ] || break
+    # Observe the proven rows again; those that lost their proof are next. A
+    # recheck that cannot run sends every row to the scalar classifier.
+    if cp "$batch/proof" "$batch/proof.previous" &&
+       cmp -s "$batch/proof" "$batch/proof.previous" &&
+       _local_registry_batch_recheck "$dir/rows" "$batch" 2>/dev/null &&
+       _local_registry_batch_delta "$dir/rows" "$batch" 2>/dev/null &&
+       input="$(cat "$batch/row-delta")"; then
+      [ -n "$input" ] || break
+    else
+      input="$rows" batch=""
+    fi
+  done
+  if [ -n "$dir" ]; then
+    _local_registry_batch_cleanup "$dir/batch"
+    rm -f "$dir/state" "$dir/rows"
+    rmdir "$dir" 2>/dev/null || :
+  fi
+  return "$rc"
+}
+
 # Stored hashes remain verifiable even while a volume is unavailable. Reachable
 # paths additionally must resolve to their recorded canonical Git identity.
 local_registry_validate_available_identities() {
@@ -1031,23 +1141,42 @@ _local_registry_diagnostic_token() {
   _local_registry_file_token "$1" "$1/registry.json"
 }
 
+# ls -lde (Darwin) also lists ACL entries on indented lines, even when an
+# xattr's @ masks the + mode marker. GNU ls -ld marks ACLs with +. Accept only
+# exactly the requested number of ordinary, ACL-free node lines.
+_local_registry_acl_listing_clear() {
+  local expected="$1" listing="$2" count=0 line mode
+  case "$expected" in ''|*[!0-9]*) return 1 ;; esac
+  while IFS= read -r line; do
+    case "$line" in ''|[[:space:]]*) return 1 ;; *' '*) ;; *) return 1 ;; esac
+    mode="${line%% *}"
+    [[ "$mode" =~ ^[-bcdlps][rwxstST-]{9}[@]?$ ]] || return 1
+    count=$((count + 1))
+  done <<< "$listing"
+  [ "$count" -eq "$expected" ]
+}
+
 # Also used for the operation-local owner snapshot. Bind every directory from
 # ROOT to the parent, not just the leaf: a renamed-and-restored ancestor can
 # otherwise redirect a read while leaving the immediate parent inode unchanged.
 _local_registry_file_token() {
   local parent="$1" file="$2" root="${3:-$1}" cursor present=0 os stat_bin rows
-  local dev ino size mode mt ct fraction count=0
-  local -a paths
+  local dev ino size mode mt ct owner_uid mode_bits fraction count=0 coarse_count=0 acl_listing
+  local -a paths coarse_paths
   [ "${file%/*}" = "$parent" ] || return 1
-  case "$parent" in "$root"|"$root"/*) ;; *) return 1 ;; esac
-  paths=()
+  if [ "$root" = / ]; then
+    case "$parent" in /*) ;; *) return 1 ;; esac
+  else
+    case "$parent" in "$root"|"$root"/*) ;; *) return 1 ;; esac
+  fi
+  paths=(); coarse_paths=()
   cursor="$parent"
   while :; do
     [ -d "$cursor" ] && [ ! -L "$cursor" ] || return 1
     paths+=("$cursor")
     [ "$cursor" = "$root" ] && break
     cursor="${cursor%/*}"
-    [ -n "$cursor" ] || return 1
+    [ -n "$cursor" ] || cursor=/
   done
   if [ -e "$file" ] || [ -L "$file" ]; then
     [ -f "$file" ] && [ ! -L "$file" ] || return 1
@@ -1059,22 +1188,48 @@ _local_registry_file_token() {
   elif [ -x /bin/stat ]; then stat_bin=/bin/stat
   else return 1
   fi
-  case "$os" in
-    Darwin) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" -f $'%d\t%i\t%z\t%p\t%Fm\t%Fc' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
-    Linux) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" --printf='%d\t%i\t%s\t%f\t%y\t%z\n' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
+  case "$os:$root" in
+    Darwin:/) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" -f $'%d\t%i\t%z\t%p\t%Fm\t%Fc\t%u' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
+    Linux:/) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" --printf='%d\t%i\t%s\t%f\t%y\t%z\t%u\n' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
+    Darwin:*) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" -f $'%d\t%i\t%z\t%p\t%Fm\t%Fc' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
+    Linux:*) rows="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 "$stat_bin" --printf='%d\t%i\t%s\t%f\t%y\t%z\n' -- "${paths[@]}" 2>/dev/null)" || return 1 ;;
     *) return 1 ;;
   esac
-  while IFS=$'\t' read -r dev ino size mode mt ct; do
+  while IFS=$'\t' read -r dev ino size mode mt ct owner_uid; do
     [ -n "$dev" ] && [ -n "$ino" ] && [ -n "$size" ] && [ -n "$mode" ] && [ -n "$mt" ] || return 1
     fraction="${ct##*.}"
     fraction="${fraction%% *}"
     case "$fraction" in ''|*[!0-9]*) return 1 ;; esac
-    [ "${#fraction}" -eq 9 ] && [ "${fraction#???}" != 000000 ] || return 1
+    [ "${#fraction}" -eq 9 ] || return 1
+    if [ "${fraction#???}" = 000000 ]; then
+      # Only the new root=/ form may tolerate a coarse, root-owned node:
+      # non-root callers cannot write it through ordinary permission bits.
+      # Its parent is also tokenized; callers that project away parent times
+      # retain their own documented swap-and-restore reporting window.
+      [ "$root" = / ] && [ "$EUID" -ne 0 ] && [ "$owner_uid" = 0 ] || return 1
+      case "$os:$mode" in
+        Darwin:*[!0-7]*|Linux:*[!0-9a-fA-F]*) return 1 ;;
+        Darwin:*) mode_bits=$((8#$mode)) ;;
+        Linux:*) mode_bits=$((16#$mode)) ;;
+        *) return 1 ;;
+      esac
+      [ $((mode_bits & 8#022)) -eq 0 ] || return 1
+      coarse_paths[$coarse_count]="${paths[$count]}"
+      coarse_count=$((coarse_count + 1))
+    fi
     count=$((count + 1))
   done <<EOF
 $rows
 EOF
   [ "$count" -eq "${#paths[@]}" ] || return 1
+  if [ "$coarse_count" -gt 0 ]; then
+    case "$os" in
+      Darwin) acl_listing="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 /bin/ls -lde -- "${coarse_paths[@]}" 2>/dev/null)" || return 1 ;;
+      Linux) acl_listing="$(/usr/bin/env -i LC_ALL=C TZ=UTC0 /bin/ls -ld -- "${coarse_paths[@]}" 2>/dev/null)" || return 1 ;;
+      *) return 1 ;;
+    esac
+    _local_registry_acl_listing_clear "$coarse_count" "$acl_listing" || return 1
+  fi
   printf '%s\n%s\n' "$present" "$rows"
 }
 
@@ -1674,6 +1829,34 @@ local_registry_checkout_rows() {
   ' "$state_file" || return "$TRELLIS_EX_STATE"
 }
 
+# Check generated streams against the independently counted, validated state.
+# An exit-0 generator may still have produced a truncated file. Do not confuse
+# that with a genuinely empty registry or trust a parallel proof of that file.
+_local_registry_require_row_count() {
+  local state="$1" rows="$2" mode="$3" fleet="${4:-}"
+  if ! jq -en --arg mode "$mode" --arg fleet "$fleet" --slurpfile s "$state" --slurpfile r "$rows" --rawfile raw "$rows" '
+    def complete_jsonl($text; $values):
+      if $text == "" then ($values | length) == 0
+      else ($text | split("\n")) as $lines
+        | ($text | endswith("\n")) and (($lines | length) == (($values | length) + 1))
+          and all(range(0; $values | length); . as $i | try (($lines[$i] | fromjson) == $values[$i]) catch false)
+      end;
+    if ($s | length) != 1 or (complete_jsonl($raw; $r) | not) then false
+    elif $mode == "checkout" then
+      ([ $s[0].projects[] | .checkouts | length ] | add // 0) == ($r | length)
+    elif $mode == "listing" then
+      ([ $s[0].projects[] | select($fleet == "" or .fleet == $fleet) | . as $p
+         | ([ $p.checkouts[] | [(.worktrees | length), 1] | max ] | add // 0)
+           + (($p.unavailable_roots // []) | length)
+           + (if ($p.checkouts | length) == 0 and (($p.unavailable_roots // []) | length) == 0 then 1 else 0 end)
+       ] | add // 0) == ($r | length)
+    else false end
+  ' >/dev/null 2>&1; then
+    local_registry_err 'registry row generator produced an incomplete or invalid stream'
+    return "$TRELLIS_EX_STATE"
+  fi
+}
+
 # Emits `project_key<TAB>checkout_id<TAB>exit_class` for every checkout whose own
 # checkout row does not validate. Both listings use THIS function, so the table
 # they fold onto their rows is byte-identical; only MODE differs. `report` (the
@@ -1691,16 +1874,22 @@ local_registry_checkout_rows() {
 # terminal text either. An empty FLEET reports every checkout, which is what the
 # whole-machine consumers get.
 local_registry_checkout_identity_classes() {
-  local state_file="${1:-}" mode="${2:-report}" fleet="${3:-}" rows row key project_key rc
-  rows="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.checkouts.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  if ! local_registry_checkout_rows "$state_file" > "$rows"; then
-    rm -f "$rows"
-    return "$TRELLIS_EX_STATE"
+  local state_file="${1:-}" mode="${2:-report}" fleet="${3:-}" rows row key project_key rc owned=0
+  if [ "$#" -ge 4 ]; then
+    rows="$4"
+  else
+    rows="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.checkouts.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+    owned=1
+    if ! local_registry_checkout_rows "$state_file" > "$rows" ||
+       ! _local_registry_require_row_count "$state_file" "$rows" checkout; then
+      rm -f "$rows"
+      return "$TRELLIS_EX_STATE"
+    fi
   fi
   while IFS= read -r row; do
     [ -n "$row" ] || continue
-    project_key="$(printf '%s\n' "$row" | jq -r '.project_key')" || { rm -f "$rows"; return "$TRELLIS_EX_STATE"; }
-    key="$(printf '%s\n' "$row" | jq -r '.project_key + "\t" + .checkout_id')" || { rm -f "$rows"; return "$TRELLIS_EX_STATE"; }
+    project_key="$(printf '%s\n' "$row" | jq -r '.project_key')" || { [ "$owned" = 0 ] || rm -f "$rows"; return "$TRELLIS_EX_STATE"; }
+    key="$(printf '%s\n' "$row" | jq -r '.project_key + "\t" + .checkout_id')" || { [ "$owned" = 0 ] || rm -f "$rows"; return "$TRELLIS_EX_STATE"; }
     # A project key is `fleet/project_id` and neither half can contain `/`.
     if [ "$mode" != quiet ] && { [ -z "$fleet" ] || [ "${project_key%%/*}" = "$fleet" ]; }; then
       local_registry_validate_identity_row "$row"
@@ -1710,7 +1899,8 @@ local_registry_checkout_identity_classes() {
     rc="$?"
     [ "$rc" -eq 0 ] || printf '%s\t%s\n' "$key" "$rc"
   done < "$rows"
-  rm -f "$rows"
+  [ "$owned" = 0 ] || rm -f "$rows"
+  return 0
 }
 
 # Rejects any checkout class outside the reportable row vocabulary {4, 5}.
@@ -1780,7 +1970,8 @@ EOF
 # checkout-row pre-pass above supplies.
 local_registry_list_diagnostic_json() {
   local home="${1:-}" fleet="${2:-}" state rows output row root kind availability identity rc
-  local checkout_classes row_project_key row_checkout_id checkout_class
+  local checkout_classes row_project_key row_checkout_id checkout_class batchdir='' input_rows flat_rc
+  local late_classes classes_file=/dev/null
   [ "$#" -le 2 ] || return "$TRELLIS_EX_USAGE"
   [ -z "$fleet" ] || trellis_home_require_fleet_name "$fleet" || return "$?"
   local_registry_require_hash_command || return "$?"
@@ -1790,23 +1981,7 @@ local_registry_list_diagnostic_json() {
   local_registry_read_diagnostic_state "$home" > "$state"
   rc="$?"
   if [ "$rc" -ne 0 ]; then rm -f "$state" "$rows" "$output"; return "$rc"; fi
-  # Checkout-row coverage: the whole-file validator identity-checks every
-  # checkout, so a populated checkout's own drift must reach the rows it owns.
-  # Same pre-pass function, same class table, as `local_registry_list_json`;
-  # only the stderr mode differs.
-  checkout_classes="$(local_registry_checkout_identity_classes "$state" quiet)" || {
-    rc="$?"; rm -f "$state" "$rows" "$output"; return "$rc"
-  }
-  # Same vocabulary guard as the strict listing, from the same definition. A
-  # class the fold below cannot interpret must fail the listing here rather than
-  # silently reach `local_registry_checkout_class_for`, whose "not class 4"
-  # branch would then read as "this checkout validated". FLEET is passed for the
-  # same reason the identity causes above take it: the table is whole-file, so
-  # the diagnostic must not name a checkout outside the listed fleet.
-  local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet" || {
-    rc="$?"; rm -f "$state" "$rows" "$output"; return "$rc"
-  }
-  if ! jq -c --arg fleet "$fleet" '
+  if jq -c --arg fleet "$fleet" '
     .projects | to_entries[] | select($fleet == "" or .value.fleet == $fleet)
     | .key as $key | .value as $project
     | ($project.checkouts | to_entries[]? as $checkout
@@ -1838,7 +2013,32 @@ local_registry_list_diagnostic_json() {
          checkout_root: null, worktree_id: null, attachment_id: null, root: null,
          git_common_dir: null, release: null, harnesses: [], metadata: $project.metadata}
        else empty end)
-  ' "$state" > "$rows"; then rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; fi
+  ' "$state" > "$rows" 2> "$rows.err"; then flat_rc=0; else flat_rc=$?; fi
+  if [ "$flat_rc" -ne 0 ]; then
+    checkout_classes="$(local_registry_checkout_identity_classes "$state" quiet)"; rc="$?"
+    if [ "$rc" -eq 0 ]; then local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet"; rc="$?"; fi
+    if [ "$rc" -eq 0 ]; then /bin/cat "$rows.err" >&2 || true; rc="$TRELLIS_EX_STATE"; fi
+    rm -f "$state" "$rows" "$rows.err" "$output"; return "$rc"
+  fi
+  if ! _local_registry_require_row_count "$state" "$rows" listing "$fleet"; then
+    rm -f "$state" "$rows" "$rows.err" "$output"; return "$TRELLIS_EX_STATE"
+  fi
+  batchdir="$(mktemp -d "${TMPDIR:-/tmp}/trellis.registry.batch.XXXXXX")" || batchdir=''
+  if [ -n "$batchdir" ] && _local_registry_batch_run "$state" "$rows" "$batchdir"; then
+    checkout_classes="$(local_registry_checkout_identity_classes "$state" quiet "$fleet" "$batchdir/checkout-misses")"
+    rc="$?"; input_rows="$batchdir/row-misses"
+  else
+    _local_registry_batch_cleanup "$batchdir"; batchdir=''
+    checkout_classes="$(local_registry_checkout_identity_classes "$state" quiet)"
+    rc="$?"; input_rows="$rows"
+  fi
+  if [ "$rc" -ne 0 ]; then _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$rows.err" "$output"; return "$rc"; fi
+  local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet" || {
+    rc="$?"; _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$rows.err" "$output"; return "$rc"
+  }
+  [ ! -s "$rows.err" ] || /bin/cat "$rows.err" >&2 || true
+  rm -f "$rows.err"
+  while :; do
   while IFS= read -r row; do
     root="$(printf '%s\n' "$row" | jq -r '.root // empty')"
     kind="$(printf '%s\n' "$row" | jq -r '.kind')"
@@ -1856,12 +2056,12 @@ local_registry_list_diagnostic_json() {
     else
       availability=available
     fi
-    identity="$(local_registry_diagnostic_identity "$row")" || { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+    identity="$(local_registry_diagnostic_identity "$row")" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
     # Fold the owning checkout row's drift onto this row. A row cannot be
     # "verified" while the checkout it is filed under fails the same identity
     # check the whole-file validator applies to it.
-    row_project_key="$(printf '%s\n' "$row" | jq -r '.project_key')" || { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
-    row_checkout_id="$(printf '%s\n' "$row" | jq -r '.checkout_id // ""')" || { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+    row_project_key="$(printf '%s\n' "$row" | jq -r '.project_key')" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+    row_checkout_id="$(printf '%s\n' "$row" | jq -r '.checkout_id // ""')" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
     checkout_class="$(local_registry_checkout_class_for "$checkout_classes" "$row_project_key" "$row_checkout_id")"
     # Only class 4 folds down, exactly as in `local_registry_list_json`: a
     # class-5 checkout row (unreachable, unhashable) says nothing about a
@@ -1869,7 +2069,7 @@ local_registry_list_diagnostic_json() {
     if [ "$checkout_class" = "$TRELLIS_EX_STATE" ]; then
       identity="$(local_registry_identity_verdict "$TRELLIS_EX_STATE" identity_error checkout \
         'the checkout this row is filed under failed identity validation' | jq -c '{state, detail, class, scope}')" ||
-        { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+        { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
     fi
     printf '%s\n' "$row" | jq -c --arg availability "$availability" --argjson identity "$identity" '
       .availability = $availability
@@ -1877,16 +2077,66 @@ local_registry_list_diagnostic_json() {
       | .status = (if $availability == "unavailable" then "unavailable" else .registry_status end)
       | .identity = $identity
       | del(.registry_status)
-    ' >> "$output" || { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
-  done < "$rows"
-  jq -s -S --slurpfile state "$state" --arg fleet "$fleet" '{
-    schema_version: 1,
-    entries: sort_by(.fleet, .project_id, (.checkout_id // ""), (.worktree_id // ""), (.root // "")),
-    discovery_ignores: (($state[0].discovery_ignores // {})
-      | with_entries(select($fleet == "" or .key == $fleet)))
-  }' "$output"
+    ' >> "$output" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+  done < "$input_rows"
+  [ -n "$batchdir" ] || break
+  if ! cp "$batchdir/proof" "$batchdir/proof.previous" ||
+     ! cmp -s "$batchdir/proof" "$batchdir/proof.previous" ||
+     ! _local_registry_batch_recheck "$rows" "$batchdir" ||
+     ! _local_registry_batch_delta "$rows" "$batchdir"; then
+    _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"
+  fi
+  [ -s "$batchdir/checkout-delta" ] || [ -s "$batchdir/row-delta" ] || break
+  late_classes="$(local_registry_checkout_identity_classes "$state" quiet "$fleet" "$batchdir/checkout-delta")"; rc="$?"
+  if [ "$rc" -ne 0 ]; then _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$rc"; fi
+  [ -z "$late_classes" ] || checkout_classes="${checkout_classes}${checkout_classes:+$'\n'}${late_classes}"
+  local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet" || {
+    rc="$?"; _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$rc"
+  }
+  input_rows="$batchdir/row-delta"
+  done
+  if [ -n "$batchdir" ]; then
+    printf '%s\n' "$checkout_classes" > "$batchdir/classes" || {
+      _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"
+    }
+    classes_file="$batchdir/classes"
+    jq -cn --slurpfile p "$batchdir/proof" --slurpfile r "$rows" --rawfile classes "$batchdir/classes" '
+      ($classes | split("\n") | map(split("\t") | select(length == 3 and .[2] == "4") | .[0] + "\t" + .[1])) as $bad
+      | range(0; $r | length) as $i | select($p[0].rows[$i]) | $r[$i]
+      | (.project_key + "\t" + (.checkout_id // "")) as $key
+      | (if .kind == "unavailable" then "unavailable" else "available" end) as $availability
+      | (if ($bad | index($key)) != null then
+           {state:"identity_error", detail:"the checkout this row is filed under failed identity validation", class:4, scope:"checkout"}
+         elif .kind == "unavailable" then
+           {state:"unavailable", detail:"registered root is unavailable", class:0, scope:"row"}
+         elif .kind == "project" then
+           {state:"not-applicable", detail:"project has no registered worktree root", class:0, scope:"row"}
+         else
+           {state:"verified", detail:"current Git identity exactly matches the registered row", class:0, scope:.kind}
+         end) as $identity
+      | .availability = $availability
+      | .excluded = (.metadata.legacy.blacklisted // false)
+      | .status = (if $availability == "unavailable" then "unavailable" else .registry_status end)
+      | .identity = $identity
+      | del(.registry_status)
+    ' >> "$output" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+  fi
+  if ! _local_registry_require_row_count "$state" "$output" listing "$fleet"; then
+    _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"
+  fi
+  jq -s -S --slurpfile state "$state" --rawfile classes "$classes_file" --arg fleet "$fleet" '
+    ($classes | split("\n") | map(split("\t") | select(length == 3 and .[2] == "4") | .[0] + "\t" + .[1])) as $bad
+    | {schema_version: 1,
+       entries: (map((.project_key + "\t" + (.checkout_id // "")) as $key
+         | if ($bad | index($key)) != null then
+             .identity = {state:"identity_error", detail:"the checkout this row is filed under failed identity validation", class:4, scope:"checkout"}
+           else . end)
+         | sort_by(.fleet, .project_id, (.checkout_id // ""), (.worktree_id // ""), (.root // ""))),
+       discovery_ignores: (($state[0].discovery_ignores // {})
+         | with_entries(select($fleet == "" or .key == $fleet)))}
+  ' "$output"
   rc="$?"
-  rm -f "$state" "$rows" "$output"
+  _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"
   return "$rc"
 }
 
@@ -2013,9 +2263,307 @@ local_registry_list_row_availability() {
 # every rollout — already call this with no FLEET and get exactly that. The
 # matrix pass over every consumer found no row needing cross-fleet state
 # visibility, so the contract stands as documented rather than being widened.
+# A positive-only batch is an optimization, never a new authority. Refuse it
+# for overridden shell helpers or non-system hash tools: the scalar classifier
+# deliberately honours those, while hashlib cannot reproduce arbitrary shims.
+_local_registry_batch_helpers() {
+  declare -f local_registry_sha256 local_registry_real_directory local_registry_git_common_dir \
+    local_registry_checkout_root_for_common_dir local_registry_identity_for_root \
+    local_registry_identity_verdict local_registry_identity_class_verdict \
+    local_registry_classify_identity_row local_registry_validate_identity_row \
+    local_registry_list_row_availability local_registry_diagnostic_identity \
+    local_registry_checkout_identity_classes local_registry_checkout_class_for \
+    local_registry_report_worktree_scoped_identity local_registry_require_absolute_safe_path \
+    trellis_home_require_safe_text trellis_home_require_absolute_safe_path \
+    trellis_home_has_unsafe_chars trellis_is_sha256_hex
+}
+
+_local_registry_batch_cleanup() {
+  local dir="${1:-}"
+  [ -n "$dir" ] || return 0
+  rm -f "$dir/checkouts" "$dir/proof" "$dir/checkout-misses" "$dir/row-misses" "$dir/classes" \
+    "$dir/proof.next" "$dir/proof.fresh" "$dir/proof.previous" "$dir/python" "$dir/git" "$dir/bundled" \
+    "$dir/delta" "$dir/checkout-delta" "$dir/row-delta" "$dir/demoted" "$dir/helper.err" "$dir/degraded"
+  rmdir "$dir" 2>/dev/null || true
+}
+
+_local_registry_batch_run() {
+  local state="$1" rows="$2" dir="$3" pin_home="${4:-}" pin_dir="${5:-}"
+  local python_bin git_bin hash_bin awk_bin jq_bin tool description bundled=0
+  if [ "${TRELLIS_LIBS_PRELOADED:-}" = 1 ]; then
+    # The verified command bundle has no executable payload pathname. Both
+    # programs must be manifest-attested data in that same bundle.
+    [ -n "${_TRELLIS_BUNDLED_REGISTRY_BATCH_PROGRAM:-}" ] &&
+      [ -n "${_TRELLIS_BUNDLED_ATTACHMENT_FS_PROGRAM:-}" ] &&
+      declare -F trellis_command_bundle_is_verified >/dev/null &&
+      trellis_command_bundle_is_verified "${TRELLIS_VERIFIED_COMMAND_BUNDLE:-}" "${TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN:-}" || return 1
+    bundled=1
+  fi
+  [ "${TRELLIS_EX_STATE:-}" = 4 ] && [ "${TRELLIS_EX_UNAVAILABLE:-}" = 5 ] || return 1
+  [ "$(_local_registry_batch_helpers)" = "${_LOCAL_REGISTRY_BATCH_HELPERS_ORIGINAL:-}" ] || return 1
+  [ "$(type -t git)" = file ] && [ "$(type -t awk)" = file ] &&
+    [ "$(type -t jq)" = file ] && [ "$(type -t python3)" = file ] || return 1
+  git_bin="$(command -v git)"; awk_bin="$(command -v awk)"; jq_bin="$(command -v jq)"
+  python_bin="$(command -v python3)" || return 1
+  case "$git_bin" in /usr/bin/git|/usr/local/bin/git|/opt/homebrew/bin/git) ;; *) return 1 ;; esac
+  case "$awk_bin" in /usr/bin/awk|/bin/awk) ;; *) return 1 ;; esac
+  case "$jq_bin" in /usr/bin/jq|/usr/local/bin/jq|/opt/homebrew/bin/jq|/bin/jq) ;; *) return 1 ;; esac
+  case "$python_bin" in /usr/bin/python3|/usr/local/bin/python3|/opt/homebrew/bin/python3) ;; *) return 1 ;; esac
+  if command -v sha256sum >/dev/null 2>&1; then
+    [ "$(type -t sha256sum)" = file ] || return 1
+    hash_bin="$(command -v sha256sum)"
+    case "$hash_bin" in /usr/bin/sha256sum|/bin/sha256sum|/sbin/sha256sum) ;; *) return 1 ;; esac
+  elif command -v openssl >/dev/null 2>&1; then
+    [ "$(type -t openssl)" = file ] || return 1
+    hash_bin="$(command -v openssl)"
+    [ "$hash_bin" = /usr/bin/openssl ] && [ -z "${OPENSSL_CONF:-}${OPENSSL_MODULES:-}" ] || return 1
+  else
+    return 1
+  fi
+  [ -z "${LD_PRELOAD:-}${LD_LIBRARY_PATH:-}${DYLD_INSERT_LIBRARIES:-}${DYLD_LIBRARY_PATH:-}" ] || return 1
+  # PATH wrappers can lie while passing the empty-string hash probe. Admit
+  # only native executables at the known paths, never shell or Python shims.
+  for tool in "$git_bin" "$awk_bin" "$jq_bin" "$python_bin" "$hash_bin"; do
+    description="$(/usr/bin/file -Lb "$tool" 2>/dev/null)" || return 1
+    case "$description" in 'ELF '*executable*|Mach-O*executable*|Mach-O*'universal binary'*) ;; *) return 1 ;; esac
+  done
+  if [ "$bundled" = 0 ]; then
+    [ -f "$_LOCAL_REGISTRY_LIB_DIR/registry_identity_batch.py" ] &&
+      [ ! -L "$_LOCAL_REGISTRY_LIB_DIR/registry_identity_batch.py" ] &&
+      [ -f "$_LOCAL_REGISTRY_LIB_DIR/attachment_fs.py" ] &&
+      [ ! -L "$_LOCAL_REGISTRY_LIB_DIR/attachment_fs.py" ] || return 1
+  fi
+  _local_registry_batch_execute "$state" "$rows" "$dir" "$python_bin" "$git_bin" "$bundled" "$pin_home" "$pin_dir" || return 1
+  _local_registry_batch_recheck "$rows" "$dir"
+}
+
+# Separate from tool admission so the fenced test runner can exercise this
+# exact protocol with its mandatory Git wrapper, without bypassing that fence.
+_local_registry_batch_execute() {
+  local state="$1" rows="$2" dir="$3" python_bin="$4" git_bin="$5" bundled="${6:-0}"
+  local pin_home="${7:-}" pin_dir="${8:-}"
+  local_registry_checkout_rows "$state" > "$dir/checkouts" || return 1
+  _local_registry_require_row_count "$state" "$dir/checkouts" checkout 2>/dev/null || return 1
+  printf '%s' "$python_bin" > "$dir/python" && printf '%s' "$git_bin" > "$dir/git" &&
+    printf '%s' "$bundled" > "$dir/bundled" || return 1
+  _local_registry_batch_observe "$rows" "$dir" "$dir/proof" "$pin_home" "$pin_dir" || return 1
+  _local_registry_batch_partition "$rows" "$dir"
+}
+
+_local_registry_batch_observe() {
+  local rows="$1" dir="$2" output="$3" pin_home="${4:-}" pin_dir="${5:-}"
+  local python_bin git_bin bundled rc=0
+  python_bin="$(< "$dir/python")"; git_bin="$(< "$dir/git")"; bundled="$(< "$dir/bundled")"
+  if [ "$bundled" = 1 ]; then
+    TRELLIS_REGISTRY_PIN_HOME="$pin_home" TRELLIS_REGISTRY_PIN_DIR="$pin_dir" \
+      TRELLIS_REGISTRY_BATCH_FS_PROGRAM="$_TRELLIS_BUNDLED_ATTACHMENT_FS_PROGRAM" \
+      "$python_bin" -I -B -c "$_TRELLIS_BUNDLED_REGISTRY_BATCH_PROGRAM" ":bundle:" \
+      "$dir/checkouts" "$rows" "$git_bin" > "$output" 2> "$dir/helper.err" || rc=$?
+  else
+    TRELLIS_REGISTRY_PIN_HOME="$pin_home" TRELLIS_REGISTRY_PIN_DIR="$pin_dir" \
+      "$python_bin" -I -B "$_LOCAL_REGISTRY_LIB_DIR/registry_identity_batch.py" \
+      "$_LOCAL_REGISTRY_LIB_DIR/attachment_fs.py" "$dir/checkouts" "$rows" "$git_bin" > "$output" 2> "$dir/helper.err" || rc=$?
+  fi
+  [ "$rc" -eq 0 ] || _local_registry_batch_degraded "$dir"
+  return "$rc"
+}
+
+# The helper failed: every row still goes to the scalar classifier, which
+# stays authoritative, but the lost speed is reported once instead of hiding
+# (a slow, silent fallback is how a Python 3.9 incompatibility went unseen).
+# Once per listing: a re-observation may fail again in the same batch
+# directory, possibly in a subshell, so the marker is a file there.
+_local_registry_batch_degraded() {
+  local reason
+  [ ! -e "$1/degraded" ] || return 0
+  : > "$1/degraded" 2>/dev/null || :
+  reason="$(tail -n 1 "$1/helper.err" 2>/dev/null | /usr/bin/env LC_ALL=C tr -cd '[:print:]' | cut -c1-200)"
+  printf 'trellis registry: identity batch unavailable (%s); classifying rows one by one\n' "${reason:-exit status only}" >&2
+}
+
+_local_registry_batch_proof_valid() {
+  local rows="$1" dir="$2" proof="$3"
+  # Missing, extra or non-boolean answers discard the whole observation.
+  jq -cn --slurpfile p "$proof" --slurpfile c "$dir/checkouts" --slurpfile r "$rows" '
+    if ($p | length) != 1 or ($p[0] | type) != "object" or
+       ($p[0] | keys) != ["checkouts", "rows"] or
+       ($p[0].checkouts | type) != "array" or ($p[0].rows | type) != "array" or
+       ($p[0].checkouts | length) != ($c | length) or ($p[0].rows | length) != ($r | length) or
+       ([$p[0].checkouts[], $p[0].rows[]] | all(type == "boolean") | not)
+    then error("invalid registry batch proof") else empty end
+  ' >/dev/null 2>&1
+}
+
+_local_registry_batch_partition() {
+  local rows="$1" dir="$2"
+  _local_registry_batch_proof_valid "$rows" "$dir" "$dir/proof" || return 1
+  jq -cn --slurpfile p "$dir/proof" --slurpfile c "$dir/checkouts" '
+    range(0; $c | length) as $i | select($p[0].checkouts[$i] | not) | $c[$i]
+  ' > "$dir/checkout-misses" || return 1
+  jq -cn --slurpfile p "$dir/proof" --slurpfile r "$rows" '
+    range(0; $r | length) as $i | select($p[0].rows[$i] | not) | $r[$i]
+  ' > "$dir/row-misses" || return 1
+  _local_registry_batch_verify_split "$rows" "$dir" misses
+}
+
+# Verify derived streams independently against the complete proof and input,
+# including JSONL framing. An exit-0 producer or an EOF on a record boundary is
+# not evidence that every miss or demotion was emitted.
+_local_registry_batch_verify_split() {
+  local rows="$1" dir="$2" mode="$3" old="$2/proof" checkout_out row_out
+  case "$mode" in
+    misses) checkout_out="$dir/checkout-misses"; row_out="$dir/row-misses" ;;
+    delta) old="$dir/proof.previous"; checkout_out="$dir/checkout-delta"; row_out="$dir/row-delta" ;;
+    *) return 1 ;;
+  esac
+  jq -en --arg mode "$mode" --slurpfile old "$old" --slurpfile new "$dir/proof" \
+    --slurpfile c "$dir/checkouts" --slurpfile r "$rows" \
+    --slurpfile co "$checkout_out" --slurpfile ro "$row_out" \
+    --rawfile ct "$checkout_out" --rawfile rt "$row_out" '
+    def complete_jsonl($text; $values):
+      if $text == "" then ($values | length) == 0
+      else ($text | split("\n")) as $lines
+        | ($text | endswith("\n")) and (($lines | length) == (($values | length) + 1))
+          and all(range(0; $values | length); . as $i | try (($lines[$i] | fromjson) == $values[$i]) catch false)
+      end;
+    [range(0; $c | length) as $i
+     | if (($new[0].checkouts[$i] | not) and ($mode == "misses" or $old[0].checkouts[$i]))
+       then $c[$i] else empty end] as $expected_checkouts
+    | [range(0; $r | length) as $i
+       | if (($new[0].rows[$i] | not) and ($mode == "misses" or $old[0].rows[$i]))
+         then $r[$i] else empty end] as $expected_rows
+    | complete_jsonl($ct; $co) and complete_jsonl($rt; $ro)
+      and $co == $expected_checkouts and $ro == $expected_rows
+  ' >/dev/null 2>&1
+}
+
+# Reobserve the full canonical Git identity, not just directory existence.
+# Proofs are monotonic: a miss never becomes positive during this listing. A
+# failed or malformed observation demotes everything to the shell classifier.
+_local_registry_batch_recheck() {
+  local rows="$1" dir="$2"
+  _local_registry_batch_proof_valid "$rows" "$dir" "$dir/proof" || return 1
+  if ! _local_registry_batch_observe "$rows" "$dir" "$dir/proof.fresh" ||
+     ! _local_registry_batch_proof_valid "$rows" "$dir" "$dir/proof.fresh"; then
+    jq -c '{checkouts: [.checkouts[] | false], rows: [.rows[] | false]}' "$dir/proof" > "$dir/proof.fresh" || return 1
+  fi
+  jq -cn --slurpfile old "$dir/proof" --slurpfile new "$dir/proof.fresh" '
+    {checkouts: [range(0; $old[0].checkouts | length) as $i | $old[0].checkouts[$i] and $new[0].checkouts[$i]],
+     rows: [range(0; $old[0].rows | length) as $i | $old[0].rows[$i] and $new[0].rows[$i]]}
+  ' > "$dir/proof.next" || return 1
+  if ! cmp -s "$dir/proof" "$dir/proof.next"; then : > "$dir/demoted" || return 1; fi
+  mv "$dir/proof.next" "$dir/proof" || return 1
+  _local_registry_batch_partition "$rows" "$dir"
+}
+
+# Identify only newly demoted rows, in input order. NUL-delimited triplets
+# (array, index, JSON row) do not split on embedded newlines or backslashes.
+_local_registry_batch_delta() {
+  local rows="$1" dir="$2" kind index row
+  # A successful copy can still be empty or truncated. Never let a missing old
+  # positive turn a newly demoted row into an apparently empty delta.
+  _local_registry_batch_proof_valid "$rows" "$dir" "$dir/proof.previous" || return 1
+  jq -jn --slurpfile old "$dir/proof.previous" --slurpfile new "$dir/proof" \
+    --slurpfile c "$dir/checkouts" --slurpfile r "$rows" '
+    (range(0; $c | length) as $i | select($old[0].checkouts[$i] and ($new[0].checkouts[$i] | not))
+     | "checkouts\u0000" + ($i | tostring) + "\u0000" + ($c[$i] | tojson) + "\u0000"),
+    (range(0; $r | length) as $i | select($old[0].rows[$i] and ($new[0].rows[$i] | not))
+     | "rows\u0000" + ($i | tostring) + "\u0000" + ($r[$i] | tojson) + "\u0000")
+  ' > "$dir/delta" || return 1
+  : > "$dir/checkout-delta" && : > "$dir/row-delta" || return 1
+  while :; do
+    kind=''
+    if ! IFS= read -r -d '' kind; then [ -z "$kind" ] || return 1; break; fi
+    IFS= read -r -d '' index && IFS= read -r -d '' row || return 1
+    case "$index" in ''|*[!0-9]*) return 1 ;; esac
+    case "$kind" in
+      checkouts) printf '%s\n' "$row" >> "$dir/checkout-delta" || return 1 ;;
+      rows) printf '%s\n' "$row" >> "$dir/row-delta" || return 1 ;;
+      *) return 1 ;;
+    esac
+  done < "$dir/delta"
+  _local_registry_batch_verify_split "$rows" "$dir" delta
+}
+
 local_registry_list_json() {
   [ "$#" -le 2 ] || return "$TRELLIS_EX_USAGE"
   _local_registry_list_json "${1:-}" "${2:-}" 0
+}
+
+# Sync can retain positive, stat-pinned worktree proofs from this same pass.
+# A missing or invalid proof is never a negative verdict: sync resolves it with
+# the ordinary live shell resolver. The caller owns the private directory.
+_local_registry_list_json_for_sync() {
+  [ "$#" -eq 3 ] || return "$TRELLIS_EX_USAGE"
+  _LOCAL_REGISTRY_SYNC_PROOF_READY=0
+  _local_registry_list_json "$1" "$2" 0 "" "$3"
+}
+
+# Sync's root proofs (fix/152-sync-batch-roots): one registry identity batch over
+# every row, run in sync's own process at the start of its row loop, instead of
+# one live resolve per row. OUT receives the registry token (several lines) as
+# one JSON string on its first line, then one JSON line per proven worktree row whose root is unique among the
+# worktree rows: {"root", "worktree_id", "checkout_root", "watch", "resolution"}.
+# "resolution" is exactly what local_registry_resolve_root prints for that root;
+# "watch" is the stat line of the root and its .git, equal before and after the
+# batch. Positive-only: sync uses an entry only while the registry token and the
+# watch line are unchanged and a use-time Git observation still agrees (see
+# sync_root_proof); any other row resolves through the original resolver. 1 when
+# the batch could not run (a failing helper says so once, on stderr).
+local_registry_sync_root_proofs() {
+  local home="$1" out="$2" state rows dir token after before_watch after_watch os rc=1
+  local -a paths=()
+  local root
+  token="$(_local_registry_diagnostic_token "$home")" && [ -n "$token" ] || return 1
+  state="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.state.XXXXXX")" || return 1
+  rows="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.rows.XXXXXX")" || { rm -f "$state"; return 1; }
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/trellis.registry.batch.XXXXXX")" || { rm -f "$state" "$rows"; return 1; }
+  os="$(/usr/bin/uname -s 2>/dev/null)" || os=''
+  if local_registry_read_diagnostic_state "$home" > "$state" 2>/dev/null &&
+     jq -c --arg fleet "" "$_LOCAL_REGISTRY_FLAT_ROWS_FILTER" "$state" > "$rows" 2>/dev/null &&
+     _local_registry_require_row_count "$state" "$rows" listing "" 2>/dev/null &&
+     jq -r 'select(.kind == "worktree") | .root | if test("\n") then error("newline in root") else . end' "$rows" > "$dir/roots" 2>/dev/null; then
+    while IFS= read -r root; do paths+=("$root" "$root/.git"); done < "$dir/roots"
+    if [ "${#paths[@]}" -gt 0 ] && before_watch="$(_local_registry_sync_watch "$os" "${paths[@]}")" &&
+       _local_registry_batch_run "$state" "$rows" "$dir" &&
+       after_watch="$(_local_registry_sync_watch "$os" "${paths[@]}")" &&
+       [ "$before_watch" = "$after_watch" ] &&
+       after="$(_local_registry_diagnostic_token "$home")" && [ "$after" = "$token" ] &&
+       { printf '%s' "$token" | jq -Rsc '.'
+         printf '%s\n' "$before_watch" | jq -cRn --slurpfile p "$dir/proof" --rawfile rows "$rows" '
+           [inputs] as $lines
+           | ($rows | split("\n") | map(select(length > 0) | fromjson)) as $r
+           | (reduce ($r[] | select(.kind == "worktree") | .root) as $x ({}; .[$x] += 1)) as $count
+           | [range(0; $r | length) as $i | select($r[$i].kind == "worktree") | $i] as $worktrees
+           | if ($lines | length) != 2 * ($worktrees | length) then error("watch lines") else . end
+           | range(0; $worktrees | length) as $k | $worktrees[$k] as $i
+           | select($p[0].rows[$i] and $count[$r[$i].root] == 1)
+           | $r[$i] as $row
+           | {root: $row.root, worktree_id: $row.worktree_id, checkout_root: $row.checkout_root,
+              watch: ($lines[2 * $k] + "\n" + $lines[2 * $k + 1]),
+              resolution: ($row | {fleet, project_id, project_key, checkout_id, worktree_id, root, git_common_dir})}'
+       } > "$out"; then
+      rc=0
+    fi
+  fi
+  _local_registry_batch_cleanup "$dir"
+  rm -f "$state" "$rows" "$dir/roots"
+  rmdir "$dir" 2>/dev/null || true
+  return "$rc"
+}
+
+# The stat line sync compares for a proven root: device, inode, size, mode,
+# mtime and ctime of each PATH, one line each, in order. Callers run it inside
+# $(...), so the locale is set through env, never a temporary assignment (the
+# 1.5.1 locale-crash family; the lexical lint does not follow function calls).
+_local_registry_sync_watch() {
+  local os="$1"
+  shift
+  case "$os" in
+    Darwin) /usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat -f $'%d\t%i\t%z\t%p\t%Fm\t%Fc' -- "$@" 2>/dev/null ;;
+    Linux) /usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat --printf='%d\t%i\t%s\t%f\t%y\t%z\n' -- "$@" 2>/dev/null ;;
+    *) return 1 ;;
+  esac
 }
 
 # Internal diagnostic entry: SNAPSHOT is the already validated, migrated state
@@ -2025,37 +2573,10 @@ _local_registry_list_json_from_snapshot() {
   _local_registry_list_json "$1" "$2" 1 "$3"
 }
 
-_local_registry_list_json() {
-  local home="$1" fleet="$2" use_snapshot="$3" snapshot="${4:-}" state rows output row availability label rc
-  local checkout_classes row_project_key row_checkout_id checkout_class
-  [ -z "$fleet" ] || trellis_home_require_fleet_name "$fleet" || return "$?"
-  # ENVIRONMENT before rows: without a hash command EVERY row would classify the
-  # same way, which is a fact about the machine and not about the registry.
-  local_registry_require_hash_command || return "$?"
-  state="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.state.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  rows="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.rows.XXXXXX")" || { rm -f "$state"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  output="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.output.XXXXXX")" || { rm -f "$state" "$rows"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  if [ "$use_snapshot" = 1 ]; then
-    printf '%s\n' "$snapshot" > "$state"; rc="$?"
-  else
-    local_registry_read_diagnostic_state "$home" > "$state"; rc="$?"
-  fi
-  if [ "$rc" -ne 0 ]; then rm -f "$state" "$rows" "$output"; return "$rc"; fi
-  # Checkout-row coverage pre-pass. It CLASSIFIES over the WHOLE file, not the
-  # fleet-filtered rows, for the same reason the whole-file validator does: the
-  # checkout row is what it is regardless of which fleet is being listed. Only
-  # the classes of checkouts that actually own emitted rows are ever consulted.
-  # FLEET is passed so its report-mode stderr obeys the fleet-scoping contract
-  # documented above; the table it returns is fleet-independent either way.
-  checkout_classes="$(local_registry_checkout_identity_classes "$state" report "$fleet")" || {
-    rc="$?"; rm -f "$state" "$rows" "$output"; return "$rc"
-  }
-  # Scoped for the same reason, and from the same FLEET, as the report-mode
-  # stderr immediately above.
-  local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet" || {
-    rc="$?"; rm -f "$state" "$rows" "$output"; return "$rc"
-  }
-  if ! jq -c --arg fleet "$fleet" '
+# The listing's flattened rows, one JSON object per project, checkout, worktree
+# or unavailable root, with checkout_root (the registry identity batch groups
+# on it). One program for the listing and for sync's root proofs.
+_LOCAL_REGISTRY_FLAT_ROWS_FILTER='
     .projects | to_entries[] | select($fleet == "" or .value.fleet == $fleet)
     | .key as $key | .value as $project
     | ($project.checkouts | to_entries[]? as $checkout
@@ -2087,10 +2608,59 @@ _local_registry_list_json() {
          checkout_root: null,
          root: null, git_common_dir: null, release: null, harnesses: [], metadata: $project.metadata}
        else empty end)
-  ' "$state" > "$rows"; then rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; fi
+'
+
+_local_registry_list_json() {
+  local home="$1" fleet="$2" use_snapshot="$3" snapshot="${4:-}" pin_dir="${5:-}" state rows output row availability label rc
+  local checkout_classes row_project_key row_checkout_id checkout_class batchdir='' input_rows flat_rc
+  local late_classes classes_file=/dev/null
+  [ -z "$fleet" ] || trellis_home_require_fleet_name "$fleet" || return "$?"
+  # ENVIRONMENT before rows: without a hash command EVERY row would classify the
+  # same way, which is a fact about the machine and not about the registry.
+  local_registry_require_hash_command || return "$?"
+  state="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.state.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+  rows="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.rows.XXXXXX")" || { rm -f "$state"; return "$TRELLIS_EX_UNAVAILABLE"; }
+  output="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.output.XXXXXX")" || { rm -f "$state" "$rows"; return "$TRELLIS_EX_UNAVAILABLE"; }
+  if [ "$use_snapshot" = 1 ]; then
+    printf '%s\n' "$snapshot" > "$state"; rc="$?"
+  else
+    local_registry_read_diagnostic_state "$home" > "$state"; rc="$?"
+  fi
+  if [ "$rc" -ne 0 ]; then rm -f "$state" "$rows" "$output"; return "$rc"; fi
+  if jq -c --arg fleet "$fleet" "$_LOCAL_REGISTRY_FLAT_ROWS_FILTER" "$state" > "$rows" 2> "$rows.err"; then flat_rc=0; else flat_rc=$?; fi
+  if [ "$flat_rc" -ne 0 ]; then
+    checkout_classes="$(local_registry_checkout_identity_classes "$state" report "$fleet")"; rc="$?"
+    if [ "$rc" -eq 0 ]; then local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet"; rc="$?"; fi
+    if [ "$rc" -eq 0 ]; then /bin/cat "$rows.err" >&2 || true; rc="$TRELLIS_EX_STATE"; fi
+    rm -f "$state" "$rows" "$rows.err" "$output"; return "$rc"
+  fi
+  if ! _local_registry_require_row_count "$state" "$rows" listing "$fleet"; then
+    rm -f "$state" "$rows" "$rows.err" "$output"; return "$TRELLIS_EX_STATE"
+  fi
+  # Classify checkout pre-pass rows and emitted rows together. On any protocol
+  # failure discard the entire pass; individual misses retain the old shell
+  # classifier, diagnostic order and checkout-folding rules.
+  batchdir="$(mktemp -d "${TMPDIR:-/tmp}/trellis.registry.batch.XXXXXX")" || batchdir=''
+  if [ -n "$batchdir" ] && _local_registry_batch_run "$state" "$rows" "$batchdir" "$home" "$pin_dir"; then
+    checkout_classes="$(local_registry_checkout_identity_classes "$state" report "$fleet" "$batchdir/checkout-misses")"
+    rc="$?"
+    input_rows="$batchdir/row-misses"
+  else
+    _local_registry_batch_cleanup "$batchdir"; batchdir=''
+    checkout_classes="$(local_registry_checkout_identity_classes "$state" report "$fleet")"
+    rc="$?"
+    input_rows="$rows"
+  fi
+  if [ "$rc" -ne 0 ]; then _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$rows.err" "$output"; return "$rc"; fi
+  local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet" || {
+    rc="$?"; _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$rows.err" "$output"; return "$rc"
+  }
+  [ ! -s "$rows.err" ] || /bin/cat "$rows.err" >&2 || true
+  rm -f "$rows.err"
+  while :; do
   while IFS= read -r row; do
-    row_project_key="$(printf '%s\n' "$row" | jq -r '.project_key')" || { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
-    row_checkout_id="$(printf '%s\n' "$row" | jq -r '.checkout_id // ""')" || { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+    row_project_key="$(printf '%s\n' "$row" | jq -r '.project_key')" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+    row_checkout_id="$(printf '%s\n' "$row" | jq -r '.checkout_id // ""')" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
     checkout_class="$(local_registry_checkout_class_for "$checkout_classes" "$row_project_key" "$row_checkout_id")"
     # Every reportable row state is already a string on stdout, so a non-zero
     # return here means a class OUTSIDE {0,4,5} — a malformed row or a bad
@@ -2117,7 +2687,7 @@ _local_registry_list_json() {
     if [ "$rc" -ne 0 ]; then
       label="$(printf '%s\n' "$row" | jq -r '"\(.project_key // "?") \(.kind // "?") \(.root // "(no recorded root)")"' 2>/dev/null)" || label='(unreadable row)'
       local_registry_err "could not classify registry row (exit $rc): $label"
-      rm -f "$state" "$rows" "$output"
+      _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"
       return "$TRELLIS_EX_STATE"
     fi
     # A row filed under a checkout whose own checkout row failed identity
@@ -2134,16 +2704,62 @@ _local_registry_list_json() {
       | .excluded = (.metadata.legacy.blacklisted // false)
       | .status = (if $availability == "unavailable" then "unavailable" else .registry_status end)
       | del(.registry_status, .checkout_root)
-    ' >> "$output" || { rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
-  done < "$rows"
-  jq -s -S --slurpfile state "$state" --arg fleet "$fleet" '{
-    schema_version: 1,
-    entries: sort_by(.fleet, .project_id, (.checkout_id // ""), (.worktree_id // ""), (.root // "")),
-    discovery_ignores: (($state[0].discovery_ignores // {})
-      | with_entries(select($fleet == "" or .key == $fleet)))
-  }' "$output"
+    ' >> "$output" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+  done < "$input_rows"
+  [ -n "$batchdir" ] || break
+  if ! cp "$batchdir/proof" "$batchdir/proof.previous" ||
+     ! cmp -s "$batchdir/proof" "$batchdir/proof.previous" ||
+     ! _local_registry_batch_recheck "$rows" "$batchdir" ||
+     ! _local_registry_batch_delta "$rows" "$batchdir"; then
+    _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"
+  fi
+  [ -s "$batchdir/checkout-delta" ] || [ -s "$batchdir/row-delta" ] || break
+  late_classes="$(local_registry_checkout_identity_classes "$state" report "$fleet" "$batchdir/checkout-delta")"; rc="$?"
+  if [ "$rc" -ne 0 ]; then _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$rc"; fi
+  [ -z "$late_classes" ] || checkout_classes="${checkout_classes}${checkout_classes:+$'\n'}${late_classes}"
+  local_registry_require_checkout_class_vocabulary "$checkout_classes" "$fleet" || {
+    rc="$?"; _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$rc"
+  }
+  input_rows="$batchdir/row-delta"
+  done
+  if [ -n "$batchdir" ]; then
+    printf '%s\n' "$checkout_classes" > "$batchdir/classes" || {
+      _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"
+    }
+    classes_file="$batchdir/classes"
+    jq -cn --slurpfile p "$batchdir/proof" --slurpfile r "$rows" --rawfile classes "$batchdir/classes" '
+      ($classes | split("\n") | map(split("\t") | select(length == 3 and .[2] == "4") | .[0] + "\t" + .[1])) as $bad
+      | range(0; $r | length) as $i | select($p[0].rows[$i]) | $r[$i]
+      | (.project_key + "\t" + (.checkout_id // "")) as $key
+      | (if .kind == "unavailable" then "unavailable"
+         elif .kind == "project" then "available"
+         elif ($bad | index($key)) != null then "identity_error"
+         else "available" end) as $availability
+      | .availability = $availability
+      | .excluded = (.metadata.legacy.blacklisted // false)
+      | .status = (if $availability == "unavailable" then "unavailable" else .registry_status end)
+      | del(.registry_status, .checkout_root)
+    ' >> "$output" || { _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"; }
+  fi
+  if ! _local_registry_require_row_count "$state" "$output" listing "$fleet"; then
+    _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"; return "$TRELLIS_EX_STATE"
+  fi
+  jq -s -S --slurpfile state "$state" --rawfile classes "$classes_file" --arg fleet "$fleet" '
+    ($classes | split("\n") | map(split("\t") | select(length == 3 and .[2] == "4") | .[0] + "\t" + .[1])) as $bad
+    | {schema_version: 1,
+       entries: (map(. as $row | (.project_key + "\t" + (.checkout_id // "")) as $key
+         | if ($bad | index($key)) != null then
+             .availability = "identity_error" | .status = $state[0].projects[$row.project_key].status
+           else . end)
+         | sort_by(.fleet, .project_id, (.checkout_id // ""), (.worktree_id // ""), (.root // ""))),
+       discovery_ignores: (($state[0].discovery_ignores // {})
+         | with_entries(select($fleet == "" or .key == $fleet)))}
+  ' "$output"
   rc="$?"
-  rm -f "$state" "$rows" "$output"
+  if [ "$rc" -eq 0 ] && [ -n "$batchdir" ] && [ -n "$pin_dir" ] && [ ! -e "$batchdir/demoted" ]; then
+    _LOCAL_REGISTRY_SYNC_PROOF_READY=1
+  fi
+  _local_registry_batch_cleanup "$batchdir"; rm -f "$state" "$rows" "$output"
   return "$rc"
 }
 
@@ -2312,7 +2928,8 @@ local_registry_manifest_project_id() {
         and (["PATH", "HOME", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "NODE_OPTIONS", "DOCKER_HOST", "DOCKER_CONTEXT", "POSIXLY_CORRECT", "ZDOTDIR", "RUBYOPT", "PERL5OPT", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "PWD", "OLDPWD", "SHLVL", "_", "LANG", "LANGUAGE", "TZ", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "NODE_EXTRA_CA_CERTS", "NODE_ICU_DATA", "NODE_V8_COVERAGE", "RANDOM", "SRANDOM", "SECONDS", "LINENO", "OPTIND", "OPTARG", "PPID", "UID", "EUID", "GROUPS", "DIRSTACK", "FUNCNAME", "PIPESTATUS", "SHELL", "PS1", "PS2", "PS3", "PS4"] | index($name) == null)
         and ($name | test("^(XDG_|TMP|TEMP|GIT_|TRELLIS_|PROCESS_GATE_|SECURITY_GATE_|PYTHON|BASH|LD_|DYLD_|CALLER_|LC_|DOCKER_|COREPACK_|PERL|RUBY|GEM_|GH_)") | not));
     def gate:
-      type == "object" and ((keys_unsorted - ["env_passthrough"]) | length == 0)
+      type == "object" and ((keys_unsorted - ["env_passthrough", "verdict_reuse"]) | length == 0)
+      and ((has("verdict_reuse") | not) or (.verdict_reuse | type == "boolean"))
       and ((has("env_passthrough") | not) or (.env_passthrough | type == "array" and all(.[]; env_name) and ((unique | length) == length)));
     def security_gate:
       type == "object" and ((keys_unsorted - ["semgrep_timeout"]) | length == 0)
@@ -2456,3 +3073,8 @@ local_registry_legacy_metadata() {
       end
     '
 }
+
+# Sourcing callers may replace helpers for tests or specialized behaviour. A
+# batch must not bypass such a replacement; the scalar route observes it.
+_LOCAL_REGISTRY_BATCH_HELPERS_ORIGINAL="$(_local_registry_batch_helpers)"
+_LOCAL_REGISTRY_LIST_JSON_ORIGINAL="$(declare -f local_registry_list_json)"

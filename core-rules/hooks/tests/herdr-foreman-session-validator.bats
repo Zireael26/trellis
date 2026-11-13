@@ -103,7 +103,7 @@ run_session() {
       PATH="$CLI_DIR/no-pi" /bin/bash "$hook"
     [ "$status" -eq 0 ]
     [ "${#lines[@]}" -eq 1 ]
-    [[ "${lines[0]}" == "DEGRADED: inside Herdr but pi is not on PATH;"* ]]
+    [[ "${lines[0]}" == "DEGRADED: inside Herdr but pi is not on PATH;"* ]] || false
     [[ "$output" != *"HARD RULE"* && "$output" != *"visible"* ]] || { echo "$output"; false; }
   done
 }

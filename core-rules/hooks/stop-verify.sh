@@ -140,6 +140,7 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -r "$__se_lib" ] || _sv_infrastructure_block "missing sibling lib at $__se_lib — re-run sync-hooks"
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib" || _sv_infrastructure_block "unable to load sibling lib at $__se_lib — re-run sync-hooks"
+_se_load_heavy || _sv_infrastructure_block "unable to load sibling lib deps-heavy.sh beside $__se_lib — re-run sync-hooks"
 if ! command -v jq >/dev/null 2>&1 && [ "${TRELLIS_NO_JQ_DEGRADE:-0}" != 1 ]; then
   _sv_infrastructure_block "jq required but not found — install jq (brew install jq | apt-get install -y jq)"
 fi

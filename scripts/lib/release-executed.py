@@ -112,6 +112,12 @@ def check_fd_acl(fd):
                     continue
                 raise
             raise ValueError('entry carries an ACL')
+        # NFSv4 and RichACL ACLs live under their own xattrs, and a file
+        # capability grants privilege the mode bits do not show. An
+        # enumeration failure is not evidence of absence, so it propagates as
+        # undecided, never clean.
+        if {'system.nfs4_acl', 'system.richacl', 'security.capability'} & set(os.listxattr(fd)):
+            raise ValueError('entry carries an ACL or file capability')
         return
     raise OSError(errno.EOPNOTSUPP, 'descriptor ACL inspection unavailable')
 

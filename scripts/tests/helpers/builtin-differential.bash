@@ -119,7 +119,14 @@ lines=('' $'\n' "$b" "$c" "$b"$'\n'"$c" "$c"$'\n'"$b" "$c"$'\n'"$c" "$b"$'\n' $'
   "$c"$'\n''trellis-turn-baseline' "$c"$'\n''trellis-turn-baselinex y' "$b"$'\n''trellis-turn-baseline')
 nonces=('' "$n1" "$n2" "$n1"$'\n'"$n2" "$n2"$'\n' $'\n'"$n1" "${n1}x" "x$n1" "$n1 " $'\377'"$n1" "$n1"$'\r')
 for tree in core-rules/hooks core-rules/codex/hooks; do
-  eval "$(sed -n '/^_se_turn_baseline_select()/,/^}/p;/^_se_turn_baseline_state()/,/^}/p' "$root/$tree/lib/deps.sh")"
+  # deps.sh holds one-line first-call stubs; the bodies live in deps-heavy.sh.
+  src=$(sed -n '/^_se_turn_baseline_select() {$/,/^}/p;/^_se_turn_baseline_state() {$/,/^}/p' "$root/$tree/lib/deps-heavy.sh")
+  case $src in
+    *'_se_turn_baseline_select() {'*'_se_turn_baseline_state() {'*) ;;
+    *) printf 'MISMATCH %s: turn-baseline bodies not found in deps-heavy.sh\n' "$tree"; exit 1 ;;
+  esac
+  case $src in *_se_load_heavy*) printf 'MISMATCH %s: extracted a stub, not a body\n' "$tree"; exit 1 ;; esac
+  eval "$src"
   for loc in C $utf8; do
     export LC_ALL=$loc
     for l in "${lines[@]}"; do

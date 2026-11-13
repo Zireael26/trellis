@@ -1,5 +1,7 @@
 # Test-only same-checkout build and literal companion pin. Never use the
 # shipped scaffold or discover a candidate from the test project's PATH.
+load helpers/native-cargo
+
 native_launcher_binary() {
   local target="${CARGO_TARGET_DIR:-$BATS_FILE_TMPDIR/native-target}" cargo_bin
   cargo_bin="$(command -v cargo || true)"
@@ -8,17 +10,19 @@ native_launcher_binary() {
   fi
   [ -n "$cargo_bin" ] || { echo 'native launcher tests require cargo or CARGO_HOME/bin/cargo' >&2; return 127; }
   (
-    # --manifest-path does not select rustup's nested toolchain pin.
-    cd "$REPO_ROOT/native/trellis-hooks" || exit 1
     unset RUSTUP_TOOLCHAIN
-    CARGO_TARGET_DIR="$target" CARGO_BUILD_JOBS=2 "$cargo_bin" build --locked --offline
+    CARGO_TARGET_DIR="$target" CARGO_BUILD_JOBS=2 "$cargo_bin" build --locked --offline \
+      --manifest-path "$REPO_ROOT/native/trellis-hooks/Cargo.toml"
   ) >&2 || return $?
   printf '%s/debug/trellis-hooks\n' "$target"
 }
 
 pin_native_launcher() {
   local binary="${1:-}" digest target entry
-  if [ -z "$binary" ]; then binary="$(native_launcher_binary)" || return $?; fi
+  if [ -z "$binary" ]; then
+    native_cargo_require
+    binary="$(native_launcher_binary)" || return $?
+  fi
   case "$(uname -s)/$(uname -m)" in
     Darwin/arm64) target=aarch64-apple-darwin ;;
     Linux/x86_64) target=x86_64-unknown-linux-musl ;;

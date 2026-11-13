@@ -32,7 +32,7 @@ run_hook() {
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.hookEventName')" = "PostToolUse" ]
-  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')" == *"truncated"* ]]
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')" == *"truncated"* ]] || false
 }
 
 @test "a 100K response still emits a Codex advisory" {
@@ -45,5 +45,5 @@ run_hook() {
 
   [ "$status" -eq 0 ]
   [ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.hookEventName')" = "PostToolUse" ]
-  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')" == *"≥100K"* ]]
+  [[ "$(printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext')" == *"≥100K"* ]] || false
 }

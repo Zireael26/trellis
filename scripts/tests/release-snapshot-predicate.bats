@@ -268,6 +268,27 @@ poisoned_bundle() (
   done
 }
 
+@test "verified bundles keep preload state in this shell but not fresh children" {
+  local implementation bundle
+  for implementation in release-store launcher; do
+    bundle="$BATS_TEST_TMPDIR/$implementation-preload-bundle.sh"
+    {
+      printf '%s\n' \
+        'probe() {' \
+        '  [ "${TRELLIS_LIBS_PRELOADED-}" = 1 ] || return 1' \
+        '  ( [ "${TRELLIS_LIBS_PRELOADED-}" = 1 ] ) || return 1' \
+        '  /bin/bash -c '\''[ -z "${TRELLIS_LIBS_PRELOADED+x}" ]'\''' \
+        '}' \
+        'main() { probe; }'
+      poisoned_bundle "$implementation" hashlib || return 1
+      [ "$implementation" != launcher ] || printf '%s\n' 'probe'
+    } > "$bundle"
+    # Simulate an inherited export attribute, not just a fresh local variable.
+    run env TRELLIS_LIBS_PRELOADED=1 /bin/bash "$bundle" release
+    [ "$status" -eq 0 ] || { echo "$implementation leaked its marker: $output"; false; }
+  done
+}
+
 @test "every release control Python heredoc uses isolated mode" {
   run python3 -I - "$REPO_ROOT" <<'PY'
 import pathlib, re, sys

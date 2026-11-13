@@ -26,6 +26,9 @@
 
 set -euo pipefail
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 portable_usage() {
@@ -96,7 +99,7 @@ portable_legacy_surface() {
   done
   if [ -e "$root/CLAUDE.md" ] || [ -L "$root/CLAUDE.md" ]; then
     if [ ! -f "$root/CLAUDE.md" ] || [ -L "$root/CLAUDE.md" ] || [ ! -r "$root/CLAUDE.md" ] ||
-      LC_ALL=C grep -Eq '^@/.*/core-rules/CLAUDE\.md$' "$root/CLAUDE.md"; then
+      /usr/bin/env LC_ALL=C grep -Eq '^@/.*/core-rules/CLAUDE\.md$' "$root/CLAUDE.md"; then
       printf '%s\n' "CLAUDE.md"
       return 0
     fi
@@ -108,7 +111,7 @@ portable_legacy_surface() {
   done
   if [ -e "$root/.gitignore" ] || [ -L "$root/.gitignore" ]; then
     if [ ! -f "$root/.gitignore" ] || [ -L "$root/.gitignore" ] || [ ! -r "$root/.gitignore" ] ||
-      LC_ALL=C grep -Eq '^# --- Trellis inheritance symlinks' "$root/.gitignore"; then
+      /usr/bin/env LC_ALL=C grep -Eq '^# --- Trellis inheritance symlinks' "$root/.gitignore"; then
       printf '%s\n' ".gitignore"
       return 0
     fi
@@ -134,12 +137,12 @@ portable_definite_legacy_surface() {
     return 0
   done
   if [ -f "$root/CLAUDE.md" ] && [ ! -L "$root/CLAUDE.md" ] &&
-    LC_ALL=C grep -Eq '^@/.*/core-rules/CLAUDE\.md$' "$root/CLAUDE.md"; then
+    /usr/bin/env LC_ALL=C grep -Eq '^@/.*/core-rules/CLAUDE\.md$' "$root/CLAUDE.md"; then
     printf '%s\n' 'CLAUDE.md'
     return 0
   fi
   if [ -f "$root/.gitignore" ] && [ ! -L "$root/.gitignore" ] &&
-    LC_ALL=C grep -Eq '^# --- Trellis inheritance symlinks' "$root/.gitignore"; then
+    /usr/bin/env LC_ALL=C grep -Eq '^# --- Trellis inheritance symlinks' "$root/.gitignore"; then
     printf '%s\n' '.gitignore'
     return 0
   fi
@@ -336,7 +339,7 @@ portable_onboard() (
   for arg in "${harnesses[@]+"${harnesses[@]}"}"; do
     attach_args+=("--harness" "$arg")
   done
-  "$SCRIPT_DIR/attach-project.sh" attach "${attach_args[@]}" "$root"
+  /usr/bin/env -u TRELLIS_LIBS_PRELOADED "$SCRIPT_DIR/attach-project.sh" attach "${attach_args[@]}" "$root"
   rc=$?
   return "$rc"
 )

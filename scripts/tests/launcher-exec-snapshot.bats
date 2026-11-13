@@ -120,6 +120,7 @@ load helpers/native-launcher
 
 run_native_launcher() {
   local binary
+  native_cargo_require
   binary="$(native_launcher_binary)" || return $?
   run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$binary" launcher run-v1 -- "$@"
 }
@@ -210,6 +211,7 @@ exit 3
 EOF
   native_reseal_cli "$SANDBOX/raw-cli"
   local binary
+  native_cargo_require
   binary="$(native_launcher_binary)"
   printf 'original input\n' > "$SANDBOX/input"
   # Exercise both first-run delegation and the native warm path.
@@ -286,7 +288,7 @@ EOF
     local expected=4
     [ "$child_status" -le 4 ] || expected="$child_status"
     [ "$status" -eq "$expected" ] || { echo "$status: $output"; false; }
-    [[ "$output" == *'identity changed'* ]] || { echo "$output"; false; }
+    [[ "$output" == *'stamped release entry changed'* ]] || { echo "$output"; false; }
     [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
   done
 }
@@ -332,6 +334,7 @@ exit 3
 EOF
   native_reseal_cli "$SANDBOX/installed-postflight-cli"
   local binary child_status expected
+  native_cargo_require
   binary="$(native_launcher_binary)"
   for child_status in 0 7; do
     rm -f "$TRELLIS_HOME/change-installed"
@@ -453,7 +456,7 @@ PY
     [ "$status" -eq 4 ] || { echo "legacy $kind: $status: $output"; false; }
     run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
     [ "$status" -eq 4 ] && [[ "$output" == *'machine config failed validation'* ]] || { echo "$status: $output"; false; }
-    [[ "$output" != *'ran doctor'* ]]
+    [[ "$output" != *'ran doctor'* ]] || false
     [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
   done
 }
@@ -644,7 +647,7 @@ for sig in [signal.SIGHUP,signal.SIGINT,signal.SIGTERM]:
   esac
   run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" "$LAUNCHER" doctor
   [ "$status" -eq 4 ] && [[ "$output" == *'ACL'* ]] || { echo "$status: $output"; false; }
-  [[ "$output" != *'ran doctor'* ]]
+  [[ "$output" != *'ran doctor'* ]] || false
   [ -z "$(find "$TRELLIS_HOME/state/scratch" -mindepth 1 -print)" ]
 }
 
@@ -666,6 +669,7 @@ for sig in [signal.SIGHUP,signal.SIGINT,signal.SIGTERM]:
 @test "native fusion derives private scratch independently of caller umask" {
   make_release
   local binary
+  native_cargo_require
   binary="$(native_launcher_binary)"
   run native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" /bin/bash -c \
     'umask 0777; exec "$1" launcher run-v1 -- doctor' native-umask "$binary"
@@ -811,7 +815,7 @@ for sig in [signal.SIGHUP,signal.SIGINT,signal.SIGTERM]:
   wait "$pid" || true
   [ -n "$work" ] || { echo 'never saw the work directory'; cat "$SANDBOX/killed.out"; false; }
   [ ! -e "$SNAPSHOT" ] && [ ! -L "$SNAPSHOT" ] || { echo 'a killed build published the final name'; false; }
-  [[ "$(cat "$SANDBOX/killed.out")" != *'ran doctor'* ]]
+  [[ "$(cat "$SANDBOX/killed.out")" != *'ran doctor'* ]] || false
 
   run_launcher doctor
   [ "$status" -eq 3 ] || { echo "$output"; false; }

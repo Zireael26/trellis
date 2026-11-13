@@ -163,7 +163,7 @@ PY
   receipt="$(find "$ROOT/out" -name 'bench-*-tiny.json')"
   md="$(find "$ROOT/out" -name 'bench-*-tiny.md')"
   [ -f "$receipt" ] && [ -f "$md" ]
-  [[ "$(basename "$receipt")" =~ ^bench-[0-9]{4}-[0-9]{2}-[0-9]{2}-tiny\.json$ ]]
+  [[ "$(basename "$receipt")" =~ ^bench-[0-9]{4}-[0-9]{2}-[0-9]{2}-tiny\.json$ ]] || false
 
   jq -e '
     def case(id): .results[] | select(.id == id);
@@ -274,7 +274,7 @@ PY
     run python3 -I "$ROOT/probe.py" "$BENCH" "$ROOT/$scenario" "$scenario"
     [ "$status" -eq 1 ] || { printf '%s: %s\n' "$scenario" "$output" >&2; return 1; }
     [[ "$output" =~ $expect ]] || { printf '%s: %s\n' "$scenario" "$output" >&2; return 1; }
-    [[ "$output" == *"kept sandbox: "* ]]
+    [[ "$output" == *"kept sandbox: "* ]] || false
     jq -e '.status == "failed" and .sandbox.kept == true and (.notes[-1] | startswith("FAILED lifecycle "))' \
       "$ROOT/$scenario/out/"bench-*-"$scenario".json >/dev/null
     sb="$ROOT/$scenario/trellis-bench.fake"
@@ -347,19 +347,19 @@ SH
   printf 'ordinal\tstage\n1\tshellcheck\n' > "$ROOT/bad.tsv"
   run python3 -I "$BENCH" --suite gate --gate-tsv "$ROOT/bad.tsv" --label bad --out "$ROOT/out"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not a run-tests-local timing receipt"* ]]
-  [[ "$output" != *Traceback* ]]
+  [[ "$output" == *"not a run-tests-local timing receipt"* ]] || false
+  [[ "$output" != *Traceback* ]] || false
   jq -e '.status == "aborted" and .gate == null and (.notes | any(startswith("ABORTED:")))' \
     "$ROOT/out/"bench-*-bad.json >/dev/null
 
   printf 'ordinal\tstage\telapsed_seconds\texit\n1\tshellcheck\tnot-a-number\t0\n' > "$ROOT/bad-row.tsv"
   run python3 -I "$BENCH" --suite gate --gate-tsv "$ROOT/bad-row.tsv" --label badrow --out "$ROOT/out"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"unreadable timing receipt"* ]]
+  [[ "$output" == *"unreadable timing receipt"* ]] || false
 
   run python3 -I "$BENCH" --suite gate --gate-tsv "$ROOT/aggregate.tsv" --label nowall --out "$ROOT/out"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no wall source"* ]]
+  [[ "$output" == *"no wall source"* ]] || false
   jq -e '.gate.wall_seconds == null and .gate.wall_source == null and .gate.stages == 3
          and (.notes | any(startswith("Gate wall is unknown")))' "$ROOT/out/"bench-*-nowall.json >/dev/null
 }
@@ -1661,7 +1661,7 @@ print('ok', sb.meta['launcher_install'], sb.meta['version_stamped_from'])
 PY
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'ok paired'* ]]
+  [[ "$output" == *'ok paired'* ]] || false
 }
 
 @test "T34b worktree callbacks are the rendered user settings, never the raw native template" {
@@ -1684,7 +1684,7 @@ for event in ('WorktreeCreate','WorktreeRemove'):
 PY
   printf '%s\n' "$output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"WorktreeCreate"*"trellis-worktree-create"* ]]
+  [[ "$output" == *"WorktreeCreate"*"trellis-worktree-create"* ]] || false
 }
 
 @test "committed bench receipts are publishable: no home, temp or private path, no user name" {

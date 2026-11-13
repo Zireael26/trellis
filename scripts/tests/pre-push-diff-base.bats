@@ -163,7 +163,7 @@ Overall: MERGEABLE
 
 install_real_spec_gate() {
   cp "$SOURCE/core-rules/hooks/spec-gate.sh" "$REPO/.claude/hooks/" || return 1
-  cp "$SOURCE/core-rules/hooks/lib/"{spec-gate-core,deps,autonomy}.sh "$REPO/.claude/hooks/lib/" || return 1
+  cp "$SOURCE/core-rules/hooks/lib/"{spec-gate-core,deps,deps-heavy,autonomy}.sh "$REPO/.claude/hooks/lib/" || return 1
 }
 
 @test "R21 carrier gets X's block verdict while HEAD is sub-floor Y" {

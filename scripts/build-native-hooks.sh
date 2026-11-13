@@ -32,7 +32,10 @@ import tomllib
 ROOT = Path(sys.argv[1])
 TARGETS = {'aarch64-apple-darwin', 'x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'}
 INSTALL = 'bin/native/{version}/{target}/{sha256}/trellis-hooks'
-VERSION = '1.5.0'
+# The release version is core-rules/VERSION, never a second pin here. Every
+# mode reads it strictly first (main block); the definitions read it leniently
+# so fixtures that exec them against a partial tree still load.
+VERSION_RE = r'[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?'
 RUSTC_VERSION = 'rustc 1.97.1 (8bab26f4f 2026-07-14)'
 SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin'
 # Resolve the named checkout and literal commit objects, not caller redirections
@@ -67,6 +70,26 @@ def closed(obj, keys):
 
 def digest(value):
     require(type(value) is str and re.fullmatch('[0-9a-f]{64}', value), 'invalid sha256')
+
+
+def release_version():
+    # One version line, as release-payload-commit.sh requires of core-rules/VERSION.
+    p = ROOT / 'core-rules/VERSION'
+    require(not p.is_symlink() and p.is_file(), 'core-rules/VERSION is not a regular file')
+    text = p.read_bytes().decode('ascii', errors='replace')
+    require(re.fullmatch(VERSION_RE + '\n', text) is not None, 'core-rules/VERSION is not one version line')
+    return text[:-1]
+
+
+def lenient_release_version():
+    # No module-level try statement: fixtures cut this text at its first one.
+    try:
+        return release_version()
+    except (ValueError, OSError):
+        return None
+
+
+VERSION = lenient_release_version()
 
 
 def read_manifest(base):
@@ -378,7 +401,7 @@ def verify_source(base, checkout):
 
 
 def build(target, base):
-    require(target in TARGETS, 'not a 1.5.0 native target: ' + target)
+    require(target in TARGETS, 'not a ' + VERSION + ' native target: ' + target)
     darwin = target.endswith('apple-darwin')
     require(platform.system() == ('Darwin' if darwin else 'Linux'), 'build Linux targets on Linux and Darwin on Mac (F5)')
     require(not base.is_symlink(), 'symlinked build output')
@@ -487,6 +510,7 @@ def build(target, base):
 
 try:
     args = sys.argv[2:]
+    VERSION = release_version()
     usage = 'usage: build-native-hooks.sh build <target> [asset-dir] | verify [--source <checkout>] [asset-dir]'
     require(bool(args), usage)
     if args[0] == 'verify' and len(args) in (3, 4) and args[1] == '--source':

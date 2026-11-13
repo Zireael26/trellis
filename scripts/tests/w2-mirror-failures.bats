@@ -26,7 +26,7 @@ PY
 @test "push refuses when Git cannot determine checkout cleanliness" {
   run bash -c 'push=true; template_dir=/fixture; mirror_git() { return 128; }; . "$1"; echo gate-passed' _ "$SANDBOX/status-gate.sh"
   [ "$status" -ne 0 ] || { echo "failed status accepted: $output"; false; }
-  [[ "$output" != *'gate-passed'* ]]
+  [[ "$output" != *'gate-passed'* ]] || false
 }
 
 @test "push accepts a successful clean Git status and rejects dirty status" {
@@ -96,7 +96,7 @@ run_pin() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" != *'legacy unfiltered release'* ]] || { echo "filtered release lost restore: $output"; false; }
   [[ "$output" == *'restore-parent='* ]] || { echo "$output"; false; }
-  [[ "$output" != *'restore-parent='$'\n'* ]]
+  [[ "$output" != *'restore-parent='$'\n'* ]] || false
 }
 
 @test "genuinely unfiltered legacy release remains allowed without restore" {
@@ -104,5 +104,5 @@ run_pin() {
   run_pin
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *'legacy unfiltered release'* ]] || { echo "$output"; false; }
-  [[ "$output" == *'restore-parent=' ]]
+  [[ "$output" == *'restore-parent=' ]] || false
 }

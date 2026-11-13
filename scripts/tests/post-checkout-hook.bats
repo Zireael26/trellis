@@ -236,8 +236,8 @@ assert_broken_generator_attach_is_recoverable() {
   managed="$(jq -r '.git_hooks.managed_hooks_path' "$owner")"
   run t14_detach
   [ "$status" -eq 3 ] || { echo "$output"; false; }
-  [[ "$output" == *'refusing detach: core.hooksPath is'* ]]
-  [[ "$output" == *'run trellis doctor --fix'* ]]
+  [[ "$output" == *'refusing detach: core.hooksPath is'* ]] || false
+  [[ "$output" == *'run trellis doctor --fix'* ]] || false
   git -C "$T14_PROJECT" config core.hooksPath "$managed"
   run t14_detach
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -466,7 +466,7 @@ restore_payload_file() {
   wait_for_postjob
   managed="$(dispatcher_path)"
   for path in scripts/seed-inheritance-symlinks.sh scripts/lib/semver.sh \
-      scripts/lib/local-registry.sh scripts/attach-project.sh; do
+      scripts/lib/local-registry.sh scripts/lib/registry_identity_batch.py scripts/attach-project.sh; do
     marker="$T14_SANDBOX/executed tamper ran"
     tamper_payload_file "$path" "$marker"
 
@@ -566,14 +566,15 @@ dispatcher_scripts() {
     queue=("${queue[@]:1}")
     case "$seen" in *" $file "*) continue ;; esac
     seen="$seen$file "
-    if [ "$file" = scripts/lib/release_verify.py ]; then
-      # Checked whenever the release carries it (conditional append in
-      # trellis_verify_release_executed), not in the unconditional list.
-      grep -q 'paths+=(scripts/lib/release_verify.py)' "$REPO_ROOT/scripts/lib/attachment.sh" ||
-        { echo 'release_verify.py is neither listed nor conditionally checked'; false; }
-    else
-      printf '%s\n' "$listed" | grep -qxF "$file" || { echo "unlisted: $file"; false; }
-    fi
+    case "$file" in
+      scripts/lib/release_verify.py|scripts/lib/registry_identity_batch.py)
+        # These helpers postdate some supported releases. Each is checked
+        # whenever present, but an older release may legitimately lack it.
+        grep -qF "paths+=($file)" "$REPO_ROOT/scripts/lib/attachment.sh" ||
+          { echo "$file is neither listed nor conditionally checked"; false; }
+        ;;
+      *) printf '%s\n' "$listed" | grep -qxF "$file" || { echo "unlisted: $file"; false; } ;;
+    esac
     [ "$file" != scripts/trellis-launcher.sh ] || continue
     if grep -v '^[[:space:]]*#' "$REPO_ROOT/$file" |
         grep -vE '^hc_(conformance_passes|codex_plugin_surface)\(\)' |
@@ -613,7 +614,8 @@ dispatcher_scripts() {
 # loads release-executed.py.
 @test "the executed-file list carries the A4 and A5b files and everything attach-postjob.sh sources" {
   listed="$(executed_list)"
-  for path in scripts/lib/attach-fastpath.py scripts/lib/release-executed.py \
+  for path in scripts/lib/attach-fastpath.py scripts/lib/release-executed.py scripts/lib/attachment_fs.py scripts/lib/detach_native.py \
+      scripts/lib/owner_verify.py \
       scripts/lib/attach-postjob.sh scripts/lib/trellis-home.sh scripts/lib/semver.sh \
       scripts/lib/release-store.sh scripts/lib/local-registry.sh scripts/lib/skill-roots.sh \
       scripts/lib/surface-plan.sh scripts/lib/attachment.sh scripts/lib/health-checks.sh \
@@ -672,7 +674,7 @@ dispatcher_scripts() {
   xattr -w com.trellis.fixture 1 "$file"
   chmod "$mode" "$file"
   chmod +a "$(id -un) allow write" "$file"
-  [[ "$(LC_ALL=C /bin/ls -ld "$file")" != *+* ]]
+  [[ "$(LC_ALL=C /bin/ls -ld "$file")" != *+* ]] || false
 
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
     _ "$T14_PROJECT" "$managed/post-checkout"
@@ -699,7 +701,7 @@ dispatcher_scripts() {
   [ "$status" -eq 0 ] || { printf 'xattr alone: status=%s\n%s\n' "$status" "$output"; false; }
 
   chmod +a "$(id -un) allow write" "$file"
-  [[ "$(LC_ALL=C /bin/ls -ld "$file")" != *+* ]]
+  [[ "$(LC_ALL=C /bin/ls -ld "$file")" != *+* ]] || false
   run env TRELLIS_HOME="$TRELLIS_HOME" bash -c 'cd "$1" && "$2" old new 1' \
     _ "$T14_PROJECT" "$managed/post-checkout"
   chmod -a# 0 "$file"

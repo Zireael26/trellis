@@ -64,6 +64,9 @@
 
 set -euo pipefail
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
 # shellcheck source=lib/trellis-home.sh
 . "$SCRIPT_DIR/lib/trellis-home.sh"
@@ -81,9 +84,9 @@ SCRIPT_DIR="$(CDPATH='' cd "$(dirname "$0")" && pwd -P)"
 # Same boundary sync-hooks.sh uses: every dynamic value that reaches a terminal
 # — a registry root, a release string, a child diagnostic — goes through %q, so
 # a control byte in registry text is rendered rather than executed.
-diagnostic_escape() {
-  LC_ALL=C printf '%q' "${1-}"
-}
+diagnostic_escape() (
+  export LC_ALL=C && printf '%q' "${1-}"
+)
 
 CHECK_ONLY=false
 ASSUME_YES=false

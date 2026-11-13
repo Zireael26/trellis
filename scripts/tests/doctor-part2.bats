@@ -983,7 +983,7 @@ EOF
   [ "$(jq -r '.release' "$owner")" = 1.2.2 ]
   [ -n "$legacy_post" ]
   [ -n "$legacy_pre" ]
-  [[ "$legacy_post" != *"TRELLIS_ALLOW_MAIN_PUSH"* ]]
+  [[ "$legacy_post" != *"TRELLIS_ALLOW_MAIN_PUSH"* ]] || false
   printf '%s\n' "$legacy_post" > "$managed/post-checkout"
   printf '%s\n' "$legacy_pre" > "$managed/pre-push"
   chmod 700 "$managed/post-checkout" "$managed/pre-push"

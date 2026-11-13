@@ -140,7 +140,7 @@ EOF
         "$PAYLOAD/core-rules/codex/hooks/lib/autonomy.sh"
       printf '{"autonomy_default":4}\n' > "$PAYLOAD/trellis.config.json"
       ;;
-    native-session|native-session-stubs|native-session-custom|native-session-deps)
+    native-session|native-session-stubs|native-session-custom|native-session-deps|native-session-heavy)
       # T24: the real dispatcher chain under a warm-capable snapshot.
       mkdir -p "$PAYLOAD/core-rules/hooks" "$PAYLOAD/core-rules/codex/hooks" "$PAYLOAD/scripts/lib"
       printf '# trellis-payload-capability: exec-snapshot\n' > "$PAYLOAD/scripts/lib/trellis-home.sh"
@@ -156,6 +156,9 @@ EOF
         [ "$fixture" != native-session-deps ] || cat >> "$PAYLOAD/$dir/lib/deps.sh" <<'EOF'
 _se_require_jq() { if [ "${1:-}" = session-start ]; then echo 'custom deps refusal' >&2; exit 7; fi; }
 EOF
+        # The lazily loaded heavy lib binds like deps.sh: a byte of difference
+        # keeps the complete shell route.
+        [ "$fixture" != native-session-heavy ] || printf '\n# custom heavy bytes\n' >> "$PAYLOAD/$dir/lib/deps-heavy.sh"
         [ "$fixture" != native-session ] || continue
         # Members that expose how the dispatcher judged them. Behaviour is read
         # at run time from $SANDBOX/member-mode so one sealed release serves all.
@@ -280,6 +283,34 @@ trellis_command_bundle_is_verified upgrade "${TRELLIS_VERIFIED_COMMAND_BUNDLE_TO
 printf 'bundle-tmpdir=%s\n' "${TMPDIR-__UNSET__}"
 printf 'bundle-admitted=%s\n' "${RELEASE_ADMITTED_TMPDIR-__UNSET__}"
 release_git -c 'alias.trellis-scratch-probe=!printf "git-tmpdir=%s\n" "$TMPDIR"' trellis-scratch-probe || exit 7
+exit 0
+EOF
+      chmod 755 "$PAYLOAD/scripts/release.sh" "$PAYLOAD/scripts/upgrade.sh"
+      printf '%s\n' "$version" > "$PAYLOAD/core-rules/VERSION"
+      ;;
+    command-bundle-verifier|command-bundle-verifier-absent)
+      # The real release body under a fixture upgrade body that reports the
+      # release verifier bytes the bundle carried and a full verify's verdict.
+      mkdir -p "$PAYLOAD/core-rules"
+      cp "$DISPATCHER_TEMPLATE" "$PAYLOAD/scripts/trellis"
+      cp "$REPO_ROOT/scripts/release.sh" "$PAYLOAD/scripts/release.sh"
+      cp -R "$REPO_ROOT/scripts/lib" "$PAYLOAD/scripts/lib"
+      [ "$fixture" != command-bundle-verifier-absent ] || rm "$PAYLOAD/scripts/lib/release_verify.py"
+      cat > "$PAYLOAD/scripts/upgrade.sh" <<'EOF'
+#!/bin/sh
+exit 5
+# -- trellis upgrade body --
+set -u
+trellis_command_bundle_is_verified upgrade "${TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN:-}" || exit 6
+if [ -z "${_TRELLIS_BUNDLED_RELEASE_VERIFY_PROGRAM+x}" ]; then
+  printf 'bundled-verifier=unset\n'
+elif printf '%s' "$_TRELLIS_BUNDLED_RELEASE_VERIFY_PROGRAM" | cmp -s - "$TRELLIS_VERIFIED_PAYLOAD/scripts/lib/release_verify.py"; then
+  printf 'bundled-verifier=match\n'
+else
+  printf 'bundled-verifier=mismatch\n'
+fi
+release_store_verify 1.2.3 >/dev/null
+printf 'verify=%s\n' "$?"
 exit 0
 EOF
       chmod 755 "$PAYLOAD/scripts/release.sh" "$PAYLOAD/scripts/upgrade.sh"
@@ -814,13 +845,13 @@ PY
   [ "$output" = 'trellis 1.2.3 (configured; not verified)' ]
   run_launcher --version doctor
   [ "$status" -eq 2 ]
-  [[ "$output" == *'--version takes no arguments'* ]]
+  [[ "$output" == *'--version takes no arguments'* ]] || false
   [ ! -e "$TRELLIS_HOME/state" ]
 
   chmod 644 "$TRELLIS_HOME/config.json"
   run_launcher --version
   [ "$status" -eq 4 ]
-  [[ "$output" == *'machine config is missing, not private'* ]]
+  [[ "$output" == *'machine config is missing, not private'* ]] || false
 }
 
 # macOS ls prints "@" for an extended attribute in place of the "+" of an ACL,
@@ -1199,7 +1230,7 @@ launcher_clean_prologue() {
     fi
     run_launcher doctor
     [ "$status" -eq 5 ] || { echo "$output"; false; }
-    [[ "$output" == *'trellis: could not prepare trusted launcher bootstrap'* ]]
+    [[ "$output" == *'trellis: could not prepare trusted launcher bootstrap'* ]] || false
     [ ! -e "$ARGV_LOG" ]
   done
 }
@@ -1211,8 +1242,8 @@ launcher_clean_prologue() {
   run /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \
     /bin/bash --noprofile --norc -c "$prologue" trellis-launcher-bootstrap "$SANDBOX/missing-source" doctor
   [ "$status" -eq 5 ] || { echo "$output"; false; }
-  [[ "$output" == *'awk:'* ]]
-  [[ "$output" == *'trellis: could not prepare trusted launcher bootstrap'* ]]
+  [[ "$output" == *'awk:'* ]] || false
+  [[ "$output" == *'trellis: could not prepare trusted launcher bootstrap'* ]] || false
   [ ! -e "$ARGV_LOG" ]
 }
 
@@ -1979,6 +2010,22 @@ for bad in (":", "1::2", "123", "", "١:2"):
   assert_no_command_scratch
 }
 
+@test "the verified command bundle carries the payload's release verifier bytes" {
+  make_release 1.2.3 command-bundle-verifier
+  run_launcher upgrade
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"bundled-verifier=match"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"verify=0"* ]] || { echo "$output"; false; }
+}
+
+@test "a release without release_verify.py gets no bundled verifier and still verifies" {
+  make_release 1.2.3 command-bundle-verifier-absent
+  run_launcher upgrade
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"bundled-verifier=unset"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"verify=0"* ]] || { echo "$output"; false; }
+}
+
 @test "release pathname execution admits only a private Trellis command scratch candidate" {
   local scratch hostile
   make_release 1.2.3 command-bundle
@@ -2358,6 +2405,19 @@ warm_native_session() {
     session_pair "$harness" "$PROJECT" '{"source":"startup"}'
     grep -q '^status=7$' "$SANDBOX/native-out" || { cat "$SANDBOX/native-out"; false; }
     grep -q 'custom deps refusal' "$SANDBOX/native-out" || { cat "$SANDBOX/native-out"; false; }
+  done
+}
+
+@test "T24 a changed sealed deps-heavy.sh keeps the complete shell route" {
+  make_release 1.2.3 native-session-heavy
+  warm_native_session
+  printf ok > "$SANDBOX/member-mode"
+  local harness
+  for harness in claude codex; do
+    rm -f "$SANDBOX/member-parent"
+    printf '{"source":"startup"}' | native_bounded env HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
+      "$LAUNCHER" hook session-start "$harness" "$PROJECT" > /dev/null
+    [ "$(cat "$SANDBOX/member-parent")" = bash ] || { echo "$harness: changed heavy lib ran natively"; false; }
   done
 }
 

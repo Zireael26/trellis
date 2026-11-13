@@ -38,6 +38,20 @@ load doctor-fix-common
   [ "$(cat "$SANDBOX/husky-pre-commit-ran")" = ran ]
 }
 
+@test "A4.4 (c'): render verification holds when TMPDIR reaches its directory through a symlink" {
+  # Inversion: the render check hands its mktemp scratch to the contextual
+  # render as a project root without resolving it, so a symlinked TMPDIR
+  # (/tmp and /var/folders on macOS) fails the canonical-root check.
+  adopt_husky_fixture
+  mkdir "$SANDBOX/real-tmp"
+  ln -s "$SANDBOX/real-tmp" "$SANDBOX/link-tmp"
+  TMPDIR="$SANDBOX/link-tmp" run_portable_doctor_fix --fix --adopt-husky
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"native surfaces: committed render bytes"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"husky adopted in"*"12 passthrough shim(s) created"* ]] || { echo "$output"; false; }
+  assert_adopted
+}
+
 @test "A4.4 (c's)(1): --adopt-husky refuses the enabled record and a linked record naming two releases" {
   local before config_before
   adopt_husky_fixture sibling

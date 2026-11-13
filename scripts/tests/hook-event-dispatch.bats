@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
 # Shared event-dispatch tests. Each lane edits only its BEGIN/END section.
+load helpers/native-cargo
 
 # BEGIN LANE A0 — T70 scaffold
 @test "T70: shared test anchors and open-task receipt headings are complete" {
@@ -40,6 +41,7 @@ PY
 a1_binary() {
   A1_BIN="${TRELLIS_A1_TEST_BIN:-${CARGO_TARGET_DIR:-$BATS_TEST_DIRNAME/../../native/trellis-hooks/target}/debug/trellis-hooks}"
   if [ -z "${TRELLIS_A1_TEST_BIN:-}" ]; then
+    native_cargo_require
     run cargo +1.97.1 build --locked --offline --manifest-path "$BATS_TEST_DIRNAME/../../native/trellis-hooks/Cargo.toml"
     [ "$status" -eq 0 ] || { echo "candidate build failed: $output"; return 1; }
   fi
@@ -80,13 +82,13 @@ assert p["members"][-1]["condition"] == "after_acceptance"
   # extension) is refused outright.
   run bash -c 'printf "{}" | "$1" event pi post_action /nonexistent' bash "$binary"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"post_action batch is not exactly one closed response; refusing"* ]]
+  [[ "$output" == *"post_action batch is not exactly one closed response; refusing"* ]] || false
   run bash -c 'printf "{}" | "$1" event pi agent_before_settle /nonexistent' bash "$binary"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"agent_before_settle batch is not exactly one closed response; refusing"* ]]
+  [[ "$output" == *"agent_before_settle batch is not exactly one closed response; refusing"* ]] || false
   run bash -c 'printf "{}" | "$1" event pi pre_action /nonexistent' bash "$binary"
   [ "$status" -eq 12 ]
-  [[ "$output" == *"unknown harness"* ]]
+  [[ "$output" == *"unknown harness"* ]] || false
 }
 # END LANE A1
 
@@ -113,29 +115,32 @@ assert p["members"][-1]["condition"] == "after_acceptance"
 
 # BEGIN LANE B5
 @test "B5 T51/T20b: native PR filtering, proven recorder exec and advisory" {
+  native_cargo_require
   run cargo test --locked --offline \
     --manifest-path "$BATS_TEST_DIRNAME/../../native/trellis-hooks/Cargo.toml" \
     --test events b5::
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"14 passed; 0 failed; 0 ignored"* ]]
+  [[ "$output" == *"14 passed; 0 failed; 0 ignored"* ]] || false
 }
 # END LANE B5
 
 # BEGIN LANE B6
 @test "B6 T50: parsed native post results preserve read credit and state identity" {
+  native_cargo_require
   run cargo test --locked --offline \
     --manifest-path "$BATS_TEST_DIRNAME/../../native/trellis-hooks/Cargo.toml" \
     --test events b6::tracker
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"4 passed; 0 failed"* ]]
+  [[ "$output" == *"4 passed; 0 failed"* ]] || false
 }
 
 @test "B6 round 2: proof-bound linked-worktree and tracker identity regressions" {
+  native_cargo_require
   run cargo test --locked --offline \
     --manifest-path "$BATS_TEST_DIRNAME/../../native/trellis-hooks/Cargo.toml" \
     --test events b6::review_
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"7 passed; 0 failed"* ]]
+  [[ "$output" == *"7 passed; 0 failed"* ]] || false
 }
 # END LANE B6
 
@@ -167,11 +172,12 @@ assert p["members"][-1]["condition"] == "always"
 }
 
 @test "T30: non-routed Stop coordinator preserves verdicts and finalization" {
+  native_cargo_require
   run cargo +1.97.1 test --locked --offline \
     --manifest-path "$BATS_TEST_DIRNAME/../../native/trellis-hooks/Cargo.toml" \
     --test events b9_baseline::t30:: -- --test-threads=1
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *'test result: ok.'* && "$output" == *'0 failed'* ]]
+  [[ "$output" == *'test result: ok.'* && "$output" == *'0 failed'* ]] || false
 }
 # END LANE B9
 
@@ -311,6 +317,7 @@ b10_deploy_ui() {
   fi
   cp "$source/ui-verify.sh" "$B10_HOOK_DIR/ui-verify.sh"
   cp "$source/lib/deps.sh" "$B10_HOOK_DIR/lib/deps.sh"
+  cp "$source/lib/deps-heavy.sh" "$B10_HOOK_DIR/lib/deps-heavy.sh"
   cp "$B10_ROOT/core-rules/hooks/lib/ui-verify-core.sh" "$B10_HOOK_DIR/lib/ui-verify-core.sh"
 }
 
@@ -470,6 +477,7 @@ b10_d2_fixture() {
   if [ "$harness" = claude ]; then source=hooks; else source=codex/hooks; fi
   cp "$B10_D2_ROOT/core-rules/$source/code-review-subagent.sh" "$B10_D2_HOOKS/code-review-subagent.sh"
   cp "$B10_D2_ROOT/core-rules/$source/lib/deps.sh" "$B10_D2_HOOKS/lib/deps.sh"
+  cp "$B10_D2_ROOT/core-rules/$source/lib/deps-heavy.sh" "$B10_D2_HOOKS/lib/deps-heavy.sh"
   cp "$B10_D2_ROOT/core-rules/$source/lib/autonomy.sh" "$B10_D2_HOOKS/lib/autonomy.sh"
   cp "$B10_D2_ROOT/core-rules/hooks/lib/code-reviewer.sh" "$B10_D2_HOOKS/lib/code-reviewer.sh"
   cp "$B10_D2_ROOT/scripts/lib/trellis-python.sh" "$B10_D2_HOOKS/lib/trellis-python.sh"

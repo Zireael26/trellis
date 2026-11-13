@@ -5,6 +5,18 @@
 # Exit classes: 0 success; 2 usage; 3 destination conflict; 4 invalid payload
 # state; 5 unavailable local capability/path. Bash 3.2 compatible.
 
+# Refuse non-Bash interpreters and Bash invoked as sh before Bash-only syntax.
+if [ -z "${BASH_VERSION:-}" ] || shopt -oq posix; then
+  printf '%s\n' 'surface-plan: requires Bash, not sh' >&2
+  exit 2
+fi
+
+# A directly executed planner cannot inherit sourced functions from its parent.
+# A sourced or verified in-memory bundle retains its local preload marker.
+if [ "${BASH_SOURCE[0]-}" = "$0" ]; then
+  unset TRELLIS_LIBS_PRELOADED
+fi
+
 if [ "${TRELLIS_LIBS_PRELOADED:-}" != 1 ]; then
   _SURFACE_PLAN_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
   # shellcheck source=trellis-home.sh
@@ -608,7 +620,7 @@ surface_plan_emit_children_link() {
   fi
   surface_plan_make_tempfile || return "$?"
   sorted_file="$_SURFACE_PLAN_LAST_TMP"
-  if ! LC_ALL=C sort "$unsorted_file" > "$sorted_file"; then
+  if ! /usr/bin/env LC_ALL=C sort "$unsorted_file" > "$sorted_file"; then
     surface_plan_err "could not sort immutable source candidates: $source"
     return "$TRELLIS_EX_STATE"
   fi

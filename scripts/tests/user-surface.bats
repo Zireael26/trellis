@@ -313,7 +313,7 @@ b1_user_doctor_check() {
   jq -e '(.hooks.WorktreeCreate | length)==2 and (.hooks.WorktreeRemove | length)==2 and (.hooks.WorktreeCreate[0].hooks | length)==1 and (.hooks.WorktreeRemove[0].hooks | length)==1 and .hooks.WorktreeCreate[1].hooks[0].command=="project-user-create" and .hooks.WorktreeRemove[1].hooks[0].command=="project-user-remove" and ([.hooks[][] | .hooks[].command | select(contains("trellis-worktree-"))] | length)==0 and (has("workflowSizeGuideline") | not)' "$settings" >/dev/null
   b1_user_doctor_check
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"user surface: exact committed owner"* ]]
+  [[ "$output" == *"user surface: exact committed owner"* ]] || false
   jq '.hooks.WorktreeCreate += [.hooks.WorktreeCreate[0]]' "$settings" > "$SANDBOX/duplicate-native"
   cp "$SANDBOX/duplicate-native" "$settings"
   b1_user_doctor_check
@@ -507,7 +507,7 @@ teardown() {
   user_attach
   [ "$status" -eq 3 ]
   assert_output_has "$output" "owned user destination is missing: $link"
-  [[ "$output" != *"was modified"* ]]
+  [[ "$output" != *"was modified"* ]] || false
 
   run "$USER_CLI" relink --user --home "$TRELLIS_HOME" --release "$USER_RELEASE"
 
@@ -592,7 +592,7 @@ teardown() {
 
   [ "$status" -eq 3 ]
   assert_output_has "$output" "owned user destination was modified: $link"
-  [[ "$output" != *"is missing"* ]]
+  [[ "$output" != *"is missing"* ]] || false
   [ "$(readlink "$link")" = "$foreign" ]
   [ "$(sha256_file "$(user_owner_path)")" = "$owner_before" ]
   [ ! -e "$(user_attach_journal_path)" ]
@@ -1576,6 +1576,32 @@ PY
   [ "$(file_mode "$settings")" = 640 ]
   [ ! -e "$(user_owner_path)" ]
   [ ! -L "$(user_owner_path)" ]
+}
+
+# 1.5.1: an operator value identical to a template-owned non-hook key (the
+# canary's workflowSizeGuideline) is adopted without --adopt-identical; detach
+# restores the operator's exact bytes. Hook events still need the flag, and an
+# unequal value still refuses.
+@test "plain attach --user adopts identical non-hook JSON values and detach restores them" {
+  local settings="$HOME/.claude/settings.json" before_hash
+  printf '%s' '{"operator":{"theme":"violet"},"managed":{"policy":"fixture","release":"1.0.0"}}' > "$settings"
+  chmod 640 "$settings"
+  before_hash="$(sha256_file "$settings")"
+
+  user_attach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq -e '.managed.policy == "fixture" and .managed.release == "1.0.0" and .operator.theme == "violet"' "$settings" >/dev/null
+
+  user_detach
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(sha256_file "$settings")" = "$before_hash" ] || { cat "$settings"; false; }
+  [ "$(file_mode "$settings")" = 640 ]
+
+  jq '.managed.release = "operator-owned"' "$settings" > "$settings.changed"
+  mv "$settings.changed" "$settings"
+  user_attach
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ ! -e "$(user_owner_path)" ]
 }
 
 @test "attach relink detach manage the release user skill links" {

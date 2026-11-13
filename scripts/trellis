@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# A fresh dispatcher cannot inherit its parent's preloaded shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 # One subshell, not two: ${0%/*} matches dirname for every invocation that
 # carries a slash, and the bare-name branch reproduces dirname's "." fallback
 # before the same physical-resolution cd/pwd pair.

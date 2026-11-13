@@ -87,7 +87,7 @@ assert_python_hook_calls() {
   make_clean
   run bash "$HOOK" <<<'{}'
   [ "$status" -eq 2 ]
-  [[ "$output" == *block* ]]
+  [[ "$output" == *block* ]] || false
 }
 
 @test "P1.3: clean tree + no todos passes (rc=0)" {
@@ -102,7 +102,7 @@ assert_python_hook_calls() {
   make_dirty
   run bash "$HOOK" <<<'{}'
   [ "$status" -eq 2 ]
-  [[ "$output" == *block* ]]
+  [[ "$output" == *block* ]] || false
 }
 
 @test "P1.3: dirty tree + all-completed passes (rc=0; no toolchains)" {

@@ -41,8 +41,8 @@ run_hook() {
 assert_unavailable() {
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -se 'length == 1 and (.[0].decision != "block")' >/dev/null
-  [[ "$output" == *'verification unavailable: dependencies not installed'* ]]
-  [[ "$output" != *'no typecheck/lint/test configured'* ]]
+  [[ "$output" == *'verification unavailable: dependencies not installed'* ]] || false
+  [[ "$output" != *'no typecheck/lint/test configured'* ]] || false
   if [ "$candidate" = "$HOOKS_DIR/stop-verify.sh" ]; then
     printf '%s' "$output" | jq -e '.additionalContext | contains("verification unavailable")' >/dev/null
   else
@@ -132,7 +132,7 @@ EOF
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run_hook
     assert_block 'test ('
-    [[ "$output" == *'pytest failed'* ]]
+    [[ "$output" == *'pytest failed'* ]] || false
     grep -q '^pytest|' "$CALL_LOG"
   done
 }
@@ -146,12 +146,12 @@ EOF
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run_hook
     assert_block 'test ('
-    [[ "$output" == *'pytest failed'* ]]
+    [[ "$output" == *'pytest failed'* ]] || false
     grep -q '^pytest|' "$CALL_LOG"
     grep -q '|pnpm|run test$' "$CALL_LOG"
     FAIL_TARGET='' run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
     grep -q '^pytest|' "$CALL_LOG"
     grep -q '|pnpm|run test$' "$CALL_LOG"
   done
@@ -168,13 +168,13 @@ EOF
       export FAIL_TARGET="$target"
       run_hook
       assert_block 'test ('
-      [[ "$output" == *"$target test failed"* ]]
+      [[ "$output" == *"$target test failed"* ]] || false
       grep -q "^$target|test" "$CALL_LOG"
     done
     export FAIL_TARGET=''
     run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
     grep -q '^cargo|test' "$CALL_LOG"
     grep -q '^go|test' "$CALL_LOG"
     grep -q '|pnpm|run test$' "$CALL_LOG"
@@ -229,7 +229,7 @@ EOF
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" == *'stop_checks.fast'* ]]
+    [[ "$output" == *'stop_checks.fast'* ]] || false
     grep -q '^fast|run$' "$CALL_LOG"
     ! grep -qE '^(pytest\||cargo\|test|go\|test)' "$CALL_LOG"
     ! grep -q '|pnpm|run test$' "$CALL_LOG"
@@ -256,7 +256,7 @@ EOF
     for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
       run_hook
       assert_block 'lint (eslint):'
-      [[ "$output" == *'flat lint failed'* ]]
+      [[ "$output" == *'flat lint failed'* ]] || false
     done
     mv "$PROJECT_DIR/eslint.config.$ext" "$BATS_TEST_TMPDIR/config.$ext"
   done
@@ -284,24 +284,24 @@ EOF
     export BROKEN_VERSION=1 BROKEN_LINT=1
     run_hook
     assert_block 'lint (eslint):'
-    [[ "$output" == *'lint failed'* ]]
+    [[ "$output" == *'lint failed'* ]] || false
     grep -q '^eslint|\. --quiet$' "$CALL_LOG"
     export BROKEN_VERSION=1 BROKEN_LINT=0
     run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
-    [[ "$output" == *'eslint version probe failed'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
+    [[ "$output" == *'eslint version probe failed'* ]] || false
     grep -q '^eslint|\. --quiet$' "$CALL_LOG"
     run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" == *'eslint version probe failed'* ]]
-    [[ "$output" != *'checks reused'* ]]
+    [[ "$output" == *'eslint version probe failed'* ]] || false
+    [[ "$output" != *'checks reused'* ]] || false
     grep -q '^eslint|\. --quiet$' "$CALL_LOG"
     export BROKEN_VERSION=0 BROKEN_LINT=0
     run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" != *'"decision":"block"'* ]]
-    [[ "$output" != *'eslint version probe failed'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
+    [[ "$output" != *'eslint version probe failed'* ]] || false
   done
 }
 
@@ -337,8 +337,8 @@ EOF
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run_hook
     assert_block 'test ('
-    [[ "$output" == *'turbo: command not found'* ]]
-    [[ "$output" != *'verification unavailable'* ]]
+    [[ "$output" == *'turbo: command not found'* ]] || false
+    [[ "$output" != *'verification unavailable'* ]] || false
     [ -s "$CALL_LOG" ]
     if [ "$candidate" = "$HOOKS_DIR/stop-verify.sh" ]; then
       [ -s "$PROJECT_DIR/.claude/.fail-counter" ]
@@ -372,8 +372,8 @@ EOF
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run_hook
     assert_block 'lint (eslint):'
-    [[ "$output" == *'eslint: invalid configuration'* ]]
-    [[ "$output" != *'verification unavailable'* ]]
+    [[ "$output" == *'eslint: invalid configuration'* ]] || false
+    [[ "$output" != *'verification unavailable'* ]] || false
     # The test step runs concurrently with eslint (spec 072 U8).
     [ "$(cut -d '|' -f2- "$CALL_LOG" | grep '^npx|')" = $'npx|--no-install eslint --version\nnpx|--no-install eslint . --quiet' ]
   done
@@ -484,7 +484,7 @@ EOF
   for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
     run_hook
     assert_block 'typecheck (mypy):'
-    [[ "$(cut -d '|' -f2 "$CALL_LOG")" == mypy ]]
+    [[ "$(cut -d '|' -f2 "$CALL_LOG")" == mypy ]] || false
   done
 }
 

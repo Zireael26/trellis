@@ -15,15 +15,276 @@ export GIT_OPTIONAL_LOCKS=0
 #     nudge to run /primer <slug>.
 #   - Tracked and untracked paths are included; .claude/ and .codex/ state is
 #     excluded. Documentation-only changes do not produce a subsystem nudge.
+#     Git C-quoted paths (tabs, newlines, quotes, backslashes) are not reliably
+#     represented by the line-oriented scan and can be missed or misclassified.
+#   - At most 200 paths are examined. An incomplete scan emits one stderr line;
+#     a three-second deadline and parent-death supervision bound the whole hook.
 #   - Advisory output is always exit 0. jq remains a required hook dependency;
 #     set TRELLIS_NO_JQ_DEGRADE=1 to make a jq-less environment a silent no-op.
 #
-# Dependencies: jq (required), git (required for change discovery; absence
-# emits a degradation notice and becomes an advisory no-op).
+# Dependencies: jq (required), git and python3 (an advisory no-op if absent).
+# Python supervises the complete process group, including blocked Git children.
 #
 # Source: Trellis / core-rules / hooks.md (C6, primer-capture-nudge).
 
 set -u
+
+# The supervisor starts before reading stdin or invoking any external command.
+# Bash defers traps while waiting for foreground children, and parent death does
+# not kill a child. A separate session lets the supervisor kill the entire job;
+# its watchdog also does so if the supervisor itself is killed. Python resets a
+# SIGTERM disposition inherited as ignored, which Bash alone cannot trap.
+if [ "${1:-}" != --pcn-worker ]; then
+  if ! command -v python3 >/dev/null 2>&1; then
+    printf '%s\n' 'primer-capture-nudge: python3 not found; degrading to no-op' >&2
+    exit 0
+  fi
+  exec python3 -I -c '
+import fcntl, os, select, shutil, signal, sys, threading, time
+
+started = time.monotonic()
+deadline = started + 3.0
+parent = os.getppid()
+# SIGCHLD may have been ignored by the launcher. Restore normal child reaping
+# before forking so our watcher PID cannot be reused before waitpid.
+signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+# Pick an unguessable name without filesystem I/O. The worker creates it and
+# acknowledges success before either supervisor is allowed to remove it.
+try:
+    base = os.path.abspath(os.environ.get("TMPDIR") or "/tmp")
+    work = os.path.join(base, "trellis-primer-nudge." + os.urandom(16).hex())
+except (OSError, ValueError):
+    sys.exit(0)
+def cleanup():
+    # A stalled temporary filesystem must not prevent process-group teardown.
+    thread = threading.Thread(target=shutil.rmtree, args=(work,), kwargs={"ignore_errors": True}, daemon=True)
+    try:
+        thread.start()
+        thread.join(0.2)
+    except RuntimeError:
+        pass
+def notice(message=b"primer-capture-nudge: time budget exceeded; skipping advisory"):
+    def emit():
+        try:
+            os.write(2, message + b"\n")
+        except OSError:
+            pass
+    thread = threading.Thread(target=emit, daemon=True)
+    try:
+        thread.start()
+        thread.join(0.05)
+    except RuntimeError:
+        pass
+stop = 0
+def interrupted(signum, frame):
+    global stop
+    stop = signum
+for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(sig, interrupted)
+supervisor = os.getpid()
+try:
+    result_read, result_write = os.pipe()
+    ready_read, ready_write = os.pipe()
+    watcher = os.fork()
+except OSError:
+    sys.exit(0)
+if watcher == 0:
+    os.close(result_read)
+    try:
+        os.setsid()
+    except OSError:
+        os._exit(0)
+    created = False
+    try:
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_DFL)
+        child = os.fork()
+        if child == 0:
+            try:
+                os.close(result_write)
+                os.close(ready_read)
+                os.mkdir(work, 0o700)
+                os.write(ready_write, b"R")
+                os.close(ready_write)
+                with open(os.path.join(work, "stdout"), "wb") as output:
+                    os.dup2(output.fileno(), 1)
+                    # Python ignores these signals; producers must stop when
+                    # the bounded downstream reader closes its pipe.
+                    for sig in (signal.SIGPIPE, signal.SIGXFSZ):
+                        signal.signal(sig, signal.SIG_DFL)
+                    os.execv(sys.argv[1], [sys.argv[1], sys.argv[2], "--pcn-worker", work])
+            except (OSError, ValueError):
+                os._exit(0)
+        os.close(ready_write)
+        def receive_ready(block=False):
+            global created, ready_read
+            if ready_read is None:
+                return
+            if block or select.select([ready_read], [], [], 0)[0]:
+                flag = os.read(ready_read, 1)
+                os.close(ready_read)
+                ready_read = None
+                if flag == b"R":
+                    created = True
+                    os.write(result_write, b"R\n")
+        while True:
+            receive_ready()
+            done, child_status = os.waitpid(child, os.WNOHANG)
+            if done:
+                receive_ready(block=True)
+                result = b"D" + str(os.WEXITSTATUS(child_status)).encode() if os.WIFEXITED(child_status) else b"K"
+                os.write(result_write, result + b"\n")
+                # Keep the group leader alive until the supervisor kills the
+                # group, so its ID cannot be recycled between wait and kill.
+                while os.getppid() == supervisor and time.monotonic() < deadline + 0.5:
+                    time.sleep(0.05)
+                break
+            if os.getppid() != supervisor:
+                break
+            if time.monotonic() >= deadline:
+                os.write(result_write, b"T\n")
+                while os.getppid() == supervisor and time.monotonic() < deadline + 0.5:
+                    time.sleep(0.05)
+                break
+            time.sleep(0.05)
+    except (OSError, ValueError):
+        pass
+    # The supervisor may have died without running its cleanup. Never wait
+    # indefinitely for cleanup before killing this session, including us.
+    if created:
+        cleanup()
+    try:
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+    except OSError:
+        pass
+    os._exit(0)
+
+os.close(result_write)
+os.close(ready_read)
+os.close(ready_write)
+status = 0
+created = False
+completed = False
+buffer = b""
+try:
+    while True:
+        if stop or os.getppid() != parent or time.monotonic() >= deadline:
+            if not stop and os.getppid() == parent and time.monotonic() >= deadline:
+                notice()
+            break
+        ready, _, _ = select.select([result_read], [], [], 0.05)
+        if not ready:
+            continue
+        chunk = os.read(result_read, 128)
+        if not chunk:
+            break
+        buffer += chunk
+        finished = False
+        while b"\n" in buffer:
+            result, buffer = buffer.split(b"\n", 1)
+            if result == b"R":
+                created = True
+            elif result == b"T":
+                if not stop and os.getppid() == parent:
+                    notice()
+                finished = True
+            elif result == b"K":
+                finished = True
+            elif result.startswith(b"D"):
+                status = int(result[1:])
+                completed = created
+                finished = True
+        if finished:
+            break
+finally:
+    os.close(result_read)
+    # Kill the watcher first so it cannot launch a worker between a failed
+    # killpg and setsid. Its unreaped PID cannot be recycled before killpg.
+    try:
+        os.kill(watcher, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        os.killpg(watcher, signal.SIGKILL)
+    except OSError:
+        pass
+    try:
+        os.waitpid(watcher, 0)
+    except ChildProcessError:
+        pass
+    # Publish only a completed worker result: a timed-out worker cannot leak
+    # partial JSON or an advisory accompanied by a misleading timeout notice.
+    if completed and not stop and os.getppid() == parent:
+        if time.monotonic() >= deadline:
+            notice()
+        else:
+            output = []
+            def read_output():
+                try:
+                    with open(os.path.join(work, "stdout"), "rb") as stream:
+                        output.append(stream.read(65536))
+                except OSError:
+                    pass
+            reader = threading.Thread(target=read_output, daemon=True)
+            try:
+                reader.start()
+            except RuntimeError:
+                reader = None
+            while reader is not None and reader.is_alive() and not stop and os.getppid() == parent and time.monotonic() < deadline:
+                reader.join(min(0.05, max(0, deadline - time.monotonic())))
+            if reader is not None and reader.is_alive() and not stop and os.getppid() == parent:
+                notice()
+            elif output and output[0] and not stop and os.getppid() == parent:
+                # A single <=512-byte pipe write is atomic on POSIX. Larger
+                # advisories are skipped instead of publishing partial JSON.
+                payload = output[0]
+                if len(payload) > 512:
+                    notice(b"primer-capture-nudge: atomic output limit exceeded; skipping advisory")
+                else:
+                    lock = threading.Lock()
+                    cancel = threading.Event()
+                    finished = []
+                    def write_output():
+                        while not cancel.is_set() and time.monotonic() < deadline:
+                            with lock:
+                                if cancel.is_set() or time.monotonic() >= deadline:
+                                    return
+                                try:
+                                    flags = fcntl.fcntl(1, fcntl.F_GETFL)
+                                    try:
+                                        fcntl.fcntl(1, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+                                        count = os.write(1, payload)
+                                    finally:
+                                        fcntl.fcntl(1, fcntl.F_SETFL, flags)
+                                    finished.append(count)
+                                    return
+                                except BlockingIOError:
+                                    pass
+                                except OSError:
+                                    return
+                            cancel.wait(0.05)
+                    writer = threading.Thread(target=write_output, daemon=True)
+                    try:
+                        writer.start()
+                    except RuntimeError:
+                        writer = None
+                    while writer is not None and writer.is_alive() and not stop and os.getppid() == parent and time.monotonic() < deadline:
+                        writer.join(min(0.05, max(0, deadline - time.monotonic())))
+                    cancel.set()
+                    # Do not announce a skip while a writer can still publish.
+                    if writer is not None and lock.acquire(timeout=0.05):
+                        try:
+                            if not finished and not stop and os.getppid() == parent and time.monotonic() >= deadline:
+                                notice()
+                        finally:
+                            lock.release()
+    if created:
+        cleanup()
+sys.exit(status)
+' "$BASH" "$0"
+fi
+__pcn_tmp="${2:-}"
+[ -n "$__pcn_tmp" ] && [ -d "$__pcn_tmp" ] || exit 0
 
 INPUT=$(cat 2>/dev/null || true)
 
@@ -57,34 +318,63 @@ PRIMERS_DIR="${REPO_ROOT}/.claude/primers"
 INDEX="${PRIMERS_DIR}/INDEX.md"
 [ -f "$INDEX" ] || exit 0
 
-# Keep every path operation read-only. The temporary lists let the hook handle
-# paths with spaces without changing the user's index or worktree.
-__pcn_tmp="$(mktemp -d "${TMPDIR:-/tmp}/trellis-primer-nudge.XXXXXX" 2>/dev/null || true)"
-[ -n "$__pcn_tmp" ] && [ -d "$__pcn_tmp" ] || exit 0
-trap 'rm -rf "$__pcn_tmp"' EXIT
-
+# The supervisor owns cleanup even when the worker is killed. All lists stay
+# private and path operations are read-only; paths containing spaces work.
 CHANGED_FILE_LIST="${__pcn_tmp}/changed"
+TRACKED_FILE_LIST="${__pcn_tmp}/tracked"
+UNTRACKED_FILE_LIST="${__pcn_tmp}/untracked"
+UNTRACKED_ROOT_LIST="${__pcn_tmp}/roots"
+CANDIDATE_LIST="${__pcn_tmp}/candidates"
 INDEX_SLUG_LIST="${__pcn_tmp}/slugs"
 INDEX_ENTRY_LIST="${__pcn_tmp}/entries"
+PCN_PATH_LIMIT=200
 
-_pcn_tracked() {
-  # Disable Git's C-style path quoting before the harness-state filter. A
-  # quoted non-ASCII path no longer begins with `.claude/` or `.codex/`.
-  git -c core.quotePath=false diff HEAD --name-only 2>/dev/null \
-    | awk '$0 !~ /^\.(claude|codex)\//'
+_pcn_scan_limit() {
+  printf '%s\n' 'primer-capture-nudge: path scan limit reached; skipping incomplete advisory' >&2
+  exit 0
 }
 
-_pcn_untracked() {
-  git -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null \
-    | awk '$0 !~ /^\.(claude|codex)\//'
-}
+# Stop reading as soon as the limit is known to be exceeded. Git may still
+# have to inspect its index, but is itself subject to the hard deadline. Do not
+# launch an fsmonitor daemon or external/textconv diff helpers for an advisory.
+git -c core.fsmonitor=false -c core.quotePath=false diff HEAD --name-only --no-ext-diff --no-textconv -- \
+  ':(top,exclude).claude' ':(top,exclude).codex' 2>/dev/null \
+  | awk -v cap="$PCN_PATH_LIMIT" '$0 !~ /^\.(claude|codex)\// && $0 !~ /^[[:space:]]*$/ { print; if (++n > cap) exit }' > "$TRACKED_FILE_LIST"
+EXAMINED=$(awk 'END { print NR + 0 }' "$TRACKED_FILE_LIST")
+[ "$EXAMINED" -le "$PCN_PATH_LIMIT" ] || _pcn_scan_limit
 
-_pcn_changed_names() {
-  {
-    _pcn_tracked
-    _pcn_untracked
-  } | sort -u | sed '/^[[:space:]]*$/d'
-}
+# Start with collapsed untracked roots, then expand each through Git so ignored
+# trees and nested repositories are not traversed as ordinary changed files.
+# Limit the visible output; Git itself may inspect more entries before writing,
+# so the supervisor deadline also bounds its work.
+ROOT_LIMIT=$((PCN_PATH_LIMIT - EXAMINED))
+git -c core.fsmonitor=false -c core.quotePath=false ls-files --others --directory --no-empty-directory --exclude-standard -- . \
+  ':(top,exclude).claude' ':(top,exclude).codex' 2>/dev/null \
+  | awk -v cap="$ROOT_LIMIT" '$0 !~ /^\.(claude|codex)\// && $0 !~ /^[[:space:]]*$/ { print; if (++n > cap) exit }' > "$UNTRACKED_ROOT_LIST"
+ROOT_COUNT=$(awk 'END { print NR + 0 }' "$UNTRACKED_ROOT_LIST")
+[ "$ROOT_COUNT" -le "$ROOT_LIMIT" ] || _pcn_scan_limit
+: > "$UNTRACKED_FILE_LIST"
+while IFS= read -r root; do
+  [ -n "$root" ] || continue
+  REMAINING=$((PCN_PATH_LIMIT - EXAMINED))
+  case "$root" in
+    */)
+      git -c core.fsmonitor=false -c core.quotePath=false --literal-pathspecs \
+        ls-files --others --exclude-standard -- "$root" 2>/dev/null \
+        | awk -v cap="$REMAINING" '{ print; if (NR > cap) exit }' > "$CANDIDATE_LIST"
+      CANDIDATE_COUNT=$(awk 'END { print NR + 0 }' "$CANDIDATE_LIST")
+      [ "$CANDIDATE_COUNT" -le "$REMAINING" ] || _pcn_scan_limit
+      EXAMINED=$((EXAMINED + CANDIDATE_COUNT))
+      cat "$CANDIDATE_LIST" >> "$UNTRACKED_FILE_LIST"
+      ;;
+    *)
+      [ "$REMAINING" -gt 0 ] || _pcn_scan_limit
+      EXAMINED=$((EXAMINED + 1))
+      printf '%s\n' "$root" >> "$UNTRACKED_FILE_LIST"
+      ;;
+  esac
+done < "$UNTRACKED_ROOT_LIST"
+sort -u "$TRACKED_FILE_LIST" "$UNTRACKED_FILE_LIST" > "$CHANGED_FILE_LIST"
 
 _pcn_normpath() {
   printf '%s' "$1" | sed -E 's#^\./##; s#//+#/#; s#/$##'
@@ -106,22 +396,25 @@ _pcn_doc_path() {
 
 # The default edit-heavy predicate is shared with code-review-subagent. Count
 # files from the same tracked+untracked union used for the path analysis below.
-_pcn_changed_names > "$CHANGED_FILE_LIST" 2>/dev/null || true
 [ -s "$CHANGED_FILE_LIST" ] || exit 0
 
 MIN_FILES="$(_pcn_safe_threshold "${REVIEW_MIN_FILES:-3}" 3)"
 MIN_LINES="$(_pcn_safe_threshold "${REVIEW_MIN_LINES:-200}" 200)"
 CHANGED_FILES=$(awk 'END { print NR + 0 }' "$CHANGED_FILE_LIST")
-TRACKED_LINES=$(git -c core.quotePath=false diff HEAD --numstat 2>/dev/null \
-  | awk '$3 !~ /^\.(claude|codex)\// && $1 != "-" && $2 != "-" { sum += $1 + $2 } END { print sum + 0 }')
-UNTRACKED_LINES=$(_pcn_untracked \
-  | while IFS= read -r file; do
+# The file threshold is already sufficient in the common edit-heavy case.
+# Otherwise reuse the bounded untracked list instead of enumerating it again.
+if [ "$CHANGED_FILES" -lt "$MIN_FILES" ]; then
+  TRACKED_LINES=$(git -c core.fsmonitor=false -c core.quotePath=false diff HEAD --numstat --no-ext-diff --no-textconv -- \
+    ':(top,exclude).claude' ':(top,exclude).codex' 2>/dev/null \
+    | awk '$3 !~ /^\.(claude|codex)\// && $1 != "-" && $2 != "-" { sum += $1 + $2 } END { print sum + 0 }')
+  UNTRACKED_LINES=$(
+    IFS=
+    while read -r file; do
       [ -f "$file" ] && wc -l < "$file" 2>/dev/null || true
-    done \
-  | awk '{ sum += $1 } END { print sum + 0 }')
-CHANGED_LINES=$((TRACKED_LINES + UNTRACKED_LINES))
-if [ "$CHANGED_FILES" -lt "$MIN_FILES" ] && [ "$CHANGED_LINES" -lt "$MIN_LINES" ]; then
-  exit 0
+    done < "$UNTRACKED_FILE_LIST" | awk '{ sum += $1 } END { print sum + 0 }'
+  )
+  CHANGED_LINES=$((TRACKED_LINES + UNTRACKED_LINES))
+  [ "$CHANGED_LINES" -ge "$MIN_LINES" ] || exit 0
 fi
 
 # INDEX is a curated subsystem map. Parse only its locked link format. An

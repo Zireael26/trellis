@@ -44,8 +44,8 @@ teardown() {
   run group_plan_case_lease_acquire
   unset GROUP_PLAN_LEASE_OBSERVE_MAX
   [ "$status" -eq 2 ]
-  [[ "$output" != *"stale lease"* ]]
-  [[ "$output" != *"malformed lease"* ]]
+  [[ "$output" != *"stale lease"* ]] || false
+  [[ "$output" != *"malformed lease"* ]] || false
   [ -d "$GROUP_PLAN_RELEASE_CACHE/case.lock" ]
   kill "$LEASE_HOLDER_PID" 2>/dev/null || true
   wait "$LEASE_HOLDER_PID" 2>/dev/null || true
@@ -74,9 +74,9 @@ teardown() {
   export GROUP_PLAN_LEASE_POLL=0.05
   run group_plan_case_lease_acquire
   [ "$status" -eq 1 ]
-  [[ "$output" == *"stale lease"* ]]
-  [[ "$output" == *"$dead_pid"* ]]
-  [[ "$output" == *"is dead"* ]]
+  [[ "$output" == *"stale lease"* ]] || false
+  [[ "$output" == *"$dead_pid"* ]] || false
+  [[ "$output" == *"is dead"* ]] || false
   [ -d "$GROUP_PLAN_RELEASE_CACHE/case.lock" ]
 }
 
@@ -89,8 +89,8 @@ teardown() {
   export GROUP_PLAN_LEASE_POLL=0.05
   run group_plan_case_lease_acquire
   [ "$status" -eq 1 ]
-  [[ "$output" == *"pid reuse"* ]]
-  [[ "$output" == *"$LEASE_HOLDER_PID"* ]]
+  [[ "$output" == *"pid reuse"* ]] || false
+  [[ "$output" == *"$LEASE_HOLDER_PID"* ]] || false
   [ -d "$GROUP_PLAN_RELEASE_CACHE/case.lock" ]
 }
 
@@ -100,13 +100,13 @@ teardown() {
   export GROUP_PLAN_LEASE_GRACE=0.3
   run group_plan_case_lease_acquire
   [ "$status" -eq 1 ]
-  [[ "$output" == *"malformed lease"* ]]
+  [[ "$output" == *"malformed lease"* ]] || false
   rm -rf "$GROUP_PLAN_RELEASE_CACHE/case.lock"
   mkdir "$GROUP_PLAN_RELEASE_CACHE/case.lock"
   printf 'garbage-no-newline' > "$GROUP_PLAN_RELEASE_CACHE/case.lock/holder"
   run group_plan_case_lease_acquire
   [ "$status" -eq 1 ]
-  [[ "$output" == *"malformed lease"* ]]
+  [[ "$output" == *"malformed lease"* ]] || false
   [ -d "$GROUP_PLAN_RELEASE_CACHE/case.lock" ]
 }
 
@@ -123,8 +123,8 @@ teardown() {
   export GROUP_PLAN_LEASE_OBSERVE_MAX=0.6
   run group_plan_case_lease_acquire
   [ "$status" -eq 2 ]
-  [[ "$output" == *"waiting for holder pid $LEASE_HOLDER_PID"* ]]
-  [[ "$output" == *"elapsed"* ]]
+  [[ "$output" == *"waiting for holder pid $LEASE_HOLDER_PID"* ]] || false
+  [[ "$output" == *"elapsed"* ]] || false
   [ -d "$GROUP_PLAN_RELEASE_CACHE/case.lock" ]
 }
 
@@ -134,7 +134,7 @@ teardown() {
   export GROUP_PLAN_LEASE_POLL=0.05
   run group_plan_case_lease_acquire
   [ "$status" -eq 1 ]
-  [[ "$output" == *"does not exist"* ]]
+  [[ "$output" == *"does not exist"* ]] || false
   [ ! -d "$GROUP_PLAN_RELEASE_CACHE/case.lock" ]
 }
 
@@ -144,27 +144,31 @@ teardown() {
   [ -n "$holder_start" ]
   mkdir "$GROUP_PLAN_RELEASE_CACHE/case.lock"
   printf '%s\n%s\n' "$LEASE_HOLDER_PID" "$holder_start" > "$GROUP_PLAN_RELEASE_CACHE/case.lock/holder"
-  ps() {
-    case "$*" in
-      *state=*) printf 'Z\n'; return 0 ;;
-      *) command ps "$@" ;;
-    esac
-  }
+  # The helper uses env to set the locale after exec, so inject ps as a
+  # PATH executable rather than a shell function that env cannot invoke.
+  LEASE_REAL_PS="$(command -v ps)"
+  mkdir -p "$LEASE_TMP/ps-bin"
+  cat > "$LEASE_TMP/ps-bin/ps" <<'SH'
+#!/bin/sh
+case "$*" in
+  *state=*) printf '%s\n' "$LEASE_PS_STATE"; exit 0 ;;
+  *lstart*)
+    if [ "${LEASE_PS_LOCALIZED:-0}" = 1 ]; then
+      if [ "${LC_ALL:-}" = C ]; then printf 'Wed Oct  7 11:21:31 2026\n'; else printf 'mer. 7 oct. 11:21:31 2026\n'; fi
+      exit 0
+    fi ;;
+esac
+exec "$LEASE_REAL_PS" "$@"
+SH
+  chmod +x "$LEASE_TMP/ps-bin/ps"
+  export LEASE_REAL_PS LEASE_PS_STATE=Z PATH="$LEASE_TMP/ps-bin:$PATH"
   export GROUP_PLAN_LEASE_POLL=0.05
   export GROUP_PLAN_LEASE_OBSERVE_MAX=0.5
   run group_plan_case_lease_acquire
   [ "$status" -eq 1 ]
-  [[ "$output" == *"is dead"* ]]
-  ps() {
-    case "$*" in
-      *state=*) printf 'S\n'; return 0 ;;
-      *lstart*)
-        if [ "${LC_ALL:-}" = "C" ]; then printf 'Wed Oct  7 11:21:31 2026\n'; else printf 'mer. 7 oct. 11:21:31 2026\n'; fi
-        return 0 ;;
-      *) command ps "$@" ;;
-    esac
-  }
-  out="$(LC_ALL=fr_FR group_plan_case_lease__start_time "$LEASE_HOLDER_PID")"
+  [[ "$output" == *"is dead"* ]] || false
+  export LEASE_PS_STATE=S LEASE_PS_LOCALIZED=1
+  out="$( (export LC_ALL=fr_FR && group_plan_case_lease__start_time "$LEASE_HOLDER_PID") )"
   [ "$out" = "Wed Oct 7 11:21:31 2026" ]
 }
 
@@ -185,7 +189,7 @@ teardown() {
   export GROUP_PLAN_LEASE_OBSERVE_MAX=1.0
   run group_plan_case_lease_acquire
   [ "$status" -eq 2 ]
-  [[ "$output" != *"malformed lease"* ]]
+  [[ "$output" != *"malformed lease"* ]] || false
   kill "$LEASE_HOLDER_PID" 2>/dev/null || true; wait "$LEASE_HOLDER_PID" 2>/dev/null || true
   rm -rf "$GROUP_PLAN_RELEASE_CACHE/case.lock"
   run group_plan_case_lease_acquire

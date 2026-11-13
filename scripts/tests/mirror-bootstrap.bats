@@ -120,7 +120,7 @@ PY
   run_sync --dry-run
   echo "observed publisher raw_exit=$status $output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'simulated mirror clean.'* ]]
+  [[ "$output" == *'simulated mirror clean.'* ]] || false
   python3 - "$HOME/allocations" "$TRELLIS_HOME" <<'PY'
 from pathlib import Path
 import sys
@@ -142,6 +142,17 @@ PY
 
 @test "T57 mirror bootstrap publishes the complete verified native set" {
   cp -R "$REPO_ROOT/core-rules/native" "$SOURCE/core-rules/native"
+  # A release ships the native generation of its own version: mirror-lint
+  # checks the manifest against the payload's core-rules/VERSION.
+  python3 -I - "$SOURCE" <<'PY'
+import hashlib, json, pathlib, sys
+source = pathlib.Path(sys.argv[1]); path = source / 'core-rules/native/artifacts.json'
+d = json.loads(path.read_text())
+d['version'] = (source / 'core-rules/VERSION').read_text().strip()
+identity = {k: d[k] for k in ('version', 'inputs', 'toolchain')}
+d['generation'] = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+path.write_text(json.dumps(d, indent=2, sort_keys=True) + '\n')
+PY
   reseal_source_release 'native delivery fixture'
   run_sync --apply
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -155,12 +166,12 @@ PY
   run_sync --dry-run
   echo "publisher dry-run raw_exit=$status $output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'simulated mirror clean.'* ]]
+  [[ "$output" == *'simulated mirror clean.'* ]] || false
   [ ! -e "$MIRROR/engineering-process.md" ]
   run_sync --apply
   echo "publisher raw_exit=$status $output"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'applied.'* ]]
+  [[ "$output" == *'applied.'* ]] || false
   [ "$(git -C "$SOURCE" rev-parse HEAD:engineering-process.md)" = \
     "$(git hash-object --no-filters "$MIRROR/engineering-process.md")" ]
   [ -f "$MIRROR/core-rules/pi/extensions/trellis.ts" ]
@@ -213,7 +224,7 @@ PY
     run "$LAUNCHER" mirror
     echo "$variant raw_exit=$status $output"
     [ "$status" -eq 5 ]
-    [[ "$output" == *'trellis mirror: could not prepare trusted bootstrap'* ]]
+    [[ "$output" == *'trellis mirror: could not prepare trusted bootstrap'* ]] || false
     [ ! -e "$HOME/body-executed" ]
   done
 }
@@ -236,6 +247,6 @@ PY
   run "$LAUNCHER" mirror
   echo "partial extraction raw_exit=$status $output"
   [ "$status" -eq 5 ]
-  [[ "$output" == *'trellis mirror: could not prepare trusted bootstrap'* ]]
+  [[ "$output" == *'trellis mirror: could not prepare trusted bootstrap'* ]] || false
   [ ! -e "$HOME/body-executed" ]
 }

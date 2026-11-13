@@ -582,3 +582,62 @@ SH
   [[ "$output" == *"removed dir ${scratch##*/} "*"owner=dead"* ]] || { echo "$output"; false; }
   [ -z "$(verify_scratch_entries)" ] || { verify_scratch_entries; false; }
 }
+
+# 1.5.2 perf: the launcher's command bundle (`trellis release`, `trellis
+# upgrade`) has no payload pathname, so it carries release_verify.py's
+# manifest-checked bytes as data. Inside a verified bundle the store runs them
+# in one process instead of the per-entry shell pass; anywhere else the bytes
+# are ignored. $3: 1 to define the bundle attestation. The shell pass is
+# observed by its scratch allocation.
+verify_release_bundled() {
+  local rel="$1" version="$2" attest="$3" record="$4"
+  env TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    TRELLIS_LIBS_PRELOADED=1
+    . "$6/semver.sh"
+    . "$1"
+    _TRELLIS_BUNDLED_RELEASE_VERIFY_PROGRAM="$(cat "$6/release_verify.py")"
+    if [ "$5" = 1 ]; then
+      TRELLIS_VERIFIED_COMMAND_BUNDLE=release
+      TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN=fixture-token
+      trellis_command_bundle_is_verified() {
+        [ "$#" -eq 2 ] && [ "$1" = "$TRELLIS_VERIFIED_COMMAND_BUNDLE" ] && [ "$2" = "$TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN" ]
+      }
+    fi
+    record="$4"
+    mktemp() {
+      [ "${1:-}" = "-d" ] && printf "%s\n" "$2" >> "$record"
+      command mktemp "$@"
+    }
+    release_store_verify_path "$2" "$3"
+  ' release-store-verify-bundled "$RELEASE_STORE_LIB" "$rel" "$version" "$record" "$attest" "$REPO_ROOT/scripts/lib"
+}
+
+@test "a verified command bundle verifies with its bundled release_verify.py, not the shell pass" {
+  rel="$(install_small_release 1.0.0)"
+  record="$SANDBOX/scratch.record"
+  : > "$record"
+  run verify_release_bundled "$rel" 1.0.0 1 "$record"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -s "$record" ] || { echo "shell pass ran:"; cat "$record"; false; }
+}
+
+@test "the bundled verifier refuses a tampered payload exactly as the shell pass does" {
+  rel="$(install_small_release 1.0.0)"
+  make_tree_writable "$rel"
+  printf 'tampered\n' > "$rel/payload/core-rules/CLAUDE.md"
+  seal_release_tree "$rel"
+  record="$SANDBOX/scratch.record"
+  : > "$record"
+  run verify_release_bundled "$rel" 1.0.0 1 "$record"
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  [[ "$output" == *"changed release content: core-rules/CLAUDE.md"* ]] || { echo "$output"; false; }
+}
+
+@test "bundled verifier bytes without the bundle attestation are never run" {
+  rel="$(install_small_release 1.0.0)"
+  record="$SANDBOX/scratch.record"
+  : > "$record"
+  run verify_release_bundled "$rel" 1.0.0 0 "$record"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -s "$record" ] || { echo "the shell pass did not run"; false; }
+}

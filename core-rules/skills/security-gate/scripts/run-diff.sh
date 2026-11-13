@@ -908,6 +908,37 @@ while IFS= read -r -d '' f; do
   [ "$shell_excluded" = true ] || SHELL_SCOPE_FILES+=("$PROJECT_DIR/$f")
 done < "$CHANGED_LIST"
 
+# ShellCheck starts here, before semgrep, so the two engines overlap. It runs
+# once per file, at most SC_PARALLEL at a time, each writing its own JSON and
+# exit status. ShellCheck analyses every file on its own (a sourced file is
+# followed for that file only), so the per-file lists joined in argument order
+# are what one invocation over all files prints; the stage below joins them and
+# keeps the single-invocation verdict rules. The wall time is the largest file,
+# not the sum (attachment.sh alone is ~7 s).
+SC_PID=""
+SC_PARALLEL=4
+if [ "$SHELLCHECK_ENABLED" = true ] && [ "${#SHELL_SCOPE_FILES[@]}" -gt 0 ] && [ -n "$SHELLCHECK_BIN" ]; then
+  (
+    sc_index=0
+    sc_pids=()
+    for f in "${SHELL_SCOPE_FILES[@]}"; do
+      if [ "${#sc_pids[@]}" -ge "$SC_PARALLEL" ]; then
+        wait "${sc_pids[0]}"
+        sc_pids=(${sc_pids[@]+"${sc_pids[@]:1}"})
+      fi
+      (
+        "$SHELLCHECK_BIN" --severity=warning --format=json "$f" >"$WORK/shellcheck.raw.$sc_index.json" 2>/dev/null
+        printf '%s\n' "$?" >"$WORK/shellcheck.rc.$sc_index"
+      ) &
+      sc_pids+=("$!")
+      sc_index=$((sc_index + 1))
+    done
+    wait
+  ) &
+  SC_PID=$!
+  trap '[ -z "$SC_PID" ] || kill "$SC_PID" 2>/dev/null; rm -rf "$WORK"' EXIT
+fi
+
 RAN=0; RC=not-run; PARSED=0; SCANNED=0; REASON=""
 if [ "${#SCOPE_FILES[@]}" -gt 0 ]; then
   [ -z "$SEMGREP_BIN" ] || RAN=1
@@ -1048,21 +1079,45 @@ scanner_status semgrep "$RAN" "$RC" "$PARSED" "$SCANNED" "$REASON"
 RAN=0; RC=not-run; PARSED=0; SCANNED=0; REASON=""
 if [ "$SHELLCHECK_ENABLED" = true ] && [ "${#SHELL_SCOPE_FILES[@]}" -gt 0 ]; then
   [ -z "$SHELLCHECK_BIN" ] || RAN=1
-  SC_RAW="$WORK/shellcheck.raw.json"
   # ShellCheck's documented return values: 0 clean, 1 issues, 2+ incomplete.
-  "$SHELLCHECK_BIN" --severity=warning --format=json "${SHELL_SCOPE_FILES[@]}" >"$SC_RAW" 2>/dev/null
-  RC=$?
+  # Per file (started above): any status other than 0 or 1, or a missing one,
+  # is the stage's status; otherwise 1 when any file had issues. No binary is
+  # the 127 a direct call would have returned.
+  SC_RAWS=()
+  if [ "$RAN" -eq 1 ]; then
+    [ -z "$SC_PID" ] || wait "$SC_PID"
+    SC_PID=""
+    RC=0
+    sc_index=0
+    while [ "$sc_index" -lt "${#SHELL_SCOPE_FILES[@]}" ]; do
+      SC_RAWS+=("$WORK/shellcheck.raw.$sc_index.json")
+      sc_rc=missing
+      [ ! -f "$WORK/shellcheck.rc.$sc_index" ] || IFS= read -r sc_rc < "$WORK/shellcheck.rc.$sc_index" || sc_rc=missing
+      case "$sc_rc" in
+        0) ;;
+        1) [ "$RC" != 0 ] || RC=1 ;;
+        *) case "$RC" in 0|1) RC="$sc_rc" ;; esac ;;
+      esac
+      sc_index=$((sc_index + 1))
+    done
+  else
+    RC=127
+  fi
   case "$RC" in 0|1) ;; *) REASON="scanner exit $RC" ;; esac
   [ "$RAN" -eq 1 ] || REASON="binary not installed"
-  SG_PARSE_DONE="$WORK/shellcheck.done" "$PYTHON3_BIN" -I - "$SC_RAW" "$PROJECT_DIR" >>"$SEMGREP_OUT" 2>/dev/null <<'SCPY'
+  SG_PARSE_DONE="$WORK/shellcheck.done" "$PYTHON3_BIN" -I - "$PROJECT_DIR" ${SC_RAWS[@]+"${SC_RAWS[@]}"} >>"$SEMGREP_OUT" 2>/dev/null <<'SCPY'
 import json, sys, os
-raw, root = sys.argv[1], os.path.abspath(sys.argv[2])
+root = os.path.abspath(sys.argv[1])
 sev_map = {"error": "high", "warning": "medium", "info": "low", "style": "low"}
-try:
-    with open(raw) as fh: data = json.load(fh)
-except (OSError, ValueError):
-    sys.exit(2)
-if not isinstance(data, list) or not all(isinstance(r, dict) for r in data): sys.exit(2)
+if len(sys.argv) < 3: sys.exit(2)
+data = []
+for raw in sys.argv[2:]:
+    try:
+        with open(raw) as fh: part = json.load(fh)
+    except (OSError, ValueError):
+        sys.exit(2)
+    if not isinstance(part, list) or not all(isinstance(r, dict) for r in part): sys.exit(2)
+    data.extend(part)
 for i, r in enumerate(data, 1):
     path = r.get("file") or ""
     if path.startswith(root + os.sep): path = path[len(root) + 1:]

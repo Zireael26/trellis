@@ -89,13 +89,13 @@ PY
   payload_fixture_git -C "$repo" commit -qm native
   run payload_fixture_tool "$repo" HEAD
   [ "$status" -ne 0 ]
-  [[ "$output" == *"must exclude root native/"* ]]
+  [[ "$output" == *"must exclude root native/"* ]] || false
   printf 'native/\ncore-rules/native/\n' >> "$repo/core-rules/payload-exclude.txt"
   payload_fixture_git -C "$repo" add -A
   payload_fixture_git -C "$repo" commit -qm exclude-runtime
   run payload_fixture_tool "$repo" HEAD
   [ "$status" -ne 0 ]
-  [[ "$output" == *"drop native runtime assets"* ]]
+  [[ "$output" == *"drop native runtime assets"* ]] || false
 }
 
 @test "native delivery: release store refuses unfiltered native payload but accepts legacy" {
@@ -125,7 +125,7 @@ PY
   run env TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" bash -c \
     '. "$1/scripts/lib/release-store.sh"; release_store_install 1.5.0 "$2"' _ "$ROOT" "$repo"
   [ "$status" -eq 4 ]
-  [[ "$output" == *"native-bearing payload contains root build sources"* ]]
+  [[ "$output" == *"native-bearing payload contains root build sources"* ]] || false
   [ ! -e "$BATS_TEST_TMPDIR/trellis/releases/1.5.0" ]
 }
 
@@ -167,7 +167,7 @@ elf[64:68]=(1).to_bytes(4,'little')
 inputs={'native/trellis-hooks/Cargo.lock':sha(b'lock'),
         'native/trellis-hooks/rust-toolchain.toml':sha(b'toolchain'),
         'scripts/build-native-hooks.sh':sha(b'build')}
-d=dict(schema_version=1,version='1.5.0',source_commit='1'*40,inputs=inputs,
+d=dict(schema_version=1,version=ns['VERSION'],source_commit='1'*40,inputs=inputs,
        toolchain=dict(channel='1.97.1',rustc='rustc 1.97.1 (8bab26f4f 2026-07-14)',
                       cargo_lock_sha256=inputs['native/trellis-hooks/Cargo.lock'],
                       rust_toolchain_sha256=inputs['native/trellis-hooks/rust-toolchain.toml']),
@@ -253,7 +253,7 @@ with patch('subprocess.check_output',side_effect=codesign_only):
         generation(d)
         error='unpinned toolchain'
     elif case=='version':
-        d['version']='1.5.1'; generation(d)
+        d['version']='0.0.0'; generation(d)
         error='version/install layout mismatch'
     elif case=='install-path':
         d['install_path']='bin/native/{version}/{target}/trellis-hooks'
@@ -368,7 +368,7 @@ copy_assets() {
   printf 'post-signing mutation' >> "$COPY/$TARGET/trellis-hooks"
   run bash "$BUILD" verify "$COPY"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"digest/size mismatch"* ]]
+  [[ "$output" == *"digest/size mismatch"* ]] || false
 }
 
 @test "native delivery: digest mismatch refuses without executing the companion" {
@@ -428,7 +428,51 @@ PY
 @test "native delivery: unsupported Intel Darwin target is refused before build" {
   run bash "$BUILD" build x86_64-apple-darwin "$BATS_TEST_TMPDIR/out"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"not a 1.5.0 native target"* ]]
+  [[ "$output" == *"not a $(cat "$ROOT/core-rules/VERSION") native target"* ]] || false
+}
+
+# The release version has one source, core-rules/VERSION: the build script
+# carries no pin of its own and refuses an unusable version file.
+@test "native delivery: the build script takes its release version from core-rules/VERSION" {
+  local copy="$BATS_TEST_TMPDIR/version-root" version
+  # The committed manifest's own version, so the case holds between a VERSION
+  # bump and its rebuild too: it tests that the script follows the file.
+  version="$(jq -r .version "$ASSETS/artifacts.json")"
+  run grep -nE "^VERSION = ['\"]" "$BUILD"
+  [ "$status" -eq 1 ] || { echo "build script still pins: $output"; false; }
+  mkdir -p "$copy/scripts" "$copy/core-rules"
+  cp "$BUILD" "$copy/scripts/build-native-hooks.sh"
+  cp -R "$ASSETS" "$copy/core-rules/native"
+  printf '%s\n' "$version" > "$copy/core-rules/VERSION"
+  run bash "$copy/scripts/build-native-hooks.sh" verify
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run bash "$copy/scripts/build-native-hooks.sh" build x86_64-apple-darwin "$BATS_TEST_TMPDIR/out"
+  [[ "$output" == *"not a $version native target"* ]] || { echo "$output"; false; }
+  # Another version in the file, not in the script, rejects the same manifest.
+  printf '9.9.9\n' > "$copy/core-rules/VERSION"
+  run bash "$copy/scripts/build-native-hooks.sh" verify
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"version/install layout mismatch"* ]] || { echo "$output"; false; }
+  run bash "$copy/scripts/build-native-hooks.sh" build x86_64-apple-darwin "$BATS_TEST_TMPDIR/out"
+  [[ "$output" == *"not a 9.9.9 native target"* ]] || { echo "$output"; false; }
+  local bad
+  for bad in '1.5' "$version"$'\n'"$version" 'latest' "$version "; do
+    printf '%s\n' "$bad" > "$copy/core-rules/VERSION"
+    run bash "$copy/scripts/build-native-hooks.sh" verify
+    [ "$status" -eq 1 ] || { echo "accepted [$bad]: $output"; false; }
+    [[ "$output" == *"core-rules/VERSION is not one version line"* ]] || { echo "$output"; false; }
+  done
+  printf '%s' "$version" > "$copy/core-rules/VERSION"
+  run bash "$copy/scripts/build-native-hooks.sh" verify
+  [[ "$output" == *"core-rules/VERSION is not one version line"* ]] || { echo "no newline accepted: $output"; false; }
+  rm "$copy/core-rules/VERSION"
+  printf '%s\n' "$version" > "$copy/version.real"
+  ln -s ../version.real "$copy/core-rules/VERSION"
+  run bash "$copy/scripts/build-native-hooks.sh" verify
+  [[ "$output" == *"core-rules/VERSION is not a regular file"* ]] || { echo "symlink accepted: $output"; false; }
+  rm "$copy/core-rules/VERSION"
+  run bash "$copy/scripts/build-native-hooks.sh" verify
+  [[ "$output" == *"core-rules/VERSION is not a regular file"* ]] || { echo "missing accepted: $output"; false; }
 }
 
 @test "native delivery: L5 nonempty output without manifest refuses before tools or input checks" {
@@ -444,7 +488,7 @@ PY
   ln -s "$BATS_TEST_TMPDIR/outside" "$BATS_TEST_TMPDIR/output/$target/trellis-hooks"
   run bash "$BUILD" build "$target" "$BATS_TEST_TMPDIR/output"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"nonempty build output without manifest"* ]]
+  [[ "$output" == *"nonempty build output without manifest"* ]] || false
   cmp "$BATS_TEST_TMPDIR/outside.expected" "$BATS_TEST_TMPDIR/outside"
   [ -L "$BATS_TEST_TMPDIR/output/$target/trellis-hooks" ]
   [ ! -e "$BATS_TEST_TMPDIR/output/artifacts.json" ]
@@ -463,7 +507,7 @@ native_home_call() {
   for label in TRELLIS_HOME 'native companion'; do
     run native_home_call trellis_home_require_absolute_safe_path "$label" "$BATS_TEST_TMPDIR/home=x"
     [ "$status" -eq 2 ] || { echo "$output"; false; }
-    [[ "$output" == *"$label must not contain an env assignment operand (=)"* ]]
+    [[ "$output" == *"$label must not contain an env assignment operand (=)"* ]] || false
   done
   # Narrow ownership: an ordinary source path is not an env command operand.
   run native_home_call trellis_home_require_absolute_safe_path 'source root' "$BATS_TEST_TMPDIR/home=x"
@@ -523,7 +567,7 @@ native_render_fixture() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   run native_render_fixture "$user_home" "$sandbox/home=x"
   [ "$status" -eq 4 ] || { echo "$output"; false; }
-  [[ "$output" == *"registration TRELLIS_HOME is not a safe native env command path"* ]]
+  [[ "$output" == *"registration TRELLIS_HOME is not a safe native env command path"* ]] || false
 }
 
 @test "native delivery: shell adapter denies a missing companion for both harnesses" {
@@ -532,10 +576,10 @@ native_render_fixture() {
       "$BATS_TEST_TMPDIR/missing" "$harness" PreToolUse "$BATS_TEST_TMPDIR"
     if [ "$harness" = claude ]; then
       [ "$status" -eq 0 ]
-      [[ "$output" == *'"permissionDecision":"deny"'* ]]
+      [[ "$output" == *'"permissionDecision":"deny"'* ]] || false
     else
       [ "$status" -eq 2 ]
-      [[ "$output" == *'"decision":"block"'* ]]
+      [[ "$output" == *'"decision":"block"'* ]] || false
     fi
   done
 }
@@ -568,10 +612,10 @@ PY
     run run_inline_adapter "$harness"
     if [ "$harness" = claude ]; then
       [ "$status" -eq 0 ]
-      [[ "$output" == *'"permissionDecision":"deny"'* ]]
+      [[ "$output" == *'"permissionDecision":"deny"'* ]] || false
     else
       [ "$status" -eq 2 ]
-      [[ "$output" == *'"decision":"block"'* ]]
+      [[ "$output" == *'"decision":"block"'* ]] || false
     fi
     [ ! -e "$BATS_TEST_TMPDIR/adapter-executed-$harness" ]
   done
@@ -597,10 +641,10 @@ PY
   [ -f "$ASSETS/$target/trellis-hooks" ] || skip "host has no selected native asset"
   run "$ASSETS/$target/trellis-hooks" contract
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"deadline_secs":20'* ]]
+  [[ "$output" == *'"deadline_secs":20'* ]] || false
   run bash -c 'printf "%s" "{\"tool_input\":{\"command\":\"echo safe\"}}" | "$1" proto-event none codex PreToolUse "$2" "$2/core-rules/hooks/rules/destructive.json"' _ "$ASSETS/$target/trellis-hooks" "$ROOT"
   [ "$status" -eq 64 ]
-  [[ "$output" == *"unknown command"* ]]
+  [[ "$output" == *"unknown command"* ]] || false
 }
 @test "native delivery: registry cache checksum is verified and extracted source is never reused" {
   run python3 -I - "$ROOT" "$BATS_TEST_TMPDIR" <<'PY'
@@ -755,6 +799,8 @@ shutil.copytree(root/'native/trellis-hooks', fixture/'native/trellis-hooks', ign
 (fixture/'native/trellis-hooks/Cargo.lock').write_text('version = 4\n\n[[package]]\nname = "trellis-hooks"\nversion = "0.1.0"\n')
 (fixture/'scripts').mkdir()
 shutil.copy2(root/'scripts/build-native-hooks.sh', fixture/'scripts/build-native-hooks.sh')
+# A checkout carries its release version (core-rules/VERSION); not an input.
+(fixture/'core-rules').mkdir(parents=True,exist_ok=True); shutil.copy2(root/'core-rules/VERSION',fixture/'core-rules/VERSION')
 source=(fixture/'scripts/build-native-hooks.sh').read_text().split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
 ns={}; exec(compile(source.split('\ntry:\n',1)[0],'build-native-hooks.sh','exec'),ns)
 for name in ns['include_inputs'](root):
@@ -960,6 +1006,8 @@ import json,os,pathlib,shutil,subprocess,sys
 root=pathlib.Path(sys.argv[1]); fixture=pathlib.Path(sys.argv[2]); fixture.mkdir()
 shutil.copytree(root/'native/trellis-hooks',fixture/'native/trellis-hooks',ignore=shutil.ignore_patterns('target'))
 (fixture/'scripts').mkdir(); shutil.copy2(root/'scripts/build-native-hooks.sh',fixture/'scripts/build-native-hooks.sh')
+# A checkout carries its release version (core-rules/VERSION); not an input.
+(fixture/'core-rules').mkdir(parents=True,exist_ok=True); shutil.copy2(root/'core-rules/VERSION',fixture/'core-rules/VERSION')
 # A real crate now embeds canonical sources outside native/. Copy the exact
 # mechanically discovered closure, never maintain a second fixture allowlist.
 text=(root/'scripts/build-native-hooks.sh').read_text().split("<<'PY'\n",1)[1].rsplit('\nPY',1)[0]
@@ -992,7 +1040,7 @@ PY
 
 source_verification_case() {
   python3 -I - "$ROOT" "$BATS_TEST_TMPDIR/source-verification" "$1" <<'PY'
-import hashlib,json,os,pathlib,subprocess,sys
+import hashlib,json,os,pathlib,re,subprocess,sys
 root=pathlib.Path(sys.argv[1]); fixture=pathlib.Path(sys.argv[2]); fixture.mkdir()
 case=sys.argv[3]
 script=root/'scripts/build-native-hooks.sh'
@@ -1018,6 +1066,9 @@ paths={'native/trellis-hooks/Cargo.lock':b'lock',
        'scripts/build-native-hooks.sh':script.read_bytes()}
 for name,data in paths.items():
     p=fixture/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data)
+# A checkout carries its release version; it is not a native build input.
+version=(root/'core-rules/VERSION').read_text().strip()
+(fixture/'core-rules').mkdir(); (fixture/'core-rules/VERSION').write_text(version+'\n')
 git('init','-q'); git('add','.'); git('commit','-qm','source')
 inputs={p:hashlib.sha256(data).hexdigest() for p,data in paths.items()}
 assets=fixture/'core-rules/native'; assets.mkdir(parents=True)
@@ -1027,7 +1078,7 @@ elf[56:58]=(1).to_bytes(2,'little'); elf[64:68]=(1).to_bytes(4,'little')
 def record(name,data):
     p=assets/name; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data); p.chmod(0o755)
     return dict(path=name,size=len(data),sha256=hashlib.sha256(data).hexdigest())
-d=dict(schema_version=1,version='1.5.0',source_commit=git('rev-parse','HEAD'),inputs=inputs,
+d=dict(schema_version=1,version=version,source_commit=git('rev-parse','HEAD'),inputs=inputs,
        toolchain=dict(channel='1.97.1',rustc='rustc 1.97.1 (8bab26f4f 2026-07-14)',
            cargo_lock_sha256=inputs['native/trellis-hooks/Cargo.lock'],
            rust_toolchain_sha256=inputs['native/trellis-hooks/rust-toolchain.toml']),
@@ -1494,7 +1545,7 @@ PY
   run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" \
     PATH="$BATS_TEST_TMPDIR/hostile-bin:$PATH" "$launcher" --version
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *1.5.0* ]]
+  [[ "$output" == *1.5.0* ]] || false
   # This interruption point is a usable legacy launcher; retry completes.
   run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" \
     PATH="$BATS_TEST_TMPDIR/hostile-bin:$PATH" "$launcher" configure --release 1.5.0 \
@@ -1507,6 +1558,77 @@ PY
   [ "$status" -eq 0 ] || { echo "idempotent configure exited $status: $output"; return 1; }
   [ "$(b1_inode "$launcher")" = "$inode" ]
   [ ! -e "$BATS_TEST_TMPDIR/planted-ran" ]
+}
+# 1.5.1: the documented two-configure first hop with a committed user
+# attachment, from the real 1.4.1 code. The first configure (old launcher, no
+# companion yet) relinks the user surface through the 1.5.x payload: it must
+# render the complete legacy user template, not refuse on the missing
+# companion; the second configure stages the companion and renders native.
+@test "1.5.1: real 1.4.1 first hop with a user attachment renders legacy, then native on the second configure" {
+  b1_native_host
+  REPO_ROOT="$ROOT"
+  source "$ROOT/scripts/tests/helpers/payload-fixture.bash"
+  local old="$BATS_TEST_TMPDIR/old-source" launcher="$BATS_TEST_TMPDIR/user/.local/bin/trellis"
+  local settings="$BATS_TEST_TMPDIR/user/.claude/settings.json" owner rel
+  # The release under test is the one the committed native manifest names.
+  rel="$(jq -r .version "$ROOT/core-rules/native/artifacts.json")"
+  # The real 1.5.x payload: committed core-rules, and this checkout's scripts.
+  B1_REPO="$BATS_TEST_TMPDIR/candidate-source-real"
+  B1_PAYLOAD="$BATS_TEST_TMPDIR/trellis/releases/$rel/payload"
+  mkdir -p "$B1_REPO" "$BATS_TEST_TMPDIR/trellis" "$BATS_TEST_TMPDIR/user"
+  chmod 700 "$BATS_TEST_TMPDIR/trellis" "$BATS_TEST_TMPDIR/user"
+  git -C "$ROOT" archive HEAD -- core-rules trellis.config.json | tar -x -C "$B1_REPO"
+  cp -R "$ROOT/scripts" "$B1_REPO/scripts"
+  [ "$(cat "$B1_REPO/core-rules/VERSION")" = "$rel" ] ||
+    printf '%s\n' "$rel" > "$B1_REPO/core-rules/VERSION"
+  payload_fixture_git -C "$B1_REPO" init -q
+  payload_fixture_git -C "$B1_REPO" add -A
+  payload_fixture_git -C "$B1_REPO" commit -qm 'real candidate release'
+  payload_fixture_tag "$B1_REPO" "$rel" HEAD
+  mkdir -p "$old" "${launcher%/*}" "$BATS_TEST_TMPDIR/user/.claude"
+  git -C "$ROOT" archive v1.4.1 -- scripts core-rules trellis.config.json | tar -x -C "$old"
+  payload_fixture_git -C "$old" init -q
+  payload_fixture_git -C "$old" add -A
+  payload_fixture_git -C "$old" commit -qm 'historical 1.4.1 fixture'
+  payload_fixture_tag "$old" 1.4.1 HEAD
+  run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" bash -c \
+    '. "$1/scripts/lib/release-store.sh"; release_store_install 1.4.1 "$1"' _ "$old"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  cp "$old/scripts/trellis-launcher.sh" "$launcher"
+  chmod 755 "$launcher"
+  run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" \
+    bash "$old/scripts/configure.sh" --source "$B1_REPO" --release 1.4.1 --no-install-launcher
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" \
+    "$launcher" attach --user
+  [ "$status" -eq 0 ] || { echo "1.4.1 attach --user: $output"; return 1; }
+  jq -e '.hooks.WorktreeCreate[0].hooks[0].command | contains("trellis-worktree-create.sh")' "$settings" >/dev/null ||
+    { cat "$settings"; return 1; }
+
+  run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" \
+    "$launcher" release install "$rel" --remote "$B1_REPO"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  mv "$launcher" "$launcher.before"
+  run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" \
+    "$launcher.before" configure --release "$rel" --launcher-template "$B1_PAYLOAD/scripts/trellis-launcher.sh"
+  [ "$status" -eq 0 ] || { echo "first configure: $output"; return 1; }
+  [[ "$output" != *"contextual registration refused"* ]] || { echo "$output"; return 1; }
+  [ ! -e "$BATS_TEST_TMPDIR/trellis/bin/native" ] || false
+  owner="$BATS_TEST_TMPDIR/trellis/attachments/user.json"
+  jq -e --arg rel "$rel" '.release == $rel' "$owner" >/dev/null || { cat "$owner"; return 1; }
+  # Complete legacy user surface: the launcher-free worktree callbacks.
+  jq -e '[.hooks.WorktreeCreate[].hooks[], .hooks.WorktreeRemove[].hooks[]]
+    | length == 2 and all(.[]; (.command | contains("/bin/native/") | not) and (has("args") | not))' "$settings" >/dev/null ||
+    { cat "$settings"; return 1; }
+
+  run env HOME="$BATS_TEST_TMPDIR/user" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" \
+    "$launcher" configure --release "$rel" --launcher-template "$B1_PAYLOAD/scripts/trellis-launcher.sh"
+  [ "$status" -eq 0 ] || { echo "second configure: $output"; return 1; }
+  grep '^launcher_native_entry=' "$launcher" | grep -F '/bin/native/'
+  jq -e '[.hooks.WorktreeCreate[].hooks[], .hooks.WorktreeRemove[].hooks[]]
+    | length == 2 and all(.[]; .command | contains("/bin/native/" + $rel + "/"))' --arg rel "$rel" "$settings" >/dev/null ||
+    { cat "$settings"; return 1; }
+  jq -e '.workflowSizeGuideline == "large"' "$settings" >/dev/null
 }
 @test "B1 T55: verified upgrade pair rolls back when adoption fails" {
   b1_native_host
@@ -1727,7 +1849,7 @@ a.update(size=len(b),sha256=hashlib.sha256(b).hexdigest())
 PY
   run bash "$BUILD" verify "$COPY"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"signature"* ]]
+  [[ "$output" == *"signature"* ]] || false
 }
 
 # T35: the shipped asset is the actual single-architecture arm64 Mach-O, built
@@ -1793,7 +1915,7 @@ PY
   run bash "$BUILD" verify "$ASSETS"
   [ "$status" -eq 0 ]
   run file "$ASSETS/x86_64-unknown-linux-musl/trellis-hooks"
-  [[ "$output" == *"static"* ]]
+  [[ "$output" == *"static"* ]] || false
 }
 
 # T37: the static-musl assumption, from the ELF itself: no program

@@ -2,6 +2,9 @@
 # show-config.sh — portable policy plus validated local machine context.
 set -u
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 
 # Direct-source rejection, in the exact shape release.sh, upgrade.sh, and

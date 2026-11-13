@@ -53,9 +53,9 @@ wm_journal() {
 wm_attach_cmd() {
   local verb="$1" path="$2" release="${3:-}" home="${TRELLIS_HOME:-$HOME/.trellis}"
   if [ "$verb" = attach ]; then
-    bash "$_WM_LIB_DIR/../attach-project.sh" attach --home "$home" --release "$release" "$path" >> "$WM_LOG" 2>&1
+    /usr/bin/env -u TRELLIS_LIBS_PRELOADED bash "$_WM_LIB_DIR/../attach-project.sh" attach --home "$home" --release "$release" "$path" >> "$WM_LOG" 2>&1
   else
-    bash "$_WM_LIB_DIR/../attach-project.sh" detach --home "$home" "$path" >> "$WM_LOG" 2>&1
+    /usr/bin/env -u TRELLIS_LIBS_PRELOADED bash "$_WM_LIB_DIR/../attach-project.sh" detach --home "$home" "$path" >> "$WM_LOG" 2>&1
   fi
 }
 
@@ -214,7 +214,7 @@ wm_deregister() {
   fleet="$(jq -r --arg r "$old" '.projects | to_entries[]
     | select(any(.value.checkouts[]?.worktrees[]?; .root == $r)) | .key | split("/")[0]' "$registry" 2>/dev/null | head -n 1)"
   [ -n "$fleet" ] || return 0
-  if bash "$_WM_LIB_DIR/../registry.sh" deregister --fleet "$fleet" --worktree-root "$old" \
+  if /usr/bin/env -u TRELLIS_LIBS_PRELOADED bash "$_WM_LIB_DIR/../registry.sh" deregister --fleet "$fleet" --worktree-root "$old" \
        --home "${TRELLIS_HOME:-$HOME/.trellis}" >> "$WM_LOG" 2>&1; then
     wm_journal "$journal" "$action" "$old" "$new" deregistered
   else

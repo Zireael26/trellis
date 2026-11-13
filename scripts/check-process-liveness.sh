@@ -45,14 +45,14 @@ if ! command -v ps >/dev/null 2>&1 || ! command -v awk >/dev/null 2>&1; then
   exit 2
 fi
 
-snapshot="$(LC_ALL=C ps -ww -eo pid=,ppid=,pgid=,ucomm=,args= 2>/dev/null)"
+snapshot="$(/usr/bin/env LC_ALL=C ps -ww -eo pid=,ppid=,pgid=,ucomm=,args= 2>/dev/null)"
 ps_status=$?
 if [ "$ps_status" -ne 0 ] || [ -z "$snapshot" ]; then
   printf 'ERROR process-table snapshot unavailable\n' >&2
   exit 2
 fi
 
-result="$(printf '%s\n' "$snapshot" | LC_ALL=C awk -v mode="$mode" -v project="$project" '
+result="$(printf '%s\n' "$snapshot" | /usr/bin/env LC_ALL=C awk -v mode="$mode" -v project="$project" '
 function base_name(value) {
   sub(/^.*\//, "", value)
   return value

@@ -8,7 +8,7 @@
 # docs-only case (base legacy docs-only path). The full-battery case is expected
 # green on base; it guards against over-narrowing.
 
-EXPECT_NARROWED="--test-file=scripts/tests/check-decisions-log.bats --test-file=scripts/tests/check-process-liveness.bats --test-file=scripts/tests/diff-base-sync.bats --test-file=scripts/tests/gpt6-roster-sweep.bats --test-file=scripts/tests/live-model-roster.bats --test-file=scripts/tests/native-hooks-delivery.bats --test-file=scripts/tests/no-legacy-herdr.bats --test-file=scripts/tests/posix-bootstrap-prologue.bats --test-file=scripts/tests/push-test-map.bats --test-file=scripts/tests/release-payload-commit.bats --test-file=scripts/tests/release-tag-consumers.bats --test-file=scripts/tests/suite-coverage.bats --test-file=scripts/tests/test-fencing.bats"
+EXPECT_NARROWED="--test-file=scripts/tests/attach-verdict-stat-dialect.bats --test-file=scripts/tests/bats-conditionals-lint.bats --test-file=scripts/tests/check-decisions-log.bats --test-file=scripts/tests/check-process-liveness.bats --test-file=scripts/tests/diff-base-sync.bats --test-file=scripts/tests/gpt6-roster-sweep.bats --test-file=scripts/tests/live-model-roster.bats --test-file=scripts/tests/native-hooks-delivery.bats --test-file=scripts/tests/no-legacy-herdr.bats --test-file=scripts/tests/posix-bootstrap-prologue.bats --test-file=scripts/tests/push-test-map.bats --test-file=scripts/tests/release-payload-commit.bats --test-file=scripts/tests/release-tag-consumers.bats --test-file=scripts/tests/suite-coverage.bats --test-file=scripts/tests/test-fencing.bats"
 
 setup() {
   export HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis"
@@ -49,7 +49,7 @@ setup() {
     > "$dir/.claude/skills/process-gate-local/local.config.sh"
   cp "$BATS_TEST_DIRNAME/../../../../scripts/lib/push-test-map.py" "$dir/scripts/lib/push-test-map.py"
   local suite
-  for suite in check-decisions-log check-process-liveness diff-base-sync gpt6-roster-sweep \
+  for suite in attach-verdict-stat-dialect bats-conditionals-lint check-decisions-log check-process-liveness diff-base-sync gpt6-roster-sweep \
     live-model-roster native-hooks-delivery no-legacy-herdr posix-bootstrap-prologue push-test-map release-payload-commit \
     release-tag-consumers suite-coverage test-fencing; do
     printf '# fixture suite\n' > "$dir/scripts/tests/$suite.bats"
@@ -101,9 +101,9 @@ recorded() { sed -n "s/^$1=//p" "$SEEN"; }
 recorded_args() { sed -n 's/^arg=//p' "$SEEN" | paste -sd' ' -; }
 
 assert_tests_row() {  # assert_tests_row <scope>
-  [[ "$output" == *"Overall: MERGEABLE"* ]]
-  [[ "$output" == *"Tests & coverage:"*"— $1"* ]]
-  [[ "$output" == *$'\nTests: '"$1"* ]]
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || false
+  [[ "$output" == *"Tests & coverage:"*"— $1"* ]] || false
+  [[ "$output" == *$'\nTests: '"$1"* ]] || false
 }
 
 accept_verdict() {
@@ -131,7 +131,7 @@ accept_verdict() {
   run bash -c 'cd "$1" && bash "$2" 11111111-1111-4111-8111-111111111111 "$3" "$4"' \
     _ "$PROCESS_GATE_PROJECT_DIR" "$tree/core-rules/skills/herdr-foreman/scripts/accept-branch.sh" "$BASE" "$HEAD_SHA"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"accept: parsed verdict=accept"* ]]
+  [[ "$output" == *"accept: parsed verdict=accept"* ]] || false
   ! gfx show-ref --verify --quiet refs/heads/pi-agent-receipt
 }
 
@@ -144,8 +144,8 @@ accept_verdict() {
   [ "$(recorded_args)" = "$EXPECT_NARROWED" ]
   local row
   row="$(printf '%s\n' "$output" | grep -F 'Tests & coverage:')"
-  [[ "$row" == *✅* ]]
-  assert_tests_row "narrowed: 13 selected"
+  [[ "$row" == *✅* ]] || false
+  assert_tests_row "narrowed: 15 selected"
   accept_verdict
 }
 

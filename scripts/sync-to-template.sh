@@ -117,11 +117,11 @@ mirror_bootstrap_private_directory() {
     Darwin)
       # Extended attributes can hide the ACL marker behind @. Read ACL rows,
       # not just the mode suffix; canonical input paths contain no newlines.
-      listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1
+      listing="$(/usr/bin/env LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1
       case "$listing" in *"
 "*) return 1 ;; esac
       ;;
-    *) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
+    *) listing="$(/usr/bin/env LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
   esac
   permissions="${listing%% *}"
   case "$permissions" in *+*) return 1 ;; esac

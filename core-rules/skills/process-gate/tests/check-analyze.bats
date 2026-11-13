@@ -55,7 +55,7 @@ commit_and_check() {
 @test "no spec dir touched -> pass (exit 0)" {
   commit_and_check "src/app.ts" $'export const x = 1;\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"no spec dir touched"* ]]
+  [[ "$output" == *"no spec dir touched"* ]] || false
 }
 
 @test "no spec dir touched -> NEVER exits 1 (set -e / grep-no-match invariant)" {
@@ -82,7 +82,7 @@ commit_and_check() {
     "specs/001-feature/spec.md"    $'# spec\n' \
     "specs/001-feature/analyze.md" $'# Analyze\n\n## Verdict: PASS (1 warning)\n'
   [ "$status" -eq 0 ]
-  [[ "$output" != *"no recognizable"* ]]
+  [[ "$output" != *"no recognizable"* ]] || false
 }
 
 @test "analyze Verdict: PASS with a multi-word qualifier -> pass (exit 0)" {
@@ -106,7 +106,7 @@ commit_and_check() {
     "specs/001-feature/spec.md"    $'# spec\n' \
     "specs/001-feature/analyze.md" $'# Analyze\n\n## Verdict: MOSTLY FINE\n'
   [ "$status" -eq 2 ]
-  [[ "$output" == *"no recognizable"* ]]
+  [[ "$output" == *"no recognizable"* ]] || false
 }
 
 @test "analyze Verdict: NEEDS-REVISION -> warn (exit 2)" {
@@ -114,7 +114,7 @@ commit_and_check() {
     "specs/001-feature/spec.md"    $'# spec\n' \
     "specs/001-feature/analyze.md" $'# Analyze\n\n## Verdict: NEEDS-REVISION\n'
   [ "$status" -eq 2 ]
-  [[ "$output" == *"NEEDS-REVISION"* ]]
+  [[ "$output" == *"NEEDS-REVISION"* ]] || false
 }
 
 @test "analyze Verdict: BLOCKED -> warn (exit 2), NEVER 1" {
@@ -125,13 +125,13 @@ commit_and_check() {
   # the merge. Worst it can do is warn.
   [ "$status" -eq 2 ]
   [ "$status" -ne 1 ]
-  [[ "$output" == *"BLOCKED"* ]]
+  [[ "$output" == *"BLOCKED"* ]] || false
 }
 
 @test "analyze.md missing for touched spec dir -> warn (exit 2)" {
   commit_and_check "specs/002-thing/spec.md" $'# spec\n'
   [ "$status" -eq 2 ]
-  [[ "$output" == *"analyze not run for specs/002-thing"* ]]
+  [[ "$output" == *"analyze not run for specs/002-thing"* ]] || false
 }
 
 @test "analyze.md present but no recognizable Verdict line -> warn (exit 2), NEVER 1" {
@@ -140,7 +140,7 @@ commit_and_check() {
     "specs/004-noverdict/analyze.md" $'# Analyze\n\nsome notes, no verdict header\n'
   [ "$status" -eq 2 ]
   [ "$status" -ne 1 ]
-  [[ "$output" == *"no recognizable"* ]]
+  [[ "$output" == *"no recognizable"* ]] || false
 }
 
 # --- multi-round resolution ---
@@ -150,7 +150,7 @@ commit_and_check() {
     "specs/005-rounds/analyze.md"   $'## Verdict: NEEDS-REVISION\n' \
     "specs/005-rounds/analyze-8.md" $'## Verdict: PASS\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"analyze-8.md"* ]]
+  [[ "$output" == *"analyze-8.md"* ]] || false
 }
 
 @test "analyze round selection compares numerically -> analyze-10.md wins over analyze-2.md" {
@@ -158,7 +158,7 @@ commit_and_check() {
     "specs/006-numeric/analyze-2.md"  $'## Verdict: NEEDS-REVISION\n' \
     "specs/006-numeric/analyze-10.md" $'## Verdict: PASS\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"analyze-10.md"* ]]
+  [[ "$output" == *"analyze-10.md"* ]] || false
 }
 
 @test "named analyze variant is ignored -> analyze.md remains authoritative" {
@@ -166,14 +166,14 @@ commit_and_check() {
     "specs/007-named/analyze.md"          $'## Verdict: PASS\n' \
     "specs/007-named/analyze-pre-impl.md" $'## Verdict: BLOCKED\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"analyze.md"* ]]
+  [[ "$output" == *"analyze.md"* ]] || false
 }
 
 @test "numbered analyze round without analyze.md -> pass (exit 0)" {
   commit_and_check \
     "specs/008-numbered-only/analyze-2.md" $'## Verdict: PASS\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"analyze-2.md"* ]]
+  [[ "$output" == *"analyze-2.md"* ]] || false
 }
 
 @test "newest analyze round without Verdict line -> warn (exit 2)" {
@@ -181,7 +181,7 @@ commit_and_check() {
     "specs/009-malformed/analyze.md"   $'## Verdict: PASS\n' \
     "specs/009-malformed/analyze-3.md" $'# Analyze\n\nsome notes, no verdict header\n'
   [ "$status" -eq 2 ]
-  [[ "$output" == *"analyze-3.md"* ]]
+  [[ "$output" == *"analyze-3.md"* ]] || false
 }
 
 @test "leading-zero analyze round suffix normalizes numerically -> warn (exit 2)" {
@@ -189,7 +189,7 @@ commit_and_check() {
     "specs/010-leading-zero/analyze.md"    $'## Verdict: PASS\n' \
     "specs/010-leading-zero/analyze-07.md" $'## Verdict: NEEDS-REVISION\n'
   [ "$status" -eq 2 ]
-  [[ "$output" == *"analyze-07.md"* ]]
+  [[ "$output" == *"analyze-07.md"* ]] || false
 }
 
 @test "multi-round resolution -> NEVER exits 1 (authoritative-report invariant)" {
@@ -198,7 +198,7 @@ commit_and_check() {
     "specs/011-never-one/analyze-2.md" $'## Verdict: BLOCKED\n'
   [ "$status" -eq 2 ]
   [ "$status" -ne 1 ]
-  [[ "$output" == *"analyze-2.md"* ]]
+  [[ "$output" == *"analyze-2.md"* ]] || false
 }
 
 # --- worst-across-dirs ---
@@ -209,7 +209,7 @@ commit_and_check() {
     "specs/001-ok/analyze.md"   $'## Verdict: PASS\n' \
     "specs/003-bad/spec.md"     $'# spec\n'
   [ "$status" -eq 2 ]
-  [[ "$output" == *"analyze not run for specs/003-bad"* ]]
+  [[ "$output" == *"analyze not run for specs/003-bad"* ]] || false
 }
 
 @test "two spec dirs, both PASS -> pass (exit 0)" {
@@ -235,11 +235,11 @@ commit_and_check() {
   git -C "$PROJECT_DIR" commit -qm 'change quoted spec path'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"NEEDS-REVISION"* && "$output" != *"no spec dir touched"* ]]
+  [[ "$output" == *"NEEDS-REVISION"* && "$output" != *"no spec dir touched"* ]] || false
   printf 'clean change\n' > "$PROJECT_DIR/specs/051-clean/notes.md"
   git -C "$PROJECT_DIR" add specs/051-clean/notes.md
   git -C "$PROJECT_DIR" commit -qm 'change passing spec'
   run bash -c 'cd "$1" && exec bash "$2" --range=HEAD~1..HEAD' fixture "$PROJECT_DIR" "$SCRIPT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"analyze verdict is PASS"* ]]
+  [[ "$output" == *"analyze verdict is PASS"* ]] || false
 }

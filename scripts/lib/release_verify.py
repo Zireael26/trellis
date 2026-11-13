@@ -198,10 +198,11 @@ class AclProbe:
                     continue
                 raise
             return True
-        # Keep the existing NFSv4 ACL detection. A failed enumeration is not
-        # evidence of absence, even on a filesystem without xattr support.
+        # NFSv4 and RichACL ACLs and file capabilities (privilege the mode
+        # bits do not show). A failed enumeration is not evidence of absence,
+        # even on a filesystem without xattr support.
         names = os.listxattr(target, **kwargs)
-        return 'system.nfs4_acl' in names
+        return bool({'system.nfs4_acl', 'system.richacl', 'security.capability'} & set(names))
 
     def has_acl_fd(self, fd):
         if self.libc is not None:

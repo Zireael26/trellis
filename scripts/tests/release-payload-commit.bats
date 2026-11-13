@@ -183,6 +183,10 @@ scripts/trellis" ] || { echo "$output"; false; }
 #   scripts/harness-conformance.py  its header says "source-only adapter fixture
 #                                   corpus"; run-tests.sh drives it, no command does.
 #   scripts/lint-shell-tree.sh      lints the source checkout's own roots.
+# The baseline was found by the 1.5.1 T45 battery, exempt for the same reason:
+#   scripts/lint-shell-assignments-baseline.json
+#                                   that lint's baseline: source paths it
+#                                   scans, never read by an installed payload.
 SCAN_EXEMPT_FILES='scripts/run-tests.sh
 scripts/lib/test-suites.sh
 scripts/lib/mirror-lint.sh
@@ -191,7 +195,8 @@ scripts/check-mirror-preseal.sh
 scripts/pi-web-search-tests.sh
 core-rules/skills/process-gate/scripts/check-tests.sh
 scripts/harness-conformance.py
-scripts/lint-shell-tree.sh'
+scripts/lint-shell-tree.sh
+scripts/lint-shell-assignments-baseline.json'
 
 # <file>|<prefix> pairs exempt for ONE prefix only, so any other excluded prefix
 # in the same file still fails. Each names the attached PROJECT's own specs/
@@ -200,14 +205,20 @@ scripts/lint-shell-tree.sh'
 # test selector and contained runner name source test inventory, not payload data;
 # so do the runner's exact-input verdict, tag-push reuse (it reads the audit from
 # the tag's Git tree) and the maintainer-run metadata trace and weight refresh,
-# whose specs/ default is the source checkout's own timing evidence.
+# whose specs/ default is the source checkout's own timing evidence. The Bats
+# conditional lint names scripts/tests/fixtures/ only to drop fixture suites from
+# its own ls-files listing; it never reads that tree.
+# The runner's verdict also binds the source checkout's native/trellis-hooks/
+# Cargo.lock, only for scripts/run-tests-local.py (native_cargo_identity).
 SCAN_EXEMPT_PAIRS='core-rules/hooks/lib/spec-gate-core.sh|specs/
 scripts/check-gate-inventory.sh|scripts/tests/
 scripts/lib/push-test-map.py|scripts/tests/
+scripts/lint-bats-conditionals.py|scripts/tests/
 scripts/run-tests-local.py|scripts/tests/
 scripts/lib/gate_verdict.py|scripts/tests/
 scripts/lib/gate_verdict.py|core-rules/hooks/tests/
 scripts/lib/gate_verdict.py|core-rules/codex/hooks/tests/
+scripts/lib/gate_verdict.py|native/
 scripts/lib/tag_push_reuse.py|scripts/tests/
 scripts/trace-release-metadata.py|scripts/tests/
 scripts/refresh-stage-weights.py|scripts/tests/

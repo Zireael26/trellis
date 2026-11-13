@@ -63,20 +63,40 @@ initialize_release_store_machine() {
   release_store_machine_paths
 }
 
-teardown() {
+# Release/adopt runs across env -i, so the runner's postjob-off switch is not
+# inherited. This bounded, test-only process scan drains the observed workers
+# before fixture reuse; it cannot prove absence during exec or exclude a later
+# spawn by a surviving producer. A timeout leaves this teardown's paths alone,
+# but Bats or the runner may still remove their own enclosing temporary root.
+# Some macOS seatbelt shells cannot run ps: that scan fails closed rather than
+# being treated as empty. Stronger containment is a 1.5.3 follow-up.
+wait_for_fixture_postjobs() {
+  python3 "$REPO_ROOT/scripts/tests/helpers/wait-fixture-postjobs.py" \
+    "$1" "${FIXTURE_POSTJOB_WAIT_SECONDS:-900}"
+}
+
+release_store_fixture_teardown() {
   local background_pid
   for background_pid in "${RELEASE_PROCESS_PID_A:-}" "${RELEASE_PROCESS_PID_B:-}"; do
     [ -n "$background_pid" ] || continue
     kill "$background_pid" 2>/dev/null || true
     wait "$background_pid" 2>/dev/null || true
   done
-  if [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ]; then
-    find "$SANDBOX" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
-    rm -rf "$SANDBOX"
+  if [ -n "${SANDBOX:-}" ]; then
+    # A timeout or process-table error must retain both the machine and lease.
+    wait_for_fixture_postjobs "$SANDBOX" || return 1
+    if [ -d "$SANDBOX" ]; then
+      find "$SANDBOX" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
+      rm -rf "$SANDBOX" || return 1
+    fi
   fi
   if [ "${GROUP_PLAN_CASE_LOCK_HELD:-false}" = true ]; then
     group_plan_case_lease_release
   fi
+}
+
+teardown() {
+  release_store_fixture_teardown
 }
 
 install_release_test_fixture() {
@@ -535,7 +555,7 @@ GENERATOR
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" adopt 1.8.1 --project malformed-target
   [ "$status" -eq 4 ] || { echo "$output"; false; }
   [[ "$output" == *'managed hook generation failed'* ]] || { echo "$output"; false; }
-  [[ "$output" != *'adopted:'* ]]
+  [[ "$output" != *'adopted:'* ]] || false
   [ "$(hook_state_listing "$managed")" = "$before_state" ]
   [ "$(directory_inode "$managed")" = "$before_inode" ]
   [ "$(cat "$owner")" = "$before_owner" ]

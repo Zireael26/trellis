@@ -59,7 +59,7 @@ commit_and_check() {
 @test "audit-closure: 'feat(): empty' fails (empty scope is invalid)" {
   commit_and_check "feat(): empty"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"commit-subject"* ]]
+  [[ "$output" == *"commit-subject"* ]] || false
 }
 
 @test "codex-fix: 'codex: subject' passes (unscoped)" {
@@ -110,11 +110,11 @@ commit_and_check() {
 @test "baseline: 'random: subject' fails (unknown type)" {
   commit_and_check "random: subject"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"commit-subject"* ]]
+  [[ "$output" == *"commit-subject"* ]] || false
 }
 
 @test "baseline: 'feat:nospace' fails (missing space after colon)" {
   commit_and_check "feat:nospace"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"commit-subject"* ]]
+  [[ "$output" == *"commit-subject"* ]] || false
 }

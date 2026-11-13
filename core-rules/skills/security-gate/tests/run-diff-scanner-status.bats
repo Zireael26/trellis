@@ -166,7 +166,7 @@ assert_mergeable() {
   commit_change
   run_diff
   assert_blocked semgrep SAST
-  [[ "$output" == *"semgrep did not complete:"*"PartialParsing"* ]]
+  [[ "$output" == *"semgrep did not complete:"*"PartialParsing"* ]] || false
 }
 
 stub_semgrep_error() {
@@ -187,8 +187,8 @@ PY
     stub_semgrep_error changed.sh "$kind"
     run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
     assert_mergeable
-    [[ "$output" == *"semgrep: 1 shell parse errors not counted (shellcheck is the shell SAST)"* ]]
-    [[ "$output" == *"shellcheck: ran=1 exit=0 parsed=1 scanned=1"* ]]
+    [[ "$output" == *"semgrep: 1 shell parse errors not counted (shellcheck is the shell SAST)"* ]] || false
+    [[ "$output" == *"shellcheck: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
   done
 }
 
@@ -220,7 +220,7 @@ PY
     stub_semgrep_error "$PROJECT/$path" PartialParsing
     run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
     assert_mergeable
-    [[ "$output" == *"semgrep: 1 shell parse errors not counted"* ]]
+    [[ "$output" == *"semgrep: 1 shell parse errors not counted"* ]] || false
   done
 }
 
@@ -230,8 +230,8 @@ PY
     stub_semgrep_error changed.py "$kind"
     run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
     assert_blocked semgrep SAST
-    [[ "$output" == *"JSON errors non-empty"* ]]
-    [[ "$output" != *"shell parse errors not counted"* ]]
+    [[ "$output" == *"JSON errors non-empty"* ]] || false
+    [[ "$output" != *"shell parse errors not counted"* ]] || false
   done
 }
 
@@ -241,8 +241,8 @@ PY
     stub_semgrep_error changed.sh "$kind"
     run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
     assert_blocked semgrep SAST
-    [[ "$output" == *"JSON errors non-empty"* ]]
-    [[ "$output" != *"shell parse errors not counted"* ]]
+    [[ "$output" == *"JSON errors non-empty"* ]] || false
+    [[ "$output" != *"shell parse errors not counted"* ]] || false
   done
 }
 
@@ -254,8 +254,8 @@ PY
     SECURITY_GATE_PROJECT_NAME=project bash "$SCRIPT_ROOT/scripts/run-diff.sh" \
     "$PROJECT" --range=HEAD~2..HEAD --no-llm
   assert_blocked semgrep SAST
-  [[ "$output" == *"semgrep: 1 shell parse errors not counted"* ]]
-  [[ "$output" == *"JSON errors non-empty (Syntax error)"* ]]
+  [[ "$output" == *"semgrep: 1 shell parse errors not counted"* ]] || false
+  [[ "$output" == *"JSON errors non-empty (Syntax error)"* ]] || false
 }
 
 @test "semgrep shell parse exemption does not excuse missing covered targets" {
@@ -266,8 +266,8 @@ PY
     SECURITY_GATE_PROJECT_NAME=project bash "$SCRIPT_ROOT/scripts/run-diff.sh" \
     "$PROJECT" --range=HEAD~2..HEAD --no-llm
   assert_blocked semgrep SAST
-  [[ "$output" == *"semgrep: 1 shell parse errors not counted"* ]]
-  [[ "$output" == *"target not scanned"*"changed.py"* ]]
+  [[ "$output" == *"semgrep: 1 shell parse errors not counted"* ]] || false
+  [[ "$output" == *"target not scanned"*"changed.py"* ]] || false
 }
 
 @test "semgrep excluded shell parse errors receive no ShellCheck exemption" {
@@ -275,7 +275,7 @@ PY
   stub_semgrep_error changed.sh 'Syntax error'
   run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS='*.sh'
   assert_blocked semgrep SAST
-  [[ "$output" != *"shell parse errors not counted"* ]]
+  [[ "$output" != *"shell parse errors not counted"* ]] || false
 }
 
 @test "a shell shebang on a file with another extension earns no parse exemption" {
@@ -313,7 +313,7 @@ PY
   stub_semgrep_error changed.zsh 'Lexical error'
   run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
   assert_blocked semgrep SAST
-  [[ "$output" != *"shell parse errors not counted"* ]]
+  [[ "$output" != *"shell parse errors not counted"* ]] || false
 }
 
 @test "semgrep parse errors without a path remain fatal" {
@@ -321,7 +321,7 @@ PY
   printf '%s\n' '{"results":[],"errors":[{"type":"Syntax error"}],"paths":{"scanned":["changed.sh"]}}' > "$TEST_ROOT/semgrep.json"
   run_diff SECURITY_GATE_STACK_PROFILE=shell-tooling
   assert_blocked semgrep SAST
-  [[ "$output" != *"shell parse errors not counted"* ]]
+  [[ "$output" != *"shell parse errors not counted"* ]] || false
 }
 
 @test "semgrep missing JSON at exit 0 blocks SAST" {
@@ -342,9 +342,9 @@ PY
   commit_change
   run_diff
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"Overall: NEEDS CHANGES"* ]]
-  [[ "$output" == *"semgrep/fixture"* ]]
-  [[ "$output" != *"did not complete:"* ]]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || false
+  [[ "$output" == *"semgrep/fixture"* ]] || false
+  [[ "$output" != *"did not complete:"* ]] || false
 }
 
 # lib/semgrep.sh documents findings as exit 0 without --error. This invocation
@@ -457,10 +457,10 @@ PY
   commit_change
   run_diff SECURITY_GATE_SHELLCHECK=1
   assert_mergeable
-  [[ "$output" == *"semgrep: ran=1 exit=0 parsed=1 scanned=1"* ]]
-  [[ "$output" == *"shellcheck: ran=1 exit=0 parsed=1 scanned=1"* ]]
-  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]]
-  [[ "$output" == *"gitleaks: ran=1 exit=0 parsed=1 scanned=range:HEAD~1..HEAD"* ]]
+  [[ "$output" == *"semgrep: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
+  [[ "$output" == *"shellcheck: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
+  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
+  [[ "$output" == *"gitleaks: ran=1 exit=0 parsed=1 scanned=range:HEAD~1..HEAD"* ]] || false
 }
 
 @test "CONTROL gitleaks exit 1 with a valid leak report retains findings verdict" {
@@ -468,9 +468,9 @@ PY
   commit_change
   run_diff GITLEAKS_MODE=findings
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"Overall: BLOCKED"* ]]
-  [[ "$output" == *"gitleaks/fixture-leak"* ]]
-  [[ "$output" != *"did not complete:"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
+  [[ "$output" == *"gitleaks/fixture-leak"* ]] || false
+  [[ "$output" != *"did not complete:"* ]] || false
 }
 
 @test "CONTROL no dependency changes do not require osv-scanner" {
@@ -556,7 +556,7 @@ PY
   commit_change
   run_diff
   assert_blocked semgrep SAST
-  [[ "$output" == *"semgrep: ran=1 exit=0 parsed=0"* ]]
+  [[ "$output" == *"semgrep: ran=1 exit=0 parsed=0"* ]] || false
 }
 
 @test "semgrep empty paths.scanned is partial for a covered TypeScript target" {
@@ -564,7 +564,7 @@ PY
   commit_change
   run_diff
   assert_blocked semgrep SAST
-  [[ "$output" == *"semgrep did not complete:"*"target not scanned"*"changed.ts"* ]]
+  [[ "$output" == *"semgrep did not complete:"*"target not scanned"*"changed.ts"* ]] || false
 }
 
 @test "semgrep must cover each target, not merely return a nonzero scanned count" {
@@ -573,7 +573,7 @@ PY
   printf '%s\n' '{"results":[],"errors":[],"paths":{"scanned":["other.ts"]}}' > "$TEST_ROOT/semgrep.json"
   run_diff
   assert_blocked semgrep SAST
-  [[ "$output" == *"target not scanned"*"changed.ts"* ]]
+  [[ "$output" == *"target not scanned"*"changed.ts"* ]] || false
 }
 
 assert_missing_covered_target() {
@@ -581,7 +581,7 @@ assert_missing_covered_target() {
   commit_change
   run_diff SECURITY_GATE_STACK_PROFILE="$1"
   assert_blocked semgrep SAST
-  [[ "$output" == *"target not scanned"*"changed.ts"* ]]
+  [[ "$output" == *"target not scanned"*"changed.ts"* ]] || false
 }
 
 @test "web-next blocks a covered scoped language missing from paths.scanned" {
@@ -635,7 +635,7 @@ PY
   commit_path package-lock.json
   run_diff OSV_MODE=unrelated
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"changed manifest not scanned: package-lock.json"* ]]
+  [[ "$output" == *"changed manifest not scanned: package-lock.json"* ]] || false
 }
 
 @test "OSV must report every changed lockfile" {
@@ -644,7 +644,7 @@ PY
   commit_path package-lock.json
   run_diff OSV_MODE=first-only
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"changed manifest not scanned: uv.lock"* ]]
+  [[ "$output" == *"changed manifest not scanned: uv.lock"* ]] || false
 }
 
 @test "OSV uses --no-ignore for a tracked manifest in a gitignored directory" {
@@ -654,7 +654,7 @@ PY
   commit_path vendor/requirements.txt
   run_diff OSV_MODE=needs-no-ignore
   assert_mergeable
-  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]]
+  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
 }
 
 @test "OSV cannot treat a manifests-only change as covered by an unrelated lockfile" {
@@ -662,7 +662,7 @@ PY
     commit_path "$manifest"
     run_diff OSV_MODE=unrelated
     assert_blocked osv-scanner Deps
-    [[ "$output" == *"no lockfile osv-scanner can read"*"$manifest"* ]]
+    [[ "$output" == *"no lockfile osv-scanner can read"*"$manifest"* ]] || false
   done
 }
 
@@ -683,7 +683,7 @@ PY
   commit_path package.json
   run_diff OSV_MODE=no-sources
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"osv-scanner did not complete: no lockfile osv-scanner can read"* ]]
+  [[ "$output" == *"osv-scanner did not complete: no lockfile osv-scanner can read"* ]] || false
 }
 
 @test "a non-ASCII TypeScript filename reaches the detector" {
@@ -691,8 +691,8 @@ PY
   commit_path évil.ts
   run_diff
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"semgrep/literal-path"*"évil.ts"* ]]
-  [[ "$output" != *"did not complete:"* ]]
+  [[ "$output" == *"semgrep/literal-path"*"évil.ts"* ]] || false
+  [[ "$output" != *"did not complete:"* ]] || false
 }
 
 @test "a non-ASCII dependency directory requires an OSV scan" {
@@ -705,7 +705,7 @@ PY
   commit_path é/package-lock.json
   run_diff
   assert_mergeable
-  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]]
+  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
 }
 
 @test "a symlink to regular TypeScript file type change reaches the detector" {
@@ -717,8 +717,8 @@ PY
   commit_path app.ts
   run_diff
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"semgrep/literal-path"*"app.ts"* ]]
-  [[ "$output" != *"did not complete:"* ]]
+  [[ "$output" == *"semgrep/literal-path"*"app.ts"* ]] || false
+  [[ "$output" != *"did not complete:"* ]] || false
 }
 
 @test "literal quotes, tabs and newlines in source paths reach the detector" {
@@ -727,8 +727,8 @@ PY
     commit_path "$path"
     run_diff
     [ "$status" -eq 1 ] || { echo "$output"; false; }
-    [[ "$output" == *"semgrep/literal-path"* ]]
-    [[ "$output" != *"did not complete:"* ]]
+    [[ "$output" == *"semgrep/literal-path"* ]] || false
+    [[ "$output" != *"did not complete:"* ]] || false
   done
 }
 
@@ -760,8 +760,8 @@ seed_untracked_worktree_lock() {
   stub_osv_findings "$PROJECT/.claude/worktrees/other/package-lock.json"
   run_diff OSV_MODE=local-findings
   assert_mergeable
-  [[ "$output" == *"osv-scanner: ran=1 exit=1 parsed=1 scanned=1"* ]]
-  [[ "$output" != *"fixture-vuln-1"* ]]
+  [[ "$output" == *"osv-scanner: ran=1 exit=1 parsed=1 scanned=1"* ]] || false
+  [[ "$output" != *"fixture-vuln-1"* ]] || false
 }
 
 @test "OSV drops untracked findings without dropping tracked high findings" {
@@ -770,10 +770,10 @@ seed_untracked_worktree_lock() {
   stub_osv_findings "$PROJECT/.claude/worktrees/other/package-lock.json" "$PROJECT/package-lock.json"
   run_diff OSV_MODE=local-findings
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"Overall: BLOCKED"* ]]
-  [[ "$output" == *"osv/fixture-vuln-2"* ]]
-  [[ "$output" != *"fixture-vuln-1"* ]]
-  [[ "$output" != *"did not complete:"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
+  [[ "$output" == *"osv/fixture-vuln-2"* ]] || false
+  [[ "$output" != *"fixture-vuln-1"* ]] || false
+  [[ "$output" != *"did not complete:"* ]] || false
 }
 
 @test "the two-argument OSV helper also drops untracked baseline findings" {
@@ -792,7 +792,7 @@ seed_untracked_worktree_lock() {
   stub_osv_findings ""
   run_diff OSV_MODE=local-findings
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"missing or malformed JSON"* ]]
+  [[ "$output" == *"missing or malformed JSON"* ]] || false
 }
 
 @test "an untracked lockfile receipt cannot cover a changed tracked manifest" {
@@ -800,7 +800,7 @@ seed_untracked_worktree_lock() {
   commit_path package.json
   run_diff OSV_MODE=first-only
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"no lockfile osv-scanner can read: package.json"* ]]
+  [[ "$output" == *"no lockfile osv-scanner can read: package.json"* ]] || false
 }
 
 seed_workspace_lock() {
@@ -870,7 +870,7 @@ commit_workspace_manifest() {
     commit_path "members/component/$manifest"
     run_diff OSV_MODE=omitted
     assert_blocked osv-scanner Deps
-    [[ "$output" == *"no lockfile osv-scanner can read"*"members/component/$manifest"* ]]
+    [[ "$output" == *"no lockfile osv-scanner can read"*"members/component/$manifest"* ]] || false
   done
 }
 
@@ -880,7 +880,7 @@ commit_workspace_manifest() {
   commit_path members/package.json
   run_diff OSV_MODE=first-only
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"no lockfile osv-scanner can read: members/package.json"* ]]
+  [[ "$output" == *"no lockfile osv-scanner can read: members/package.json"* ]] || false
 }
 
 @test "suffix-only source filenames still require Semgrep coverage" {
@@ -888,7 +888,7 @@ commit_workspace_manifest() {
   commit_path .ts
   run_diff
   assert_blocked semgrep SAST
-  [[ "$output" == *"target not scanned"*".ts"* ]]
+  [[ "$output" == *"target not scanned"*".ts"* ]] || false
 }
 
 @test "CONTROL a suffix-only source filename with a valid receipt is mergeable" {
@@ -904,7 +904,7 @@ commit_workspace_manifest() {
     commit_path "$path"
     run_diff
     assert_blocked osv-scanner Deps
-    [[ "$output" == *"changed manifest path contains control character or %"* ]]
+    [[ "$output" == *"changed manifest path contains control character or %"* ]] || false
   done
 }
 
@@ -912,7 +912,7 @@ commit_workspace_manifest() {
   commit_path package-lock.json
   run_diff OSV_MODE=relative
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"changed manifest not scanned: package-lock.json"* ]]
+  [[ "$output" == *"changed manifest not scanned: package-lock.json"* ]] || false
 }
 
 # Round 4: prove ancestor membership, retain submodule/directory sources,
@@ -923,7 +923,7 @@ assert_nonmember_blocked() {
   commit_workspace_manifest
   run_diff
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"ancestor lockfile does not name member: members/component/$WORKSPACE_MANIFEST"* ]]
+  [[ "$output" == *"ancestor lockfile does not name member: members/component/$WORKSPACE_MANIFEST"* ]] || false
 }
 
 assert_member_covered() {
@@ -961,7 +961,7 @@ assert_member_covered() {
   commit_workspace_manifest
   run_diff
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"ancestor lockfile does not name member: members/component/Cargo.toml"* ]]
+  [[ "$output" == *"ancestor lockfile does not name member: members/component/Cargo.toml"* ]] || false
 }
 
 @test "CONTROL npm packages entry proves ancestor workspace membership" {
@@ -1006,7 +1006,7 @@ assert_member_covered() {
   commit_workspace_manifest
   run_diff
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"ancestor lockfile does not name member"* ]]
+  [[ "$output" == *"ancestor lockfile does not name member"* ]] || false
 }
 
 @test "a yarn descriptor string is not a workspace package mapping" {
@@ -1017,7 +1017,7 @@ assert_member_covered() {
   commit_workspace_manifest
   run_diff
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"ancestor lockfile does not name member"* ]]
+  [[ "$output" == *"ancestor lockfile does not name member"* ]] || false
 }
 
 @test "a malformed ancestor lock cannot prove workspace membership" {
@@ -1028,7 +1028,7 @@ assert_member_covered() {
   commit_workspace_manifest
   run_diff
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"ancestor lockfile does not name member"* ]]
+  [[ "$output" == *"ancestor lockfile does not name member"* ]] || false
 }
 
 seed_submodule_lock() {
@@ -1065,8 +1065,8 @@ assert_normalized_high() {
   stub_osv_findings "$PROJECT/vendor/deps/package-lock.json"
   run_diff OSV_MODE=findings
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"osv/fixture-vuln-1"*"vendor/deps/package-lock.json"* ]]
-  [[ "$output" != *"did not complete:"* ]]
+  [[ "$output" == *"osv/fixture-vuln-1"*"vendor/deps/package-lock.json"* ]] || false
+  [[ "$output" != *"did not complete:"* ]] || false
 }
 
 @test "OSV retains a directory source containing tracked dependency files" {
@@ -1104,7 +1104,7 @@ prepare_named_osv_inputs() {
     --config "$TEST_ROOT/empty.config" --changed-manifests "$TEST_ROOT/changed.list" \
     --tracked "$TEST_ROOT/tracked.list" --status "$TEST_ROOT/helper.status"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"changed manifest not scanned: package-lock.json"* ]]
+  [[ "$output" == *"changed manifest not scanned: package-lock.json"* ]] || false
 }
 
 @test "CONTROL named optional files preserve tracked coverage and status" {
@@ -1124,7 +1124,7 @@ prepare_named_osv_inputs() {
     bash "$SCRIPT_ROOT/scripts/lib/osv.sh" "$PROJECT" "$TEST_ROOT/normalized.jsonl" \
     --config "$TEST_ROOT/missing.config" --changed-manifests "$TEST_ROOT/changed.list"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"config file is missing or unreadable"* ]]
+  [[ "$output" == *"config file is missing or unreadable"* ]] || false
 }
 
 @test "missing or empty named input files fail closed rather than disable coverage" {
@@ -1138,8 +1138,8 @@ prepare_named_osv_inputs() {
         bash "$SCRIPT_ROOT/scripts/lib/osv.sh" "$PROJECT" "$TEST_ROOT/normalized.jsonl" \
         "${args[@]+"${args[@]}"}" "$flag" "$TEST_ROOT/$file"
       [ "$status" -eq 2 ] || { echo "$output"; false; }
-      [[ "$output" == *"osv-scanner did not complete:"* ]]
-      [[ "$output" == *"$flag file is missing, unreadable or empty"* ]]
+      [[ "$output" == *"osv-scanner did not complete:"* ]] || false
+      [[ "$output" == *"$flag file is missing, unreadable or empty"* ]] || false
     done
   done
 }
@@ -1150,7 +1150,7 @@ prepare_named_osv_inputs() {
     bash "$SCRIPT_ROOT/scripts/lib/osv.sh" "$PROJECT" "$TEST_ROOT/normalized.jsonl" \
     "$TEST_ROOT/helper.status" "$TEST_ROOT/empty.config" "$TEST_ROOT/tracked.list"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"unknown option or positional argument"* ]]
+  [[ "$output" == *"unknown option or positional argument"* ]] || false
 }
 
 # Round 5: Cargo names establish identity, not workspace membership.
@@ -1174,7 +1174,7 @@ commit_same_name_cargo_manifest() {
 assert_cargo_membership_blocked() {
   run_diff
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"ancestor lockfile does not name member: $1"* ]]
+  [[ "$output" == *"ancestor lockfile does not name member: $1"* ]] || false
 }
 
 @test "Cargo literal exclude overrides a matching member glob" {
@@ -1227,7 +1227,7 @@ assert_cargo_membership_blocked() {
   commit_same_name_cargo_manifest members/component/Cargo.toml
   run_diff
   assert_mergeable
-  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]]
+  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
 }
 
 @test "CONTROL Cargo recursive members glob authorizes a nested member" {
@@ -1244,7 +1244,7 @@ assert_cargo_membership_blocked() {
   git -C "$PROJECT" commit -qm "change workspace root"
   run_diff
   assert_mergeable
-  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]]
+  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
 }
 
 # Round 6: literal Cargo excludes cover descendants, not same-prefix siblings.
@@ -1265,7 +1265,7 @@ assert_cargo_membership_blocked() {
   commit_same_name_cargo_manifest crates/older/x/Cargo.toml
   run_diff
   assert_mergeable
-  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]]
+  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
 }
 
 # Round 8: OSV receipts Go modules, not checksum files; all JS locks trigger it.
@@ -1281,7 +1281,7 @@ seed_go_module() {
   commit_path g/go.sum
   run_diff
   assert_mergeable
-  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]]
+  [[ "$output" == *"osv-scanner: ran=1 exit=0 parsed=1 scanned=1"* ]] || false
 }
 
 @test "a changed go.sum blocks when its sibling go.mod has no receipt" {
@@ -1289,7 +1289,7 @@ seed_go_module() {
   commit_path g/go.sum
   run_diff OSV_MODE=omitted
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"changed manifest not scanned: g/go.sum"* ]]
+  [[ "$output" == *"changed manifest not scanned: g/go.sum"* ]] || false
 }
 
 @test "a go.mod receipt in another directory cannot cover a changed go.sum" {
@@ -1297,7 +1297,7 @@ seed_go_module() {
   commit_path g/go.sum
   run_diff
   assert_blocked osv-scanner Deps
-  [[ "$output" == *"changed manifest not scanned: g/go.sum"* ]]
+  [[ "$output" == *"changed manifest not scanned: g/go.sum"* ]] || false
 }
 
 @test "Bun and npm shrinkwrap lockfile-only changes require osv-scanner" {
@@ -1306,7 +1306,7 @@ seed_go_module() {
     commit_path "$lock"
     run_diff
     assert_blocked osv-scanner Deps
-    [[ "$output" == *"osv-scanner did not complete: binary not installed"* ]]
+    [[ "$output" == *"osv-scanner did not complete: binary not installed"* ]] || false
   done
 }
 

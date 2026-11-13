@@ -153,6 +153,7 @@ post_fixture() {
   mkdir -p "$hooks/lib" "$runtime/core-rules/native" "$TEST_ROOT/event" "$log"
   chmod 700 "$TEST_ROOT/event"
   cp "$SOURCE/core-rules/codex/hooks/lib/deps.sh" "$hooks/lib/deps.sh"
+  cp "$SOURCE/core-rules/codex/hooks/lib/deps-heavy.sh" "$hooks/lib/deps-heavy.sh"
   for name in post-edit-verify slop-tripwire track-read wiki-skill-suggest; do
     printf '#!/bin/bash\nprintf "%%s\\n" "${0##*/}" >> "%s/order"\n' "$log" > "$hooks/$name.sh"
     chmod +x "$hooks/$name.sh"
@@ -210,7 +211,7 @@ run_post() {
   [ "$(wc -l < "$log/argv" | tr -d ' ')" = 1 ]
   [ "$(<"$log/argv")" = "event pi post_action $project" ]
   [ ! -e "$log/order" ]
-  [[ "$stderr" != *"sequential fallback"* ]]
+  [[ "$stderr" != *"sequential fallback"* ]] || false
   jq -e --arg cwd "$project" '
     (keys == ["action","cwd","harness","in_process_read_tracking","native_event","phase","result","schema_version","session_file","session_id"])
     and .in_process_read_tracking == false and .cwd == $cwd and .session_id == "sid"

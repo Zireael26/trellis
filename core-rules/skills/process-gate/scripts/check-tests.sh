@@ -60,7 +60,8 @@ if [ "$(pg_parse_mode "$@")" = push ]; then
     esac
   done
 fi
-trap '[ -z "$pg_tests_receipt_file" ] || rm -f "$pg_tests_receipt_file"' EXIT
+pg_verdict_inputs=""
+trap '[ -z "$pg_tests_receipt_file" ] || rm -f "$pg_tests_receipt_file"; [ -z "$pg_verdict_inputs" ] || rm -f "$pg_verdict_inputs"' EXIT
 
 # Git exports repository-local routing variables to hooks. The configured test
 # command is a fixture suite, not an extension of the hook's Git process: if it
@@ -308,9 +309,9 @@ pg_docs_path_ok() {
 pg_docs_blob_ok() {
   local sha="$1" size text head
   size="$(git cat-file -s "$sha" 2>/dev/null)" || return 1
-  text="$(git cat-file blob "$sha" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d '[:space:]')" || return 1
+  text="$(git cat-file blob "$sha" 2>/dev/null | /usr/bin/env LC_ALL=C tr -d '\000' | wc -c | tr -d '[:space:]')" || return 1
   [ "$size" = "$text" ] || return 1
-  head="$(git cat-file blob "$sha" 2>/dev/null | LC_ALL=C head -c 40 || true)"
+  head="$(git cat-file blob "$sha" 2>/dev/null | /usr/bin/env LC_ALL=C head -c 40 || true)"
   case "$head" in "version https://git-lfs"*) return 1 ;; esac
 }
 
@@ -440,12 +441,25 @@ pg_docs_only_eval() {
         metadata_work="$(umask 077; mktemp -d "${TMPDIR:-/tmp}/trellis-metadata.XXXXXX")" || exit 1
         metadata_work="$(cd "$metadata_work" && pwd -P)" || exit 1
         trap 'rm -rf "$metadata_work"' EXIT
+        # Keep the checkout layout: gate_verdict.py loads the native Cargo
+        # helper from ../tests/helpers/ relative to itself.
+        mkdir -p "$metadata_work/scripts/lib" "$metadata_work/scripts/tests/helpers" || exit 1
         for metadata_module in release_metadata.py gate_verdict.py gate_receipts.py receipt_provenance.py; do
           metadata_source="scripts/lib/$metadata_module"
           [ "$(git ls-tree "$base" -- "$metadata_source" | awk '{print $1}')" = 100644 ] || exit 1
-          (umask 077; git show "$base:$metadata_source" > "$metadata_work/$metadata_module") || exit 1
+          (umask 077; git show "$base:$metadata_source" > "$metadata_work/$metadata_source") || exit 1
         done
-        python3 -I "$metadata_work/release_metadata.py" "$base" "$head" "$release_metadata_manifest"
+        # A base that predates the helper has no native identity to bind.
+        # No case statement here: Bash 3.2 would end this command substitution
+        # at the closing paren of a case pattern.
+        metadata_source=scripts/tests/helpers/native-cargo-home.py
+        metadata_mode="$(git ls-tree "$base" -- "$metadata_source" | awk '{print $1}')"
+        if [ "$metadata_mode" = 100644 ] || [ "$metadata_mode" = 100755 ]; then
+          (umask 077; git show "$base:$metadata_source" > "$metadata_work/$metadata_source") || exit 1
+        elif [ -n "$metadata_mode" ]; then
+          exit 1
+        fi
+        python3 -I -B "$metadata_work/scripts/lib/release_metadata.py" "$base" "$head" "$release_metadata_manifest"
       )" || metadata_rc=$?
       case "$metadata_rc" in
         0)
@@ -477,7 +491,7 @@ pg_docs_only_eval() {
       docs_only_note "${why:-cannot read commit $c}"; return 1
     fi
   done
-  n="$(git diff --no-renames --name-only -z "$base" "$head" | LC_ALL=C tr -cd '\000' | wc -c | tr -d '[:space:]')" ||
+  n="$(git diff --no-renames --name-only -z "$base" "$head" | /usr/bin/env LC_ALL=C tr -cd '\000' | wc -c | tr -d '[:space:]')" ||
     { docs_only_note "cannot count the changed paths"; return 1; }
   if [ "${n:-0}" -eq 0 ]; then
     docs_only_note "no changed paths in $RANGE"; return 1
@@ -521,27 +535,67 @@ if [ -z "$docs_only_files" ] && [ -n "$_pg_tests_base" ] &&
   fi
 fi
 
-# Only the canonical full local runner can supply an exact-input verdict. A
-# project command, narrowed range, dirty checkout, or different gated HEAD misses.
+# A passing verdict for the same committed tree, test command, runner,
+# toolchain and platform replaces the Tests run (references/tests.md). The
+# canonical local runner writes its own verdicts; any other project command is
+# recorded here after a passing full run. A narrowed or docs-only range, a dirty
+# checkout, a different gated HEAD, a tag push or `.trellis.json`
+# gate.verdict_reuse=false misses and runs the command.
 PG_REUSED_VERDICT=""
 PG_TAG_VERDICT=""
-if [ "$tag_push" -eq 1 ] && [ -n "$release_tag" ] && [ "$(pg_parse_mode "$@")" = push ] &&
-  { [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 scripts/run-tests-local.py' ] ||
-    [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 -I scripts/run-tests-local.py' ]; }; then
-  if tag_result="$(python3 -I "$SKILL_DIR/../../../scripts/lib/tag_push_reuse.py" "$release_tag" "$RANGE")"; then
+pg_verdict_helper="$SKILL_DIR/../../../scripts/lib/gate_verdict.py"
+pg_verdict_args=()
+pg_tests_passed=0
+pg_tests_output=""
+pg_is_local_runner() {
+  [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 scripts/run-tests-local.py' ] ||
+    [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 -I scripts/run-tests-local.py' ]
+}
+if [ "$tag_push" -eq 1 ] && [ -n "$release_tag" ] && [ "$(pg_parse_mode "$@")" = push ] && pg_is_local_runner; then
+  if tag_result="$(python3 -I -B "$SKILL_DIR/../../../scripts/lib/tag_push_reuse.py" "$release_tag" "$RANGE")"; then
     PG_TAG_VERDICT="${tag_result%%$'\n'*}"
     PROCESS_GATE_TEST_CMD="${tag_result#*$'\n'}"
   fi
 fi
-if [ "$tag_push" -eq 0 ] && [ "$pg_push_scope" != full ] && [ "$diff_tests_count" -eq 0 ] &&
-  [ -z "$docs_only_files" ] && [ -f scripts/lib/gate_verdict.py ] &&
-  { [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 scripts/run-tests-local.py' ] ||
-    [ "${PROCESS_GATE_TEST_CMD:-}" = 'python3 -I scripts/run-tests-local.py' ]; }; then
+# A forced-full run (PG_PUSH_TEST_SCOPE=full) never reads a pass, but is still
+# tracked: the lookup persists its intent before it executes, so its failure,
+# or its exit without a verdict, invalidates passes for the same tree and
+# command. Tag pushes keep their own verified path. Store errors are reported,
+# never swallowed.
+pg_verdict_reuse=0
+[ "$pg_push_scope" = full ] || pg_verdict_reuse=1
+pg_verdict_errors=()
+pg_verdict_untracked=""
+if [ "$tag_push" -eq 0 ] && [ "$diff_tests_count" -eq 0 ] && [ -z "$docs_only_files" ] &&
+  [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; then
   # shellcheck source=lib/diff-base.sh
   . "$SKILL_DIR/scripts/lib/diff-base.sh"
   if db_resolve --range="$RANGE" >/dev/null 2>&1 && [ -n "$DB_HEAD_SHA" ]; then
-    PG_REUSED_VERDICT="$(python3 -I scripts/run-tests-local.py --verdict-status "--head=$DB_HEAD_SHA" 2>/dev/null)" || PG_REUSED_VERDICT=""
-    [ -z "$PG_REUSED_VERDICT" ] || tests_scope=full
+    if pg_is_local_runner; then
+      if [ "$pg_verdict_reuse" -eq 1 ] && [ -f scripts/lib/gate_verdict.py ]; then
+        PG_REUSED_VERDICT="$(python3 -I -B scripts/run-tests-local.py --verdict-status "--head=$DB_HEAD_SHA" 2>/dev/null)" || PG_REUSED_VERDICT=""
+      fi
+    elif [ -f "$pg_verdict_helper" ] &&
+      pg_verdict_inputs="$(umask 077; mktemp "${TMPDIR:-/tmp}/pg-verdict-inputs.XXXXXXXX")"; then
+      pg_verdict_args=("--head=$DB_HEAD_SHA" "--command=$PROCESS_GATE_TEST_CMD" "--save=$pg_verdict_inputs"
+        "--runner=$SKILL_DIR/scripts/check-tests.sh" "--runner=$SKILL_DIR/scripts/lib/common.sh")
+      pg_verdict_lookup=("--owner-pid=$$")
+      [ "$pg_verdict_reuse" -eq 1 ] || pg_verdict_lookup+=(--no-reuse)
+      pg_verdict_status=0
+      pg_verdict_out="$(python3 -I "$pg_verdict_helper" lookup "${pg_verdict_args[@]}" "${pg_verdict_lookup[@]}" 2>&1)" ||
+        pg_verdict_status=$?
+      case $pg_verdict_status in
+        0) PG_REUSED_VERDICT="$pg_verdict_out" ;;
+        1) [ -z "$pg_verdict_out" ] || pg_verdict_errors+=("$pg_verdict_out") ;;
+        # No durable intent: running untracked could let a store repair revive
+        # passes this run's failure supersedes, so the command does not run.
+        3) pg_verdict_untracked="${pg_verdict_out:-lookup could not track the run}" ;;
+        *) pg_verdict_errors+=("${pg_verdict_out:-lookup failed}") ;;
+      esac
+    fi
+    # A reuse repeats the configured command's verdict; it claims nothing
+    # about whether that command is the project's full suite.
+    [ -z "$PG_REUSED_VERDICT" ] || tests_scope='reused: configured command'
   fi
 fi
 
@@ -775,7 +829,12 @@ run_check() {
 
   local out rc receipt
   local -a command_env=()
-  if [ "$label" = tests ] && [ -z "$PG_TAG_VERDICT" ] && [ -n "$_pg_tests_base" ] && [ -n "$_pg_tests_head" ]; then
+  # A reuse-tracked command never gets the range interface: its verdict is
+  # keyed without the range, so committed code that narrowed on
+  # PG_TESTS_BASE would publish a pass another range then reuses. A project
+  # that selects through it sets gate.verdict_reuse=false.
+  if [ "$label" = tests ] && [ -z "$PG_TAG_VERDICT" ] && [ -n "$_pg_tests_base" ] && [ -n "$_pg_tests_head" ] &&
+    [ ! -s "$pg_verdict_inputs" ]; then
     pg_tests_receipt_file="$(umask 077; mktemp "${TMPDIR:-/tmp}/pg-tests-receipt.XXXXXXXX")"
     # Set these AFTER the heavy launcher's clean-env boundary, on the command
     # itself. Typecheck, lint, coverage and mutation never get this interface.
@@ -802,7 +861,9 @@ run_check() {
     fi
   fi
   set -e
+  [ "$label" != tests ] || pg_tests_output="$out"
 
+  local receipt_failed=0
   if [ "$label" = tests ] && [ -s "$pg_tests_receipt_file" ]; then
     receipt=""
     if [ "$(wc -c < "$pg_tests_receipt_file")" -le 128 ] &&
@@ -817,6 +878,7 @@ run_check() {
       tests_scope='no-tests: docs-only'
     else
       findings+=("invalid Tests receipt: expected one PG_TESTS_RECEIPT line")
+      receipt_failed=1
       worst=fail
     fi
   fi
@@ -827,6 +889,7 @@ run_check() {
     elif [ "$tests_scope" != "narrowed: $diff_tests_count selected" ]; then
       findings+=("invalid Tests receipt: selected command must report narrowed $diff_tests_count")
       tests_scope=unknown
+      receipt_failed=1
       worst=fail
     fi
   fi
@@ -871,6 +934,8 @@ run_check() {
       findings+=("    $line")
     done < <(printf "%s\n" "$out" | tail -n 10)
     worst="fail"
+  elif [ "$label" = tests ] && [ "$receipt_failed" -eq 0 ]; then
+    pg_tests_passed=1
   fi
 }
 
@@ -888,9 +953,35 @@ else
   run_check "lint"      "${PROCESS_GATE_LINT_CMD:-}"
 fi
 # Narrowed with no policy tests command: the battery is skipped, not undeclared.
-if [ -z "$PG_REUSED_VERDICT" ] && { [ -z "$docs_only_files" ] || [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; }; then
+if [ -n "$pg_verdict_untracked" ]; then
+  findings+=("tests: not run: ${pg_verdict_untracked//$'\n'/ }; repair or remove the verdict store, or set gate.verdict_reuse=false")
+  worst=fail
+elif [ -z "$PG_REUSED_VERDICT" ] && { [ -z "$docs_only_files" ] || [ -n "${PROCESS_GATE_TEST_CMD:-}" ]; }; then
   run_check "tests"     "${PROCESS_GATE_TEST_CMD:-}"
+  # The tag path repeats a recorded battery verdict and runs only the
+  # tag-reading suites: a reuse of the configured command, too.
+  if [ -n "$PG_TAG_VERDICT" ] && [ "$tests_scope" = full ]; then tests_scope='reused: configured command'; fi
 fi
+# Record a project command's pass only for a full run whose inputs the lookup
+# saved and the run left unchanged; the helper recaptures and compares, and
+# retains the run's output as the verdict's execution log. A failing run drops
+# every pass for the same tree and command; a pass that publishes nothing
+# releases its intent.
+if [ -z "$PG_REUSED_VERDICT" ] && [ -s "$pg_verdict_inputs" ]; then
+  if [ "$pg_tests_passed" -eq 1 ] && [ "$tests_scope" = full ]; then
+    pg_verdict_out="$(printf '%s\n' "$pg_tests_output" |
+      python3 -I "$pg_verdict_helper" record "${pg_verdict_args[@]}" --log=- 2>&1 >/dev/null)" || true
+  elif [ "$pg_tests_passed" -eq 1 ]; then
+    pg_verdict_out="$(python3 -I "$pg_verdict_helper" release "${pg_verdict_args[@]}" 2>&1 >/dev/null)" || true
+  else
+    pg_verdict_out="$(python3 -I "$pg_verdict_helper" forget "${pg_verdict_args[@]}" 2>&1 >/dev/null)" || true
+  fi
+  [ -z "$pg_verdict_out" ] || pg_verdict_errors+=("$pg_verdict_out")
+fi
+for pg_verdict_error in ${pg_verdict_errors[@]+"${pg_verdict_errors[@]}"}; do
+  findings+=("tests: verdict store: ${pg_verdict_error//$'\n'/ }")
+  if [ "$worst" = pass ]; then worst=warn; fi
+done
 if [ -n "$auto_missing_suites" ] && [ -z "$docs_only_files" ]; then
   findings+=("tests: autodetection did not run $auto_missing_suites; declare PROCESS_GATE_TEST_CMD in process-gate-local/local.config.sh as a project-wide command")
   if [ "$worst" = pass ]; then worst=warn; fi

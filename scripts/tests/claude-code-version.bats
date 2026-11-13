@@ -59,8 +59,8 @@ stub_claude() {
 @test "claude absent from PATH -> INFO" {
   run hc_claude_code_version
   [ "$status" -eq "$HC_INFO" ]
-  [[ "$output" == *"unreadable"* ]]
-  [[ "$output" == *"not found"* ]]
+  [[ "$output" == *"unreadable"* ]] || false
+  [[ "$output" == *"not found"* ]] || false
 }
 
 # The launcher runs doctor under the control PATH and forwards the caller's
@@ -110,4 +110,91 @@ stub_claude() {
   output="$(eval "$claude_block")"
   [[ "$output" == *"not found"* ]] || { echo "$output"; false; }
   [[ "$output" == *"  i claude-code version:"* ]] || { echo "$output"; false; }
+}
+
+# r152-t13-code F4: a present CLI whose version cannot be read is reported as
+# unreadable output, never as a CLI that is not installed.
+@test "a present claude without a readable version says so, not 'not found'" {
+  local body
+  for body in 'exit 1' "echo 'Claude Code'" 'printf ""'; do
+    stub_claude "$body"
+    run hc_claude_code_version
+    [ "$status" -eq "$HC_INFO" ] || { echo "$body: status=$status $output"; return 1; }
+    [[ "$output" == *"gave no X.Y.Z"* ]] || { echo "$body: $output"; return 1; }
+    [[ "$output" != *"not found"* ]] || { echo "$body: $output"; return 1; }
+  done
+}
+
+# r152-t13-code F3: a version line followed by a nonzero exit is read, with and
+# without pipefail, and the boundary decision follows it.
+@test "a version line before a nonzero exit is read with and without pipefail" {
+  local options
+  stub_claude "echo '2.1.322 (Claude Code)'; exit 1"
+  for options in '' 'set -o pipefail'; do
+    run bash -c "$options"'
+      . "$1/scripts/lib/attachment.sh"
+      printf "%s %s\n" "$(attachment_claude_code_version)" "$(attachment_claude_decision)"
+    ' _ "$REPO"
+    [ "$status" -eq 0 ] || { echo "[$options] status=$status $output"; return 1; }
+    [ "$output" = '2.1.322 supported' ] || { echo "[$options] $output"; return 1; }
+  done
+}
+
+@test "a version source that succeeds without X.Y.Z is unreadable, never supported" {
+  local out
+  for out in '' 'garbage' '2.1' '2.1.x9'; do
+    attachment_claude_code_version() { printf '%s\n' "$STUB_OUT"; }
+    STUB_OUT="$out"
+    [ "$(attachment_claude_decision)" = unreadable ] || false
+    _ATTACHMENT_CLAUDE_DECISION=''
+    run attachment_claude_on_failure_supported
+    [ "$status" -eq 2 ] || false
+  done
+  STUB_OUT=2.1.295
+  [ "$(attachment_claude_decision)" = supported ] || false
+  STUB_OUT=2.1.294
+  [ "$(attachment_claude_decision)" = unsupported ] || false
+}
+
+# r152-create-3: digits and dots are not a version. Leading zeros, a missing
+# or fourth part, an empty part, a prerelease or a prefix are undecided, from
+# the real CLI path and from a version-source wrapper alike.
+@test "a CLI version line that is not canonical X.Y.Z is unreadable, never supported" {
+  local line
+  for line in 02.1.295 2.01.295 2.1.0295 2.1..295 2.1.295.4444 2.1.295-rc.1 v2.1.295 '2.1.295x (Claude Code)'; do
+    stub_claude "echo '$line'"
+    [ "$(attachment_claude_decision)" = unreadable ] || { echo "$line: $(attachment_claude_decision)"; return 1; }
+    _ATTACHMENT_CLAUDE_DECISION=''
+    run attachment_claude_on_failure_supported
+    [ "$status" -eq 2 ] || { echo "$line: on_failure status=$status"; return 1; }
+    run hc_claude_code_version
+    [ "$status" -eq "$HC_INFO" ] || { echo "$line: doctor status=$status $output"; return 1; }
+  done
+  for line in 2.1.295 '2.1.295 (Claude Code)' '3.0.0	(tab)'; do
+    stub_claude "printf '%s\n' '$line'"
+    [ "$(attachment_claude_decision)" = supported ] || { echo "$line: $(attachment_claude_decision)"; return 1; }
+  done
+}
+
+@test "a version-source wrapper answer that is not canonical X.Y.Z is unreadable, never supported" {
+  local out
+  attachment_claude_code_version() { printf '%s\n' "$STUB_OUT"; }
+  for out in 02.1.295 2.01.295 2.1.0295 2.1..295 2.1.295.4444 .2.1.295 2.1.295. v2.1.295 2.1.295-rc.1 2.1.295+build ' 2.1.295'; do
+    STUB_OUT="$out"
+    [ "$(attachment_claude_decision)" = unreadable ] || { echo "$out: $(attachment_claude_decision)"; return 1; }
+    _ATTACHMENT_CLAUDE_DECISION=''
+    run attachment_claude_on_failure_supported
+    [ "$status" -eq 2 ] || { echo "$out: on_failure status=$status"; return 1; }
+  done
+}
+
+@test "a comparison that fails or answers outside -1, 0, 1 is unreadable, never supported" {
+  local answer
+  attachment_claude_code_version() { printf '2.1.300\n'; }
+  semver_compare() { return 1; }
+  [ "$(attachment_claude_decision)" = unreadable ] || { echo "failed compare: $(attachment_claude_decision)"; return 1; }
+  for answer in '' 2 x; do
+    eval "semver_compare() { printf '%s' '$answer'; }"
+    [ "$(attachment_claude_decision)" = unreadable ] || { echo "answer [$answer]: $(attachment_claude_decision)"; return 1; }
+  done
 }

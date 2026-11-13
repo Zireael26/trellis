@@ -294,7 +294,12 @@ if [ "$ORIG_HAS_NL" -eq 0 ]; then
 fi
 
 # Preserve mode of the original where possible (best-effort; ignore failure).
-chmod "$(stat -f '%Lp' "$TASKS_FILE" 2>/dev/null || echo 644)" "$TMP" 2>/dev/null || true
+# GNU first, each probe its own assignment: GNU `stat -f` is --file-system and
+# prints a filesystem block before failing, which a fallback inside the same
+# substitution would append to (BSD `stat -c` fails with nothing on stdout).
+tasks_mode="$(stat -c '%a' "$TASKS_FILE" 2>/dev/null)" ||
+  tasks_mode="$(stat -f '%Lp' "$TASKS_FILE" 2>/dev/null)" || tasks_mode=644
+chmod "$tasks_mode" "$TMP" 2>/dev/null || true
 
 mv "$TMP" "$TASKS_FILE"
 trap - EXIT

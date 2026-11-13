@@ -324,13 +324,13 @@ pi_aux_verdict() {
   run "$bash_bin" "$REPO_ROOT/scripts/doctor.sh" --home "$TRELLIS_HOME" --project pi-fixture
   if [ "$expected" -eq 0 ]; then
     [ "$status" -eq 0 ] || { echo "$output"; false; }
-    [[ "$output" == *"owned artifacts, and managed hooks match"* ]]
+    [[ "$output" == *"owned artifacts, and managed hooks match"* ]] || false
   else
     [ "$status" -ne 0 ] || { echo "$output"; false; }
     [[ "$output" == *"$path"*"$reason"* ]] || { echo "$output"; false; }
     if [ "$path" = .pi/extensions ] && [ -z "$reason" ]; then
       # A missing child must not mask missing/type-redirected literal parents.
-      [[ "$output" == *"$path (recorded parent)"* || "$output" == *"$path: native Pi hook artifact"* ]]
+      [[ "$output" == *"$path (recorded parent)"* || "$output" == *"$path: native Pi hook artifact"* ]] || false
     fi
   fi
 }

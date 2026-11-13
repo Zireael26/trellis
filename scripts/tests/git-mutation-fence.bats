@@ -297,7 +297,7 @@ SH
   for target in outside-link/new dangling-link/new; do
     run_fence init "$FIXTURE_ROOT/$target"
     [ "$status" -eq 97 ] || { echo "$output"; false; }
-    [[ "$output" == *"outside test root"* ]]
+    [[ "$output" == *"outside test root"* ]] || false
   done
   run_fence -C "$FIXTURE_ROOT/outside-link" config user.name Fixture
   [ "$status" -eq 97 ] || { echo "$output"; false; }

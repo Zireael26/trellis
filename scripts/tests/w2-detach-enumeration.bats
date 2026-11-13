@@ -65,6 +65,6 @@ run_detach() {
   printf '%s\n' '{"status":"detaching","original_owner":{"checkout_id":"other","worktree_id":"other","worktree_root":"/other"}}' > "$JOURNALS/detach-other.json"
   run_detach
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"already detached:"* ]]
+  [[ "$output" == *"already detached:"* ]] || false
   [ -f "$JOURNALS/detach-other.json" ]
 }

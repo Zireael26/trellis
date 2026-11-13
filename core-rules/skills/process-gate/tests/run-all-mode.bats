@@ -95,15 +95,15 @@ teardown() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Bypass coverage: Git reflog does not record --no-verify"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"hook execution cannot be verified post-hoc"* ]]
-  [[ "$output" == *"Husky coverage:"* && "$output" == *"heuristic"* ]]
+  [[ "$output" == *"hook execution cannot be verified post-hoc"* ]] || false
+  [[ "$output" == *"Husky coverage:"* && "$output" == *"heuristic"* ]] || false
   [ "$(grep -c '^  Bypass coverage:' <<< "$output")" -eq 1 ]
   [ "$(grep -c '^  Husky coverage:' <<< "$output")" -eq 1 ]
   mkdir "$PROJECT_DIR/.husky"
   printf '#!/bin/sh\nexit 0\n' > "$PROJECT_DIR/.husky/pre-push"
   run_all merge
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"Overall: BLOCKED"* && "$output" == *"short-circuit"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* && "$output" == *"short-circuit"* ]] || false
   [ "$(grep -c '^  Bypass coverage:' <<< "$output")" -eq 1 ]
   [ "$(grep -c '^  Husky coverage:' <<< "$output")" -eq 1 ]
 }
@@ -144,7 +144,7 @@ run_all() {
   [[ "$output" == *"Security (diff)"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Analyze"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Anti-slop"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"Overall: MERGEABLE"* ]]
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || false
 }
 
 # Row 8's level comes from the printed token, not the exit code — the one gate
@@ -223,7 +223,7 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"## Findings"* ]] || { echo "$output"; false; }
   [[ "$output" == *"### Security (diff)"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"### Analyze"* ]]
+  [[ "$output" == *"### Analyze"* ]] || false
 }
 
 @test "unexpected gate exits and a missing hard gate fail closed" {
@@ -251,7 +251,7 @@ EOF
   # idx 0 (PR hygiene) fails; merge default => no downgrade => BLOCKED.
   [ "$status" -eq 1 ]
   [[ "$output" == *"mode=merge"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 @test "mode: garbage --mode value is REFUSED before any gate runs" {
@@ -273,19 +273,19 @@ EOF
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 2 ]
   [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"downgraded to WARN"* ]]
+  [[ "$output" == *"downgraded to WARN"* ]] || false
 }
 
 @test "push: Docs discipline (idx 4) FAIL downgrades to WARN -> NEEDS CHANGES 2" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_4=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"Overall: NEEDS CHANGES"* ]]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || false
 }
 
 @test "push: Analyze (idx 7) FAIL downgrades to WARN -> NEEDS CHANGES 2" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_7=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"Overall: NEEDS CHANGES"* ]]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || false
 }
 
 # --- push: always-hard gates NEVER downgrade (fail-open guard) -------------
@@ -293,25 +293,25 @@ EOF
 @test "push: Secrets (idx 1) FAIL still BLOCKS (no downgrade) -> 1" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_1=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 @test "push: Bypass markers (idx 2) FAIL still BLOCKS (no downgrade) -> 1" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_2=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 @test "push: Tests (idx 3) FAIL still BLOCKS (no downgrade) -> 1" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_3=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 @test "push: Security (idx 6) FAIL still BLOCKS (no downgrade) -> 1" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_6=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 # --- merge: strict, every FAIL blocks (incl PR-shape) ---------------------
@@ -319,19 +319,19 @@ EOF
 @test "merge: PR hygiene (idx 0) FAIL hard-blocks (no downgrade at merge) -> 1" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 @test "merge: Docs discipline (idx 4) FAIL hard-blocks -> 1" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_4=1 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 @test "merge: Analyze (idx 7) FAIL hard-blocks -> 1" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_7=1 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 # --- warn handling preserved ----------------------------------------------
@@ -339,14 +339,14 @@ EOF
 @test "any gate WARN (rc 2) -> NEEDS CHANGES 2 at both modes" {
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_1=2 '$STUB/scripts/run-all.sh' --mode=merge --range=main..HEAD"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"Overall: NEEDS CHANGES"* ]]
+  [[ "$output" == *"Overall: NEEDS CHANGES"* ]] || false
 }
 
 @test "push: a real fail + a warn -> still BLOCKED when fail is always-hard" {
   # idx 6 always-hard fail + idx 0 PR-shape fail (downgraded). Overall BLOCKED.
   run bash -c "cd '$PROJECT_DIR' && STUB_RC_6=1 STUB_RC_0=1 '$STUB/scripts/run-all.sh' --mode=push"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Overall: BLOCKED"* ]]
+  [[ "$output" == *"Overall: BLOCKED"* ]] || false
 }
 
 # --- PG_MODE is exported to child gates -----------------------------------
@@ -449,9 +449,9 @@ EOF
       vulnerabilities:[{id:"FIXTURE-HIGH",summary:"seeded advisory",database_specific:{severity:"HIGH"}}]}]}]}' > "$OSV_FIXTURE_FILE"
   run_all merge
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
-  [[ "$output" == *"osv/FIXTURE-HIGH"* ]]
-  [[ "$output" != *"skipped"* ]]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]] || false
+  [[ "$output" == *"osv/FIXTURE-HIGH"* ]] || false
+  [[ "$output" != *"skipped"* ]] || false
   [ -f "$OSV_RAN" ]
 }
 
@@ -467,9 +467,9 @@ EOF
       vulnerabilities:[{id:"FIXTURE-HIGH",summary:"seeded advisory",database_specific:{severity:"HIGH"}}]}]}]}' > "$OSV_FIXTURE_FILE"
   run_all merge
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
-  [[ "$output" == *"osv/FIXTURE-HIGH"* ]]
-  [[ "$output" != *"PROJECT-SECURITY-STUB"* && "$output" != *"skipped"* ]]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]] || false
+  [[ "$output" == *"osv/FIXTURE-HIGH"* ]] || false
+  [[ "$output" != *"PROJECT-SECURITY-STUB"* && "$output" != *"skipped"* ]] || false
   [ -f "$OSV_RAN" ]
 }
 
@@ -484,7 +484,7 @@ EOF
   git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm 'chore: more lockfiles'
   run_all merge
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"Security (diff):"*"✅ pass"* ]]
+  [[ "$output" == *"Security (diff):"*"✅ pass"* ]] || false
   [ -f "$OSV_RAN" ]
 }
 
@@ -506,9 +506,9 @@ EOF
   rm "${BATS_TEST_TMPDIR:?}/security-gate/scripts/run-diff.sh"
   run_all merge
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
-  [[ "$output" == *"security-gate payload unavailable"* ]]
-  [[ "$output" != *"skipped"* ]]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]] || false
+  [[ "$output" == *"security-gate payload unavailable"* ]] || false
+  [[ "$output" != *"skipped"* ]] || false
 }
 
 @test "Security: an incomplete committed baseline under a docs-only change blocks the merge" {
@@ -535,9 +535,9 @@ EOF
   SECURITY_FIXTURE_BASELINE=0 security_payload_fixture
   run_all merge
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Security (diff):"*"❌ fail"* ]]
-  [[ "$output" == *"no baseline JSON"* ]]
-  [[ "$output" != *"skipped"* ]]
+  [[ "$output" == *"Security (diff):"*"❌ fail"* ]] || false
+  [[ "$output" == *"no baseline JSON"* ]] || false
+  [[ "$output" != *"skipped"* ]] || false
 }
 
 @test "render: an off-contract first token from check-slop fails the row" {

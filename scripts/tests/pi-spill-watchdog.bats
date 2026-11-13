@@ -46,7 +46,7 @@ file_inode() {
 
   run "$WATCHDOG" --root "$MOCK_ROOT1"
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  [[ "$output" == *"truncated $target (2147483649 bytes,"* ]]
+  [[ "$output" == *"truncated $target (2147483649 bytes,"* ]] || false
   [ "$(stat -c '%s' "$target")" = 0 ]
   [ "$(stat -c '%i' "$target")" = "$inode" ]
 }

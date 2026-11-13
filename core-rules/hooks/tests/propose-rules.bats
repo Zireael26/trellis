@@ -331,7 +331,7 @@ run_hook() {
 
   [ "$status" -eq 0 ]
   [ "$(claude_call_count "$COUNT")" -eq 0 ]
-  [[ "$stderr" == *"propose-rules"*"Perl"* ]]
+  [[ "$stderr" == *"propose-rules"*"Perl"* ]] || false
   [ "$(printf '%s' "$stderr" | grep -Fc 'Perl')" -eq 1 ]
   rm -rf "$FAKE_BIN" "${NO_PERL_PATH#*:}"
 }
@@ -454,10 +454,10 @@ run_hook() {
   run_hook
   [ "$status" -eq 0 ]
   [ "$(claude_call_count "$COUNT")" -eq 1 ]
-  [[ "$output" == *"auto-appended the candidate"* ]]
-  [[ "$(cat "$CANONICAL_ROOT/gotchas.md")" == *"## 2026-08-23 — Canonical gotcha writes"* ]]
-  [[ "$(cat "$CANONICAL_ROOT/decisions-log.md")" == *"propose-rules auto-appended a surfaced gotcha"* ]]
-  [[ "$(cat "$WORKTREE/gotchas.md")" != *"## 2026-08-23 — Canonical gotcha writes"* ]]
+  [[ "$output" == *"auto-appended the candidate"* ]] || false
+  [[ "$(cat "$CANONICAL_ROOT/gotchas.md")" == *"## 2026-08-23 — Canonical gotcha writes"* ]] || false
+  [[ "$(cat "$CANONICAL_ROOT/decisions-log.md")" == *"propose-rules auto-appended a surfaced gotcha"* ]] || false
+  [[ "$(cat "$WORKTREE/gotchas.md")" != *"## 2026-08-23 — Canonical gotcha writes"* ]] || false
   # The append replaces each record by rename; the original mode must survive it.
   for record in gotchas.md decisions-log.md; do
     mode="$(stat -c '%a' "$CANONICAL_ROOT/$record" 2>/dev/null || stat -f '%Lp' "$CANONICAL_ROOT/$record")"
@@ -466,7 +466,7 @@ run_hook() {
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *"candidate already exists"* ]]
+  [[ "$output" == *"candidate already exists"* ]] || false
   [ "$(grep -Fxc "## 2026-08-23 — Canonical gotcha writes" "$CANONICAL_ROOT/gotchas.md")" -eq 1 ]
   [ "$(grep -Fc "propose-rules auto-appended a surfaced gotcha to gotchas.md." "$CANONICAL_ROOT/decisions-log.md")" -eq 1 ]
 }
@@ -494,7 +494,7 @@ EOF
   run_hook
   [ "$status" -eq 0 ]
   [ "$(claude_call_count "$COUNT")" -eq 1 ]
-  [[ "$output" == *"review and append if useful"* ]]
+  [[ "$output" == *"review and append if useful"* ]] || false
   [ "$(cat "$PROJECT_DIR/gotchas.md")" = "$gotchas_before" ]
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
 }
@@ -523,7 +523,7 @@ EOF
   done
   printf '%s\n' '---' 'autonomy_ceiling: 5' '---' > "$TRELLIS_ROOT/core-rules/presets/ceiling.md"
   run_hook
-  [[ "$output" == *"auto-appended the candidate"* ]]
+  [[ "$output" == *"auto-appended the candidate"* ]] || false
   [ -f "$PROJECT_DIR/gotchas.md" ]
 }
 
@@ -541,8 +541,8 @@ EOF
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *"secret-like material"* ]]
-  [[ "$output" != *"not-a-real-secret"* ]]
+  [[ "$output" == *"secret-like material"* ]] || false
+  [[ "$output" != *"not-a-real-secret"* ]] || false
   [ "$(cat "$PROJECT_DIR/gotchas.md")" = "$gotchas_before" ]
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
 }
@@ -561,14 +561,14 @@ EOF
     printf '## 2026-08-23 — Credential guard\n**Pattern:** %s\n**Why it matters:** Keep credentials private.\n**Rule:** Never emit credentials.\n' "$specimen" > "$CANDIDATE"
     run_hook
     [ "$status" -eq 0 ]
-    [[ "$output" == *"secret-like material"* ]]
-    [[ "$output" != *"$specimen"* ]]
+    [[ "$output" == *"secret-like material"* ]] || false
+    [[ "$output" != *"$specimen"* ]] || false
     [ ! -e "$PROJECT_DIR/gotchas.md" ]
     [ ! -e "$PROJECT_DIR/decisions-log.md" ]
   done
   printf '## 2026-08-23 — Empty example\n**Pattern:** {"api_key": ""}\n**Why it matters:** Empty examples contain no credential.\n**Rule:** Leave empty examples safe.\n' > "$CANDIDATE"
   run_hook
-  [[ "$output" == *"auto-appended the candidate"* ]]
+  [[ "$output" == *"auto-appended the candidate"* ]] || false
   grep -Fq '"api_key": ""' "$PROJECT_DIR/gotchas.md"
 }
 
@@ -588,14 +588,14 @@ EOF
       run_hook
       [ "$status" -eq 0 ]
       [[ "$output" == *"secret-like material"* ]] || { echo "level $level: $specimen was not screened"; false; }
-      [[ "$output" != *"$specimen"* ]]
+      [[ "$output" != *"$specimen"* ]] || false
       [ ! -e "$PROJECT_DIR/gotchas.md" ]
       [ ! -e "$PROJECT_DIR/decisions-log.md" ]
     done
   done
   setup_safe_candidate
   run_hook
-  [[ "$output" == *"auto-appended the candidate"* ]]
+  [[ "$output" == *"auto-appended the candidate"* ]] || false
   [ -f "$PROJECT_DIR/gotchas.md" ]
 }
 
@@ -613,8 +613,8 @@ EOF
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *"secret-like material"* ]]
-  [[ "$output" != *"not-a-real-secret"* ]]
+  [[ "$output" == *"secret-like material"* ]] || false
+  [[ "$output" != *"not-a-real-secret"* ]] || false
   [ "$(cat "$PROJECT_DIR/gotchas.md")" = "$gotchas_before" ]
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
 }
@@ -632,7 +632,7 @@ EOF
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *"could not atomically append and log"* ]]
+  [[ "$output" == *"could not atomically append and log"* ]] || false
   [ "$(cat "$PROJECT_DIR/gotchas.md")" = "$gotchas_before" ]
   [ -d "$PROJECT_DIR/decisions-log.md" ]
 }
@@ -652,7 +652,7 @@ EOF
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *"could not atomically append and log"* ]]
+  [[ "$output" == *"could not atomically append and log"* ]] || false
   [ "$(cat "$PROJECT_DIR/gotchas.md")" = "$gotchas_before" ]
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
 }
@@ -672,13 +672,13 @@ EOF
 
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *"could not restore canonical gotchas.md after the decisions-log write failed"* ]]
-  [[ "$output" == *"preserved the intact backup at"* ]]
+  [[ "$output" == *"could not restore canonical gotchas.md after the decisions-log write failed"* ]] || false
+  [[ "$output" == *"preserved the intact backup at"* ]] || false
   backup="$(printf '%s\n' "$PROJECT_DIR"/.gotchas.md.tmp.*)"
   [ -f "$backup" ]
-  [[ "$output" == *"$backup"* ]]
+  [[ "$output" == *"$backup"* ]] || false
   [ "$(cat "$backup")" = "$gotchas_before" ]
-  [[ "$(cat "$PROJECT_DIR/gotchas.md")" == *"## 2026-08-23 — Canonical gotcha writes"* ]]
+  [[ "$(cat "$PROJECT_DIR/gotchas.md")" == *"## 2026-08-23 — Canonical gotcha writes"* ]] || false
   [ "$(cat "$PROJECT_DIR/decisions-log.md")" = "$decisions_before" ]
 }
 
@@ -692,8 +692,8 @@ EOF
   PATH="$(install_fake_claude_response "$COUNT" "$CANDIDATE")"
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" == *"secret-like material"* ]]
-  [[ "$output" != *"hunter2"* ]]
+  [[ "$output" == *"secret-like material"* ]] || false
+  [[ "$output" != *"hunter2"* ]] || false
   [ ! -e "$PROJECT_DIR/gotchas.md" ]
   [ ! -e "$PROJECT_DIR/decisions-log.md" ]
 }

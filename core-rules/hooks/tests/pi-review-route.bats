@@ -224,7 +224,7 @@ EOF
   rm -rf "$dir" "$CLAUDE_DIR" "$PI_DIR"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == *'"from-operator"'* ]]
+  [[ "$output" == *'"from-operator"'* ]] || false
   grep -q OPERATOR_RAN "$OP_MARKER"
   rm -f "$OP_MARKER" "$PI_MARKER"
   [ ! -s "$TOMBSTONE" ] || { cat "$TOMBSTONE"; false; }
@@ -615,7 +615,7 @@ for case in manifest:
 print("code-reviewer enforces SC7")
 PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"code-reviewer enforces SC7"* ]]
+  [[ "$output" == *"code-reviewer enforces SC7"* ]] || false
   rm -rf "$FAKE_HOME"
 }
 
@@ -634,7 +634,7 @@ deploy_codex_review_hook() {
   # Standalone copies must carry the trusted resolver introduced by T29 M4.
   # Registered hooks instead resolve it from the immutable payload tree.
   cp "$HOOKS_DIR/../../scripts/lib/trellis-python.sh" "$hookdir/lib/trellis-python.sh"
-  cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/pm.sh" "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$hookdir/lib/"
+  cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps-heavy.sh" "$CODEX_HOOKS_DIR/lib/pm.sh" "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$hookdir/lib/"
   chmod +x "$hookdir/code-review-subagent.sh" "$hookdir/lib/code-reviewer.sh"
   printf '%s' "$hookdir/code-review-subagent.sh"
 }

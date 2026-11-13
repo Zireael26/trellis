@@ -155,6 +155,7 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -r "$__se_lib" ] || _sv_infrastructure_block "missing sibling lib at $__se_lib — re-run sync-codex-hooks"
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib" || _sv_infrastructure_block "unable to load sibling lib at $__se_lib — re-run sync-codex-hooks"
+_se_load_heavy || _sv_infrastructure_block "unable to load sibling lib deps-heavy.sh beside $__se_lib — re-run sync-codex-hooks"
 if ! command -v jq >/dev/null 2>&1 && [ "${TRELLIS_NO_JQ_DEGRADE:-0}" != 1 ]; then
   _sv_infrastructure_block "jq required but not found — install jq (brew install jq | apt-get install -y jq)"
 fi
@@ -243,7 +244,11 @@ unset TRELLIS_NATIVE_STOP_TMP_ROOT
 # An inherited hint can only suppress publication, not authorize a pass.
 __se_defer_token="${TRELLIS_NATIVE_STOP_DEFER:-}"
 __se_force_reverify="${TRELLIS_NATIVE_STOP_FORCE_REVERIFY:-0}"
-unset TRELLIS_NATIVE_STOP_DEFER TRELLIS_NATIVE_STOP_FORCE_REVERIFY
+# This Pi-only hint can only invalidate a baseline, never authorize a skip.
+# It covers a prompt whose publication failed before an older carry could be
+# invalidated. Do not leak bridge-only state into project checks.
+__se_pi_baseline_untrusted="${TRELLIS_PI_BASELINE_UNTRUSTED:-0}"
+unset TRELLIS_NATIVE_STOP_DEFER TRELLIS_NATIVE_STOP_FORCE_REVERIFY TRELLIS_PI_BASELINE_UNTRUSTED
 __se_defer_dir=""
 if [ -n "$__se_defer_token" ]; then
   case "$__se_defer_token" in *[!0-9a-f]*) _sv_infrastructure_block "invalid deferred Stop token" ;; esac
@@ -270,8 +275,17 @@ TURN_RANGE_FILES=""
 __se_blocked=0
 __se_harness=codex
 [ "${TRELLIS_HARNESS:-codex}" = "pi" ] && __se_harness=pi
+# The old 1.5.0 native companion forwards this closed-envelope field to the
+# proven wrapper. The prefix can only force re-verification; it never grants a
+# pass or weakens the normal nonce/arming checks.
+if [ "$__se_harness" = pi ] && printf '%s' "$INPUT" | jq -e '
+  if (.turn_id | type) == "string" then (.turn_id | startswith("trellis-baseline-untrusted:")) else false end
+' >/dev/null 2>&1; then
+  __se_pi_baseline_untrusted=1
+fi
 __se_sdir=""
 __se_now=""
+__se_skip_fp=""
 __se_key=""
 __se_carry=0
 __se_consumed=0
@@ -289,9 +303,9 @@ _se_stop_exit() {
   local rc="$1"
   if [ "$rc" -eq 0 ] && [ "$__se_blocked" = 0 ] && [ "$__se_carry" = 1 ]; then
     if [ -n "$__se_defer_dir" ]; then
-      _se_turn_carry_write "$__se_defer_dir" "$__se_harness.$__se_key" "$PROJECT_DIR" stage
+      _se_turn_carry_write "$__se_defer_dir" "$__se_harness.$__se_key" "$PROJECT_DIR" stage "$__se_skip_fp"
     else
-      _se_turn_carry_write "$__se_sdir" "$__se_harness.$__se_key" "$PROJECT_DIR"
+      _se_turn_carry_write "$__se_sdir" "$__se_harness.$__se_key" "$PROJECT_DIR" "" "$__se_skip_fp"
     fi
   fi
   [ -z "$__se_defer_dir" ] || rm -f "$__se_defer_dir/fp-cache" 2>/dev/null
@@ -299,7 +313,23 @@ _se_stop_exit() {
 }
 trap '_se_stop_exit "$?"' EXIT
 if [ "$__se_arming" != unknown ] && command -v git >/dev/null 2>&1; then
-  __se_sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || __se_sid=""
+  if [ "$__se_harness" = pi ]; then
+    # Validate before command substitution strips trailing newlines or NULs.
+    # An ambiguous identity must never consume another session's baseline.
+    if ! __se_sid=$(printf '%s' "$INPUT" | jq -ser '
+      if length != 1 then empty
+      else .[0] | if type != "object" then empty
+        elif (.session_id | type) != "string" then empty
+        elif (.session_id | length) == 0 then empty
+        elif (.session_id | explode | any(. == 0 or . == 10 or . == 13)) then empty
+        else .session_id end
+      end' 2>/dev/null); then
+      __se_sid=""
+      __se_pi_baseline_untrusted=1
+    fi
+  else
+    __se_sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || __se_sid=""
+  fi
   __se_key=""
   [ -z "$__se_sid" ] || __se_key=$(_se_state_key "" "$__se_sid") || __se_key=""
   __se_consumed=0
@@ -338,6 +368,15 @@ if [ "$__se_arming" != unknown ] && command -v git >/dev/null 2>&1; then
     if [ "$__se_degraded" = 0 ] && { [ "$__se_consumed" = "1" ] || [ "$__se_arming" != unarmed ]; }; then
       __se_carry=1
     fi
+  fi
+  if [ "$__se_harness" = pi ] && [ "$__se_pi_baseline_untrusted" = 1 ]; then
+    # Consume any old nonce as usual, but it cannot stand in for the current
+    # prompt. In particular a failed prompt must not revive a previous carry.
+    # Pi-only attachments can be unarmed for Codex. Unknown still requires
+    # checks and a receipt there, including after a clean commit.
+    TURN_STATE=changed
+    TURN_RANGE_FILES=".trellis-turn-range-unknown"
+    __se_carry=0
   fi
   if [ "$TURN_STATE" = "unknown" ] && [ "$__se_arming" != unarmed ]; then
     # Missing, unreadable or uncomputable baseline: whatever the turn did,
@@ -690,10 +729,29 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
 ${WORKTREE_STATUS}"
   fi
   if [ "$TURN_STATE" = "same" ]; then
-    # Existing dirty code is not a new edit: the authenticated fingerprint
-    # already covers its bytes and the index. Todos were checked above.
-    _se_receipt_gate
-    exit 0
+    # A shared checkout can change after the first fingerprint. Pi confirms
+    # the snapshot after status, and binds the carry to that exact snapshot;
+    # an edit racing the later carry write must not be silently certified.
+    if [ "$__se_harness" = pi ]; then
+      if __se_confirm=$(_se_tree_fingerprint "$PROJECT_DIR" "$__se_sdir/fp-cache") && [ "$__se_confirm" = "$__se_now" ]; then
+        __se_skip_fp="$__se_confirm"
+      else
+        TURN_STATE=changed
+        TURN_RANGE_FILES=".trellis-turn-range-unknown"
+      fi
+    fi
+    if [ "$TURN_STATE" = "same" ]; then
+      _se_receipt_gate
+      if [ "$__se_harness" != pi ]; then exit 0; fi
+      # The receipt gate itself is another scheduling window. Recheck once
+      # more before returning; a mismatch or failure must run full checks.
+      if __se_after_receipt=$(_se_tree_fingerprint "$PROJECT_DIR" "$__se_sdir/fp-cache") && [ "$__se_after_receipt" = "$__se_skip_fp" ]; then
+        exit 0
+      fi
+      __se_skip_fp=""
+      TURN_STATE=changed
+      TURN_RANGE_FILES=".trellis-turn-range-unknown"
+    fi
   fi
   # Git's ordinary status intentionally hides flagged tracked files. Include
   # their actual content changes before applying the clean/doc-only shortcuts.

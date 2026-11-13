@@ -9,6 +9,7 @@ import copy
 from contextlib import ExitStack, contextmanager
 import ctypes
 import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -36,12 +37,355 @@ def load_integrity():
     return integrity
 
 
+owner_verify = None
+OWNER_VERIFY_SOURCES = ('scripts/lib/owner_verify.py', 'scripts/lib/attachment_fs.py')
+
+# One Bash process yields the canonical owner schema verdict for every
+# captured owner (the same jq filter _attachment_owner_json_valid applies)
+# and the settings_owned_json program the shared verifier judges renders with.
+OWNER_SCHEMA = r'''
+. "$1" || exit 1
+settings="$(_settings_owned_json_program)" || exit 1
+verdicts="$(jq -c -n "[inputs | try ($_attachment_owner_schema_filter) catch false]")" || exit 1
+jq -cn --argjson valid "$verdicts" --arg settings "$settings" '{valid:$valid,settings:$settings}'
+'''
+
+
+def load_owner_verify():
+    """The shared one-pass owner verifier (l151-perf), from this helper's own
+    verified payload directory, like release-executed.py above."""
+    global owner_verify
+    if owner_verify is None:
+        lib = Path(__file__).parent
+        spec = importlib.util.spec_from_file_location('trellis_owner_verify', lib / 'owner_verify.py')
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        owner_verify = module
+        owner_verify._fastpath_modules = (module.load_modules(str(lib / 'attachment_fs.py')),)
+    return owner_verify
+
+
+def read_all_at(fd):
+    """Every byte of the held file, from offset 0, without moving its offset."""
+    chunks, offset = [], 0
+    while True:
+        chunk = os.pread(fd, 1 << 20, offset)
+        if not chunk:
+            return b''.join(chunks)
+        chunks.append(chunk)
+        offset += len(chunk)
+
+
+# T13 D1: a support policy, not a clock proof. The fast path reuses captured
+# evidence only on these local filesystems; anything else (network, FUSE,
+# overlay, unknown) is unavailable and the full attach runs.
+SUPPORTED_FILESYSTEMS = frozenset(('apfs', 'ext2/ext3/ext4', 'btrfs', 'xfs', 'tmpfs'))
+LINUX_FILESYSTEM_MAGIC = {0xEF53: 'ext2/ext3/ext4', 0x9123683E: 'btrfs', 0x58465342: 'xfs', 0x01021994: 'tmpfs'}
+
+
+def filesystem_type(fd):
+    """The type of the filesystem holding FD, or None if it cannot be read."""
+    import ctypes
+    try:
+        libc = ctypes.CDLL(None, use_errno=True)
+        if sys.platform == 'darwin':
+            class StatFS(ctypes.Structure):
+                _fields_ = [('f_bsize', ctypes.c_uint32), ('f_iosize', ctypes.c_int32),
+                            ('f_blocks', ctypes.c_uint64), ('f_bfree', ctypes.c_uint64),
+                            ('f_bavail', ctypes.c_uint64), ('f_files', ctypes.c_uint64),
+                            ('f_ffree', ctypes.c_uint64), ('f_fsid', ctypes.c_int32 * 2),
+                            ('f_owner', ctypes.c_uint32), ('f_type', ctypes.c_uint32),
+                            ('f_flags', ctypes.c_uint32), ('f_fssubtype', ctypes.c_uint32),
+                            ('f_fstypename', ctypes.c_char * 16), ('f_mntonname', ctypes.c_char * 1024),
+                            ('f_mntfromname', ctypes.c_char * 1024), ('f_flags_ext', ctypes.c_uint32),
+                            ('f_reserved', ctypes.c_uint32 * 7)]
+            try:
+                fstatfs = libc['fstatfs$INODE64']  # x86_64; arm64 has only the 64-bit layout
+            except AttributeError:
+                fstatfs = libc['fstatfs']
+            info = StatFS()
+            if fstatfs(fd, ctypes.byref(info)) != 0:
+                return None
+            return info.f_fstypename.decode('ascii', 'replace') or None
+        if sys.platform.startswith('linux'):
+            buffer = ctypes.create_string_buffer(512)
+            if libc['fstatfs'](fd, buffer) != 0:
+                return None
+            magic = ctypes.c_long.from_buffer(buffer).value & 0xffffffff
+            return LINUX_FILESYSTEM_MAGIC.get(magic, 'magic 0x%x' % magic)
+    except (OSError, AttributeError, ValueError):
+        return None
+    return None
+
+
+def require_supported_filesystem(fd):
+    name = filesystem_type(fd)
+    if name not in SUPPORTED_FILESYSTEMS:
+        raise FastPathUnavailable('filesystem ' + (name or 'type unknown') + ' is not supported for reuse')
+
+
+class Collector:
+    """Keeps what the verifier actually observed for each recorded path: the
+    no-follow node, its bytes and identity. Planning reads these, never the
+    names again. Descriptors stay held until the journal boundary.
+
+    A held descriptor does not freeze a file's contents, so require_fresh()
+    proves, without re-verifying semantics, that every capture is unchanged
+    (r152-create-code F1, T13 D1): the held node, its name and its parent
+    keep their captured identity, a symlink keeps its target, and a file's
+    complete bytes, read again through its held descriptor, equal the
+    captured bytes. Timestamps are cheap rejection, never the proof."""
+
+    def __init__(self):
+        self.nodes = {}
+        self.root = None
+
+    def open(self, parent_fd, name, kind, expected=None):
+        node = owner_verify.capture_opener(parent_fd, name, kind, expected)
+        if node is not None:
+            if isinstance(expected, dict) and isinstance(expected.get('path'), str):
+                previous = self.nodes.get(expected['path'])
+                if previous is not None:
+                    previous.close()
+                self.nodes[expected['path']] = node
+            else:
+                node.close()
+        return node
+
+    def data(self, path):
+        node = self.nodes.get(path)
+        require(node is not None and node.kind == 'file' and node.data is not None, 'leaf not observed by the verifier')
+        return node.data
+
+    def require_fresh(self):
+        require(self.root is not None and self.nodes, 'no donor captures')
+        # One no-follow walk per parent directory (a donor has many leaves
+        # under few parents), then every child's checks under that walk.
+        by_parent = {}
+        for path, node in sorted(self.nodes.items()):
+            if node.fd is not None:
+                require(owner_verify._identity(os.fstat(node.fd)) == node.identity, 'donor capture changed')
+                if node.kind == 'file':
+                    require(read_all_at(node.fd) == node.data, 'donor capture bytes changed')
+            parent, name = os.path.split(self.root + '/' + relative(path))
+            by_parent.setdefault(parent, []).append((name, node))
+        for parent, children in sorted(by_parent.items()):
+            with directory(parent) as fd:
+                parent_identity = owner_verify._identity(os.fstat(fd))
+                for name, node in children:
+                    require(parent_identity == node.parent_identity, 'donor capture parent changed')
+                    require(owner_verify._identity(os.stat(name, dir_fd=fd, follow_symlinks=False)) == node.identity,
+                            'donor capture changed')
+                    if node.kind == 'symlink':
+                        require(os.fsencode(os.readlink(name, dir_fd=fd)) == node.data, 'donor capture changed')
+
+    def close(self):
+        for node in self.nodes.values():
+            node.close()
+        self.nodes = {}
+
+
+def owner_schema_verdicts(snapshots, paths):
+    """Canonical schema verdicts for the captured owner bytes, in PATHS order,
+    plus the settings program. One child; any failure is a fast miss."""
+    data = b''.join(snapshots[path] if snapshots[path].endswith(b'\n') else snapshots[path] + b'\n' for path in paths)
+    result = subprocess.run(['/bin/bash', '-c', OWNER_SCHEMA, 'fast-owner-schema', str(Path(__file__).parent.parent / 'attach-project.sh')],
+                            input=data, env=dict(os.environ, TRELLIS_LIBS_PRELOADED='0'),
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    require(result.returncode == 0, 'owner schema check unavailable')
+    doc = json.loads(result.stdout)
+    valid = doc['valid']
+    require(isinstance(valid, list) and len(valid) == len(paths) and isinstance(doc['settings'], str), 'owner schema check differs')
+    return {path: verdict is True for path, verdict in zip(paths, valid)}, doc['settings']
+
+
+def admit_registry_donor(home, owner_dir, checkout, candidates, owners, snapshots, schema, payload, stack):
+    """Spec 074 / t152 once-per-boundary: the first canonically valid donor in
+    the seed's registry order, under the transaction locks, in ONE verifier
+    pass per attempted candidate. Returns (record, collector) or (None, None).
+    Managed hooks are the checkout authority's, checked once by PREFLIGHT."""
+    for candidate in candidates:
+        key = candidate.get('worktree_id')
+        record = owners.get(key)
+        if record is None or record.get('worktree_root') != candidate.get('root') or \
+                record.get('attachment_id') != candidate.get('attachment_id'):
+            continue
+        path = owner_dir + '/' + key + '.json'
+        if not schema.get(path):
+            continue
+        runtime = [a for a in record.get('artifacts', []) if a.get('path') == '.trellis/runtime']
+        if len(runtime) != 1 or runtime[0].get('kind') != 'symlink' or runtime[0].get('target') != payload:
+            continue
+        collector = Collector()
+        entry = {'path': path, 'data': snapshots[path], 'record': None, 'valid': True,
+                 'canonical': path == home + '/state/attachments/' + record.get('checkout_id', '') + '/' + record.get('worktree_id', '') + '.json'
+                              and record.get('checkout_id') == checkout}
+        try:
+            failures = owner_verify.verify_owner_records(home, [entry], opener=collector.open)
+        except Exception:
+            collector.close()
+            raise
+        if failures:
+            collector.close()
+            continue
+        collector.root = record.get('worktree_root')
+        if stack is not None:
+            stack.callback(collector.close)
+        return record, collector
+    return None, None
+
+
 def directory(path):
     return load_integrity().directory(path)
 
 
 def read_regular(*args, **kwargs):
     return load_integrity().read_regular(*args, **kwargs)
+
+
+def recheck_bound_file(path, before, captured, reason, mode=None):
+    """PATH still names the captured inode and holds exactly BEFORE."""
+    parent, name = os.path.split(path)
+    with directory(parent) as fd:
+        with integrity._bound_file(fd, name, mode=mode) as data:
+            named = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            require(data == before and integrity._fingerprint(named) == integrity._fingerprint(captured), reason)
+
+
+def entry_state(path):
+    """PATH's no-follow namespace state: None when absent, else (type, dev, ino,
+    permission bits, owner). A missing or unusable parent is its own state, so
+    it compares too."""
+    parent, name = os.path.split(path)
+    try:
+        with (root_directory() if parent == '/' else directory(parent)) as fd:
+            try:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                return None
+            return (stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), info.st_uid)
+    except (OSError, ValueError) as error:
+        return ('parent unavailable', type(error).__name__)
+
+
+@contextmanager
+def root_directory():
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def prior_hook_path_state(path):
+    """PATH as the shell's prior-hook predicates see it: its own and its
+    followed type, identity, mode and owner, plus the effective read and
+    execute answers ([ -r ], [ -x ]) that ACLs can change without a mode."""
+    states = []
+    for follow in (False, True):
+        try:
+            info = os.stat(path, follow_symlinks=follow)
+            states.append((stat.S_IFMT(info.st_mode), info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode), info.st_uid))
+        except (OSError, ValueError) as error:
+            states.append(type(error).__name__)
+    states.append((os.access(path, os.R_OK), os.access(path, os.X_OK)))
+    return states
+
+
+def prior_hooks_state(prior):
+    """The prior hooks directory the passthrough shims derive from, read the
+    way the shell reads it (following links): its own state, then each entry's."""
+    listing = [('', prior_hook_path_state(prior))]
+    try:
+        names = sorted(os.listdir(prior))
+    except (OSError, ValueError) as error:
+        return listing + [('unavailable', type(error).__name__)]
+    return listing + [(name, prior_hook_path_state(prior + '/' + name)) for name in names]
+
+
+class Facts:
+    """r152-t13-code F2: every mutable input admission and planning rely on,
+    beyond the owner, registry, exclude and donor captures, recorded where it
+    is read and rechecked, nonsemantically, at the journal boundary: file
+    bytes with their bound identity, namespace states, and Git answers."""
+
+    def __init__(self):
+        self.items = []
+
+    def file(self, path, mode=None):
+        parent, name = os.path.split(path)
+        with directory(parent) as fd:
+            with integrity._bound_file(fd, name, mode=mode) as data:
+                info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        self.items.append(('file', path, data, info, mode))
+        return data
+
+    def entry(self, path):
+        state = entry_state(path)
+        self.items.append(('entry', path, state))
+        return state
+
+    def directory(self, path):
+        """PATH opens as a directory through the no-follow walk; its identity."""
+        with directory(path) as fd:
+            state = identity(os.fstat(fd))
+        self.items.append(('directory', path, state))
+        return state
+
+    def answer(self, label, compute):
+        value = compute()
+        self.items.append(('answer', label, compute, value))
+        return value
+
+    def recheck(self):
+        for item in self.items:
+            if item[0] == 'file':
+                recheck_bound_file(item[1], item[2], item[3], 'planning input changed: ' + item[1], mode=item[4])
+            elif item[0] == 'entry':
+                require(entry_state(item[1]) == item[2], 'planning namespace changed: ' + item[1])
+            elif item[0] == 'directory':
+                with directory(item[1]) as fd:
+                    require(identity(os.fstat(fd)) == item[2], 'planning namespace changed: ' + item[1])
+            else:
+                require(item[2]() == item[3], 'planning answer changed: ' + item[1])
+
+
+def absent(state):
+    return state is None or state[0] == 'parent unavailable'
+
+
+def capture_donor_artifacts(root, artifacts):
+    """r152-t13-code F1: the ordinary and explicit-binding routes take the
+    same retained captures as registry admission. Each artifact is captured
+    through the shared verifier's no-follow opener and checked on the captured
+    node exactly as artifact_exact checks the name; the collector then serves
+    planning and the final recheck."""
+    load_owner_verify()
+    collector = Collector()
+    collector.root = root
+    kinds = {'symlink': 'symlink', 'directory': 'directory', 'parent': 'directory', 'file': 'file'}
+    try:
+        for artifact in artifacts:
+            kind = artifact['kind']
+            require(kind in kinds, 'unknown artifact kind')
+            parent, name = os.path.split(root + '/' + relative(artifact['path']))
+            with directory(parent) as fd:
+                node = collector.open(fd, name, kinds[kind], artifact)
+            if kind == 'symlink':
+                require(node is not None and node.data == os.fsencode(artifact['target']), 'donor symlink drift')
+            elif kind in ('directory', 'parent'):
+                require(node is not None, 'donor directory drift')
+                if kind == 'directory':
+                    require(not os.listdir(node.fd), 'donor empty directory drift')
+            else:
+                require(node is not None and node.identity[4] == 1, 'donor file drift')
+                if 'mode' in artifact:
+                    require(stat.S_IMODE(node.identity[2]) == int(artifact['mode'], 8), 'donor file drift')
+                require(sha(node.data) == artifact['sha256'], 'donor file drift')
+    except BaseException:
+        collector.close()
+        raise
+    return collector
 
 
 def relative(path):
@@ -65,6 +409,22 @@ class RenderMiss(ValueError):
     """A donor whose explicit-json render the canonical renderer does not
     reproduce for the donor's own root. Always labelled on stderr; still a
     read-only miss (10) that runs the full attach, never a fast-path success."""
+
+
+class FastPathUnavailable(ValueError):
+    """T13 D3: the fast path cannot decide on this machine at all (not a
+    donor-specific miss): the filesystem cannot prove freshness, or the
+    Claude Code version is unreadable. One line on stderr, without TRACE;
+    still a read-only miss (10) that runs the full attach."""
+
+
+# T13 D2: this template's render form follows the Claude Code version
+# (exec form at 2.1.295 or newer, else the legacy shell form), so its donor
+# render is checked through the canonical renderer, which makes that decision
+# once for the batch, never by substituting the template here.
+CLAUDE_SETTINGS_TEMPLATE = 'core-rules/templates/claude-settings.local.json'
+# The attach boundary's decision, from this call's environment only (main).
+CLAUDE_DECISION = ''
 
 
 MARKERS = ('__TRELLIS_USER_HOME__', '__TRELLIS_HOME__', '__TRELLIS_LAUNCHER__')
@@ -176,7 +536,7 @@ def artifact_exact(root, artifact):
     return data
 
 
-def current_inventory(donor, payload, harnesses, native=None):
+def current_inventory(donor, payload, harnesses, native=None, observed=None, facts=None):
     """Reject historical/adopted inventories that need the current full planner.
 
     Recognize the shipped nonrecursive link/render shapes only. Unknown shapes
@@ -217,6 +577,8 @@ def current_inventory(donor, payload, harnesses, native=None):
                 destination = relative(entry['destination'])
                 source = relative(entry['project_target'])
                 target = '../' * destination.count('/') + source
+                if facts is not None:
+                    facts.entry(donor['worktree_root'] + '/' + source)
                 if not project_file_present(donor['worktree_root'] + '/' + source):
                     target = '../' * destination.count('/') + '.trellis/runtime/' + relative(entry['fallback_source'])
                 require(destination not in expected, 'duplicate surface destination')
@@ -239,7 +601,7 @@ def current_inventory(donor, payload, harnesses, native=None):
             else:
                 require(entry['merge'] == 'explicit-json', 'unknown render merge')
                 value = json.loads(data)
-                if native_shaped(value):
+                if native_shaped(value) or template == CLAUDE_SETTINGS_TEMPLATE:
                     require(native is not None, 'native render needs the canonical renderer')
                     native.append({'template': template, 'destination': destination, 'mode': entry['mode'], 'merge': 'explicit-json'})
                     expected[destination] = ('native', None, entry['mode'])
@@ -272,7 +634,7 @@ def current_inventory(donor, payload, harnesses, native=None):
         elif wanted[0] == 'native':
             require(artifact.get('mode') == wanted[2], 'guard template differs')  # content: canonical_renders
         else:
-            data = artifact_exact(donor['worktree_root'], artifact)
+            data = observed.data(path) if observed is not None else artifact_exact(donor['worktree_root'], artifact)
             require(json.loads(data) == wanted[1] and artifact.get('mode') == wanted[2], 'guard template differs')
     return sources
 
@@ -300,9 +662,14 @@ def render_inputs(payload):
 # full attach probes per render, a few milliseconds apart.
 RENDER = r'''
 . "$1" || exit 1
-payload="$2"; context="$3"; donor_root="$4"; target_root="$5"
-shift 5 || exit 1
-if attachment_claude_on_failure_supported; then fast_direct=0; else fast_direct=1; fi
+payload="$2"; context="$3"; donor_root="$4"; target_root="$5"; decision="$6"
+shift 6 || exit 1
+# The attach boundary's Claude decision (T13 D2), never a second probe.
+case "$decision" in
+  supported) fast_direct=0 ;;
+  unsupported|absent) fast_direct=1 ;;
+  *) exit 12 ;;  # unreadable or missing: never guess the render form
+esac
 attachment_claude_on_failure_supported() { return "$fast_direct"; }
 for record in "$@"; do
   template="$(printf '%s\n' "$record" | jq -r .template)" || exit 1
@@ -313,15 +680,18 @@ done
 '''
 
 
-def canonical_renders(payload, donor, root, entries):
+def canonical_renders(payload, donor, root, entries, observed=None):
     """T34 option B: verify each native donor render against the canonical
     render for the donor's own root, then take the target's artifact and
     render record from the canonical plan for the target root."""
     result = subprocess.run(['/bin/bash', '-c', RENDER, 'fast-render', str(Path(__file__).parent.parent / 'attach-project.sh'),
-                             payload, json.dumps(donor.get('render_context')), donor['worktree_root'], root,
+                             payload, json.dumps(donor.get('render_context')), donor['worktree_root'], root, CLAUDE_DECISION,
                              *[json.dumps(e, sort_keys=True) for e in entries]],
                             env=dict(os.environ, TRELLIS_LIBS_PRELOADED='0'), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode == 12:
+        raise FastPathUnavailable('Claude Code version unreadable' if CLAUDE_DECISION == 'unreadable'
+                                  else 'no Claude render decision for this attach')
     if result.returncode != 0:
         raise RenderMiss('canonical render refused: ' + result.stderr.decode(errors='replace').strip()[-400:])
     lines = result.stdout.decode().splitlines()
@@ -332,7 +702,7 @@ def canonical_renders(payload, donor, root, entries):
     for entry, line in zip(entries, lines):
         doc = json.loads(line)
         path = entry['destination']
-        actual = json.loads(artifact_exact(donor['worktree_root'], artifacts[path]))
+        actual = json.loads(observed.data(path) if observed is not None else artifact_exact(donor['worktree_root'], artifacts[path]))
         if actual != doc['donor']:
             raise RenderMiss(render_miss_label(actual, doc['donor']))
         artifact, render = doc['target']['artifact'], doc['target']['render']
@@ -529,12 +899,72 @@ def read_lock_token(fd):
     return b''.join(chunks)
 
 
+def hold_publisher_lock(holder_fd, owner_pid):
+    """H2: hold the attachment holder's publisher flock for this writer's life.
+
+    The transaction lock records the shell that started us; a SIGKILL of that
+    shell does not stop us. Recovery (_attachment_publisher_idle) reclaims the
+    lock only once this flock is free, so a write in flight cannot race it,
+    and every later lock-scope recheck stops us before the next write once the
+    owner is gone. Taken through the held holder fd, before the lock scope
+    captures the holder: creating the file changes the holder's ctime.
+    """
+    # O_NONBLOCK: a FIFO planted here must refuse at the type check below,
+    # not block the open while the caller holds the transaction locks.
+    try:
+        fd = os.open('publisher.lock', os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                     0o600, dir_fd=holder_fd)
+    except OSError as error:
+        raise LostTransactionLock('publisher lock unavailable') from error
+    try:
+        info = os.fstat(fd)
+        lock_require(stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1,
+                     'unsafe publisher lock')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise LostTransactionLock('publisher lock is held') from error
+        try:
+            os.kill(owner_pid, 0)
+        except OSError as error:
+            raise LostTransactionLock('transaction lock owner exited') from error
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 class TransactionLocks:
-    def __init__(self, entries, parents):
+    def __init__(self, entries, parents, stack=None):
         self.entries = entries
         self.parents = parents
+        self.stack = stack
+        self.committed = False
+        self.released = False
+        # The held, flocked publisher.lock (hold_publisher_lock); once set,
+        # every recheck proves its name still binds that exact inode.
+        self.publisher_fd = None
+
+    def mark_committed(self):
+        # Called as soon as the journal unlink succeeds: the transaction is
+        # committed, so nothing after it may report an uncommitted,
+        # recoverable one.
+        self.committed = True
+
+    def release_checked(self):
+        """Last lock check, then unwind every lock-parent context with its
+        own checks: all fallible lock-scope exits finish before the journal
+        unlink. Afterwards the scope holds nothing left to verify."""
+        self.recheck()
+        try:
+            if self.stack is not None:
+                self.stack.close()
+        except (OSError, ValueError) as error:
+            raise LostTransactionLock('lock namespace changed before commit') from error
+        self.released = True
 
     def recheck(self):
+        lock_require(not self.released, 'lock scope already released')
         # The holder's parent fd alone is not enough: its old directory could
         # have been moved away while a new lock namespace takes its place.
         for path, held_parent, original in self.parents:
@@ -567,6 +997,17 @@ class TransactionLocks:
                 raise
             except (OSError, ValueError) as error:
                 raise LostTransactionLock('lock scope could not be rechecked') from error
+        if self.publisher_fd is not None:
+            try:
+                held = os.fstat(self.publisher_fd)
+                named = os.stat('publisher.lock', dir_fd=self.entries[1]['fd'], follow_symlinks=False)
+                lock_require(stat.S_ISREG(named.st_mode) and named.st_nlink == 1 and
+                             (named.st_dev, named.st_ino) == (held.st_dev, held.st_ino),
+                             'publisher lock name no longer binds the held lock')
+            except LostTransactionLock:
+                raise
+            except (OSError, ValueError) as error:
+                raise LostTransactionLock('publisher lock could not be rechecked') from error
 
     def proof_infos(self):
         infos = []
@@ -640,7 +1081,7 @@ def transaction_lock_scope(home, binding, attachment_id, checkout_pid, attachmen
                                 'token_name': token_name, 'token_info': token_info, 'token': token, 'pid': pid})
             parents = [(home + '/state/locks', state_parent, os.fstat(state_parent)),
                        (home + '/locks', registry_parent, os.fstat(registry_parent))]
-            scope = TransactionLocks(entries, parents)
+            scope = TransactionLocks(entries, parents, stack)
             scope.recheck()
             try:
                 yield scope
@@ -648,7 +1089,15 @@ def transaction_lock_scope(home, binding, attachment_id, checkout_pid, attachmen
                 operation_failed = True
                 raise
             finally:
-                scope.recheck()
+                if scope.committed:
+                    # Committed: the remaining unwind only closes resources
+                    # and can never report a lock loss.
+                    try:
+                        stack.close()
+                    except (OSError, ValueError):
+                        pass
+                elif not scope.released:
+                    scope.recheck()
     except LostTransactionLock:
         raise
     except (OSError, ValueError, KeyError, TypeError) as error:
@@ -679,38 +1128,6 @@ def registry_digest(data):
     return sha(canonical_json(data).encode('ascii'))
 
 
-def require_fine_ctime(device, infos, ticks):
-    """A reuse miss unless every pinned input is on the probed fine-ctime device."""
-    require(len(infos) >= 2 and len(ticks) == 3, 'missing ctime proof inputs')
-    require(all(info.st_dev == device and info.st_ctime_ns % 1000000 for info in infos),
-            'foreign device or coarse input ctime')
-    require(len(set(ticks)) == 3 and all(value % 1000000 for value in ticks),
-            'ctime does not move finely')
-
-
-def prove_fine_ctime(scratch_fd, inputs):
-    """Probe two metadata changes on the same device as the held inputs."""
-    name = '.registry-ctime-' + uuid.uuid4().hex
-    fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scratch_fd)
-    try:
-        probe = os.fstat(fd)
-        ticks = [probe.st_ctime_ns]
-        for mode in (0o400, 0o600):
-            os.fchmod(fd, mode)
-            ticks.append(os.fstat(fd).st_ctime_ns)
-        probe = os.fstat(fd)
-        require_fine_ctime(probe.st_dev, list(inputs) + [probe], ticks)
-    finally:
-        held = os.fstat(fd)
-        try:
-            named = os.stat(name, dir_fd=scratch_fd, follow_symlinks=False)
-            if stat.S_ISREG(named.st_mode) and integrity._fingerprint(named) == integrity._fingerprint(held):
-                os.unlink(name, dir_fd=scratch_fd)
-        except FileNotFoundError:
-            pass
-        os.close(fd)
-
-
 @contextmanager
 def private_capture(scratch_fd, parent_fd, name, snapshot_name, mode=None, check=None):
     """Copy one held input into the private workspace for the canonical child.
@@ -718,7 +1135,7 @@ def private_capture(scratch_fd, parent_fd, name, snapshot_name, mode=None, check
     Keep original and capture descriptors live through the child; a
     name/inode/content change of either is a read-only miss, never permission
     to publish a journal. Yields the bytes and both identities for the
-    caller's fine-ctime proof.
+    caller's final content recheck.
     """
     with integrity._bound_file(parent_fd, name, mode=mode) as live:
         if check is not None:
@@ -755,21 +1172,21 @@ def private_capture(scratch_fd, parent_fd, name, snapshot_name, mode=None, check
 
 
 @contextmanager
-def captured_preflight_registry(scratch_fd, registry_path, diagnostic, lock_infos=()):
+def captured_preflight_registry(scratch_fd, registry_path, diagnostic):
     """Lend one pinned capture to the existing canonical registry proposal.
 
     The normalized diagnostic bytes arrive on stdin from the lock-holding
-    parent. Unsupported ctime or a foreign device is a read-only miss. The
-    capture is named relative to the held workspace, the child's cwd.
+    parent. The capture is named relative to the held workspace, the child's
+    cwd; the caller rechecks original and copy after PREFLIGHT.
     """
     parent, registry_name = os.path.split(registry_path)
     snapshot_name = 'registry.captured.json'
     def check(live):
         require(same_registry_snapshot(live, diagnostic), 'registry capture differs')
-    with directory(parent) as registry_fd, \
-         private_capture(scratch_fd, registry_fd, registry_name, snapshot_name, 0o600, check) as (live, inputs):
-        prove_fine_ctime(scratch_fd, inputs + list(lock_infos))
-        yield live, snapshot_name
+    with directory(parent) as registry_fd:
+        require_supported_filesystem(registry_fd)
+        with private_capture(scratch_fd, registry_fd, registry_name, snapshot_name, 0o600, check) as (live, inputs):
+            yield live, snapshot_name, inputs
 
 
 @contextmanager
@@ -778,14 +1195,15 @@ def captured_shared_exclude(scratch_fd, common, common_pin):
 
     Bound to the pinned common directory and lent to the child as a private
     copy, so repeated canonical checks of one record value see one file. The
-    caller adds the identities to its fine-ctime proof.
+    caller rechecks original and copy after PREFLIGHT.
     """
     snapshot_name = 'exclude.captured'
     with directory(common) as common_fd:
         require(identity(os.fstat(common_fd)) == common_pin, 'common directory replaced')
-        with integrity._child_directory(common_fd, 'info') as info_fd, \
-             private_capture(scratch_fd, info_fd, 'exclude', snapshot_name) as (data, inputs):
-            yield data, snapshot_name, inputs
+        with integrity._child_directory(common_fd, 'info') as info_fd:
+            require_supported_filesystem(info_fd)
+            with private_capture(scratch_fd, info_fd, 'exclude', snapshot_name) as (data, inputs):
+                yield data, snapshot_name, inputs
 
 
 @contextmanager
@@ -794,6 +1212,7 @@ def captured_owner_records(owner_dir, keys):
     require(len(keys) == len(set(keys)) and all(re.fullmatch(r'[0-9a-f]{64}', key) for key in keys),
             'invalid owner keys')
     with directory(owner_dir) as fd:
+        require_supported_filesystem(fd)
         expected = {key + '.json' for key in keys}
         require(set(os.listdir(fd)) == expected, 'owner namespace differs')
         parent_info = os.fstat(fd)
@@ -814,7 +1233,7 @@ def captured_owner_records(owner_dir, keys):
 PREFLIGHT = r'''
 . "$1" || exit 1
 home="$2"; registry="$3"; proposal="$4"; plan="$5"; authority="$6"; donor_owner="$7"
-exclude_path="$8"; exclude_capture="$9"
+exclude_path="$8"; exclude_capture="$9"; owners_proven="${10}"
 trap 'surface_plan_cleanup' EXIT
 _SURFACE_PLAN_HARNESSES=()
 while IFS= read -r harness; do _SURFACE_PLAN_HARNESSES+=("$harness"); done < <(jq -r '.[]' "$plan.harnesses")
@@ -823,10 +1242,14 @@ payload="$home/releases/$release/payload"
 manifest="$payload/core-rules/inheritance-manifest.json"
 surface_plan_validate_manifest "$manifest" || exit 1
 surface_plan_validate_expanded_skills "$payload" "$manifest" || exit 1
-shift 9 || exit 1
+shift 10 || exit 1
 verified_excludes=()
 for owner in "$@"; do
-  if [ "$owner" = "$donor_owner" ]; then
+  if [ "$owners_proven" = owners-proven ]; then
+    # The parent's registry admission judged every owner's schema and the
+    # donor's whole record from these same captured bytes, in its process.
+    :
+  elif [ "$owner" = "$donor_owner" ]; then
     # This canonical verifier calls _attachment_owner_json_valid itself. With a
     # shared seed proof for these exact bytes (T2a) only the per-artifact leaf
     # loop is skipped: attach-fastpath.py re-proved every leaf under the locks.
@@ -887,7 +1310,13 @@ def shared_donor_proof(proof, expected_donor, donor_owner, snapshots, release):
     return owner + '\t' + digest
 
 
-def prepare(home, root, fleet, project_id, binding, release, harnesses, expected_donor, attachment_id, root_pin, common_pin, exclude_bytes, owner_stack, registry_bytes):
+def registry_donor_request(expected_donor):
+    return isinstance(expected_donor, dict) and 'candidates' in expected_donor
+
+
+def prepare(home, root, fleet, project_id, binding, release, harnesses, expected_donor, attachment_id, root_pin, common_pin, exclude_bytes, owner_stack, registry_bytes, captures=None, facts=None):
+    if facts is None:
+        facts = Facts()
     checkout, worktree, common = binding['checkout_id'], binding['worktree_id'], binding['git_common_dir']
     require(binding['root'] == root and sha(root.encode()) == worktree and sha(common.encode()) == checkout, 'invalid identity binding')
     with directory(root) as fd:
@@ -895,17 +1324,23 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
     with directory(common) as fd:
         require(identity(os.fstat(fd)) == common_pin, 'common directory replaced')
     live_identity(root, common)
+    # r152-t13-code-2: the target manifest selects the registry project; its
+    # bytes are rechecked at the journal boundary like the donors'.
+    target_manifest = json.loads(facts.file(root + '/.trellis.json'))
+    require(isinstance(target_manifest, dict) and target_manifest.get('project_id') == project_id, 'target project differs')
     state = home + '/state'
     owner_dir = state + '/attachments/' + checkout
     journal_dir = state + '/attachment-journals'
     owner_path = owner_dir + '/' + worktree + '.json'
-    require(not os.path.lexists(owner_path), 'target already owned')
-    require(not os.path.lexists(state + '/release-adoptions/' + checkout), 'pending adoption')
+    require(absent(facts.entry(owner_path)), 'target already owned')
+    require(absent(facts.entry(state + '/release-adoptions/' + checkout)), 'pending adoption')
     for path in (home, state, state + '/attachments', owner_dir, journal_dir):
         with directory(path) as fd:
             require(stat.S_IMODE(os.fstat(fd).st_mode) == 0o700, 'nonprivate attachment state')
-    with directory(journal_dir) as fd:
-        require(not os.listdir(fd), 'pending journal')
+    def journal_names():
+        with directory(journal_dir) as fd:
+            return sorted(os.listdir(fd))
+    require(not facts.answer('journal directory', journal_names), 'pending journal')
     registry = json.loads(registry_bytes)
     project = registry['projects'][fleet + '/' + project_id]
     require(project['status'] == 'active' and not project.get('metadata', {}).get('legacy', {}).get('blacklisted', False), 'inactive checkout')
@@ -925,7 +1360,7 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
         donor_root = row['root']
         require(donor_root != root and sha(donor_root.encode()) == key, 'donor root binding differs')
         live_identity(donor_root, common)
-        manifest = json.loads(read_regular(donor_root + '/.trellis.json'))
+        manifest = json.loads(facts.file(donor_root + '/.trellis.json'))
         require(manifest.get('project_id') == project_id, 'donor project differs')
         for field, value in [('status', 'committed'), ('fleet', fleet), ('project_id', project_id), ('checkout_id', checkout), ('worktree_id', key), ('attachment_id', row['attachment_id']), ('release', release), ('project_root', donor_root), ('worktree_root', donor_root)]:
             require(record.get(field) == value, 'donor binding differs')
@@ -935,60 +1370,124 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
         owners[key] = record
         owner_files.append(path)
     require(authority is not None, 'missing hook authority')
+    payload = home + '/releases/' + release + '/payload'
     donor = None
-    candidates = [owners[expected_donor['worktree_id']]] if expected_donor else owners.values()
-    for candidate in candidates:
-        if not expected_donor and candidate.get('pre_existing'):
-            continue  # Deferred leaves need fresh planning; try another donor.
-        try:
-            for artifact in candidate['artifacts']:
-                artifact_exact(candidate['worktree_root'], artifact)
-        except (OSError, ValueError):
-            continue  # Native drift disqualifies this donor, not exclude ownership.
-        donor = candidate
-        break
+    observed = None
+    if registry_donor_request(expected_donor):
+        # The seed named the candidates in registry order and verified none:
+        # this process admits the donor once, under the transaction locks.
+        load_owner_verify()
+        paths = [owner_dir + '/' + key + '.json' for key in sorted(rows)]
+        schema, settings_program = owner_schema_verdicts(owner_snapshots, paths)
+        require(all(schema.values()), 'invalid owner')
+        owner_verify.load(*owner_verify._fastpath_modules, settings_program)
+        # CAPTURES, when given, keeps the admitted donor's captures held past
+        # the owner contexts, so the caller rechecks them at its journal boundary.
+        donor, observed = admit_registry_donor(home, owner_dir, checkout, expected_donor['candidates'], owners,
+                                               owner_snapshots, schema, payload, owner_stack if captures is None else None)
+        if observed is not None and captures is not None:
+            captures.append(observed)
+    else:
+        candidates = [owners[expected_donor['worktree_id']]] if expected_donor else owners.values()
+        for candidate in candidates:
+            if not expected_donor and candidate.get('pre_existing'):
+                continue  # Deferred leaves need fresh planning; try another donor.
+            try:
+                observed = capture_donor_artifacts(candidate['worktree_root'], candidate['artifacts'])
+            except (OSError, ValueError):
+                continue  # Native drift disqualifies this donor, not exclude ownership.
+            if captures is not None:
+                captures.append(observed)
+            else:
+                owner_stack.callback(observed.close)
+            donor = candidate
+            break
     require(donor is not None, 'no exact donor')
-    if expected_donor:
+    for path in (donor['worktree_root'], root):
+        with directory(path) as fd:
+            require_supported_filesystem(fd)
+    registry_mode = registry_donor_request(expected_donor)
+    if expected_donor and not registry_mode:
         require(donor['attachment_id'] == expected_donor['attachment_id'] and donor['worktree_root'] == expected_donor['root'], 'expected donor changed')
     require(not donor.get('pre_existing'), 'donor deferred leaves need fresh planning')
     require(all(not r['before_exists'] for r in donor.get('renders', [])), 'donor guards contain project content')
     toolchain = donor.get('toolchain_path', [])
     require(toolchain and any(p not in ('/usr/bin', '/bin', '/usr/sbin', '/sbin') for p in toolchain), 'donor toolchain absent/control-only')
     for path in toolchain:
-        with directory(path):
-            pass
+        facts.directory(path)
+    context = donor.get('render_context')
+    if isinstance(context, dict) and isinstance(context.get('launcher'), str):
+        # r152-t13-code-2: the render context requires a canonical, executable
+        # launcher; its directory and its own type, inode and mode are facts.
+        facts.directory(os.path.dirname(context['launcher']))
+        launcher = facts.entry(context['launcher'])
+        require(launcher is not None and launcher[0] == stat.S_IFREG and launcher[3] & 0o111, 'render-context launcher unusable')
     if not expected_donor:
         require(caller_toolchain() == toolchain, 'caller toolchain needs fresh capture')
         if donor.get('render_context'):
             require(donor['render_context']['user_home'] == os.path.realpath(os.environ.get('HOME', '')), 'different render home')
+    facts.entry(root + '/CLAUDE.md')
+    facts.entry(donor['worktree_root'] + '/CLAUDE.md')
     require(project_file_present(root + '/CLAUDE.md') == project_file_present(donor['worktree_root'] + '/CLAUDE.md'), 'different project CLAUDE context')
     managed = state + '/git-hooks/' + checkout
     authority_record = owners[Path(authority).stem]
     hooks = authority_record['git_hooks']
     require(hooks['managed_hooks_path'] == managed, 'different managed hooks')
-    require(git(root, 'config', '--local', '--get-all', 'core.hooksPath') == (managed + '\n').encode(), 'hooksPath mismatch')
-    require(git(root, 'config', '--get', 'core.hooksPath') == (managed + '\n').encode(), 'effective hooksPath mismatch')
+    require(facts.answer('local hooksPath', lambda: git(root, 'config', '--local', '--get-all', 'core.hooksPath')) == (managed + '\n').encode(), 'hooksPath mismatch')
+    require(facts.answer('effective hooksPath', lambda: git(root, 'config', '--get', 'core.hooksPath')) == (managed + '\n').encode(), 'effective hooksPath mismatch')
     pins = []
     for name in ('pre-push', 'post-checkout'):
-        body = read_regular(managed + '/' + name, mode=0o700).decode()
+        body = facts.file(managed + '/' + name, mode=0o700).decode()
         found = re.findall(r'^expected_release_manifest_sha256=([0-9a-f]{64})$', body, re.M)
         require(len(found) == 1, 'missing dispatcher manifest pin')
         pins.append(found[0])
     require(pins[0] == pins[1], 'dispatcher pins differ')
-    payload = home + '/releases/' + release + '/payload'
+    # r152-t13-code-2: PREFLIGHT checks the whole managed hook set (sidecars
+    # such as previous-hooks-path, release-payload and pre-push-source, and
+    # any passthrough shims), so all of it joins the final recheck.
+    facts.directory(managed)
+    # r152-create-3: the hooks state directories' modes and owners, and the
+    # prior hooks directory whose executable hooks decide the passthrough
+    # shims, are PREFLIGHT inputs too (prior_hooks_state).
+    facts.entry(state + '/git-hooks')
+    facts.entry(managed)
+    # A relative prior path resolves against the hooks authority's worktree,
+    # as _attachment_verify_managed_hooks resolves it, not the target's.
+    previous = hooks.get('previous_hooks_path') or ''
+    prior = common + '/hooks' if previous == '' else previous if previous.startswith('/') else authority_record['worktree_root'] + '/' + previous
+    facts.answer('prior hooks ' + prior, lambda: prior_hooks_state(prior))
+    def managed_names():
+        with directory(managed) as fd:
+            return sorted(os.listdir(fd))
+    for name in facts.answer('managed hook names', managed_names):
+        if name in ('pre-push', 'post-checkout'):
+            continue
+        entry = facts.entry(managed + '/' + name)
+        if entry is not None and entry[0] == stat.S_IFREG:
+            facts.file(managed + '/' + name)
+        elif entry is not None and entry[0] == stat.S_IFLNK:
+            facts.answer('managed hook link ' + name, lambda path=managed + '/' + name: os.readlink(path))
     native = []
-    required = ['scripts/seed-inheritance-symlinks.sh', hooks['pre_push_source']] + current_inventory(donor, payload, harnesses, native)
+    if observed is not None:
+        # The captures are unchanged before planning uses their bytes.
+        observed.require_fresh()
+    required = ['scripts/seed-inheritance-symlinks.sh', hooks['pre_push_source']] + current_inventory(donor, payload, harnesses, native, observed, facts)
+    if observed is not None:
+        required += list(OWNER_VERIFY_SOURCES)
     if native:
         required += render_inputs(payload)
     release_record = integrity.verify_release_executed(home + '/releases/' + release, pins[0], required)
     require(release_record['version'] == release, 'release version differs')
     # Native renders name the project root and this host's companion, so the
     # target's are the canonical renderer's, never the donor's bytes.
-    target_renders = canonical_renders(payload, donor, root, native) if native else {}
+    target_renders = canonical_renders(payload, donor, root, native, observed) if native else {}
     exclude_path = common + '/info/exclude'
     exclude = copy.deepcopy(authority_record['exclude'])
     require(exclude['managed_by_attachment'] and exclude['path'] == exclude_path and exclude['git_common_dir'] == common, 'exclude authority mismatch')
-    require(exclude_bytes == base64.b64decode(exclude['after_base64'], validate=True), 'exclude bytes changed')
+    if not registry_mode:
+        # Registry admission leaves this to PREFLIGHT's attach_exclude_verify_state
+        # of the same captured bytes, before any journal: one exclude check.
+        require(exclude_bytes == base64.b64decode(exclude['after_base64'], validate=True), 'exclude bytes changed')
     for record in owners.values():
         require(record['exclude_block_hash'] == exclude['managed_block_sha256'] and record['exclude']['git_common_dir'] == common, 'sibling exclude differs')
     block = base64.b64decode(exclude['managed_block_base64'], validate=True)
@@ -1000,21 +1499,22 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
     parents = set()
     for artifact in leaves:
         path = relative(artifact['path'])
-        require(not os.path.lexists(root + '/' + path), 'project-owned target leaf')
+        require(absent(facts.entry(root + '/' + path)), 'project-owned target leaf')
         parts = path.split('/')[:-1]
         parents.update('/'.join(parts[:i]) for i in range(1, len(parts) + 1))
         if artifact['kind'] == 'file' and path not in target_renders:
-            artifact['content_base64'] = encoded(artifact_exact(donor['worktree_root'], artifact))
+            data = observed.data(artifact['path']) if observed is not None else artifact_exact(donor['worktree_root'], artifact)
+            artifact['content_base64'] = encoded(data)
     owned_parents = []
     for path in sorted(parents, key=lambda p: (p.count('/'), p)):
-        if os.path.lexists(root + '/' + path):
-            with directory(root + '/' + path):
-                pass
+        present = facts.entry(root + '/' + path)
+        if not absent(present):
+            require(present[0] == stat.S_IFDIR, 'target parent is not a directory')
         else:
             owned_parents.append({'path': path, 'kind': 'parent'})
     paths = [a['path'] for a in leaves]
-    require(not git(root, 'ls-files', '-z', '--', *paths), 'tracked destination conflict')
-    ignored = git(root, 'check-ignore', '-z', '--no-index', '--stdin', data=('\0'.join(paths) + '\0').encode(), allowed=(0, 1)).decode().split('\0')
+    require(not facts.answer('tracked destinations', lambda: git(root, 'ls-files', '-z', '--', *paths)), 'tracked destination conflict')
+    ignored = facts.answer('ignored destinations', lambda: git(root, 'check-ignore', '-z', '--no-index', '--stdin', data=('\0'.join(paths) + '\0').encode(), allowed=(0, 1))).decode().split('\0')
     require(set(paths) <= set(ignored), 'exclude not effective')
     plan = copy.deepcopy(donor)
     plan.update(status='prepared', project_root=root, worktree_root=root, checkout_id=checkout, worktree_id=worktree, attachment_id=attachment_id, artifacts=owned_parents + leaves, exclude=exclude, git_hooks={'enabled': False})
@@ -1024,7 +1524,7 @@ def prepare(home, root, fleet, project_id, binding, release, harnesses, expected
     return plan, owner_path, journal_dir + '/' + attachment_id + '.json', authority, donor_owner, owner_files, owner_snapshots, owner_infos
 
 
-def publish(plan, owner_path, journal_path, root_pin, common_pin, recheck_locks):
+def publish(plan, owner_path, journal_path, root_pin, common_pin, recheck_locks, release_locks=None, committed=None):
     root = plan['worktree_root']
     common = plan['exclude']['git_common_dir']
     def namespace():
@@ -1083,8 +1583,31 @@ def publish(plan, owner_path, journal_path, root_pin, common_pin, recheck_locks)
     for artifact in owner['artifacts']:
         artifact.pop('content_base64', None)
     write_json(owner_path, owner, exclusive=True)
-    with directory(os.path.dirname(journal_path)) as fd:
-        os.unlink(os.path.basename(journal_path), dir_fd=fd)
+    # Every fallible check precedes journal removal: a lock lost after the
+    # owner write leaves owner plus journal for trellis recover. The journal
+    # directory's context finishes its checks first and leaves a descriptor
+    # for the unlink; the lock-parent contexts unwind next. The unlink is the
+    # commit, and what follows it only closes the descriptor.
+    recheck_locks()
+    final_fd = None
+    try:
+        with directory(os.path.dirname(journal_path)) as fd:
+            final_fd = os.dup(fd)
+        if release_locks is not None:
+            release_locks()
+    except BaseException:
+        if final_fd is not None:
+            os.close(final_fd)
+        raise
+    try:
+        os.unlink(os.path.basename(journal_path), dir_fd=final_fd)
+        if committed is not None:
+            committed()
+    finally:
+        try:
+            os.close(final_fd)
+        except OSError:
+            pass
 
 
 def main():
@@ -1104,29 +1627,43 @@ def main():
         # Only this caller's explicit argument may carry a donor proof; never
         # let an inherited value reach PREFLIGHT.
         donor_proof = os.environ.pop('TRELLIS_FASTPATH_DONOR_PROOF', '')
+        global CLAUDE_DECISION
+        decision = os.environ.pop('TRELLIS_FASTPATH_CLAUDE_DECISION', '')
+        CLAUDE_DECISION = decision if decision in ('supported', 'unsupported', 'absent', 'unreadable') else ''
         os.environ.pop('_TRELLIS_PREFLIGHT_DONOR_PROVEN', None)
         if mode == '--begin':
             diagnostic = sys.stdin.buffer.read()
             (home, root, fleet, project, binding, release, harnesses, expected_donor, attachment_id,
              root_pin, common_pin, checkout_pid, attachment_pid, registry_pid) = sys.argv[3:]
             binding = json.loads(binding)
+            publisher = hold_publisher_lock(32, int(attachment_pid))
             # One held workspace descriptor serves every begin-phase workspace
             # access and is the canonical child's cwd, so renaming a workspace
             # ancestor cannot redirect what the child reads or writes.
-            with transaction_lock_scope(home, binding, attachment_id, checkout_pid, attachment_pid, registry_pid) as locks:
+            captures = []
+            facts = Facts()
+            with transaction_lock_scope(home, binding, attachment_id, checkout_pid, attachment_pid, registry_pid) as locks, \
+                    ExitStack() as capture_stack:
+                locks.publisher_fd = publisher
+                capture_stack.callback(lambda: [c.close() for c in captures])
                 registry_path = home + '/registry.json'
                 with ExitStack() as owner_stack:
                     scratch_fd = owner_stack.enter_context(directory(workspace))
                     require(stat.S_IMODE(os.fstat(scratch_fd).st_mode) == 0o700, 'nonprivate workspace')
-                    registry_before, captured_registry = owner_stack.enter_context(
-                        captured_preflight_registry(scratch_fd, registry_path, diagnostic, locks.proof_infos()))
+                    require_supported_filesystem(scratch_fd)
+                    registry_before, captured_registry, registry_infos = owner_stack.enter_context(
+                        captured_preflight_registry(scratch_fd, registry_path, diagnostic))
                     exclude_before, captured_exclude, exclude_infos = owner_stack.enter_context(
                         captured_shared_exclude(scratch_fd, binding['git_common_dir'], common_pin))
                     locks.recheck()
-                    plan, owner_path, candidate, authority, donor_owner, owners, snapshots, owner_infos = prepare(home, root, fleet, project, binding, release, json.loads(harnesses), json.loads(expected_donor or 'null'), attachment_id, root_pin, common_pin, exclude_before, owner_stack, registry_before)
-                    prove_fine_ctime(scratch_fd, owner_infos + exclude_infos)
+                    plan, owner_path, candidate, authority, donor_owner, owners, snapshots, owner_infos = prepare(home, root, fleet, project, binding, release, json.loads(harnesses), json.loads(expected_donor or 'null'), attachment_id, root_pin, common_pin, exclude_before, owner_stack, registry_before, captures, facts)
                     # No project or persistent-state writes during eligibility validation.
                     write_json_at(scratch_fd, 'plan.json', plan, exclusive=True)
+                    # H1: the validated plan's exact bytes are the publication
+                    # authority. The caller holds this digest in memory and
+                    # --finish refuses any other plan, so mutable scratch can
+                    # never re-authorize a substituted plan plus journal.
+                    plan_digest = sha(json_bytes(plan))
                     out = os.open('plan.json.harnesses', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=scratch_fd)
                     with os.fdopen(out, 'w') as stream:
                         stream.write(harnesses)
@@ -1135,16 +1672,30 @@ def main():
                     if proven:
                         env['_TRELLIS_PREFLIGHT_DONOR_PROVEN'] = proven
                     if os.environ.get('TRELLIS_FASTPATH_TRACE') == '1':
-                        print('trellis attach: donor proof ' + ('shared' if proven else 'not shared'), file=sys.stderr)
+                        if registry_donor_request(json.loads(expected_donor or 'null')):
+                            print('trellis attach: donor admitted from registry candidates', file=sys.stderr)
+                        else:
+                            print('trellis attach: donor proof ' + ('shared' if proven else 'not shared'), file=sys.stderr)
                     locks.recheck()
-                    result = subprocess.run(['/bin/bash', '-c', PREFLIGHT, 'fast-preflight', str(Path(__file__).parent.parent / 'attach-project.sh'), home, captured_registry, 'registry.json', 'plan.json', authority, donor_owner, binding['git_common_dir'] + '/info/exclude', captured_exclude, *owners],
+                    result = subprocess.run(['/bin/bash', '-c', PREFLIGHT, 'fast-preflight', str(Path(__file__).parent.parent / 'attach-project.sh'), home, captured_registry, 'registry.json', 'plan.json', authority, donor_owner, binding['git_common_dir'] + '/info/exclude', captured_exclude,
+                                             'owners-proven' if registry_donor_request(json.loads(expected_donor or 'null')) else '', *owners],
                                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, preexec_fn=lambda: os.fchdir(scratch_fd))
                     require(result.returncode == 0, 'existing attachment preflight refused: ' + result.stderr.decode(errors='replace')[-2000:])
                     with integrity._bound_file(scratch_fd, 'registry.json') as data:
                         proposal_digest = registry_digest(data)
-                    for path, before in snapshots.items():
-                        require(read_regular(path, mode=0o600) == before, 'donor changed during preflight')
-                    require(read_regular(registry_path, mode=0o600) == registry_before, 'registry changed during preflight')
+                    # T13 D1: one content recheck of every authoritative file
+                    # after PREFLIGHT, while each capture is still held: the
+                    # complete bytes and the name's identity as captured.
+                    for (path, before), info in zip(snapshots.items(), owner_infos[1:]):
+                        recheck_bound_file(path, before, info, 'donor changed during preflight', mode=0o600)
+                    recheck_bound_file(registry_path, registry_before, registry_infos[0], 'registry changed during preflight', mode=0o600)
+                    recheck_bound_file(binding['git_common_dir'] + '/info/exclude', exclude_before, exclude_infos[0],
+                                       'exclude changed during preflight')
+                    for name, before, info in ((captured_registry, registry_before, registry_infos[1]),
+                                               (captured_exclude, exclude_before, exclude_infos[1])):
+                        with integrity._bound_file(scratch_fd, name, mode=0o600) as data:
+                            require(data == before and integrity._fingerprint(os.stat(name, dir_fd=scratch_fd, follow_symlinks=False))
+                                    == integrity._fingerprint(info), 'captured copy changed during preflight')
                 # All pinned input contexts must close cleanly before this first
                 # persistent write: a recoverable v1 journal. The lock scope
                 # remains held and is checked immediately before and after it.
@@ -1153,50 +1704,79 @@ def main():
                     require(identity(os.fstat(fd)) == root_pin, 'root replaced')
                 with directory(os.path.dirname(candidate)):
                     pass
+                # The admitted donor's captures are still the ones planning
+                # and PREFLIGHT relied on: a change since is a fast miss.
+                for observed in captures:
+                    observed.require_fresh()
+                facts.recheck()
                 locks.recheck()
                 write_json(candidate, dict(plan, phase=0, applied=[], pending=None, removal=None), exclusive=True)
                 locks.recheck()
-            # The only stdout line: --finish binds the registry write to it
-            # instead of re-reading the workspace proposal by path.
-            print(proposal_digest)
+            # The only stdout line: --finish binds the registry write to the
+            # proposal digest instead of re-reading the workspace proposal by
+            # path, and publication to the plan digest.
+            print(proposal_digest + ' ' + plan_digest)
             return 0
         # The calling Bash process holds the registry lock and performs the
         # bound-row write through local_registry_write_locked_bound_rows.
-        plan = json.loads(read_regular(plan_file, mode=0o600))
         home = sys.argv[3]
         registry_path = home + '/registry.json'
-        root_pin, common_pin, proposal_digest, checkout_pid, attachment_pid, registry_pid = sys.argv[4:10]
+        root_pin, common_pin, proposal_digest, plan_digest, checkout_pid, attachment_pid, registry_pid = sys.argv[4:11]
+        require(re.fullmatch(r'[0-9a-f]{64}', plan_digest) is not None, 'malformed begin plan digest')
+        plan_bytes = read_regular(plan_file, mode=0o600)
+        require(sha(plan_bytes) == plan_digest, 'plan differs from the begin plan')
+        plan = json.loads(plan_bytes)
         owner_path = home + '/state/attachments/' + plan['checkout_id'] + '/' + plan['worktree_id'] + '.json'
         candidate = home + '/state/attachment-journals/' + plan['attachment_id'] + '.json'
         binding = {'checkout_id': plan['checkout_id'], 'worktree_id': plan['worktree_id'],
                    'git_common_dir': plan['exclude']['git_common_dir']}
+        publisher = hold_publisher_lock(32, int(attachment_pid))
         # The caller kept its three lock pins through the registry write:
         # publication and the owner commit run only while they still name
         # the holders --begin proved, and a lost lock leaves the journal.
         with transaction_lock_scope(home, binding, plan['attachment_id'],
                                     checkout_pid, attachment_pid, registry_pid) as locks:
+            locks.publisher_fd = publisher
             require(re.fullmatch(r'[0-9a-f]{64}', proposal_digest) is not None and
                     registry_digest(read_regular(registry_path, mode=0o600)) == proposal_digest,
                     'registry API write differs from the begin proposal')
-            publish(plan, owner_path, candidate, root_pin, common_pin, locks.recheck)
+            publish(plan, owner_path, candidate, root_pin, common_pin, locks.recheck,
+                    locks.release_checked, locks.mark_committed)
         print(owner_path)
         return 0
-    except LostTransactionLock as error:
-        if 'candidate' in locals() and os.path.lexists(candidate):
+    except BaseException as error:
+        # The journal unlink committed the attachment: anything later is a
+        # committed attach with a failed cleanup, never a recoverable one.
+        if 'locks' in locals() and getattr(locks, 'committed', False) is True:
+            print('trellis attach: committed; post-commit cleanup failed: ' + str(error), file=sys.stderr)
+            try:
+                print(owner_path)
+            except Exception:
+                pass
+            return 0
+        if not isinstance(error, Exception):
+            raise
+        return finish_failure(error, mode, started, locals().get('candidate'))
+
+
+def finish_failure(error, mode, started, candidate):
+    journaled = candidate is not None and os.path.lexists(candidate)
+    if isinstance(error, LostTransactionLock):
+        if journaled:
             print('trellis attach: lock scope changed after journaling; run trellis recover: ' + str(error), file=sys.stderr)
         else:
             print('trellis attach: lock scope changed; inspect the retained locks and retry: ' + str(error), file=sys.stderr)
         return 3
-    except Exception as error:
-        if started or (mode == '--begin' and 'candidate' in locals() and os.path.lexists(candidate)):
-            print('trellis attach: donor batch interrupted; run trellis recover: ' + str(error), file=sys.stderr)
-            return 3
-        if isinstance(error, RenderMiss):
-            print('trellis attach: donor not reused (' + str(error) + '); running the full attach', file=sys.stderr)
-        elif os.environ.get('TRELLIS_FASTPATH_TRACE') == '1':
-            print('trellis attach: donor fast-path miss: ' + repr(str(error)), file=sys.stderr)
-        return 10
-
+    if started or (mode == '--begin' and journaled):
+        print('trellis attach: donor batch interrupted; run trellis recover: ' + str(error), file=sys.stderr)
+        return 3
+    if isinstance(error, FastPathUnavailable):
+        print('trellis attach: donor fast path unavailable here (' + str(error) + '); running the full attach', file=sys.stderr)
+    elif isinstance(error, RenderMiss):
+        print('trellis attach: donor not reused (' + str(error) + '); running the full attach', file=sys.stderr)
+    elif os.environ.get('TRELLIS_FASTPATH_TRACE') == '1':
+        print('trellis attach: donor fast-path miss: ' + repr(str(error)), file=sys.stderr)
+    return 10
 
 if __name__ == '__main__':
     sys.exit(main())

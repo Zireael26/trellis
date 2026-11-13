@@ -22,7 +22,11 @@ checkout_id=$(_attachment_hash_text "$root/.git") || exit 1
 file_hash=$(_attachment_hash "$root/real/file") || exit 1
 second_hash=$(_attachment_hash "$root/real/second") || exit 1
 render_hash=$(_attachment_hash "$root/real/settings.json") || exit 1
-owner="$home/owner.json"
+# At the shape every owner file has (.../<checkout id>/<worktree id>.json), which
+# the batch requires before it reads an owner.
+owner="$home/state/attachments/$checkout_id/$worktree_id.json"
+mkdir -p "${owner%/*}" || exit 1
+chmod 700 "$home/state" "$home/state/attachments" "${owner%/*}" || exit 1
 jq -n --arg root "$root" --arg work "$worktree_id" --arg checkout "$checkout_id" \
   --arg f "$file_hash" --arg s "$second_hash" --arg r "$render_hash" '
   {project_root:$root,worktree_root:$root,worktree_id:$work,checkout_id:$checkout,
@@ -154,34 +158,46 @@ cp -f "$base/owner-before-prefix" "$owner"; chmod 600 "$owner"
 printf '%s\n' '{"one":true,"empty":null,"nested":{"x":[1,2]}}' > "$root/real/settings.json"
 run_pair prefix-fixture-restored 0 verified || exit 45
 
-# Modify a file only after the batch has read every leaf and compared its jq
-# documents, but before its postflight. The fault exists only in this test's
-# in-memory copy of the function, not in production or a request parameter.
+# Modify a file only after the shared verifier (scripts/lib/owner_verify.py)
+# has read every leaf and judged it, but before its end-of-pass check. The fault
+# exists only in this test's private copy of the library, never in production
+# or a request parameter.
 export M4_TEST_RACE_FILE="$root/real/file"
-original_batch="$(declare -f _hc_portable_owner_artifacts_batch)"
-instrumented="$(printf '%s\n' "$original_batch" | python3 -I -c '
+race_lib="$base/race-lib"
+cp -R "$repo/scripts/lib" "$race_lib" || exit 24
+python3 -I - "$race_lib/owner_verify.py" <<'PY' || exit 24
 import sys
-source = sys.stdin.read()
-needle = "    for fd, parent_fd, name, expected, qualified in held:\n"
-if source.count(needle) != 1:
+path = sys.argv[1]
+source = open(path).read()
+needle = '    _READS["owner"] = None\n    failed = set('
+# Only verify_owner_records (the health-check batch's pass); verify_siblings
+# shares the end-of-pass check and has its own race test.
+start = source.index("\ndef verify_owner_records(")
+end = source.index("\ndef ", start + 1)
+body = source[start:end]
+if body.count(needle) != 1:
     raise SystemExit(1)
-injection = """    race_file = os.environ[\"M4_TEST_RACE_FILE\"]
-    previous = os.stat(race_file)
-    os.chmod(race_file, 0o600)
-    with open(race_file, \"wb\") as changed:
-        changed.write(b\"xyz\\n\")
-    os.chmod(race_file, 0o644)
-    os.utime(race_file, ns=(previous.st_atime_ns, previous.st_mtime_ns))
-"""
-sys.stdout.write(source.replace(needle, injection + needle))
-')" || exit 24
-[ -n "$instrumented" ] || exit 24
-eval "$instrumented" || exit 24
+injection = (
+    '    race_file = os.environ["M4_TEST_RACE_FILE"]\n'
+    '    previous = os.stat(race_file)\n'
+    '    os.chmod(race_file, 0o600)\n'
+    '    with open(race_file, "wb") as changed:\n'
+    '        changed.write(b"xyz\\n")\n'
+    '    os.chmod(race_file, 0o644)\n'
+    '    os.utime(race_file, ns=(previous.st_atime_ns, previous.st_mtime_ns))\n'
+)
+open(path, "w").write(source[:start] + body.replace(needle, injection + needle) + source[end:])
+PY
+. "$race_lib/attachment.sh" || exit 24
+. "$race_lib/health-checks.sh" || exit 24
 batch=0; _hc_portable_owner_artifacts_batch "$owner" "$home" >/dev/null 2>&1 || batch=$?
+. "$repo/scripts/lib/attachment.sh" || exit 24
+. "$repo/scripts/lib/health-checks.sh" || exit 24
 canonical=0; _attachment_verify_owner_artifacts "$owner" "$home" >/dev/null 2>&1 || canonical=$?
 actual=0; _hc_portable_verify_owner_artifacts "$owner" "$home" >/dev/null 2>&1 || actual=$?
 printf 'in-pass-old-mtime canonical=%s batch=%s effective=%s\n' "$canonical" "$batch" "$actual"
 [ "$canonical" -eq 3 ] && [ "$batch" -ne 0 ] && [ "$actual" -eq 3 ] || exit 25
+original_batch="$(declare -f _hc_portable_owner_artifacts_batch)"
 
 # A second owner is checked under its own token while the primary owner's
 # guarded scope remains active. The test-only wrappers record whether the

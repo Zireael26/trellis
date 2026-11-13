@@ -19,7 +19,7 @@ setup() {
 teardown() { [ -n "$SANDBOX" ] && rm -rf "$SANDBOX"; }
 _write_cfg() { printf '%s\n' "$@" > "$CODEX_HOME/config.toml"; }
 _truthful() {
-  [[ "$output" != *"hooks active"* && "$output" != *"NO-OP"* && "$output" != *"will NOT run"* && "$output" != *"fix: set"* ]]
+  [[ "$output" != *"hooks active"* && "$output" != *"NO-OP"* && "$output" != *"will NOT run"* && "$output" != *"fix: set"* ]] || false
 }
 _unknown() {
   [ "$status" -eq "$HC_INFO" ]
@@ -32,15 +32,15 @@ _unknown() {
   HARNESSES=(claude)
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_OK" ]
-  [[ "$output" == *"n/a"* ]]
+  [[ "$output" == *"n/a"* ]] || false
 }
 
 @test "explicit true is configured intent only -> INFO" {
   _write_cfg '[features]' 'hooks = true'
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_INFO" ]
-  [[ "$output" == *"configured intent: [features] hooks = true"* ]]
-  [[ "$output" == *"native activation unverified"* ]]
+  [[ "$output" == *"configured intent: [features] hooks = true"* ]] || false
+  [[ "$output" == *"native activation unverified"* ]] || false
   _truthful
 }
 
@@ -57,15 +57,15 @@ _unknown() {
   _write_cfg '[features]' 'hooks = false'
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"configured intent: [features] hooks = false"* ]]
-  [[ "$output" == *"native activation unverified"* ]]
+  [[ "$output" == *"configured intent: [features] hooks = false"* ]] || false
+  [[ "$output" == *"native activation unverified"* ]] || false
   _truthful
 }
 
 @test "missing config is unknown, not certain failure -> INFO" {
   run hc_codex_hooks_enabled
   _unknown
-  [[ "$output" == *"absent"* ]]
+  [[ "$output" == *"absent"* ]] || false
 }
 
 @test "malformed scalars and conflicting or repeated declarations are unknown" {
@@ -90,12 +90,12 @@ _unknown() {
   _write_cfg ' [features] # intent' ' hooks = true # enabled intent'
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_INFO" ]
-  [[ "$output" == *"configured intent: [features] hooks = true"* ]]
+  [[ "$output" == *"configured intent: [features] hooks = true"* ]] || false
   _truthful
   _write_cfg '[features]' 'hooks = false # disabled intent'
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"configured intent: [features] hooks = false"* ]]
+  [[ "$output" == *"configured intent: [features] hooks = false"* ]] || false
   _truthful
 }
 
@@ -104,8 +104,8 @@ _unknown() {
   chmod 000 "$CODEX_HOME/config.toml"
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"unknown"* ]]
-  [[ "$output" == *"read"* ]]
+  [[ "$output" == *"unknown"* ]] || false
+  [[ "$output" == *"read"* ]] || false
   _truthful
 }
 
@@ -115,7 +115,7 @@ _unknown() {
   PATH="$SANDBOX/bin:/usr/bin:/bin"
   run hc_codex_hooks_enabled
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"cannot invoke"* ]]
-  [[ "$output" == *"native activation unverified"* ]]
+  [[ "$output" == *"cannot invoke"* ]] || false
+  [[ "$output" == *"native activation unverified"* ]] || false
   _truthful
 }

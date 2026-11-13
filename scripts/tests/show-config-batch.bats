@@ -26,7 +26,7 @@ setup() {
 seal_small_release() {
   local version="$1" rel="$STORE/releases/$1" work path full idx=0
   work="$(mktemp -d "$SANDBOX/manifest.XXXXXX")"
-  (CDPATH='' cd "$rel/payload" && find . -mindepth 1 \( -type f -o -type l \) -print | sed 's|^\./||' | LC_ALL=C sort) > "$work/paths"
+  (CDPATH='' cd "$rel/payload" && find . -mindepth 1 \( -type f -o -type l \) -print | sed 's|^\./||' | /usr/bin/env LC_ALL=C sort) > "$work/paths"
   : > "$work/hash"
   : > "$work/modes"
   while IFS= read -r path; do
@@ -1277,18 +1277,31 @@ m4_prepare_show_config_differential() {
   STORE="$TRELLIS_HOME_FIX" stamp_now "$TRELLIS_HOME_FIX/releases/1.6.4" || return 1
   real_python="$(command -v python3)" || return 1
   mkdir -p "$SANDBOX/m4-bin" || return 1
+  # The owner batch is the shared verifier's verdict call:
+  # python3 -I -B .../owner_verify.py owner-verdicts HOME FS, owners on
+  # stdin. Only calls whose owners belong to the project or donor are touched.
   cat > "$SANDBOX/m4-bin/python3" <<'SH'
 #!/bin/bash
-if [ "$#" -eq 3 ] && [ "$1" = -I ] && [ "$2" = - ] &&
-   { [ "$3" = "$M4_TEST_PROJECT" ] || [ "$3" = "${M4_TEST_DONOR:-}" ]; }; then
-  if [ "$M4_TEST_MODE" = canonical ]; then
-    echo canonical-miss >> "$M4_TEST_LOG"
-    exit 1
+if [ "$#" -eq 6 ] && [ "$1" = -I ] && [ "$2" = -B ] && [ "${3##*/}" = owner_verify.py ] && [ "$4" = owner-verdicts ]; then
+  input="$(cat)"
+  roots="$(printf '%s\n' "$input" | jq -r '.[].path' | while IFS= read -r owner; do jq -r '.worktree_root' "$owner"; done)"
+  if printf '%s\n' "$roots" | grep -Fqx -e "$M4_TEST_PROJECT" -e "${M4_TEST_DONOR:-$M4_TEST_PROJECT}"; then
+    if [ "$M4_TEST_MODE" = canonical ]; then
+      echo canonical-miss >> "$M4_TEST_LOG"
+      exit 10
+    fi
+    verdicts="$(printf '%s\n' "$input" | "$M4_TEST_PYTHON" "$@")"
+    rc=$?
+    while IFS="$(printf '\t')" read -r verdict owner; do
+      [ -n "$owner" ] || continue
+      printf 'batch=%s\nbatch-path=%s:%s\n' "$verdict" "$(jq -r '.worktree_root' "$owner")" "$verdict" >> "$M4_TEST_LOG"
+    done <<EOF
+$verdicts
+EOF
+    printf '%s\n' "$verdicts"
+    exit "$rc"
   fi
-  "$M4_TEST_PYTHON" "$@"
-  rc=$?
-  printf 'batch=%s\nbatch-path=%s:%s\n' "$rc" "$3" "$rc" >> "$M4_TEST_LOG"
-  exit "$rc"
+  printf '%s\n' "$input" | exec "$M4_TEST_PYTHON" "$@"
 fi
 exec "$M4_TEST_PYTHON" "$@"
 SH
@@ -1439,4 +1452,49 @@ m4_compare_show_config() {
     [ "$b" != "$_HC_SURFACE_PLAN_MEMO" ] && echo other-selection=expanded
   ' "$project"
   [ "$output" = $'same-selection=memo\nother-selection=expanded\nplans=2' ] || { echo "$output"; false; }
+}
+
+# 1.5.1 (large-checkout doctor, 224 rows): a second pin under the same key keeps the plan,
+# so rows of one release and harness selection expand it once per process; a
+# changed selection still re-expands.
+@test "a repeated pin under the same key does not re-expand the surface plan" {
+  initialize_release_store_machine
+  project="$SANDBOX/project"
+  make_portable_project "$project" plan-fixture
+  attach_portable_project "$project" personal 0.0.0
+  rel="$TRELLIS_HOME_FIX/releases/0.0.0"
+  run with_attachment_libs '
+    hc_portable_surface_plan_pin "$1" "$9" "'"$rel"'/payload" claude codex || exit 81
+    first="$_HC_SURFACE_PLAN_MEMO_KEY"
+    hc_portable_surface_plan_pin "$1" "$9" "'"$rel"'/payload" claude codex || exit 82
+    [ -n "$first" ] && [ "$_HC_SURFACE_PLAN_MEMO_KEY" = "$first" ] && echo kept
+    hc_portable_surface_plan_pin "$1" "$9" "'"$rel"'/payload" claude || exit 83
+    [ "$_HC_SURFACE_PLAN_MEMO_KEY" != "$first" ] && echo replaced
+  ' "$project"
+  [ "$output" = $'kept\nreplaced\nplans=2' ] || { echo "$output"; false; }
+}
+
+# 1.5.1: read-only doctor reuses one checkout's sibling-owner scan across its
+# rows, but never across a change to any owner file in that checkout.
+@test "the managed-hooks sibling scan memo is dropped when a sibling owner changes" {
+  initialize_release_store_machine
+  local project="$SANDBOX/project" sibling="$SANDBOX/sibling" owner sibling_owner
+  make_portable_project "$project" plan-fixture
+  attach_portable_project "$project" personal 0.0.0
+  git -C "$project" worktree add -q --detach "$sibling"
+  attach_portable_project "$sibling" personal 0.0.0
+  owner="$(owner_for_root "$project")"
+  sibling_owner="$(owner_for_root "$sibling")"
+  jq -e '.git_hooks.enabled == false' "$sibling_owner" >/dev/null || skip 'fixture sibling owns the hooks'
+  run env -u TRELLIS_PYTHON TRELLIS_HOME="$TRELLIS_HOME_FIX" HC_PORTABLE_SCAN_MEMO=1 bash -c '
+    lib="$1"; home="$2"; sib="$3"; main="$4"
+    . "$lib/trellis-home.sh"; . "$lib/release-store.sh"; . "$lib/local-registry.sh"
+    . "$lib/attachment.sh"; . "$lib/health-checks.sh"
+    hc_portable_managed_hooks "$home" "$sib"; echo "first=$? $HC_PORTABLE_HOOK_STATE"
+    hc_portable_managed_hooks "$home" "$sib"; echo "memo=$? $HC_PORTABLE_HOOK_STATE"
+    chmod 644 "$main"
+    hc_portable_managed_hooks "$home" "$sib"; echo "changed=$? $HC_PORTABLE_HOOK_STATE"
+    chmod 600 "$main"
+  ' scan "$LIB" "$TRELLIS_HOME_FIX" "$sibling_owner" "$owner"
+  [ "$output" = $'first=0 shared\nmemo=0 shared\nchanged=1 corrupt' ] || { echo "$output"; false; }
 }

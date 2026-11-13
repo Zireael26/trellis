@@ -110,7 +110,7 @@ GUARD_OF='def guard_of: ((.args // []) | index("guard-supervise")) as $i | if $i
     # shellcheck disable=SC2053
     [[ "$cmd" == $pattern ]] || { echo "filter skips: $cmd"; false; }
   done
-  [[ 'git status --short' != $pattern ]]
+  [[ 'git status --short' != $pattern ]] || false
 }
 
 @test "render keeps onFailure at or above Claude Code 2.1.295" {

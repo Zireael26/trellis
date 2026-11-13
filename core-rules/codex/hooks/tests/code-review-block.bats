@@ -95,6 +95,7 @@ deploy_hook() {
   cp "$CODEX_HOOK_DIR/code-review-subagent.sh" "$hookdir/code-review-subagent.sh"
   cp "$CORE_LIB_DIR/code-reviewer.sh"          "$hookdir/lib/code-reviewer.sh"
   cp "$CODEX_HOOK_DIR/lib/deps.sh"             "$hookdir/lib/deps.sh"
+  cp "$CODEX_HOOK_DIR/lib/deps-heavy.sh"             "$hookdir/lib/deps-heavy.sh"
   cp "$CODEX_HOOK_DIR/lib/pm.sh"               "$hookdir/lib/pm.sh"
   cp "$CODEX_HOOK_DIR/lib/autonomy.sh"         "$hookdir/lib/autonomy.sh"
   cp "$CORE_LIB_DIR/../../../scripts/lib/trellis-python.sh" "$hookdir/lib/trellis-python.sh"
@@ -314,7 +315,7 @@ setup() {
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
   [[ "$output" == *'AWS access key'* ]] || { echo "$output"; false; }
   # A blocked turn must NOT advise; it blocks.
-  [[ "$output" != *'systemMessage'* ]]
+  [[ "$output" != *'systemMessage'* ]] || false
 }
 
 # =========================================================================
@@ -331,7 +332,7 @@ setup() {
   [[ "$output" == *'<review>'* ]] || { echo "$output"; false; }
   [[ "$output" == *'[important]'* ]] || { echo "$output"; false; }
   [[ "$output" == *'debugger'* ]] || { echo "$output"; false; }
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
 }
 
 # =========================================================================
@@ -346,7 +347,7 @@ setup() {
   run_hook
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
 }
 
 @test "degraded: nonzero reviewer leaves no marker and retries the same diff" {
@@ -413,7 +414,7 @@ setup() {
   run_hook
   [ "$status" -eq 0 ]
   [[ "$output" != *'"decision":"block"'* ]] || { echo "$output"; false; }
-  [[ "$output" != *'systemMessage'* ]]
+  [[ "$output" != *'systemMessage'* ]] || false
   [[ "$stderr" == *'cross-family review unmet'* ]] || { echo "$stderr"; false; }
   [ ! -d "$PROJECT_DIR/.codex" ] ||
     [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -type f -name '.review-done-*' -print -quit)" ]
@@ -440,14 +441,14 @@ setup() {
   [ "$status" -eq 0 ]
   [ "$(call_count "$CLAUDE_COUNT")" -eq 0 ]
   [ -z "$(find "$PROJECT_DIR/.codex" -maxdepth 1 -name '.review-done-*' -print 2>/dev/null)" ]
-  [[ "$output" != *'<review>'* ]]
+  [[ "$output" != *'<review>'* ]] || false
 
   log="$PROJECT_DIR/decisions-log.md"
   [ -f "$log" ]
   # A line matching the dated format session-context.sh keys off: "- 20YY-...".
   run grep -E '^- 20[0-9][0-9]' "$log"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'TRELLIS_REVIEW_OVERRIDE'* ]]
+  [[ "$output" == *'TRELLIS_REVIEW_OVERRIDE'* ]] || false
 }
 
 # =========================================================================
@@ -510,7 +511,7 @@ EOF
   # And its critical finding propagated to a Codex stdout JSON block.
   [ "$status" -eq 0 ]
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
-  [[ "$output" == *'eval injection'* ]]
+  [[ "$output" == *'eval injection'* ]] || false
 }
 
 # =========================================================================
@@ -725,6 +726,6 @@ codex_marker_count() {
   printf '%s\n' '{"status":"bogus","findings":[{"severity":"minor","file":"a.py","msg":"nit"}]}' > "$env_file"
   run_hook
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
   [[ "$stderr" == *'malformed findings envelope'* ]] || { echo "$stderr"; false; }
 }

@@ -44,9 +44,9 @@ refuses_key() {
   publish_base
   run "$VALIDATOR" --foreman "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/subagents.json"* ]]
-  [[ "$output" == *"$1"* ]]
-  [[ "$output" == *"remove it, or merge it through a PR with owner approval"* ]]
+  [[ "$output" == *".pi/subagents.json"* ]] || false
+  [[ "$output" == *"$1"* ]] || false
+  [[ "$output" == *"remove it, or merge it through a PR with owner approval"* ]] || false
 }
 
 # --- widening keys in subagents.json ------------------------------------------
@@ -67,7 +67,7 @@ refuses_key() {
   publish_base
   run "$VALIDATOR" --foreman "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/subagents.json"* ]]
+  [[ "$output" == *".pi/subagents.json"* ]] || false
 }
 
 # --- loader paths ---------------------------------------------------------------
@@ -78,8 +78,8 @@ refuses_key() {
   publish_base
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/agents/x.md"* ]]
-  [[ "$output" == *"untracked"* ]]
+  [[ "$output" == *".pi/agents/x.md"* ]] || false
+  [[ "$output" == *"untracked"* ]] || false
 }
 
 @test ".pi/extensions/ refuses" {
@@ -88,7 +88,7 @@ refuses_key() {
   publish_base
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/evil.ts"* ]]
+  [[ "$output" == *".pi/extensions/evil.ts"* ]] || false
 }
 
 @test ".pi/settings.json refuses" {
@@ -97,7 +97,7 @@ refuses_key() {
   publish_base
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/settings.json"* ]]
+  [[ "$output" == *".pi/settings.json"* ]] || false
 }
 
 @test ".pi/settings.local.json, mcp.json, skills, prompts, SYSTEM.md refuse" {
@@ -107,7 +107,7 @@ refuses_key() {
     printf 'x\n' >"$WT/.pi/$path"
     run "$VALIDATOR" "$WT"
     [ "$status" -eq 1 ] || { echo "$path passed"; false; }
-    [[ "$output" == *".pi/$path"* ]]
+    [[ "$output" == *".pi/$path"* ]] || false
   done
 }
 
@@ -130,7 +130,7 @@ refuses_key() {
   printf '%s\n' "$PAYLOAD" >"$WT/.pi/subagents.json"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/subagents.json"* ]]
+  [[ "$output" == *".pi/subagents.json"* ]] || false
 }
 
 @test "content tracked and identical at the protected base passes" {
@@ -152,8 +152,8 @@ refuses_key() {
   commit_all widened
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/agents/x.md"* ]]
-  [[ "$output" == *"differs from the protected base"* ]]
+  [[ "$output" == *".pi/agents/x.md"* ]] || false
+  [[ "$output" == *"differs from the protected base"* ]] || false
 }
 
 @test "an unresolvable protected base refuses" {
@@ -162,7 +162,7 @@ refuses_key() {
   commit_all reviewed
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"protected base"* ]]
+  [[ "$output" == *"protected base"* ]] || false
 }
 
 @test "content outside a git worktree refuses" {
@@ -170,7 +170,7 @@ refuses_key() {
   printf 'x\n' >"$WORK/plain/.pi/agents/x.md"
   run "$VALIDATOR" "$WORK/plain"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/agents/x.md"* ]]
+  [[ "$output" == *".pi/agents/x.md"* ]] || false
 }
 
 # --- links and escapes ------------------------------------------------------------
@@ -180,7 +180,7 @@ refuses_key() {
   ln -s "$WORK/elsewhere" "$WT/.pi"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"symlink"* ]]
+  [[ "$output" == *"symlink"* ]] || false
 }
 
 @test "a symlink under .pi refuses, even to a tracked identical target" {
@@ -191,8 +191,8 @@ refuses_key() {
   publish_base
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/agents/x.md"* ]]
-  [[ "$output" == *"symlink"* ]]
+  [[ "$output" == *".pi/agents/x.md"* ]] || false
+  [[ "$output" == *"symlink"* ]] || false
 }
 
 @test "a directory symlink resolving outside the worktree refuses" {
@@ -201,7 +201,7 @@ refuses_key() {
   ln -s "$WORK/outside-ext" "$WT/.pi/extensions"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions"* ]]
+  [[ "$output" == *".pi/extensions"* ]] || false
 }
 
 @test "a hardlink under .pi refuses" {
@@ -210,7 +210,7 @@ refuses_key() {
   ln "$WORK/shared.json" "$WT/.pi/subagents.json"
   run "$VALIDATOR" --foreman "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"link count"* ]]
+  [[ "$output" == *"link count"* ]] || false
 }
 
 # --- Trellis-managed attachment leaves --------------------------------------------
@@ -234,7 +234,7 @@ attach_fixture() {
   attach_fixture
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts"* ]] || false
 }
 
 @test "a \$HOME other than the account's passwd home is validated like any directory" {
@@ -242,7 +242,7 @@ attach_fixture() {
   printf 'x\n' >"$HOME/.pi/agent/extensions/mine.ts"
   run "$VALIDATOR" "$HOME"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"HOME"* ]]
+  [[ "$output" == *"HOME"* ]] || false
 }
 
 @test "the account's passwd home is the user's own profile, not a project" {
@@ -259,7 +259,7 @@ attach_fixture() {
   printf -- '---\nname: evil\ntools: read, bash, write\n---\n' >"$WT/.agents/agents/evil.md"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".agents/agents/evil.md"* ]]
+  [[ "$output" == *".agents/agents/evil.md"* ]] || false
 }
 
 @test ".agents/skills/x/SKILL.md refuses" {
@@ -267,7 +267,7 @@ attach_fixture() {
   printf -- '---\nname: x\n---\n' >"$WT/.agents/skills/x/SKILL.md"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".agents/skills/x/SKILL.md"* ]]
+  [[ "$output" == *".agents/skills/x/SKILL.md"* ]] || false
 }
 
 @test ".agents/workflows/evil.js refuses" {
@@ -275,7 +275,7 @@ attach_fixture() {
   printf 'export default 1\n' >"$WT/.agents/workflows/evil.js"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".agents/workflows/evil.js"* ]]
+  [[ "$output" == *".agents/workflows/evil.js"* ]] || false
 }
 
 @test "an ancestor .agents/skills inside the repository refuses from a subdirectory" {
@@ -283,7 +283,7 @@ attach_fixture() {
   printf 'x\n' >"$WT/.agents/skills/x/SKILL.md"
   run "$VALIDATOR" "$WT/sub"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".agents/skills/x/SKILL.md"* ]]
+  [[ "$output" == *".agents/skills/x/SKILL.md"* ]] || false
 }
 
 @test ".agents content pi does not load passes" {
@@ -305,7 +305,7 @@ attach_fixture() {
   printf 'tools: read, bash, write\n' >>"$WT/.agents/agents/$name"
   run "$VALIDATOR" --foreman "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".agents/agents/$name"* ]]
+  [[ "$output" == *".agents/agents/$name"* ]] || false
 }
 
 @test "a source-canonical skill link at the protected base passes" {
@@ -328,7 +328,7 @@ attach_fixture() {
   ln -s ../../core-rules/skills/process-gate "$WT/.agents/skills/process-gate"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".agents/skills/process-gate"* ]]
+  [[ "$output" == *".agents/skills/process-gate"* ]] || false
 }
 
 @test "a managed .agents/skills link listed in the exclude block passes" {
@@ -350,7 +350,7 @@ attach_fixture() {
     '/.pi/extensions/trellis.ts' '# --- end Trellis local attachment exclude block ---' >>"$WT/.git/info/exclude"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts"* ]] || false
 }
 
 # --- authorization-bypass audit -----------------------------------------------------
@@ -367,7 +367,7 @@ attach_fixture() {
   git -C "$EVIL" update-ref refs/remotes/origin/main HEAD
   GIT_DIR="$EVIL/.git" GIT_WORK_TREE="$WT" run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/agents/x.md"* ]]
+  [[ "$output" == *".pi/agents/x.md"* ]] || false
 }
 
 @test "a branch-committed .trellis/runtime cannot stand in for the managed anchor" {
@@ -378,7 +378,7 @@ attach_fixture() {
     '/.pi/extensions/trellis.ts' '# --- end Trellis local attachment exclude block ---' >>"$WT/.git/info/exclude"
   run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts"* ]] || false
 }
 
 @test "a .pi pi can search but the validator cannot list refuses" {
@@ -388,7 +388,7 @@ attach_fixture() {
   run "$VALIDATOR" "$WT"
   chmod 0755 "$WT/.pi"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi"* ]]
+  [[ "$output" == *".pi"* ]] || false
 }
 
 @test "a subagents.json with a second JSON value refuses" {
@@ -396,7 +396,7 @@ attach_fixture() {
   printf '%s\n%s\n' '{"fallbackSubagent": "general-purpose"}' "$PAYLOAD" >"$WT/.pi/subagents.json"
   run "$VALIDATOR" --foreman "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/subagents.json"* ]]
+  [[ "$output" == *".pi/subagents.json"* ]] || false
 }
 
 # --- environment a branch's .envrc can set (B0-6 security review F1-F5) ------------
@@ -411,7 +411,7 @@ evil_extension() {
   evil_extension
   HOME="$WT" run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"HOME"* ]]
+  [[ "$output" == *"HOME"* ]] || false
 }
 
 @test "F2: PI_CODING_AGENT_DIR pointed into the worktree refuses" {
@@ -420,7 +420,7 @@ evil_extension() {
   publish_base
   PI_CODING_AGENT_DIR="$WT/.pi-agent" run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"PI_CODING_AGENT_DIR"* ]]
+  [[ "$output" == *"PI_CODING_AGENT_DIR"* ]] || false
 }
 
 @test "F3: a TRELLIS_HOME inside the worktree cannot vouch for a managed link" {
@@ -430,7 +430,7 @@ evil_extension() {
     '/.pi/extensions/trellis.ts' '# --- end Trellis local attachment exclude block ---' >>"$WT/.git/info/exclude"
   TRELLIS_HOME="$TRELLIS_HOME" run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"TRELLIS_HOME"* ]]
+  [[ "$output" == *"TRELLIS_HOME"* ]] || false
 }
 
 @test "F4: a symlinked ancestor .agents refuses from a subdirectory" {
@@ -439,7 +439,7 @@ evil_extension() {
   ln -s "$WORK/outside-agents" "$WT/.agents"
   run "$VALIDATOR" "$WT/sub"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".agents"*"symlink"* ]]
+  [[ "$output" == *".agents"*"symlink"* ]] || false
 }
 
 @test "F5: a jq earlier on PATH inside the worktree is never run" {
@@ -456,5 +456,5 @@ evil_extension() {
   mkdir -p "$WT/.pi"
   XDG_CONFIG_HOME="$WT/cfg" run "$VALIDATOR" "$WT"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"XDG_CONFIG_HOME"* ]]
+  [[ "$output" == *"XDG_CONFIG_HOME"* ]] || false
 }

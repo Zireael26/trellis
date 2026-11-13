@@ -105,6 +105,9 @@ owner_for_root() {
 }
 
 setup() {
+  # Attach spawns no background attachment checks here, as run-tests.sh
+  # arranges; a direct bats run must not differ from the suite runner.
+  export TRELLIS_ATTACH_POSTJOB=off
   SANDBOX="$(mktemp -d "${TMPDIR:-/tmp}/attach-durability-attach.XXXXXX")"
   SANDBOX="$(canonical_dir "$SANDBOX")"
   export HOME="$SANDBOX/fixture user home"
@@ -214,7 +217,7 @@ run_detach() {
   run bash -c "source '$ATTACH_LIB'; _attachment_toolchain_path_resolve '$SANDBOX/System/Cryptexes/App/usr/bin:/usr/bin:/bin' 2>/dev/null"
   [ "$status" -eq 0 ]
   printf '%s\n' "$output" | grep -Fq -- "$SANDBOX/preboot/App/usr/bin"
-  [[ "$output" != *"$SANDBOX/System/Cryptexes/App/usr/bin"* ]]
+  [[ "$output" != *"$SANDBOX/System/Cryptexes/App/usr/bin"* ]] || false
 
   # A real non-directory is still a hard refusal, named.
   : > "$SANDBOX/notadir"
@@ -512,14 +515,22 @@ journal_v2_digest() {
   attachment="$(jq -r '.attachment_id' "$journal")"
   log="$TRELLIS_HOME/state/attachment-progress/$attachment.log"
   # A commit killed at its 20th durable step leaves a v2 journal and its log.
-  program="$(_attachment_commit_program)"
-  program="${program/'    return None  # crash-test seam'/'    checkpoint.calls = getattr(checkpoint, "calls", 0) + 1
-    if checkpoint.calls == 20: os.kill(os.getpid(), signal.SIGKILL)'}"
+  # One python3 substitution: bash 3.2 keeps the quotes of a quoted
+  # ${var/pattern/replacement} replacement, which broke the program text.
+  program="$(_attachment_commit_program | python3 -c '
+import sys
+text = sys.stdin.read()
+seam = "    return None  # crash-test seam"
+assert text.count(seam) == 1
+sys.stdout.write(text.replace(seam, "    checkpoint.calls = getattr(checkpoint, \"calls\", 0) + 1\n    if checkpoint.calls == 20: os.kill(os.getpid(), signal.SIGKILL)"))
+')"
   [ "$program" != "$(_attachment_commit_program)" ]
   _attachment_ensure_private_dir "$TRELLIS_HOME/state/attachment-progress"
   _attachment_ensure_private_dir "$SANDBOX/holder"
   status=0
-  python3 -I -c "$program" "$journal" "$log" "" "$SANDBOX/holder" "$BASHPID" || status=$?
+  # Bash 3.2 has no BASHPID; the production 3.2-safe current-process pid.
+  _attachment_capture_current_pid "$SANDBOX/holder"
+  python3 -I -B -c "$program" "$journal" "$log" "" "$SANDBOX/holder" "$_ATTACHMENT_PROCESS_PID" || status=$?
   [ "$status" -eq 137 ]
   jq -e '.journal_version == 2' "$journal"
   [ "$(wc -l < "$log")" -gt 3 ]

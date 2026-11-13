@@ -515,7 +515,7 @@ sg_triad_in_range() {
   for d in $(printf '%s\n' "$changed" | sed -E 's#^(specs/[0-9][^/]*)/.*#\1#' | sort -u); do
     complete=true
     for f in spec.md plan.md tasks.md; do
-      if printf '%s\n' "$changed" | grep -qx "$d/$f" 2>/dev/null; then
+      if grep -qx "$d/$f" <<<"$changed" 2>/dev/null; then
         :
       else
         grep_status=$?
@@ -570,7 +570,7 @@ sg_autonomy_level() {
 # permit a branch to be recorded in prose without interpreting it as a regex.
 sg_branch_token_in_log() {
   [ -n "$1" ] || return 1
-  LC_ALL=C awk -v branch="$1" '
+  /usr/bin/env LC_ALL=C awk -v branch="$1" '
     function boundary(c) { return c == "" || c ~ /[[:space:]:]/ }
     {
       text = $0
@@ -668,15 +668,34 @@ sg_write_marker() {
 # Echoes "<verdict>\t<reason>"  verdict in: pass | block | advisory
 # sg_verdict dir [range [ref [head]]]; explicit identity pins object content.
 # Pure function of state. Callers map verdict to their output shape.
+# One resolver subshell resolves the default branch for a verdict and prints
+# the diff-base.sh memo; the protected-branch check and the diff range reuse it.
+_sg_defbranch_memo() (
+  local dir="$1" root="$2" resolver
+  resolver=$(sg_find_resolver "$dir" "$root") || return 1
+  # shellcheck source=/dev/null
+  . "$resolver"
+  command -v db_memo_print >/dev/null 2>&1 || return 1
+  cd -- "$dir" || return 1
+  db_memo_print
+)
+
+# sg_verdict <dir> [range] [ref] [head] [stop]. In stop mode a pass the policy
+# or the protected branch already decides skips the diff range: the Stop early
+# warning prints nothing on a pass. Every other verdict keeps its receipt.
 sg_verdict() {
-  local dir requested="${1:-$PWD}" is_git=1
+  local dir requested="${1:-$PWD}" is_git=1 stop_mode=0
+  [ "${5:-}" = stop ] && stop_mode=1
   if ! dir=$(git -C "$requested" rev-parse --show-toplevel 2>/dev/null); then
     dir="$requested"; is_git=0
   fi
   local root; root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
-  local branch="" protected base diff range resolved="" rc=1 SG_RECEIPT=""
+  local branch="" protected="" protected_known=0 base diff range resolved="" rc=1 SG_RECEIPT=""
   local ref="${3:-${SG_REQUEST_REF:-}}" head="${4:-${SG_REQUEST_HEAD:-}}"
   local SG_OBJECT_DIR="$dir" SG_OBJECT_HEAD=""
+  local _db_memo_key="" _db_memo_rkey="" _db_memo_bkey="" _db_memo_remote="" _db_memo_base_policy=""
+  local _db_memo_dd_rc="" _db_memo_dd_ref="" _db_memo_dd_tip="" _db_memo_dd_reason="" memo
+  local cfg="" enabled floor ceiling cfgst
   if [ "$is_git" -eq 1 ]; then
   if [ -n "$ref" ]; then
     branch=${ref#refs/heads/}
@@ -688,6 +707,38 @@ sg_verdict() {
   if [ -n "$ref" ] || [ -n "$head" ]; then
     SG_OBJECT_HEAD=$(git -C "$dir" rev-parse --verify "$head^{commit}" 2>/dev/null) || { sg_result block invalid-head; return; }
     head="$SG_OBJECT_HEAD"
+  fi
+  # A valid disabled policy decides a Stop pass before any branch resolution.
+  if [ "$stop_mode" -eq 1 ]; then
+    cfg=$(sg_resolve_cfg "$root"); read -r enabled floor ceiling cfgst <<EOF
+$cfg
+EOF
+    case "$cfgst" in
+      disabled) sg_result pass disabled; return ;;
+      nojq|malformed) ;;
+      *) [ "$enabled" = "true" ] || { sg_result pass disabled; return; } ;;
+    esac
+  fi
+  if memo=$(_sg_defbranch_memo "$dir" "$root"); then
+    IFS=$'\037' read -r _db_memo_key _db_memo_remote _db_memo_base_policy _db_memo_dd_rc \
+      _db_memo_dd_ref _db_memo_dd_tip _db_memo_dd_reason <<EOF
+$memo
+EOF
+    # Accept only a memo for this checkout with a well-formed result.
+    case "$_db_memo_dd_rc" in 0|1|2) ;; *) _db_memo_dd_rc=bad ;; esac
+    case "$_db_memo_dd_tip" in *[!0-9a-f]*) _db_memo_dd_rc=bad ;; esac
+    case "${#_db_memo_dd_tip}" in 0|40|64) ;; *) _db_memo_dd_rc=bad ;; esac
+    if [ "$_db_memo_key" = "$dir|" ] && [ "$_db_memo_dd_rc" != bad ]; then
+      _db_memo_rkey=$_db_memo_key; _db_memo_bkey=$_db_memo_key
+    else
+      _db_memo_key=""
+    fi
+  fi
+  if [ "$stop_mode" -eq 1 ] && [ "$cfgst" != nojq ] && [ "$cfgst" != malformed ] &&
+     [ -n "$branch" ] && [ "$branch" != "HEAD" ]; then
+    protected=$(sg_trusted_protected_branch "$dir" "$root") || protected=""
+    protected_known=1
+    [ -n "$protected" ] && [ "$branch" = "$protected" ] && { sg_result pass on-protected-branch; return; }
   fi
   if resolved=$(_sg_resolve_diff_with_root "$dir" "${2:-${SG_REQUEST_RANGE:-}}" "$ref" "$head" "$root"); then
     rc=0
@@ -701,10 +752,11 @@ EOF
   fi
   fi
 
-  local cfg enabled floor ceiling cfgst
-  cfg=$(sg_resolve_cfg "$root"); read -r enabled floor ceiling cfgst <<EOF
+  if [ -z "$cfg" ]; then
+    cfg=$(sg_resolve_cfg "$root"); read -r enabled floor ceiling cfgst <<EOF
 $cfg
 EOF
+  fi
   case "$cfgst" in
     disabled) sg_result pass disabled; return ;;
     nojq)     sg_result block 'jq required but not found — cannot read mandatory_pipeline policy'; return ;;
@@ -714,7 +766,9 @@ EOF
   [ "$is_git" -eq 1 ] || { sg_result block not-a-git-worktree; return; }
 
   [ -n "$branch" ] && [ "$branch" != "HEAD" ] || { sg_result block detached-or-unknown-branch; return; }
-  protected=$(sg_trusted_protected_branch "$dir" "$root") || protected=""
+  if [ "$protected_known" -eq 0 ]; then
+    protected=$(sg_trusted_protected_branch "$dir" "$root") || protected=""
+  fi
   [ -n "$protected" ] && [ "$branch" = "$protected" ] && { sg_result pass on-protected-branch; return; }
   if [ "$rc" -eq 4 ]; then
     sg_result block 'diff-base resolver missing from trusted runtime; restore the process-gate skill'; return
@@ -742,57 +796,6 @@ EOF
     sg_result pass 'surgical-marker'; return
   fi
   sg_result block "$diff gated lines over floor $floor with no in-range spec triad and no valid surgical declaration"
-}
-
-# --- Stop-hook pass cache (spec 072 U8) ---------------------------------------
-# The Stop early warning re-derives the same verdict on every Stop. A pass is
-# cached under a key over everything sg_verdict reads in Stop mode: the
-# worktree and canonical root, HEAD, the branch, every ref, the common-dir
-# config and reflogs (diff-base reads them), policy and preset files, the
-# surgical marker, autonomy session, decisions-log, spec waiver, every
-# specs/*/*.md file, the resolver and these scripts, and TRELLIS_ROOT and the
-# SG_REQUEST_* inputs. Only passes are cached, and never a surgical-marker pass
-# (its validation appends to the audit log), so a hit can only be a pass the
-# full path also gives. The pre-push --gate never reads the cache. Requires
-# the deps.sh helpers; without them there is no cache.
-
-# sg_stop_cache_file <dir> <harness> — print the per-worktree pass cache path.
-sg_stop_cache_file() {
-  local sdir
-  sdir=$(_se_turn_state_dir "$1") || return 1
-  printf '%s/spec-gate/%s.%s' "${sdir%/turn-baseline/*}" "${sdir##*/}" "$2"
-}
-
-# sg_stop_cache_key <dir> — print the sha256 key; fails when any input cannot
-# be read.
-sg_stop_cache_key() {
-  local dir root common branch head refs stats resolver f sum key_input list=()
-  dir=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) || return 1
-  root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
-  common=$(git -C "$dir" rev-parse --git-common-dir 2>/dev/null) || return 1
-  case "$common" in /*) ;; *) common="$dir/$common" ;; esac
-  branch=$(git -C "$dir" symbolic-ref -q --short HEAD 2>/dev/null) || branch=""
-  head=$(git -C "$dir" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null) || head=unborn
-  refs=$(git -C "$dir" for-each-ref --format='%(refname) %(objectname)' 2>/dev/null) || return 1
-  resolver=$(sg_find_resolver "$dir" "$root") || resolver=""
-  for f in "$common/config" "$common/logs/HEAD" "$common/logs/refs/heads/$branch" \
-      "$root/.trellis.json" "$root/.trellis.config.json" "$root/.claude/session-surgical" \
-      "$root/.claude/session-autonomy" "$root/.claude/spec-waiver" "$root/decisions-log.md" \
-      "${TRELLIS_ROOT:-/nonexistent}/trellis.config.json" \
-      "${TRELLIS_ROOT:-/nonexistent}"/core-rules/presets/*.md "$dir"/specs/*/*.md \
-      "$resolver" "$_sg_lib_dir/spec-gate-core.sh" "$_sg_lib_dir/deps.sh" \
-      "$_sg_lib_dir/autonomy.sh" "$0"; do
-    list[${#list[@]}]="s:$f"
-  done
-  stats=$(_se_stat_lines "${list[@]}") || return 1
-  # Preserve the final newline: command substitution would change the key.
-  printf -v key_input '%s\n' 'trellis-spec-gate-key v1' "dir $dir" "root $root" "branch $branch" "head $head" \
-    "env ${TRELLIS_ROOT:-}|${SG_REQUEST_RANGE:-}|${SG_REQUEST_REF:-}|${SG_REQUEST_HEAD:-}" \
-    "$refs" "$stats"
-  sum=$(_se_stop_sha256_text "$key_input") || return 1
-  sum=${sum%% *}
-  [ "${#sum}" -eq 64 ] || return 1
-  printf '%s' "$sum"
 }
 
 # Human-facing remedy message (shared by all callers).

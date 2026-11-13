@@ -64,8 +64,8 @@ ctx() { printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext // 
   run_guard 'pnpm install'
   [ "$status" -eq 0 ]
   [[ "$(ctx)" == *'core.hooksPath is ".husky/_"'* ]] || { echo "$output"; false; }
-  [[ "$(ctx)" == *husky* ]]
-  [[ "$(ctx)" == *'`trellis doctor --fix`'* ]]
+  [[ "$(ctx)" == *husky* ]] || false
+  [[ "$(ctx)" == *'`trellis doctor --fix`'* ]] || false
   [[ "$(ctx)" != *'git config'* ]] || { echo "$output"; false; }
 }
 
@@ -80,7 +80,7 @@ ctx() { printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext // 
   run_guard 'git -c core.hooksPath=/tmp/empty-hooks worktree add ../wt'
   [ "$status" -eq 0 ]
   [[ "$(ctx)" == *'Operator remedy (report it; never run it yourself): `trellis worktree sync ../wt`'* ]] || { echo "$output"; false; }
-  [[ "$(ctx)" == *'before its first push'* ]]
+  [[ "$(ctx)" == *'before its first push'* ]] || false
 }
 
 @test "an env-style GIT_CONFIG_KEY_0=core.hooksPath command runs the check" {
@@ -123,7 +123,7 @@ ctx() { printf '%s' "$output" | jq -r '.hookSpecificOutput.additionalContext // 
   run_guard 'npm install'
   [ "$status" -eq 0 ]
   [[ "$(ctx)" == *'2 values'* ]] || { echo "$output"; false; }
-  [[ "$(ctx)" == *'trellis doctor --fix'* ]]
+  [[ "$(ctx)" == *'trellis doctor --fix'* ]] || false
 }
 
 @test "the guard never writes git config" {

@@ -119,7 +119,7 @@ _sg_failure() {
     _sg_r="[spec-gate] $_sg_missing"
     _sg_r=${_sg_r//\\/\\\\}; _sg_r=${_sg_r//\"/\\\"}
     _sg_r=${_sg_r//$'\n'/\\n}; _sg_r=${_sg_r//$'\r'/\\r}; _sg_r=${_sg_r//$'\t'/\\t}
-    printf '{"decision":"block","reason":"%s"}\n' "$(printf '%s' "$_sg_r" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
+    printf '{"decision":"block","reason":"%s"}\n' "$(printf '%s' "$_sg_r" | /usr/bin/env LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
   fi
   exit "$_SG_STOP_BLOCK_EXIT"
 }
@@ -156,8 +156,8 @@ if [ "${1:-}" = "--mark" ] || [ "${1:-}" = "--mark-emergency" ]; then
   exit 1
 fi
 
-# Validate before any pass-cache lookup: malformed input is never reentry or
-# a valid disabled-policy no-op. CLI/marker modes do not consume Stop input.
+# Validate before the verdict: malformed input is never reentry or a valid
+# disabled-policy no-op. CLI/marker modes do not consume Stop input.
 _sg_active=false
 if [ -z "$_sg_cli_mode" ]; then
   command -v jq >/dev/null 2>&1 || _sg_failure 'jq required but not found — cannot read Stop policy'
@@ -165,20 +165,10 @@ if [ -z "$_sg_cli_mode" ]; then
     || _sg_failure 'invalid Stop envelope: stop_hook_active must be a JSON Boolean'
 fi
 
-# Stop-hook pass cache (spec 072 U8, see sg_stop_cache_key). The CLI modes
-# never read it; a hit is a pass the full path would also give.
-_sg_cache="" _sg_key=""
-if [ -z "${1:-}" ] && command -v _se_stop_receipt_match >/dev/null 2>&1 \
-   && _sg_cache=$(sg_stop_cache_file "$PWD" "$_SG_HARNESS") && _sg_key=$(sg_stop_cache_key "$PWD"); then
-  if _se_stop_receipt_match "$_sg_cache" "$_sg_key"; then
-    cat >/dev/null 2>&1 || true
-    exit 0
-  fi
-else
-  _sg_key=""
-fi
-
-if ! verdict_line=$(sg_verdict "$PWD" "${SG_REQUEST_RANGE:-}" "${SG_REQUEST_REF:-}" "${SG_REQUEST_HEAD:-}"); then
+# The Stop early warning (no argument) lets a decided pass skip the diff range.
+_sg_verdict_mode=""
+[ -z "${1:-}" ] && _sg_verdict_mode=stop
+if ! verdict_line=$(sg_verdict "$PWD" "${SG_REQUEST_RANGE:-}" "${SG_REQUEST_REF:-}" "${SG_REQUEST_HEAD:-}" "$_sg_verdict_mode"); then
   _sg_failure 'verdict engine failed'
 fi
 case "$verdict_line" in
@@ -226,11 +216,5 @@ case "$verdict" in
     fi
     exit 2 ;;
   *)
-    if [ "$verdict" = pass ] && [ -n "$_sg_key" ]; then
-      case "$reason" in
-        *surgical-marker) ;;
-        *) _se_stop_receipt_write "$_sg_cache" "$_sg_key" "spec-gate ${reason##*$'\n'}" ;;
-      esac
-    fi
     exit 0 ;;
 esac

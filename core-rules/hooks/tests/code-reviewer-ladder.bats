@@ -173,7 +173,7 @@ EOF
   [[ "$stderr" == *'code-reviewer: review degraded'* ]] || { echo "$stderr"; false; }
   # Fell through to rung 3 on the secret diff → the critical is recovered.
   [[ "$output" == *'"critical"'* ]] || { echo "$output"; false; }
-  [[ "$output" == *"AWS access key"* ]]
+  [[ "$output" == *"AWS access key"* ]] || false
 }
 
 @test "fail-open: claude nonzero visibly degrades to rung 3 with valid JSON" {
@@ -285,7 +285,7 @@ EOF
   [ "$status" -eq 0 ]
   assert_valid_findings
   [[ "$output" == *'"severity":"critical"'* ]] || { echo "$output"; false; }
-  [[ "$output" == *"AWS access key"* ]]
+  [[ "$output" == *"AWS access key"* ]] || false
 }
 
 @test "rung3: clean diff (no secrets) → {\"findings\":[]}" {
@@ -311,7 +311,7 @@ EOF
   unset TRELLIS_REVIEW_IN_PROGRESS
   [ "$status" -eq 0 ]
   assert_valid_findings
-  [[ "$output" == *'"severity":"critical"'* ]]
+  [[ "$output" == *'"severity":"critical"'* ]] || false
 }
 
 @test "rung3 precision: unquoted type annotations / struct fields → NOT critical" {
@@ -344,7 +344,7 @@ EOF
   assert_valid_findings
   # The .diff inside the envelope is extracted and scanned → key is found.
   [[ "$output" == *'"critical"'* ]] || { echo "$output"; false; }
-  [[ "$output" == *"AWS access key"* ]]
+  [[ "$output" == *"AWS access key"* ]] || false
 }
 
 @test "envelope: raw-diff (non-JSON) stdin is accepted" {
@@ -354,7 +354,7 @@ EOF
 
   [ "$status" -eq 0 ]
   assert_valid_findings
-  [[ "$output" == *'"critical"'* ]]
+  [[ "$output" == *'"critical"'* ]] || false
 }
 
 @test "envelope: clean JSON envelope → empty findings" {

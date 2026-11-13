@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=lib/trellis-home.sh
 . "$SCRIPT_DIR/lib/trellis-home.sh"
@@ -228,8 +231,8 @@ configure_recover_user_surface() {
   fi
   recover="$SCRIPT_DIR/attach-project.sh"
   configure_attachment_command_valid "$recover" || return "$?"
-  TRELLIS_CONFIGURE_USER_LOCK=1 "$recover" relink --user --home "$home" \
-    --configure-lock-held --recover-only
+  /usr/bin/env -u TRELLIS_LIBS_PRELOADED TRELLIS_CONFIGURE_USER_LOCK=1 \
+    "$recover" relink --user --home "$home" --configure-lock-held --recover-only
 }
 
 configure_relink_user_surface_if_attached() {
@@ -245,8 +248,8 @@ configure_relink_user_surface_if_attached() {
   release_dir="$(TRELLIS_HOME="$home" release_store_locate "$release")" || return "$?"
   relink="$release_dir/payload/scripts/attach-project.sh"
   configure_attachment_command_valid "$relink" || return "$?"
-  if TRELLIS_CONFIGURE_USER_LOCK=1 "$relink" relink --user --home "$home" --release "$release" \
-    --configure-lock-held; then
+  if /usr/bin/env -u TRELLIS_LIBS_PRELOADED TRELLIS_CONFIGURE_USER_LOCK=1 \
+    "$relink" relink --user --home "$home" --release "$release" --configure-lock-held; then
     return 0
   else
     relink_rc=$?

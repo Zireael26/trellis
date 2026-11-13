@@ -83,7 +83,7 @@ teardown() {
   migrate
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   [[ "$output" == *"ACTION"*"SIZE"*"PROJECT"*"BRANCH"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *"$HOME/projects/alpha-wt/one"* ]]
+  [[ "$output" == *"$HOME/projects/alpha-wt/one"* ]] || false
   [[ "$output" == *"Totals: 1 worktree(s)"* ]] || { echo "$output"; return 1; }
 }
 
@@ -100,7 +100,7 @@ teardown() {
 @test "migrate rejects an unknown flag with usage" {
   migrate --frobulate
   [ "$status" -eq 2 ]
-  [[ "$output" == *"Usage: trellis worktree migrate"* ]]
+  [[ "$output" == *"Usage: trellis worktree migrate"* ]] || false
 }
 
 @test "inventory and owner records survive a tab and a newline in a worktree path" {

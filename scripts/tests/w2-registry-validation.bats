@@ -74,3 +74,17 @@ setup() {
   run bash -c '. "$1"; local_registry_manifest_project_id "$2"' _ "$REGISTRY_LIB" "$manifest"
   [ "$status" -eq 0 ] && [ "$output" = valid-one ]
 }
+
+@test "manifest validator accepts a boolean gate.verdict_reuse and refuses any other type" {
+  local manifest="$SANDBOX/manifest.json" value
+  for value in true false; do
+    printf '{"schema_version":1,"project_id":"reuse-%s","gate":{"verdict_reuse":%s,"env_passthrough":["CI"]}}\n' "$value" "$value" > "$manifest"
+    run bash -c '. "$1"; local_registry_manifest_project_id "$2"' _ "$REGISTRY_LIB" "$manifest"
+    [ "$status" -eq 0 ] && [ "$output" = "reuse-$value" ] || { echo "refused verdict_reuse=$value: $output"; false; }
+  done
+  for value in '"false"' 0 null '{}'; do
+    printf '{"schema_version":1,"project_id":"reuse-bad","gate":{"verdict_reuse":%s}}\n' "$value" > "$manifest"
+    run bash -c '. "$1"; local_registry_manifest_project_id "$2"' _ "$REGISTRY_LIB" "$manifest"
+    [ "$status" -ne 0 ] || { echo "accepted verdict_reuse=$value"; false; }
+  done
+}

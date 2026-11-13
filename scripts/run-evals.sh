@@ -175,7 +175,7 @@ registry_available_projects() {
     | select(.kind == "worktree" and .availability == "available" and .status == "active")
     | select((.excluded // false) | not)
     | .project_id
-  ' <<<"$REGISTRY_SNAPSHOT" | LC_ALL=C sort -u
+  ' <<<"$REGISTRY_SNAPSHOT" | /usr/bin/env LC_ALL=C sort -u
 }
 registry_project_is_evaluable() {
   local project="$1"
@@ -253,7 +253,7 @@ reconcile_eval_projects() {
   local fixture_projects missing project
   fixture_projects="$(discover_fixtures \
     | sed "s#^$EVALS_DIR/##; s#/.*##" \
-    | LC_ALL=C sort -u)"
+    | /usr/bin/env LC_ALL=C sort -u)"
   missing=0
 
   while IFS= read -r project; do

@@ -63,8 +63,9 @@ def run_weekly(root: Path) -> int:
             del environment[name]
     # The weekly run is the one that also runs the slow tier (cases that skip
     # without it); it widens the battery and never narrows it. The name stays
-    # outside TRELLIS_TEST_*, which verdict capture refuses as a test seam: this
-    # one is hashed into the input key, so the P1 comparison still works.
+    # outside TRELLIS_TEST_*, which verdict capture refuses as a test seam. The
+    # environment is not keyed, so a passing weekly run is also an ordinary
+    # verdict for its tree, and a failing one still raises P1 on tree matches.
     environment["TRELLIS_SLOW_TESTS"] = "1"
     receipt = kept / "aggregate.tsv"
     fd = os.open(str(receipt), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

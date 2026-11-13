@@ -1131,8 +1131,8 @@ module._run_check = fail_with_sentinel
 raise SystemExit(module.main(["check", "--root", root]))
 PY
   [ "$status" -ne 0 ]
-  [[ "$output" == *"sentinel runtime failure"* ]]
-  [[ "$output" != *"input could not be safely validated"* ]]
+  [[ "$output" == *"sentinel runtime failure"* ]] || false
+  [[ "$output" != *"input could not be safely validated"* ]] || false
 }
 
 @test "wiki validator rejects the forbidden logs layer" {

@@ -118,9 +118,9 @@ CLEAN_TS=$'export const two: number = 2;\n'
   posture enforced
   commit_and_check "src/signatures.ts" $'export function apply(\n  input: any,\n): void {}\ntype Model = {\n  value: any,\n};\nexport function safe(\n  input: unknown,\n): void {}\n'
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"src/signatures.ts:2 — ts-any-signature"* ]]
-  [[ "$output" != *"src/signatures.ts:5 — ts-any-signature"* ]]
-  [[ "$output" != *"src/signatures.ts:8 — ts-any-signature"* ]]
+  [[ "$output" == *"src/signatures.ts:2 — ts-any-signature"* ]] || false
+  [[ "$output" != *"src/signatures.ts:5 — ts-any-signature"* ]] || false
+  [[ "$output" != *"src/signatures.ts:8 — ts-any-signature"* ]] || false
 }
 
 @test "enforced TypeScript signatures: diff gaps cannot join unrelated added lines" {
@@ -134,23 +134,23 @@ CLEAN_TS=$'export const two: number = 2;\n'
   )
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" != *"ts-any-signature"* ]]
+  [[ "$output" != *"ts-any-signature"* ]] || false
 }
 
 @test "enforced Python annotations: a trailing comment cannot hide a wrapped Any parameter" {
   posture enforced
   commit_and_check "src/annotations.py" $'def f(\n    payload: Any,  # untyped on purpose\n) -> Widget:\n    return payload\ntimeout: Any = load()  # assignment\n'
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"src/annotations.py:2 — py-any-annotation"* ]]
-  [[ "$output" != *"src/annotations.py:5 — py-any-annotation"* ]]
+  [[ "$output" == *"src/annotations.py:2 — py-any-annotation"* ]] || false
+  [[ "$output" != *"src/annotations.py:5 — py-any-annotation"* ]] || false
 }
 
 @test "enforced Go assertions: a previous checked assertion cannot suppress the next unchecked one" {
   posture enforced
   commit_and_check "src/assertions.go" $'package p\nfunc f() {\n  widget, ok := raw.(Widget)\n  name := payload.(Widget).Name\n}\n'
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"src/assertions.go:4 — go-unchecked-assert"* ]]
-  [[ "$output" != *"src/assertions.go:3 — go-unchecked-assert"* ]]
+  [[ "$output" == *"src/assertions.go:4 — go-unchecked-assert"* ]] || false
+  [[ "$output" != *"src/assertions.go:3 — go-unchecked-assert"* ]] || false
 }
 
 @test "posture enforced + clean added lines: passes with rc 0 (rc 1 is the finding, not the posture)" {

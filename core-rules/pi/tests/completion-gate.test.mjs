@@ -61,6 +61,7 @@ test('T64b: the settle request is one native call over the exact frozen completi
   assert.deepEqual(f.calls(), [`event pi agent_before_settle ${f.cwd}`]);
   const request = JSON.parse(readFileSync(resolve(f.log, 'stdin'), 'utf8'));
   assert.deepEqual(Object.keys(request).sort(), ['can_continue', 'cwd', 'generation', 'harness', 'last_assistant_message', 'phase', 'schema_version', 'session_id', 'stop_hook_active', 'turn_id']);
+  assert.match(request.turn_id, /^trellis-baseline-untrusted:/, 'an unobserved prompt cannot authorize a carry');
   assert.equal(request.last_assistant_message, 'done');
   assert.equal(request.can_continue, true);
   assert.equal(f.state().status, 'accepted');

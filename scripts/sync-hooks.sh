@@ -10,6 +10,9 @@
 
 set -euo pipefail
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 readonly SYNC_TMPDIR="${TMPDIR:-/tmp}"
 
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -30,9 +33,9 @@ SYNC_NAME="${TRELLIS_SYNC_NAME:-sync-hooks.sh}"
 # Bash's %q emits a one-line terminal-safe representation: control bytes become
 # visible escapes rather than terminal instructions. Keep every dynamic
 # diagnostic behind this boundary, including captured child-process output.
-diagnostic_escape() {
-  LC_ALL=C printf '%q' "${1-}"
-}
+diagnostic_escape() (
+  export LC_ALL=C && printf '%q' "${1-}"
+)
 
 case "$SYNC_HARNESS" in
   claude) SYNC_LABEL="Claude hooks" ;;
@@ -177,10 +180,23 @@ TARGETS="$(mktemp "$SYNC_TMPDIR/trellis.sync-targets.XXXXXX")" || {
 ACTIVE_REPAIR_SNAPSHOT=""
 ACTIVE_REPAIR_RELEASE_DIGEST=""
 ACTIVE_REPAIR_RELEASE_VERSION=""
+SYNC_PROOF_DIR="$(mktemp -d "$SYNC_TMPDIR/trellis.sync-proofs.XXXXXX")" || SYNC_PROOF_DIR=""
+SYNC_PROOF_TOKEN=""
+SYNC_PROOF_STAT_OS="$(/usr/bin/uname -s 2>/dev/null)" || SYNC_PROOF_STAT_OS=""
+_LOCAL_REGISTRY_SYNC_PROOF_READY=0
+if [ -n "$SYNC_PROOF_DIR" ]; then
+  SYNC_PROOF_TOKEN="$(_local_registry_diagnostic_token "$HOME_PATH" 2>/dev/null)" || SYNC_PROOF_TOKEN=""
+fi
 
 cleanup_sync() {
   local status="${1:-0}" cleanup_output cleanup_rc=0
   rm -f "$SNAPSHOT" "$TARGETS"
+  [ -z "${SYNC_ROOT_PROOFS:-}" ] || rm -f "$SYNC_ROOT_PROOFS"
+  [ -z "${SYNC_ROOT_PROOF_LIST:-}" ] || rm -f "$SYNC_ROOT_PROOF_LIST"
+  if [ -n "$SYNC_PROOF_DIR" ] && [ -d "$SYNC_PROOF_DIR" ] && [ ! -L "$SYNC_PROOF_DIR" ]; then
+    /usr/bin/find "$SYNC_PROOF_DIR" -mindepth 1 -maxdepth 1 ! -type d -exec rm -f {} + 2>/dev/null || true
+    rmdir "$SYNC_PROOF_DIR" 2>/dev/null || true
+  fi
   if [ -n "$ACTIVE_REPAIR_SNAPSHOT" ]; then
     if cleanup_output="$(TRELLIS_HOME="$HOME_PATH" \
         release_store_remove_snapshot "$ACTIVE_REPAIR_SNAPSHOT" \
@@ -220,13 +236,20 @@ trap 'cleanup_sync 129' HUP
 trap 'cleanup_sync 130' INT
 trap 'cleanup_sync 143' TERM
 
-if local_registry_list_json "$HOME_PATH" "$FLEET" > "$SNAPSHOT" 2>/dev/null; then
-  :
+if [ -n "$SYNC_PROOF_DIR" ] && [ -n "$SYNC_PROOF_TOKEN" ] &&
+   [ "$(declare -f local_registry_list_json)" = "${_LOCAL_REGISTRY_LIST_JSON_ORIGINAL:-}" ]; then
+  if _local_registry_list_json_for_sync "$HOME_PATH" "$FLEET" "$SYNC_PROOF_DIR" > "$SNAPSHOT" 2>/dev/null; then rc=0; else rc=$?; fi
 else
-  rc=$?
+  if local_registry_list_json "$HOME_PATH" "$FLEET" > "$SNAPSHOT" 2>/dev/null; then rc=0; else rc=$?; fi
+fi
+if [ "$rc" -ne 0 ]; then
   printf '%s: could not read strict local registry for fleet %s\n' \
     "$(diagnostic_escape "$SYNC_NAME")" "$(diagnostic_escape "$FLEET")" >&2
   exit "$rc"
+fi
+if [ "$_LOCAL_REGISTRY_SYNC_PROOF_READY" = 1 ]; then
+  SYNC_PROOF_AFTER="$(_local_registry_diagnostic_token "$HOME_PATH" 2>/dev/null)" || SYNC_PROOF_AFTER=""
+  [ "$SYNC_PROOF_AFTER" = "$SYNC_PROOF_TOKEN" ] || _LOCAL_REGISTRY_SYNC_PROOF_READY=0
 fi
 
 # The aggregate is armed BEFORE the selection so that every exit path below —
@@ -287,8 +310,39 @@ row_is_legacy() {
   printf '%s\n' "$1" | jq -e '.metadata.legacy? != null' >/dev/null 2>&1
 }
 
+# The row values the comparisons below pass to jq as --arg, computed in jq for
+# the rows where that is exact: each value a string that $(jq -r ...) would
+# return unchanged (no NUL, no trailing newline), an optional one "" when null
+# or false (`// empty`). Any other row is undecided (2) and the caller takes
+# its per-column extraction, which stays the authority.
+SYNC_ROW_ARGS_DEFS='
+  def plain: type == "string" and (explode | any(. == 0) | not) and (endswith("\n") | not);
+  def req(f): (f) as $v | if ($v | plain) then $v else error("undecided") end;
+  def opt(f): (f) as $v | if $v == null or $v == false then "" elif ($v | plain) then $v else error("undecided") end;
+  def rowargs: {fleet: req(.fleet), project_id: req(.project_id), root: opt(.root),
+    checkout_id: opt(.checkout_id), worktree_id: opt(.worktree_id),
+    attachment_id: opt(.attachment_id), release: opt(.release)};
+'
+
+# One jq for row_matches_resolved_root: 0 match, 1 mismatch, 2 undecided.
+_row_matches_resolved_root_fast() {
+  local row="$1" resolution="$2" verdict
+  verdict="$(jq -r --argjson row "$row" "$SYNC_ROW_ARGS_DEFS"'
+    ($row | rowargs) as $a
+    | .fleet == $a.fleet and .project_id == $a.project_id and .root == $a.root
+      and .checkout_id == $a.checkout_id and .worktree_id == $a.worktree_id
+  ' <<<"$resolution" 2>/dev/null)" || return 2
+  case "$verdict" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 row_matches_resolved_root() {
-  local row="$1" resolution="$2"
+  local row="$1" resolution="$2" rc=0
+  _row_matches_resolved_root_fast "$row" "$resolution" || rc=$?
+  [ "$rc" -eq 2 ] || return "$rc"
   jq -e \
     --arg fleet "$(printf '%s\n' "$row" | jq -r '.fleet' 2>/dev/null)" \
     --arg project_id "$(printf '%s\n' "$row" | jq -r '.project_id' 2>/dev/null)" \
@@ -313,8 +367,27 @@ owner_harnesses_json() {
   ' "$1" 2>/dev/null
 }
 
+# One jq for the field comparison of owner_matches_row: 0 match, 1 mismatch,
+# 2 undecided.
+_owner_matches_row_fields_fast() {
+  local owner="$1" row="$2" verdict
+  verdict="$(jq -r --argjson row "$row" "$SYNC_ROW_ARGS_DEFS"'
+    ($row | rowargs) as $a
+    | .status == "committed"
+      and .fleet == $a.fleet and .project_id == $a.project_id
+      and .project_root == $a.root and .worktree_root == $a.root
+      and .checkout_id == $a.checkout_id and .worktree_id == $a.worktree_id
+      and .attachment_id == $a.attachment_id and .release == $a.release
+  ' "$owner" 2>/dev/null)" || return 2
+  case "$verdict" in
+    true) return 0 ;;
+    false) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 owner_matches_row() {
-  local owner="$1" row="$2" row_harnesses owner_harnesses
+  local owner="$1" row="$2" row_harnesses owner_harnesses rc=0
   if row_harnesses="$(printf '%s\n' "$row" | jq -c '.harnesses // []' 2>/dev/null)"; then
     :
   else
@@ -332,6 +405,8 @@ owner_matches_row() {
   fi
   [ "$owner_harnesses" = "$row_harnesses" ] || return 1
 
+  _owner_matches_row_fields_fast "$owner" "$row" || rc=$?
+  [ "$rc" -eq 2 ] || return "$rc"
   jq -e \
     --arg fleet "$(printf '%s\n' "$row" | jq -r '.fleet' 2>/dev/null)" \
     --arg project_id "$(printf '%s\n' "$row" | jq -r '.project_id' 2>/dev/null)" \
@@ -375,6 +450,25 @@ active_cli_repair_bundle_fail() {
   return "$status"
 }
 
+# Inventory locate caching never authorizes copying or executing release bytes.
+# Bypass the same-process verify memo at both use boundaries: immediately
+# before copying the installed tree and immediately before each bundle emission.
+sync_verify_release_for_copy() {
+  local version="$1" path
+  path="$(release_store_release_path "$version")" || return "$?"
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then return "$TRELLIS_EX_UNAVAILABLE"; fi
+  release_store_release_has_no_acl "$path" || return "$TRELLIS_EX_STATE"
+  release_store_verify_path_body "$path" "$version" 0 0
+}
+
+sync_reverify_repair_snapshot() {
+  local digest
+  digest="$(release_store_release_json_sha256_no_follow "${ACTIVE_REPAIR_SNAPSHOT%/*}" "${ACTIVE_REPAIR_SNAPSHOT##*/}")" || return "$?"
+  [ "$digest" = "$ACTIVE_REPAIR_RELEASE_DIGEST" ] || return "$TRELLIS_EX_STATE"
+  release_store_release_has_no_acl "$ACTIVE_REPAIR_SNAPSHOT" || return "$TRELLIS_EX_STATE"
+  release_store_verify_path_body "$ACTIVE_REPAIR_SNAPSHOT" "$ACTIVE_REPAIR_RELEASE_VERSION" 0 1
+}
+
 # Resolve one private snapshot record from the active installed release. The
 # only later consumer of its pathname is the verified in-memory bundle emitter;
 # no snapshot path is ever executed directly.
@@ -403,6 +497,7 @@ active_cli_repair_bundle() {
   else
     return "$TRELLIS_EX_STATE"
   fi
+  sync_verify_release_for_copy "$version" || return "$?"
   # Arm the release-version cleanup context before command substitution starts.
   # The producer records the owning shell in its sidecar; cleanup can recover
   # that exact snapshot if the substitution returns during a signal handoff.
@@ -475,14 +570,24 @@ relink_one() {
     return 0
   fi
 
+  if sync_reverify_repair_snapshot >/dev/null 2>&1; then
+    :
+  else
+    rc=$?
+    printf '  WARN: attachment relink failed (%s): %s\n' "$rc" \
+      "$(diagnostic_escape 'release snapshot failed use-time verification')" >&2
+    record_failure "$rc"
+    return 0
+  fi
+
   printf '%s\n' '  ~ reconciling attachment through relink'
   if output="$(
     set -o pipefail
     {
-      TRELLIS_HOME="$HOME_PATH" \
-        release_store_emit_verified_attachment_bundle \
-          "$ACTIVE_REPAIR_SNAPSHOT" "$ACTIVE_REPAIR_RELEASE_DIGEST" \
-          "$ACTIVE_REPAIR_RELEASE_VERSION" |
+      export TRELLIS_HOME="$HOME_PATH"
+      release_store_emit_verified_attachment_bundle \
+        "$ACTIVE_REPAIR_SNAPSHOT" "$ACTIVE_REPAIR_RELEASE_DIGEST" \
+        "$ACTIVE_REPAIR_RELEASE_VERSION" |
         /usr/bin/env -i \
           "HOME=${HOME:-}" \
           "TRELLIS_HOME=$HOME_PATH" \
@@ -492,7 +597,6 @@ relink_one() {
           "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
           "LC_ALL=C" \
           "TRELLIS_VERIFIED_PAYLOAD=$ACTIVE_REPAIR_SNAPSHOT/payload" \
-          "TRELLIS_LIBS_PRELOADED=1" \
           /bin/bash --noprofile --norc -s -- relink --home "$HOME_PATH" --fleet "$fleet" \
             "${binding_args[@]}" "$root"
     } 2>&1
@@ -509,6 +613,256 @@ relink_one() {
   return 0
 }
 
+# The batch pre-pass verified OWNER together with every other owner it named.
+sync_owner_batch_verified() {
+  local owner=$1
+  [ -n "$SYNC_VERIFIED_OWNERS" ] || return 1
+  case $'\n'"$SYNC_VERIFIED_OWNERS"$'\n' in
+    *$'\n'"$owner"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
+# surface_plan_emit is a function of the verified immutable payload and the
+# harness; rows on the same release share one plan per sync.
+SYNC_PLAN_PAYLOAD=""
+SYNC_PLAN=""
+sync_surface_plan() {
+  local payload=$1
+  if [ -n "$SYNC_PLAN_PAYLOAD" ] && [ "$SYNC_PLAN_PAYLOAD" = "$payload" ]; then
+    printf '%s\n' "$SYNC_PLAN"
+    return 0
+  fi
+  surface_plan_emit "$payload" "$SYNC_HARNESS"
+}
+
+# A row proof is usable only while every named Git/registry node still has the
+# identity and fine-ctime captured by the batch. Any uncertainty goes through
+# the original resolver, preserving its exact result and failure class.
+sync_resolve_root() {
+  local root="$1" worktree_id="$2" prefix path expected actual resolved
+  local -a watched=() ancestors=()
+  case "$worktree_id" in ''|*[!0-9a-f]*) local_registry_resolve_root "$HOME_PATH" "$root"; return "$?" ;; esac
+  if resolved="$(sync_root_proof "$root" "$worktree_id")"; then
+    printf '%s\n' "$resolved"
+    return 0
+  fi
+  if [ "${#worktree_id}" -eq 64 ] && [ "${_LOCAL_REGISTRY_SYNC_PROOF_READY:-0}" = 1 ] &&
+     [ -n "$SYNC_PROOF_DIR" ] && [ -d "$SYNC_PROOF_DIR" ] && [ ! -L "$SYNC_PROOF_DIR" ]; then
+    prefix="$SYNC_PROOF_DIR/$worktree_id"
+    if [ -f "$prefix.ready" ] && [ ! -L "$prefix.ready" ] &&
+       [ -f "$prefix.root" ] && [ ! -L "$prefix.root" ] &&
+       [ -f "$prefix.resolution" ] && [ ! -L "$prefix.resolution" ] &&
+       [ -f "$prefix.watched" ] && [ ! -L "$prefix.watched" ] &&
+       [ -f "$prefix.full" ] && [ ! -L "$prefix.full" ] &&
+       [ -f "$prefix.ancestors" ] && [ ! -L "$prefix.ancestors" ] &&
+       [ -f "$prefix.partial" ] && [ ! -L "$prefix.partial" ] &&
+       IFS= read -r path < "$prefix.root" && [ "$path" = "$root" ]; then
+      while IFS= read -r path; do [ -z "$path" ] || watched+=("$path"); done < "$prefix.watched"
+      while IFS= read -r path; do [ -z "$path" ] || ancestors+=("$path"); done < "$prefix.ancestors"
+      if [ -n "${watched[*]-}" ] && [ -n "${ancestors[*]-}" ]; then
+        expected="$(< "$prefix.full")"
+        case "$SYNC_PROOF_STAT_OS" in
+          Darwin) actual="$(/usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat -f $'%d\t%i\t%z\t%p\t%Fm\t%Fc' -- "${watched[@]}" 2>/dev/null)" || actual='' ;;
+          Linux) actual="$(/usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat --printf='%d\t%i\t%s\t%f\t%y\t%z\n' -- "${watched[@]}" 2>/dev/null)" || actual='' ;;
+          *) actual='' ;;
+        esac
+        if [ -n "$actual" ] && [ "$actual" = "$expected" ]; then
+          expected="$(< "$prefix.partial")"
+          case "$SYNC_PROOF_STAT_OS" in
+            Darwin) actual="$(/usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat -f $'%d\t%i\t%p\t%u' -- "${ancestors[@]}" 2>/dev/null)" || actual='' ;;
+            Linux) actual="$(/usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat --printf='%d\t%i\t%f\t%u\n' -- "${ancestors[@]}" 2>/dev/null)" || actual='' ;;
+            *) actual='' ;;
+          esac
+          if [ -n "$actual" ] && [ "$actual" = "$expected" ] &&
+             resolved="$(jq -e -s -S 'if length == 1 and (.[0] | type) == "object" then .[0] else error("invalid resolution proof") end' "$prefix.resolution" 2>/dev/null)" &&
+             [ -n "$resolved" ]; then
+            printf '%s\n' "$resolved"
+            return 0
+          fi
+        fi
+      fi
+    fi
+  fi
+  local_registry_resolve_root "$HOME_PATH" "$root"
+}
+
+# One registry identity batch for every row, in this process, at the start of
+# the row loop (local_registry_sync_root_proofs). Positive-only: no file, a
+# failed batch or any doubt leaves every row on sync_resolve_root's other
+# paths. Its stderr is discarded like the listing's above: the batch is an
+# optimization, and a failed one must not change sync's diagnostics.
+SYNC_ROOT_PROOFS=""
+SYNC_ROOT_PROOF_TOKEN=""
+SYNC_ROOT_PROOF_OS=""
+SYNC_ROOT_PROOF_LIST=""
+sync_root_proofs_prepare() {
+  local file
+  file="$(mktemp "$SYNC_TMPDIR/trellis.sync-roots.XXXXXX")" || return 0
+  SYNC_ROOT_PROOF_LIST="$(mktemp "$SYNC_TMPDIR/trellis.sync-worktrees.XXXXXX")" || { rm -f "$file"; SYNC_ROOT_PROOF_LIST=""; return 0; }
+  if local_registry_sync_root_proofs "$HOME_PATH" "$file" 2>/dev/null &&
+     SYNC_ROOT_PROOF_TOKEN="$(head -n 1 "$file" | jq -r '.' 2>/dev/null)" && [ -n "$SYNC_ROOT_PROOF_TOKEN" ]; then
+    SYNC_ROOT_PROOFS="$file"
+    SYNC_ROOT_PROOF_OS="$(/usr/bin/uname -s 2>/dev/null)" || SYNC_ROOT_PROOFS=""
+  fi
+  [ -n "$SYNC_ROOT_PROOFS" ] || { rm -f "$file"; SYNC_ROOT_PROOF_TOKEN=""; }
+  return 0
+}
+
+# The proven resolution for ROOT and WORKTREE_ID, printed exactly as
+# local_registry_resolve_root prints it, while the registry token and the stat
+# line of the root and its .git still equal the batch's AND Git, asked now in
+# this environment, still gives the identity the proof relied on (sync_root_seen).
+# 1 otherwise; the caller then runs the original resolver.
+sync_root_proof() {
+  local root="$1" worktree_id="$2" entry watch actual token checkout common
+  [ -n "$SYNC_ROOT_PROOFS" ] && [ -f "$SYNC_ROOT_PROOFS" ] || return 1
+  token="$(_local_registry_diagnostic_token "$HOME_PATH" 2>/dev/null)" && [ "$token" = "$SYNC_ROOT_PROOF_TOKEN" ] || return 1
+  entry="$(tail -n +2 "$SYNC_ROOT_PROOFS" | jq -c --arg root "$root" --arg id "$worktree_id" \
+    'select(.root == $root and .worktree_id == $id)' 2>/dev/null)" || return 1
+  [ -n "$entry" ] && [ "$(printf '%s\n' "$entry" | wc -l | tr -d ' ')" = 1 ] || return 1
+  watch="$(printf '%s\n' "$entry" | jq -r '.watch' 2>/dev/null)" || return 1
+  actual="$(_local_registry_sync_watch "$SYNC_ROOT_PROOF_OS" "$root" "$root/.git")" || return 1
+  [ -n "$actual" ] && [ "$actual" = "$watch" ] || return 1
+  checkout="$(printf '%s\n' "$entry" | jq -r '.checkout_root | strings' 2>/dev/null)" && [ -n "$checkout" ] || return 1
+  common="$(printf '%s\n' "$entry" | jq -r '.resolution.git_common_dir | strings' 2>/dev/null)" && [ -n "$common" ] || return 1
+  # The Git observations local_registry_resolve_root makes for this root, run
+  # now exactly as it runs them (sync_root_seen); any difference is a miss.
+  sync_root_seen "$root" "$checkout" "$common" || return 1
+  printf '%s\n' "$entry" | jq -S '.resolution' 2>/dev/null
+}
+
+# The Git invocations the original resolver makes for ROOT, with the same
+# arguments, working directory and environment, in the same order
+# (local_registry_identity_for_root, then local_registry_checkout_root_for_common_dir
+# and local_registry_git_common_dir), each required to succeed and to give back
+# the recorded ROOT, CHECKOUT and COMMON. Only the resolver's non-Git work
+# (registry parsing, jq, ids) is skipped. Any non-zero status, missing field or
+# difference is a miss, and the caller then runs the resolver itself. The rare
+# primary-is-the-common-dir branch is not re-observed here: it misses.
+sync_root_seen() {
+  local root="$1" checkout="$2" common="$3" real record top seen candidate field
+  real="$(cd "$root" 2>/dev/null && pwd -P)" && [ "$real" = "$root" ] || return 1
+  # local_registry_identity_for_root
+  record="$(git -C "$root" rev-parse --show-toplevel --git-common-dir 2>/dev/null)" || return 1
+  [ "$record" != "${record#*$'\n'}" ] || return 1
+  top="${record%%$'\n'*}"
+  seen="${record#*$'\n'}"
+  top="$(cd "$top" 2>/dev/null && pwd -P)" && [ "$top" = "$root" ] || return 1
+  case "$seen" in /*) ;; *) seen="$root/$seen" ;; esac
+  seen="$(cd "$seen" 2>/dev/null && pwd -P)" && [ "$seen" = "$common" ] || return 1
+  # local_registry_checkout_root_for_common_dir: the primary worktree, read from
+  # a file as the resolver reads it, never through a pipe
+  [ -n "${SYNC_ROOT_PROOF_LIST:-}" ] || return 1
+  git -C "$root" worktree list --porcelain -z > "$SYNC_ROOT_PROOF_LIST" 2>/dev/null || return 1
+  IFS= read -r -d '' field < "$SYNC_ROOT_PROOF_LIST" || return 1
+  case "$field" in 'worktree '*) candidate="${field#worktree }" ;; *) return 1 ;; esac
+  candidate="$(cd "$candidate" 2>/dev/null && pwd -P)" && [ "$candidate" = "$checkout" ] || return 1
+  [ "$candidate" != "$common" ] || return 1
+  # local_registry_git_common_dir for the primary
+  record="$(git -C "$candidate" rev-parse --is-inside-work-tree --git-common-dir 2>/dev/null)" || return 1
+  [ "${record%%$'\n'*}" = true ] && [ "$record" != "${record#*$'\n'}" ] || return 1
+  seen="${record#*$'\n'}"
+  case "$seen" in /*) ;; *) seen="$candidate/$seen" ;; esac
+  seen="$(cd "$seen" 2>/dev/null && pwd -P)" && [ "$seen" = "$common" ] || return 1
+}
+
+# A successful prepass locate may be reused only for this sync process and
+# the same canonical release directory inode. This is an inventory shortcut,
+# not authority to execute/copy payload bytes: the repair path still creates
+# and verifies a fresh immutable snapshot before use.
+SYNC_RELEASE_CACHE=""
+sync_release_dir_identity() {
+  local path="$1" physical token
+  [ -d "$path" ] && [ ! -L "$path" ] && [ -f "$path/release.json" ] &&
+    [ ! -L "$path/release.json" ] && [ -d "$path/payload" ] && [ ! -L "$path/payload" ] || return 1
+  physical="$(CDPATH='' cd "$path" && pwd -P)" || return 1
+  [ "$physical" = "$path" ] || return 1
+  case "$SYNC_PROOF_STAT_OS" in
+    Darwin) token="$(/usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat -f $'%d:%i:%p:%u:%z:%Fm:%Fc' -- "$path" "$path/release.json" "$path/payload" 2>/dev/null)" || return 1 ;;
+    Linux) token="$(/usr/bin/env LC_ALL=C TZ=UTC0 /usr/bin/stat --printf='%d:%i:%f:%u:%s:%y:%z\n' -- "$path" "$path/release.json" "$path/payload" 2>/dev/null)" || return 1 ;;
+    *) return 1 ;;
+  esac
+  [ -n "$token" ] || return 1
+  printf '%s\n' "$token"
+}
+
+sync_release_preverify() {
+  local release="$1" version path before after verified tmp rc lines
+  if [ "$(_release_store_sync_cache_helpers)" != "${_RELEASE_STORE_SYNC_CACHE_HELPERS_ORIGINAL:-}" ]; then
+    TRELLIS_HOME="$HOME_PATH" release_store_locate "$release" >/dev/null
+    return "$?"
+  fi
+  version="$(release_store_normalize_version "$release")" || return "$?"
+  path="$(release_store_release_path "$version")" || return "$?"
+  before="$(sync_release_dir_identity "$path")" || {
+    TRELLIS_HOME="$HOME_PATH" release_store_locate "$release" >/dev/null
+    return "$?"
+  }
+  tmp="$(mktemp "$SYNC_TMPDIR/trellis.sync-release.XXXXXX")" || {
+    TRELLIS_HOME="$HOME_PATH" release_store_locate "$release" >/dev/null
+    return "$?"
+  }
+  if TRELLIS_HOME="$HOME_PATH" release_store_locate "$release" > "$tmp"; then rc=0; else rc=$?; fi
+  lines="$(wc -l < "$tmp" | tr -d ' ')" || lines=''
+  if [ "$rc" -eq 0 ] && [ "$lines" = 1 ] && IFS= read -r verified < "$tmp" && [ "$verified" = "$path" ] &&
+     after="$(sync_release_dir_identity "$path")" && [ "$before" = "$after" ]; then
+    # Keep the multi-line stat token on one table line; hashes are not used as
+    # authority here, only to compare a fresh observation to this one.
+    after="${after//$'\n'/|}"
+    [ -z "$after" ] || SYNC_RELEASE_CACHE="${SYNC_RELEASE_CACHE}${version}"$'\t'"${path}"$'\t'"${after}"$'\n'
+  fi
+  rm -f "$tmp"
+  return "$rc"
+}
+
+sync_release_locate() {
+  local release="$1" version cached_version cached_path cached_identity current
+  version="$(release_store_normalize_version "$release")" || return "$?"
+  if [ "$(_release_store_sync_cache_helpers)" != "${_RELEASE_STORE_SYNC_CACHE_HELPERS_ORIGINAL:-}" ]; then
+    TRELLIS_HOME="$HOME_PATH" release_store_locate "$release"
+    return "$?"
+  fi
+  while IFS=$'\t' read -r cached_version cached_path cached_identity; do
+    [ "$cached_version" = "$version" ] || continue
+    if current="$(sync_release_dir_identity "$cached_path")"; then
+      current="${current//$'\n'/|}"
+    else
+      current=''
+    fi
+    if [ -n "$current" ] && [ "$current" = "$cached_identity" ]; then
+      printf '%s\n' "$cached_path"
+      return 0
+    fi
+    break
+  done <<EOF
+$SYNC_RELEASE_CACHE
+EOF
+  TRELLIS_HOME="$HOME_PATH" release_store_locate "$release"
+}
+
+# Every column sync_one reads, from one jq: the values joined by the unit
+# separator (not whitespace to IFS, so an empty column keeps its place). Only
+# rows whose every value is a string that $(jq -r ...) returns unchanged and
+# that holds no separator, newline or NUL; any other row fails here and
+# sync_one extracts column by column as before. Sets the caller's locals.
+_sync_row_columns_fast() {
+  local columns
+  columns="$(printf '%s\n' "$1" | jq -r '
+    def plain: type == "string" and (explode | any(. == 0 or . == 10 or . == 31) | not);
+    def s(f): (f) as $v | if ($v | plain) then $v else error("undecided") end;
+    def req(f): (f) as $v | if $v == null or $v == false then error("absent") else s($v) end;
+    [req(.fleet), req(.project_id), req(.kind), req(.availability), req(.status),
+     s((.excluded // false) | tostring), s(.root // ""), s(.release // ""),
+     s(.attachment_id // ""), s(.checkout_id // ""), s(.worktree_id // ""),
+     s((.harnesses // []) | tojson)]
+    | join("\u001f")' 2>/dev/null)" || return 1
+  IFS=$'\037' read -r fleet project_id kind availability status excluded root release \
+    attachment_id checkout_id worktree_id row_harnesses <<EOF
+$columns
+EOF
+}
+
 sync_one() {
   local row="$1" fleet project_id kind availability status excluded root
   local release attachment_id checkout_id worktree_id row_harnesses owner_harnesses
@@ -516,7 +870,9 @@ sync_one() {
 
   # Extract nullable columns independently. IFS treats tab as whitespace and
   # would collapse an empty attachment_id, shifting every later binding field.
-  if fleet="$(printf '%s\n' "$row" | jq -er '.fleet' 2>/dev/null)" &&
+  if _sync_row_columns_fast "$row"; then
+    :
+  elif fleet="$(printf '%s\n' "$row" | jq -er '.fleet' 2>/dev/null)" &&
      project_id="$(printf '%s\n' "$row" | jq -er '.project_id' 2>/dev/null)" &&
      kind="$(printf '%s\n' "$row" | jq -er '.kind' 2>/dev/null)" &&
      availability="$(printf '%s\n' "$row" | jq -er '.availability' 2>/dev/null)" &&
@@ -578,7 +934,7 @@ sync_one() {
     return 0
   fi
 
-  if resolution="$(local_registry_resolve_root "$HOME_PATH" "$root" 2>/dev/null)"; then
+  if resolution="$(sync_resolve_root "$root" "$worktree_id" 2>/dev/null)"; then
     :
   else
     rc=$?
@@ -628,7 +984,7 @@ sync_one() {
     return 0
   fi
 
-  if release_dir="$(TRELLIS_HOME="$HOME_PATH" release_store_locate "$release" 2>/dev/null)"; then
+  if release_dir="$(sync_release_locate "$release" 2>/dev/null)"; then
     :
   else
     rc=$?
@@ -644,9 +1000,10 @@ sync_one() {
     record_failure "$TRELLIS_EX_STATE"
     return 0
   fi
-  if plan="$(surface_plan_emit "$payload" "$SYNC_HARNESS" 2>/dev/null)" &&
+  if plan="$(sync_surface_plan "$payload" 2>/dev/null)" &&
      plan_has_attached_leaves "$plan"; then
-    :
+    SYNC_PLAN_PAYLOAD="$payload"
+    SYNC_PLAN="$plan"
   else
     printf 'blocked (immutable manifest has no usable %s surface): %s\n' \
       "$(diagnostic_escape "$SYNC_HARNESS")" "$(diagnostic_escape "$label")" >&2
@@ -655,7 +1012,7 @@ sync_one() {
   fi
 
   printf '== %s ==\n' "$(diagnostic_escape "$label")"
-  if attachment_verify "$HOME_PATH" "$owner" >/dev/null 2>&1; then
+  if sync_owner_batch_verified "$owner" || attachment_verify "$HOME_PATH" "$owner" >/dev/null 2>&1; then
     printf '  (in sync: attached immutable release %s)\n' "$(diagnostic_escape "$release")"
     return 0
   fi
@@ -669,6 +1026,33 @@ sync_one() {
   fi
   return 0
 }
+
+# One pass before the rows, none of it a verdict on its own. Each recorded
+# release is verified once in this shell, so sync_one's locate captures answer
+# from the verify memo (the ACL refusal still runs on each). The owner records
+# the rows name are verified together (attachment_verify_owners_batch); only
+# when every one passes does sync_one take that pass in place of its own
+# attachment_verify, and any miss leaves every row to verify alone.
+SYNC_VERIFIED_OWNERS=""
+sync_prepass() {
+  local release owner
+  local -a owners=()
+  while IFS= read -r release; do
+    [ -n "$release" ] || continue
+    sync_release_preverify "$release" >/dev/null 2>&1 || :
+  done < <(jq -r 'select(.kind == "worktree") | .release // empty' "$TARGETS" | sort -u)
+  while IFS= read -r owner; do
+    [ -f "$owner" ] && [ ! -L "$owner" ] || continue
+    owners+=("$owner")
+  done < <(jq -r --arg home "$HOME_PATH" '
+    select(.kind == "worktree" and (.checkout_id // "") != "" and (.worktree_id // "") != "")
+    | $home + "/state/attachments/" + .checkout_id + "/" + .worktree_id + ".json"' "$TARGETS" | sort -u)
+  [ "${#owners[@]}" -gt 0 ] || return 0
+  attachment_verify_owners_batch "$HOME_PATH" "${owners[@]}" || return 0
+  SYNC_VERIFIED_OWNERS="$(printf '%s\n' "${owners[@]}")"
+}
+sync_prepass
+sync_root_proofs_prepare
 
 while IFS= read -r row; do
   [ -n "$row" ] || continue

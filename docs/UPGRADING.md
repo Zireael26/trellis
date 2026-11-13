@@ -13,6 +13,119 @@ upgrade end to end — any harness, with per-step verification, stop conditions,
 and a rollback path — use [AGENT_UPGRADE.md](../AGENT_UPGRADE.md); this document
 is the reference it cites.
 
+## `1.5.0` → `1.5.2` (direct upgrade)
+
+1.5.1 was not published separately; its changes ship in 1.5.2. No 1.5.1
+installation is required. Use the installed stable launcher, not a source
+checkout, and an approved remote containing the annotated `v1.5.2` tag.
+Installation is not adoption: inspect `registry list` first and select only
+intended projects. Retain the currently installed release and its launcher for
+recovery.
+
+### Before the first gate run: test-verdict reuse
+
+1.5.2 enables reuse of eligible passing test results. A hit skips the configured
+test command, not other gate checks; unsupported commands and uncertain inputs
+run normally. Generic commands tracked for reuse no longer receive
+`PG_TESTS_BASE`, `PG_TESTS_HEAD` or `PG_TESTS_RECEIPT_FILE`. Projects relying
+on those variables for range selection **must opt out**, as must projects whose
+results depend on mutable external data, installed dependencies, time, services
+or other unkeyed inputs. A reused result proves the configured command passed,
+not that it covers the whole project; release qualification remains uncached.
+
+For a project opt-out, merge `"verdict_reuse": false` into the existing
+`.trellis.json` `gate` object and commit it through normal review before the
+first target-release gate. Do not assume the older active release accepts a new
+manifest key. Alternatively an operator, outside an agent session, can create
+`$TRELLIS_HOME/state/gate-verdicts/reuse-disabled` in a private parent and keep
+it until deliberately re-enabling reuse. See the process-gate
+`core-rules/skills/process-gate/references/tests.md`, “Verdict reuse”, for
+supported runners and limits.
+
+```sh
+TRELLIS="$HOME/.local/bin/trellis"
+: "${TRELLIS_HOME:=$HOME/.trellis}"; export TRELLIS_HOME
+: "${RELEASE_REMOTE:?Set the remote containing annotated tag v1.5.2}"
+: "${FLEET:?Set the fleet}" "${PROJECT_ID:?Set the reviewed project ID}"
+TARGET_RELEASE=1.5.2
+"$TRELLIS" registry list --fleet "$FLEET" &&
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE" &&
+"$TRELLIS" release verify "$TARGET_RELEASE" &&
+"$TRELLIS" configure --release "$TARGET_RELEASE" \
+  --launcher-template "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh" &&
+"$TRELLIS" release adopt "$TARGET_RELEASE" --project "$PROJECT_ID" --fleet "$FLEET" &&
+"$TRELLIS" doctor --fleet "$FLEET" --project "$PROJECT_ID"
+```
+
+If 1.5.2 is already installed, **verify** it instead of reinstalling it; an
+existing installed version is immutable. Stop on any nonzero result, deferral,
+missing surface, unrecognized launcher or failed/pending attachment check and
+resolve it before proceeding. A native launcher is rendered with a companion
+pin: compare it to its digest-keyed ownership ledger and check doctor's launcher
+currency, not the raw template's bytes. Configure updates the machine-wide
+launcher and owned user surface; project policy changes only on adoption.
+Recheck registered user and project hooks, then restart Claude Code and Codex
+and reload or restart Pi. Do not copy only the binary or force an overwrite.
+
+### Direct `1.4.x` → `1.5.2`
+
+Use the [1.4.x → 1.5.0 native bootstrap](#14x--150-native-bootstrap) steps with
+**1.5.2 as the target**: install and verify through the old launcher, keep that
+launcher, reinstall from the *verified 1.5.2 payload*, then configure a second
+time through the new launcher to stage and pin the native companion before
+adoption. 1.5.2 includes the fixed first-hop user-attachment behavior; the
+original 1.5.0 user-detach workaround is not normally needed. Review the
+same test-reuse compatibility rules above; no 1.5.0 or 1.5.1 interim adoption is
+required. Preserve your actual prior version for rollback. See the 1.4.x
+bootstrap and launcher-reinstall sections for the interruption points and
+platform-specific shell fallback. Do not use the older one-command upgrade
+route for this first native bootstrap.
+
+### Rollback and the 1.5.0 limitation
+
+Verify and configure the retained prior version with **its own** launcher and
+companion, then adopt that version on the same selected scope and run scoped
+doctor. For a project whose retained prior version is 1.5.0:
+
+```sh
+"$TRELLIS" release verify 1.5.0 &&
+"$TRELLIS" configure --release 1.5.0 \
+  --launcher-template "$TRELLIS_HOME/releases/1.5.0/payload/scripts/trellis-launcher.sh" &&
+"$TRELLIS" release adopt 1.5.0 --project "$PROJECT_ID" --fleet "$FLEET" &&
+"$TRELLIS" doctor --fleet "$FLEET" --project "$PROJECT_ID"
+```
+
+Keep both releases and restart/reload the assistants. A successful adopt exit is
+not a verified rollback if doctor reports an error or a required surface is
+missing. Preserve journals and stop; never hand-edit the runtime, owner records,
+managed hooks or settings to force a green result.
+
+In a clean single-worktree Claude+Codex+Pi rehearsal, rolling back from 1.5.1
+to 1.5.0 left `.agents/agents/luna.md` missing: 1.5.0 adoption could not
+recreate that retired leaf. Scoped doctor failed even though adopt returned 0.
+That limitation is in 1.5.0's rollback controller and may also affect a rollback
+from 1.5.2; a 1.5.2 rollback is not proven by the 1.5.1 fixture. In the tested
+single-worktree case, after 1.5.0 was active and adopted, a supported detach
+followed by attach of the same root with its **recorded** Claude, Codex and Pi
+harnesses restored the leaf and scoped doctor passed. Detach temporarily ungates
+pushes: stop agents and prohibit pushes until reattachment and doctor pass. For
+that tested single-worktree case **only**, with 1.5.0 already active and adopted
+and the recorded harnesses exactly Claude, Codex and Pi:
+
+```sh
+: "${PROJECT_ROOT:?Set the affected attached worktree root}"
+"$TRELLIS" detach --home "$TRELLIS_HOME" "$PROJECT_ROOT" &&
+"$TRELLIS" attach --home "$TRELLIS_HOME" --fleet "$FLEET" --release 1.5.0 \
+  --harness claude --harness codex --harness pi "$PROJECT_ROOT" &&
+"$TRELLIS" doctor --fleet "$FLEET" --project "$PROJECT_ID"
+```
+
+For a multi-worktree checkout, first inventory every sibling and its harnesses
+and follow the documented checkout-group detach/attach sequence; that fixture
+does not prove group recovery. On refusal preserve state and seek help. Rollback
+to an older 1.4.x release needs its own legacy launcher and reviewed procedure;
+do not assume the 1.5.0 recovery result applies.
+
 ## Repair a tracked file takeover after a merge
 
 If a merge starts tracking a regular file where Trellis owned a native symlink
@@ -260,8 +373,11 @@ If the user surface was hand-placed before Trellis owned it, do not delete or
 overwrite those files to make the command pass. Without an adoption flag,
 `attach --user` treats an existing unowned destination as a conflict and
 leaves the existing user surface untouched. For a release-managed JSON
-destination, plain attach preserves unrelated operator keys, but any overlap
-with a key Trellis renders is a conflict. With `--adopt-identical`, an existing
+destination, plain attach preserves unrelated operator keys and, from 1.5.2,
+adopts an overlapping non-hook value that already equals the release value
+(for example `workflowSizeGuideline: "large"`); detach restores the operator's
+bytes. Any other overlap with a key Trellis renders, including an identical
+hook event array, is a conflict. With `--adopt-identical`, an existing
 JSON object is eligible only when every overlapping managed leaf already has the
 exact release value; an object/type conflict remains a conflict.
 
@@ -625,6 +741,63 @@ checkout.
 `trellis recover` now prints the library's `trellis recover: refused (<code>):
 <path>` lines as detach does; before 1.5.0 it printed none of those library
 refusals. The uncoded command-level messages above retain their existing form.
+
+#### A detach interrupted right after its first removal (1.5.0 and earlier)
+
+Up to 1.5.0, a detach journaled the end of each removal (`removal` back to
+`null`) and the next `phase` in two writes. A detach killed between those two
+writes for the **first** artifact leaves a journal that says `phase` 0 with no
+removal while that artifact is already gone, and the phase-0 preflight then
+refuses it forever: `trellis recover` and `trellis detach` both print
+`refused (artifact-changed): <worktree>/<remove[0].path>`. In 1.5.2 the two
+writes are one, so a 1.5.2 detach never leaves this state, but 1.5.2 still
+refuses a journal 1.5.0 left in it. Finish it by hand, once:
+
+```sh
+journal=~/.trellis/state/attachment-journals/detach-<attachment-uuid>.json  # the journal named by the refusal's worktree
+jq '{phase, removal, owner_committed, first: .remove[0].path}' "$journal"
+# Go on only if it prints phase 0, removal null, owner_committed false, and the
+# refused path is that first path. Then check the leaf is gone and nothing is
+# claimed beside it (both commands print nothing):
+{ [ -e "<worktree>/<first>" ] || [ -L "<worktree>/<first>" ]; } && echo present
+find "$(dirname "<worktree>/<first>")" -maxdepth 1 -name '.trellis-attachment-remove-*'
+# No Trellis process may run for this worktree. Journal phase 1, private and
+# atomic, exactly as the interrupted detach would have:
+tmp=$(mktemp "$journal.tmp.XXXXXX") && chmod 600 "$tmp" &&
+  jq -cS '.phase = 1' "$journal" > "$tmp" && mv -f "$tmp" "$journal"
+trellis recover <worktree>
+```
+
+If any check differs (another phase, a removal still set, the leaf present, a
+quarantine directory), this is not that state: do not edit the journal; keep
+it and run `trellis doctor`.
+
+Two more interrupted-detach states that 1.5.0 refused forever with
+`render-conflict` need no manual step: a render claim killed after its
+quarantine directory was created and before the file moved into it, and a
+render cleanup killed after the claimed file and its quarantine were removed
+and before the claim was cleared. In 1.5.2, `trellis recover` finishes both.
+
+A third one does need a manual step. Up to 1.5.0, restoring a merged settings
+file journaled its staged copy's identity before writing the copy's bytes; a
+detach killed in between leaves a stage whose bytes never match, and recovery
+refuses `render-conflict` on that settings file. 1.5.2 writes the bytes first,
+but it still refuses a stage 1.5.0 left this way, because a wrong stage cannot
+be told apart from a tampered one. Finish it by hand:
+
+```sh
+journal=~/.trellis/state/attachment-journals/detach-<attachment-uuid>.json  # the worktree's journal
+jq '.external.render_pending | {staging_path, staging_identity, result_sha256}' "$journal"
+stage=<staging_path printed above>
+stat -f '%d:%i' "$stage" 2>/dev/null || stat -c '%d:%i' "$stage"   # must equal staging_identity
+shasum -a 256 "$stage"                                             # must differ from result_sha256
+# No Trellis process may run for this worktree. Drop the incomplete stage and
+# its journaled identity; recovery stages it again from the journal:
+rm -- "$stage"
+tmp=$(mktemp "$journal.tmp.XXXXXX") && chmod 600 "$tmp" &&
+  jq -cS '.external.render_pending.staging_identity = null' "$journal" > "$tmp" && mv -f "$tmp" "$journal"
+trellis recover <worktree>
+```
 
 A committed full-detach journal whose worktree was attached again before the
 journal finished is superseded: recovery refuses at `owner-changed` before
@@ -1069,6 +1242,13 @@ restriction. The first hop needs **two configure calls**, because the installed
    qualified release cutover supplies native registrations. Recheck user-level
    surfaces too; do not edit settings arrays manually.
 
+A committed user attachment does not change these steps. In 1.5.2 the first
+configure (run by the 1.4.x launcher, before any companion exists) relinks the
+user surface with the complete legacy user template and says so on stderr; the
+second configure stages the companion and relinks it native. The 1.5.0
+workaround (`detach --user`, both configures, `attach --user --adopt-identical`)
+is no longer needed.
+
 The older one-command `trellis upgrade 1.5.0 ...` cannot perform this bootstrap:
 its 1.4.x release body remains legacy. From a native-capable active release,
 upgrade's verified in-memory bundle stages/publishes the target pair before
@@ -1131,8 +1311,8 @@ Nothing to configure.
   everything else 20 s. The harness timeout is the deadline plus 10 s.
 - **Restart running sessions.** After adoption, restart Claude Code, Codex and
   Pi sessions so they load the new registrations.
-- **Worktree remove** is not faster in 1.5.0. The single-process detach comes
-  in 1.5.1.
+- **Worktree remove** is not faster in 1.5.0. The whole-transaction
+  single-process detach rewrite is deferred to 1.5.3.
 
 ### Roll back from 1.5.0
 

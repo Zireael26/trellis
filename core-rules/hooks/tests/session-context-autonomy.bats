@@ -78,13 +78,13 @@ resolver_globals() {
     [ "$status" -eq 2 ]
     run --separate-stderr bash -c 'source "$1"; _se_resolve_autonomy "$2"; s=$?; printf "%s %s %s\n" "$AUTONOMY_LEVEL" "$AUTONOMY_CEILING" "$AUTONOMY_ERROR"; exit "$s"' _ "$helper" "$PROJECT_DIR"
     [ "$status" -eq 2 ]
-    [[ "$output" == '1 1 '* ]]
+    [[ "$output" == '1 1 '* ]] || false
   done
   chmod 600 "$PROJECT_DIR/.trellis.json"
   for helper in "$AUTONOMY_HELPER" "$CODEX_AUTONOMY_HELPER"; do
     run resolver_globals "$helper"
     [ "$status" -eq 0 ]
-    [[ "$output" == $'2\tCautious\t5\t2\t1\tstrict' ]]
+    [[ "$output" == $'2\tCautious\t5\t2\t1\tstrict' ]] || false
   done
   mv "$PROJECT_DIR/.trellis.json" "$PROJECT_DIR/.trellis.config.json"
   chmod 000 "$PROJECT_DIR/.trellis.config.json"
@@ -110,10 +110,10 @@ resolver_globals() {
     cp "$HOOKS_DIR/lib/decision-receipt-core.sh" "$dir/lib/"
     if [ "$harness" = claude ]; then
       cp "$HOOKS_DIR/decision-receipt.sh" "$dir/decision-receipt.sh"
-      cp "$HOOKS_DIR/lib/deps.sh" "$HOOKS_DIR/lib/autonomy.sh" "$dir/lib/"
+      cp "$HOOKS_DIR/lib/deps.sh" "$HOOKS_DIR/lib/deps-heavy.sh" "$HOOKS_DIR/lib/autonomy.sh" "$dir/lib/"
     else
       cp "$CODEX_HOOKS_DIR/decision-receipt.sh" "$dir/decision-receipt.sh"
-      cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$dir/lib/"
+      cp "$CODEX_HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps-heavy.sh" "$CODEX_HOOKS_DIR/lib/autonomy.sh" "$dir/lib/"
     fi
     hook="$dir/decision-receipt.sh"
     run --separate-stderr bash "$hook" <<<'{"last_assistant_message":"Done."}'
@@ -162,8 +162,8 @@ resolver_globals() {
   for hook in "$HOOKS_DIR/session-context.sh" "$CODEX_HOOKS_DIR/session-context.sh"; do
     run --separate-stderr bash "$hook" <<<'{"source":"startup"}'
     [ "$status" -eq 0 ]
-    [[ "$output" == *'Policy unavailable'* ]]
-    [[ "$output" != *'Level: L5'* ]]
+    [[ "$output" == *'Policy unavailable'* ]] || false
+    [[ "$output" != *'Level: L5'* ]] || false
   done
   chmod 600 "$PROJECT_DIR/.trellis.json"
 }

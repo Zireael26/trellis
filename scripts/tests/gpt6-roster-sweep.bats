@@ -1,13 +1,18 @@
 #!/usr/bin/env bats
 # SC1 guard for the current roster surface and its repository-wide history ledger.
+# Retired model identifiers: the GPT-5 point-six generation (spec 052) and GPT-6 Luna
+# (owner roster 2026-11-10). GPT-6.1 Terra is current again (terra-medium,
+# terra-low), so the bare word Terra is no longer a retired name. Both patterns
+# are split so this file never matches itself.
 
 bats_require_minimum_version 1.5.0
 
 REPO_ROOT="$(git -C "$BATS_TEST_DIRNAME/../.." rev-parse --show-toplevel)"
 ALLOWLIST="$REPO_ROOT/specs/052-gpt6-roster/record-allowlist.txt"
 OLD_MODEL_RE='gpt-5[.]6'
-OLD_NAME_RE='ter''ra'
+OLD_NAME_RE='gpt-6-lu''na'
 LEGACY_MODEL='gpt-5''.''6'
+LEGACY_LUNA='openai-codex/gpt-6-lu''na:max'
 HIT_PATTERN="(^|[^[:alnum:]_])(${OLD_MODEL_RE}|${OLD_NAME_RE})([^[:alnum:]_]|$)"
 
 _live_set_files() {
@@ -184,12 +189,15 @@ _validate_allowlist() {
   rel='core-rules/skills/herdr-foreman/roles.json'
   mkdir -p "$fixture_root/core-rules/skills/herdr-foreman"
   cp "$REPO_ROOT/$rel" "$fixture_root/$rel"
-  printf '%s\n' "$LEGACY_MODEL" >> "$fixture_root/$rel"
   printf '%s\n' "$rel" > "$BATS_TEST_TMPDIR/gpt6-roster-fixture-files.txt"
 
-  run _scan_live_files "$fixture_root" "$BATS_TEST_TMPDIR/gpt6-roster-fixture-files.txt"
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"$rel:"* ]]
+  for legacy in "$LEGACY_MODEL" "$LEGACY_LUNA"; do
+    cp "$REPO_ROOT/$rel" "$fixture_root/$rel"
+    printf '%s\n' "$legacy" >> "$fixture_root/$rel"
+    run _scan_live_files "$fixture_root" "$BATS_TEST_TMPDIR/gpt6-roster-fixture-files.txt"
+    [ "$status" -eq 1 ] || { echo "not flagged: $legacy"; false; }
+    [[ "$output" == *"$rel:"*"$legacy"* ]] || false
+  done
 }
 
 @test "word boundaries ignore unrelated provider names and embedded fragments" {
@@ -197,9 +205,18 @@ _validate_allowlist() {
   rel='core-rules/skills/herdr-foreman/roles.json'
   mkdir -p "$fixture_root/core-rules/skills/herdr-foreman"
   cp "$REPO_ROOT/$rel" "$fixture_root/$rel"
-  printf '%s\n' 'Terraform' 'prefixterraSuffix' > "$fixture_root/$rel"
+  # Current GPT-6.1 Terra ids, an unrelated provider name, and the retired
+  # Luna id embedded in a longer word on either side are all clean.
+  printf '%s\n' 'Terraform' 'openai-codex/gpt-6.1-terra:medium' 'terra-low' \
+    'xgpt-6-lu''na' 'gpt-6-lu''nar' 'prefixgpt-6-lu''naSuffix' > "$fixture_root/$rel"
   printf '%s\n' "$rel" > "$BATS_TEST_TMPDIR/gpt6-roster-boundary-files.txt"
 
   run _scan_live_files "$fixture_root" "$BATS_TEST_TMPDIR/gpt6-roster-boundary-files.txt"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 0 ] || { echo "boundary false positive: $output"; false; }
+
+  # The same file with the bare retired id on its own line is flagged, so the
+  # clean result above is the boundary rule, not a blind scanner.
+  printf '%s\n' 'see gpt-6-lu''na here' >> "$fixture_root/$rel"
+  run _scan_live_files "$fixture_root" "$BATS_TEST_TMPDIR/gpt6-roster-boundary-files.txt"
+  [ "$status" -eq 1 ]
 }

@@ -61,6 +61,7 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { _se_prompt_baseline_notice; exit 0; }
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
+_se_load_heavy || { _se_prompt_baseline_notice; exit 0; }
 command -v jq >/dev/null 2>&1 || { _se_prompt_baseline_notice; exit 0; }
 _se_require_jq "turn-baseline"
 

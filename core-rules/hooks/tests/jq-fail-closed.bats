@@ -145,6 +145,7 @@ _r2_m3_wrapper_cases() {
   mkdir -p "$deploy/lib"
   cp "$source/$kind.sh" "$deploy/$kind.sh"
   cp "$source/lib/deps.sh" "$deploy/lib/deps.sh"
+  cp "$source/lib/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   if [ "$kind" = decision-receipt ]; then
     cp "$source/lib/autonomy.sh" "$deploy/lib/autonomy.sh"
     cp "$HOOKS_DIR/lib/decision-receipt-core.sh" "$deploy/lib/decision-receipt-core.sh"
@@ -203,6 +204,7 @@ _r3_l5_cases() {
   mkdir -p "$deploy/lib"
   cp "$source/$kind.sh" "$deploy/$kind.sh"
   cp "$source/lib/deps.sh" "$deploy/lib/deps.sh"
+  cp "$source/lib/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   if [ "$kind" = decision-receipt ]; then
     cp "$source/lib/autonomy.sh" "$deploy/lib/autonomy.sh"
     cp "$HOOKS_DIR/lib/decision-receipt-core.sh" "$deploy/lib/decision-receipt-core.sh"
@@ -411,7 +413,7 @@ PY
       [ "$status" -eq 0 ]
       printf '%s\n' "$output" | jq -e '.decision == "block"' >/dev/null
     fi
-    [[ "$stderr" == *"install jq"* ]]
+    [[ "$stderr" == *"install jq"* ]] || false
     dir="$BATS_TEST_TMPDIR/$harness/hooks"
     mkdir -p "$dir"
     cp "$hook" "$dir/stop-verify.sh"
@@ -422,7 +424,7 @@ PY
       [ "$status" -eq 0 ]
       printf '%s\n' "$output" | jq -e '.decision == "block"' >/dev/null
     fi
-    [[ "$stderr" == *"missing sibling lib"* ]]
+    [[ "$stderr" == *"missing sibling lib"* ]] || false
     run --separate-stderr bash "$hook" <<<'{"stop_hook_active":true}'
     [ "$status" -eq 0 ]
     [ -z "$output" ]
@@ -439,6 +441,9 @@ _turn_baseline_degraded_notice() {
 
 @test "P1.5: every hook reports missing jq or emits a Codex Stop block" {
   jq_free_path="$(make_jq_free_path)"
+  # Only jq is missing: primer-capture-nudge supervises itself with python3
+  # (an advisory no-op without it) before it can report the missing jq.
+  ln -s "$(command -v python3)" "$jq_free_path/python3"
   PATH_BACKUP="$PATH"
   failed=()
   for h in "${HOOKS[@]}"; do
@@ -483,6 +488,9 @@ _turn_baseline_degraded_notice() {
 # (`_se_require_jq ... block`) still refuses with it set (spec 074 E5).
 @test "P1.5: every hook degrades cleanly when TRELLIS_NO_JQ_DEGRADE=1, except the bright-line guards" {
   jq_free_path="$(make_jq_free_path)"
+  # Only jq is missing: primer-capture-nudge supervises itself with python3
+  # (an advisory no-op without it) before it can report the missing jq.
+  ln -s "$(command -v python3)" "$jq_free_path/python3"
   PATH_BACKUP="$PATH"
   export TRELLIS_NO_JQ_DEGRADE=1
   failed=()

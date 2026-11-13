@@ -56,8 +56,8 @@ gate() {
   echo "$output"
 }
 assert_receipt() {
-  [[ "$output" == *"Tests & coverage:"*"— $1"* ]]
-  [[ "$output" == *"Overall: MERGEABLE"*$'\nTests: '"$1"* ]]
+  [[ "$output" == *"Tests & coverage:"*"— $1"* ]] || false
+  [[ "$output" == *"Overall: MERGEABLE"*$'\nTests: '"$1"* ]] || false
 }
 
 parse_merge_verdict() {
@@ -85,7 +85,7 @@ PY
   for scope in 'Secrets: — invalid pass' 'Tests & coverage: —bogus pass'; do
     output="$(printf '%s\n' "$verdict" | sed "/^${scope%%:*}:/ { s/ — .*//; s/$/${scope#*:}/; }")"
     parse_merge_verdict
-    [[ "$output" == *$'\nreject' ]]
+    [[ "$output" == *$'\nreject' ]] || false
   done
 }
 
@@ -95,14 +95,14 @@ PY
   BASE="$(gfx rev-parse HEAD)"; HEAD_SHA="$BASE"
   gate
   [ "$status" -eq 2 ]
-  [[ "$output" == *'— not run'* && "$output" == *$'\nTests: not run'* && "$output" != *$'\nTests: full'* ]]
+  [[ "$output" == *'— not run'* && "$output" == *$'\nTests: not run'* && "$output" != *$'\nTests: full'* ]] || false
 }
 
 @test "crashed Tests checker reports unknown, never full" {
   printf '#!/usr/bin/env bash\nexit 1\n' > "$SKILL/scripts/check-tests.sh"
   gate merge
   [ "$status" -eq 1 ]
-  [[ "$output" == *'— unknown'* && "$output" == *$'\nTests: unknown'* && "$output" != *$'\nTests: full'* ]]
+  [[ "$output" == *'— unknown'* && "$output" == *$'\nTests: unknown'* && "$output" != *$'\nTests: full'* ]] || false
 }
 
 @test "last checker-owned Tests line wins over an earlier finding" {
@@ -119,8 +119,8 @@ PY
     gate merge
     [ "$status" -eq 0 ]
     assert_receipt "$scope"
-    [[ "$output" == *'tests: reused verdict aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'* ]]
-    [[ "$output" == *'tests: tag-reading suites executed'* ]]
+    [[ "$output" == *'tests: reused verdict aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'* ]] || false
+    [[ "$output" == *'tests: tag-reading suites executed'* ]] || false
     [ "$(printf '%s\n' "$output" | grep -c '^Tests: ')" -eq 1 ]
     parse_merge_verdict
     [ "$output" = accept ]
@@ -192,7 +192,7 @@ PY
     export RECEIPT="$receipt"
     gate
     [ "$status" -eq 1 ]
-    [[ "$output" == *'invalid Tests receipt'* ]]
+    [[ "$output" == *'invalid Tests receipt'* ]] || false
   done
 }
 
@@ -200,7 +200,7 @@ PY
   export RECEIPT='PG_TESTS_RECEIPT narrowed 7' TEST_RC=9
   gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *'Overall: BLOCKED'*'Tests: narrowed: 7 selected'* ]]
+  [[ "$output" == *'Overall: BLOCKED'*'Tests: narrowed: 7 selected'* ]] || false
 }
 
 @test "three-dot push range delivers its merge-base, not the divergent left tip" {

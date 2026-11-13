@@ -1078,7 +1078,7 @@ JSON
 JSON
     adapter
     receipt unavailable stream_malformed
-    [[ "$output" != *Traceback* ]]
+    [[ "$output" != *Traceback* ]] || false
   done
 }
 
@@ -1171,7 +1171,7 @@ JSON
 JSON
     adapter
     receipt unavailable stream_malformed
-    [[ "$output" != *Traceback* ]]
+    [[ "$output" != *Traceback* ]] || false
   done
 }
 
@@ -1194,7 +1194,7 @@ JSON
     adapter
     receipt unavailable version_unavailable
     [ ! -e "$PI.invocations.jsonl" ]
-    [[ "$output" != *Traceback* ]]
+    [[ "$output" != *Traceback* ]] || false
   done
 }
 
@@ -1264,7 +1264,7 @@ PY
   printf '%s\n' "$output" > "$CASE/mutant-oracle.log"
   printf '%s\n' "$status" > "$CASE/mutant-oracle.exit"
   [ "$status" -eq 1 ]
-  [[ "$output" == *AssertionError* ]]
+  [[ "$output" == *AssertionError* ]] || false
   MODULE="$original_module"
 }
 

@@ -130,7 +130,7 @@ full_fingerprint() {
 assert_baseline_state_unknown() {
   local bin="$1" expected
   expected="$(full_fingerprint)"
-  [[ "$expected" =~ ^[0-9a-f]{40,64}\ [0-9a-f]{64}$ ]]
+  [[ "$expected" =~ ^[0-9a-f]{40,64}\ [0-9a-f]{64}$ ]] || false
   run_baseline_helper "$bin" _se_turn_state_dir "$PROJECT_DIR"
   [ "$status" -ne 0 ] && [ -z "$output" ] ||
     { echo "unavailable hash produced state: $status $output"; return 1; }
@@ -164,7 +164,7 @@ assert_fingerprint_unknown() {
   expected="$(cd "$PROJECT_DIR" && pwd -P)"
   expected="$(printf '%s' "$expected" | sha256sum)"
   expected="${expected%% *}"
-  [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || false
   run_baseline_helper "$bin" _se_turn_state_dir "$PROJECT_DIR"
   [ "$status" -eq 0 ]
   [ "$output" = "$TRELLIS_HOME/state/turn-baseline/${expected:0:16}" ]
@@ -173,7 +173,7 @@ assert_fingerprint_unknown() {
   [ "$status" -eq 0 ]
   [ "$output" = "$(full_fingerprint)" ]
   [ "${output%% *}" = "$(git -C "$PROJECT_DIR" rev-parse HEAD)" ]
-  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]] || false
   before="$output"
   run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
   [ "$status" -eq 0 ]
@@ -181,7 +181,7 @@ assert_fingerprint_unknown() {
   printf 'actual edit this turn\n' >> "$PROJECT_DIR/app.js"
   run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
   [ "$status" -eq 0 ]
-  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]] || false
   [ "$output" != "$before" ]
 }
 
@@ -992,20 +992,22 @@ assert_unreadable_range_requires_receipt() {
 @test "baseline fingerprint and publication helpers retain exact twin parity" {
   local claude codex fn names_claude names_codex expected
   names_claude="$BATS_TEST_TMPDIR/claude-functions"; names_codex="$BATS_TEST_TMPDIR/codex-functions"
-  bash -c 'source "$1"; declare -F' _ "$HOOKS_DIR/lib/deps.sh" | awk '$3 ~ /^_se_/ { print $3 }' | LC_ALL=C sort > "$names_claude"
-  bash -c 'source "$1"; declare -F' _ "$CODEX_HOOKS_DIR/lib/deps.sh" | awk '$3 ~ /^_se_/ { print $3 }' | LC_ALL=C sort > "$names_codex"
+  # The heavy half is loaded first, so moved helpers compare by their real
+  # definitions rather than their identical first-call stubs.
+  bash -c 'source "$1" && _se_load_heavy && declare -F' _ "$HOOKS_DIR/lib/deps.sh" | awk '$3 ~ /^_se_/ { print $3 }' | LC_ALL=C sort > "$names_claude"
+  bash -c 'source "$1" && _se_load_heavy && declare -F' _ "$CODEX_HOOKS_DIR/lib/deps.sh" | awk '$3 ~ /^_se_/ { print $3 }' | LC_ALL=C sort > "$names_codex"
   [ -s "$names_claude" ]
   [ -z "$(comm -23 "$names_claude" "$names_codex")" ] || { echo 'a Claude helper is missing from Codex'; return 1; }
   expected=$(printf '%s\n' _se_emit_hook_context _se_emit_system_message _se_harness_home _se_inherited_project_mismatch | LC_ALL=C sort)
   [ "$(comm -13 "$names_claude" "$names_codex")" = "$expected" ] || { echo 'unexpected one-sided helper; update the reviewed harness-only list'; return 1; }
   while IFS= read -r fn; do
     [ "$fn" != _se_require_jq ] || continue # Harness-specific output transport.
-    claude="$(bash -c 'source "$1"; declare -f "$2"' _ "$HOOKS_DIR/lib/deps.sh" "$fn")"
-    codex="$(bash -c 'source "$1"; declare -f "$2"' _ "$CODEX_HOOKS_DIR/lib/deps.sh" "$fn")"
+    claude="$(bash -c 'source "$1" && _se_load_heavy && declare -f "$2"' _ "$HOOKS_DIR/lib/deps.sh" "$fn")"
+    codex="$(bash -c 'source "$1" && _se_load_heavy && declare -f "$2"' _ "$CODEX_HOOKS_DIR/lib/deps.sh" "$fn")"
     [ -n "$claude" ] && [ "$claude" = "$codex" ] || { echo "$fn drifted between twins"; return 1; }
   done < "$names_claude"
-  claude="$(bash -c 'source "$1"; printf "%s" "$__se_fp_perl"' _ "$HOOKS_DIR/lib/deps.sh")"
-  codex="$(bash -c 'source "$1"; printf "%s" "$__se_fp_perl"' _ "$CODEX_HOOKS_DIR/lib/deps.sh")"
+  claude="$(bash -c 'source "$1" && _se_load_heavy && printf "%s" "$__se_fp_perl"' _ "$HOOKS_DIR/lib/deps.sh")"
+  codex="$(bash -c 'source "$1" && _se_load_heavy && printf "%s" "$__se_fp_perl"' _ "$CODEX_HOOKS_DIR/lib/deps.sh")"
   [ -n "$claude" ] && [ "$claude" = "$codex" ] || { echo '__se_fp_perl drifted between twins'; return 1; }
 }
 
@@ -2216,4 +2218,46 @@ assert_turn_start_fails_closed_on_lock() {
 }
 @test "fx1 merge: turn-start fails closed when the nonce lock is held (Codex)" {
   assert_turn_start_fails_closed_on_lock "$CODEX_HOOKS_DIR" codex
+}
+
+# P3 (1.5.2): the native arming inspection keeps its result with one
+# strict-JSON interpreter start, folded jq reads and no shasum process.
+assert_native_arming_process_budget() {
+  local harness="$1" form="$2" lib bin="$BATS_TEST_TMPDIR/count-bin" log="$BATS_TEST_TMPDIR/count.log" tool real result
+  native_prompt_candidate "$harness" "$form"
+  mkdir -p "$bin"
+  for tool in jq shasum sha256sum; do
+    real="$(command -v "$tool" || true)"
+    [ -n "$real" ] || continue
+    printf '#!/bin/bash\nprintf "%%s\\n" %s >> "%s"\nexec "%s" "$@"\n' "$tool" "$log" "$real" > "$bin/$tool"
+    chmod +x "$bin/$tool"
+  done
+  for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
+    : > "$log"
+    result="$(PATH="$bin:$PATH" bash -c '
+      source "$1"; _se_load_heavy || exit 70; count_log="$4"
+      eval "_orig_strict() $(declare -f _se_turn_json_strict | tail -n +2)"
+      _se_turn_json_strict() { printf "strict\n" >> "$count_log"; _orig_strict "$@"; }
+      if declare -f _se_turn_json_strict_each >/dev/null; then
+        eval "_orig_each() $(declare -f _se_turn_json_strict_each | tail -n +2)"
+        _se_turn_json_strict_each() { printf "strict\n" >> "$count_log"; _orig_each "$@"; }
+      fi
+      _se_turn_baseline_arming "$2" "$3"' _ "$lib" "$PROJECT_DIR" "$harness" "$log")"
+    [ "$result" = native ] || { echo "$lib $harness $form: $result"; return 1; }
+    [ "$(grep -cx strict "$log")" -eq 1 ] || { echo "$lib $harness $form strict:"; sort "$log" | uniq -c; return 1; }
+    [ "$(grep -cE '^(shasum|sha256sum)$' "$log")" -eq 0 ] || { echo "$lib $harness $form hash:"; sort "$log" | uniq -c; return 1; }
+    [ "$(grep -cx jq "$log")" -le 7 ] || { echo "$lib $harness $form jq:"; sort "$log" | uniq -c; return 1; }
+  done
+}
+
+@test "P3 native Claude arming keeps its result with one interpreter and no shasum" {
+  assert_native_arming_process_budget claude direct
+}
+
+@test "P3 native Claude shell-form arming keeps its result with one interpreter" {
+  assert_native_arming_process_budget claude shell
+}
+
+@test "P3 native Codex arming keeps its result with one interpreter and no shasum" {
+  assert_native_arming_process_budget codex direct
 }

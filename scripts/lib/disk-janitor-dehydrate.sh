@@ -928,7 +928,7 @@ _dw_cc_delete_merged_branch() {
     echo "branch $branch changed or could not be deleted" >&2
     return 1
   fi
-  if config_error="$(LC_ALL=C _hy_git -C "$main" config --local --remove-section "branch.$branch" 2>&1)"; then
+  if config_error="$( { export LC_ALL=C && _hy_git -C "$main" config --local --remove-section "branch.$branch"; } 2>&1)"; then
     :
   elif [ "$config_error" != "fatal: no such section: branch.$branch" ]; then
     printf 'branch %s was deleted but its config could not be removed: %s\n' "$branch" "$config_error" >&2

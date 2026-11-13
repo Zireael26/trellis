@@ -107,6 +107,17 @@ class MetadataTests(FIXTURE.VerdictTests):
         with self.assertRaisesRegex(ValueError, "no matching"):
             self.evaluate(head)
 
+    def test_base_verdict_without_ref_evidence_never_narrows(self):
+        # 1.5.1 stopped keying refs; the green base must still prove tags and
+        # other branches are unchanged, so a verdict lacking refs runs full.
+        record = json.loads(self.path.read_text(encoding="utf-8"))
+        del record["refs"]
+        self.path.chmod(0o600)
+        self.path.write_text(json.dumps(record))
+        head = self.candidate()
+        with self.assertRaisesRegex(ValueError, "no matching"):
+            self.evaluate(head)
+
     def test_file_open_parser_excludes_writes_and_keeps_metadata_and_tags(self):
         raw = b'''10 openat(AT_FDCWD</src>, "CHANGELOG.md", O_RDONLY) = 3
 11 openat(AT_FDCWD</src>, "core-rules/VERSION", O_RDONLY) = 3

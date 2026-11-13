@@ -215,3 +215,70 @@ run_diff() {
   [[ "$output" == *"shellcheck/SC1072"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
 }
+
+# 1.5.1 perf: ShellCheck runs once per file, at most four at a time, started
+# before semgrep. One file per run must still report every file, in the order
+# the files were given, and keep the single-run verdict rules.
+stub_shellcheck_per_file() {
+  cat > "$BIN/shellcheck" <<SH
+#!/usr/bin/env bash
+files=()
+for a in "\$@"; do case "\$a" in --*) ;; *) files+=("\$a") ;; esac; done
+printf '%s\n' "\${#files[@]} \${files[*]}" >> "$TEST_ROOT/shellcheck.calls"
+mkdir -p "$TEST_ROOT/running"
+: > "$TEST_ROOT/running/\$\$"
+sleep 0.3
+ls "$TEST_ROOT/running" | wc -l | tr -d ' ' >> "$TEST_ROOT/shellcheck.concurrency"
+rm -f "$TEST_ROOT/running/\$\$"
+out='['
+sep=''
+for f in "\${files[@]}"; do
+  case "\${f##*/}" in crash.sh) exit 2 ;; esac
+  out="\$out\$sep{\"file\":\"\$f\",\"line\":2,\"column\":1,\"level\":\"$1\",\"code\":1072,\"message\":\"stubbed shell defect\"}"
+  sep=','
+done
+printf '%s]' "\$out"
+exit 1
+SH
+  chmod +x "$BIN/shellcheck"
+}
+
+commit_shell_files() {
+  local name
+  for name in "$@"; do
+    printf '#!/usr/bin/env bash\ntrue\n' > "$PROJECT/$name"
+  done
+  git -C "$PROJECT" add "$@"
+  git -C "$PROJECT" commit -qm "add shell files"
+}
+
+@test "ShellCheck checks each file in its own run, at most four at once, and reports every file" {
+  stub_shellcheck_per_file error
+  commit_shell_files a1.sh a2.sh a3.sh a4.sh a5.sh a6.sh
+  run_diff
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [ "$(wc -l < "$TEST_ROOT/shellcheck.calls" | tr -d ' ')" -eq 6 ] || { cat "$TEST_ROOT/shellcheck.calls"; false; }
+  ! grep -qv '^1 ' "$TEST_ROOT/shellcheck.calls" || { cat "$TEST_ROOT/shellcheck.calls"; false; }
+  [ "$(sort -n "$TEST_ROOT/shellcheck.concurrency" | tail -n 1)" -le 4 ] || { cat "$TEST_ROOT/shellcheck.concurrency"; false; }
+  echo "# max concurrent ShellCheck runs: $(sort -n "$TEST_ROOT/shellcheck.concurrency" | tail -n 1)" >&3
+  local name previous=0 at
+  for name in a1.sh a2.sh a3.sh a4.sh a5.sh a6.sh; do
+    [[ "$output" == *"shellcheck/SC1072"*"$name"* ]] || { echo "missing $name"; echo "$output"; false; }
+    at="$(printf '%s\n' "$output" | grep -n "shellcheck/SC1072.*$name" | head -n 1 | cut -d: -f1)"
+    [ "$at" -gt "$previous" ] || { echo "out of order at $name"; echo "$output"; false; }
+    previous="$at"
+  done
+  [[ "$output" == *"shellcheck: ran=1 exit=1 parsed=1 scanned=6"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+}
+
+@test "a ShellCheck crash on one file of several blocks SAST as incomplete" {
+  stub_shellcheck_per_file warning
+  commit_shell_files a1.sh crash.sh a3.sh
+  run_diff
+
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"shellcheck: ran=1 exit=2 parsed=0 scanned=0"* ]] && [[ "$output" == *"shellcheck did not complete: scanner exit 2"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+}

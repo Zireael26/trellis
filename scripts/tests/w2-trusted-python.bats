@@ -36,7 +36,7 @@ register_project() {
     exec "$1" remove
   ' _ "$INSTALLER"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *'after: none'* ]]
+  [[ "$output" == *'after: none'* ]] || false
   [ ! -e "$MARKER" ]
 }
 

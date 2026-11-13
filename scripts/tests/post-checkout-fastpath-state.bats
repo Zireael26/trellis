@@ -1402,3 +1402,97 @@ done')"
   [ -z "$(git -C "$PROJECT" status --porcelain -- .trellis.json)" ]
   assert_full
 }
+
+# 1.5.1 perf: a linked worktree's owner records no hook state (git_hooks
+# enabled false); the checkout's hooks-enabled owner does. The current-worktree
+# proof binds its hook checks to that owner, as the full reconcile verifies it.
+attach_linked() {
+  LINKED="$SANDBOX/linked"
+  git -C "$PROJECT" -c core.hooksPath=/dev/null worktree add -q -b linked "$LINKED" "$BASE"
+  "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 9.0.1 "$LINKED" >/dev/null
+  LINKED_OWNER="$(dirname "$OWNER")/$(printf '%s' "$LINKED" | shasum -a 256 | cut -d' ' -f1).json"
+  [ -f "$LINKED_OWNER" ] || { echo "no linked owner $LINKED_OWNER"; return 1; }
+  [ "$(jq -r '.git_hooks.enabled' "$LINKED_OWNER")" = false ] || { echo 'linked owner holds hooks'; return 1; }
+  git -C "$LINKED" branch -q linked-other other
+}
+
+# Switch the linked worktree to linked-other and back with hooks on.
+linked_round_trip() {
+  rm -f "$LINKED/.reconciled"
+  run git -C "$LINKED" switch -q linked-other
+  [ "$status" -eq 0 ] || { printf 'switch: %s\n%s\n' "$status" "$output"; return 1; }
+  git -C "$LINKED" -c core.hooksPath=/dev/null switch -q linked
+}
+
+# Rewrites the main (hooks-enabled) owner record through jq, keeping its mode.
+edit_main_owner() {
+  jq -c "$1" "$OWNER" > "$SANDBOX/owner.next"
+  cat "$SANDBOX/owner.next" > "$OWNER"
+}
+
+@test "a current linked worktree takes the fast path through the checkout's hooks-enabled owner" {
+  attach_linked
+  linked_round_trip
+  [ ! -e "$LINKED/.reconciled" ] || { echo 'full reconcile ran in the linked worktree'; printf '%s\n' "$output"; false; }
+  # The main worktree's own fast path is unchanged.
+  assert_fast
+}
+
+@test "a linked worktree takes the full reconcile when the enabled owner's hook record drifts" {
+  attach_linked
+  edit_main_owner '.git_hooks.previous_hooks_path = "/nonexistent-hooks"'
+  linked_round_trip
+  [ -e "$LINKED/.reconciled" ] || { echo 'fast path taken with a drifted hook record'; false; }
+}
+
+@test "a linked worktree takes the full reconcile with no hooks-enabled owner in its checkout" {
+  attach_linked
+  edit_main_owner '.git_hooks = {"enabled": false}'
+  linked_round_trip
+  [ -e "$LINKED/.reconciled" ] || { echo 'fast path taken with no hooks-enabled owner'; false; }
+}
+
+@test "a linked worktree takes the full reconcile when its checkout holds an unexpected owner entry" {
+  attach_linked
+  printf '{}\n' > "$(dirname "$OWNER")/stray.json"
+  chmod 600 "$(dirname "$OWNER")/stray.json"
+  linked_round_trip
+  [ -e "$LINKED/.reconciled" ] || { echo 'fast path taken beside an unexpected owner entry'; false; }
+}
+
+@test "a linked worktree takes the full reconcile when the enabled owner is on another release" {
+  attach_linked
+  edit_main_owner '.release = "9.0.2"'
+  linked_round_trip
+  [ -e "$LINKED/.reconciled" ] || { echo 'fast path taken across releases'; false; }
+}
+
+# Guard: the repository's own libraries must yield both canonical schemas.
+# "canonical schema unavailable" turns the current-worktree fast path off for
+# every worktree while every check still passes (it fails closed to the full
+# reconcile), so a refactor of the validators must fail here, not degrade.
+@test "the repository's generator extracts both canonical schemas and never warns" {
+  local owner_b64 owner_schema
+  run --separate-stderr schema_generator_from_copy "$REPO_ROOT/scripts/lib"
+  [ "$status" -eq 0 ] || { printf '%s\n%s\n' "$output" "$stderr"; false; }
+  [ -z "$stderr" ] || { echo "generator warned: $stderr"; false; }
+  owner_b64="$(printf '%s\n' "$output" | sed -n 's/^trellis_owner_schema_b64=//p')"
+  [ -n "$owner_b64" ] || { echo 'no owner schema'; false; }
+  printf '%s\n' "$output" | grep -Eq '^trellis_manifest_schema_b64=.+$' || { echo 'no manifest schema'; false; }
+  # The extracted owner schema is the expression the per-file check runs.
+  owner_schema="$(printf '%s' "$owner_b64" | base64 --decode 2>/dev/null || printf '%s' "$owner_b64" | base64 -D)"
+  run bash -c '. "$1/scripts/lib/attachment.sh" >/dev/null 2>&1; printf "%s" "$_attachment_owner_schema_filter"' _ "$REPO_ROOT"
+  # The variable's value opens with the newline after its quote.
+  [ "$output" = $'\n'"$owner_schema" ] || { echo 'extracted owner schema differs from _attachment_owner_schema_filter'; false; }
+}
+
+@test "an attach writes a dispatcher that carries both schemas, without the fallback warning" {
+  local managed
+  rm -rf "$MANAGED"
+  run --separate-stderr "$ATTACH" attach --home "$TRELLIS_HOME" --fleet personal --release 9.0.1 "$PROJECT"
+  [ "$status" -eq 0 ] || { printf '%s\n%s\n' "$output" "$stderr"; false; }
+  [[ "$stderr" != *"canonical schema unavailable"* ]] || { echo "$stderr"; false; }
+  managed="$(jq -r '.git_hooks.managed_hooks_path' "$OWNER")"
+  grep -Eq '^trellis_owner_schema_b64=.+$' "$managed/post-checkout" || { echo 'dispatcher lacks the owner schema'; false; }
+  grep -Eq '^trellis_manifest_schema_b64=.+$' "$managed/post-checkout" || { echo 'dispatcher lacks the manifest schema'; false; }
+}

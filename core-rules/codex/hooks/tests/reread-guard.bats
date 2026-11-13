@@ -109,7 +109,7 @@ warn_rows() {
   done
   run_guard "$f"; run_guard "$f"; run_guard "$f"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || false
 
   run_with_stderr "$TRACK" "$(jq -nc --arg tp "$TP" --arg t "$f" \
     '{transcript_path:$tp, tool_name:"Edit", tool_input:{file_path:$t}, tool_response:{is_error:false,newString:"Error: ordinary code"}}')"
@@ -183,7 +183,7 @@ warn_rows() {
   # Call 2 — block.
   run_guard "$f"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || false
 }
 
 # =============================================================================
@@ -221,7 +221,7 @@ warn_rows() {
   [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
   run_with_stderr "$GUARD" "$existing_event"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || false
 }
 
 @test "native Add File cannot bypass reread protection when its declared target already exists" {
@@ -239,23 +239,23 @@ warn_rows() {
   [[ "$stderr" == *"warn 2/2"* ]] || { echo "$stderr"; false; }
   run_with_stderr "$GUARD" "$event"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || false
 }
 
 @test "143-stop missing deployed action normalizer blocks rather than permitting" {
   local dir="$BATS_TEST_TMPDIR/deploy/hooks" event
   mkdir -p "$dir/lib"
   cp "$GUARD" "$dir/reread-guard.sh"
-  cp "$HOOKS_DIR/lib/deps.sh" "$HOOKS_DIR/lib/autonomy.sh" "$HOOKS_DIR/lib/guard-rules.sh" "$dir/lib/"
+  cp "$HOOKS_DIR/lib/deps.sh" "$HOOKS_DIR/lib/deps-heavy.sh" "$HOOKS_DIR/lib/autonomy.sh" "$HOOKS_DIR/lib/guard-rules.sh" "$dir/lib/"
   event="$(jq -nc --arg tp "$TP" --arg t "$PROJECT_DIR/new.txt" \
     '{transcript_path:$tp,tool_name:"Write",tool_input:{file_path:$t}}')"
   run_with_stderr "$dir/reread-guard.sh" "$event"
   [ "$status" -eq 2 ]
-  [[ "$stderr" == *"normalizer"* ]]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$stderr" == *"normalizer"* ]] || false
+  [[ "$output" == *'"decision":"block"'* ]] || false
   run --separate-stderr perl "$HOOKS_DIR/../../hooks/lib/guard-supervise.pl" codex reread-guard bash "$dir/reread-guard.sh" <<<"$event"
   [ "$status" -eq 12 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || false
 
   # A healthy installation still permits a new file without a warning.
   cp "$HOOKS_DIR/../../hooks/lib/action-normalize.sh" "$dir/lib/action-normalize.sh"
@@ -431,7 +431,7 @@ warn_rows() {
 
   run_guard "$f"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'"decision":"block"'* ]]
+  [[ "$output" == *'"decision":"block"'* ]] || false
 }
 
 # =============================================================================
@@ -472,7 +472,7 @@ warn_rows() {
       '{hook_event_name:"PreToolUse",tool_name:"Edit",transcript_path:$tp,tool_input:{file_path:$f}}')"
   [ "$status" -eq 2 ] || { echo "rc=$status out=$output err=$stderr"; false; }
   [ "$output" = '{"decision":"block","reason":"reread-guard: missing action normalizer; refusing"}' ]
-  [[ "$stderr" == *"missing action normalizer; refusing"* ]]
+  [[ "$stderr" == *"missing action normalizer; refusing"* ]] || false
 }
 
 @test "fail-open: unwritable state dir → permit, never a block (even past the budget)" {
@@ -536,7 +536,7 @@ warn_rows() {
   run_guard "$f"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  [[ "$stderr" == *"not Read this turn"* ]]
+  [[ "$stderr" == *"not Read this turn"* ]] || false
 }
 
 # =============================================================================
@@ -634,7 +634,7 @@ warn_rows() {
   run_guard "$rel"
   [ "$status" -eq 2 ]
   [[ "$output" == *'"decision":"block"'* ]] || { echo "$output"; false; }
-  [[ "$output" == *"$PROJECT_DIR/$rel"* ]]
+  [[ "$output" == *"$PROJECT_DIR/$rel"* ]] || false
 }
 
 # =============================================================================

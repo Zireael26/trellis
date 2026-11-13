@@ -115,7 +115,7 @@ make_failing_npx_dir() {
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
   assert_block
-  [[ "$output" == *"$ESCALATION"* ]]
+  [[ "$output" == *"$ESCALATION"* ]] || false
 }
 
 # =========================================================================
@@ -144,7 +144,7 @@ EOF
   # Block 2: DIFFERENT last_assistant_message + DIFFERENT transcript, SAME files.
   run bash "$HOOK" <<<"$(make_envelope "Wrapped up, all good here." "$tx2")"
   assert_block
-  [[ "$output" == *"$ESCALATION"* ]]
+  [[ "$output" == *"$ESCALATION"* ]] || false
 }
 
 # =========================================================================
@@ -166,7 +166,7 @@ EOF
 
   run bash "$HOOK" <<<"$(make_envelope NULL "$tx")"
   assert_block
-  [[ "$output" != *"$ESCALATION"* ]]
+  [[ "$output" != *"$ESCALATION"* ]] || false
 }
 
 # =========================================================================

@@ -105,11 +105,11 @@ release_entry_private_directory() {
     Darwin)
       # Extended attributes can hide the ACL marker behind @. Read ACL rows,
       # not just the mode suffix; canonical input paths contain no newlines.
-      listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1
+      listing="$(/usr/bin/env LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" || return 1
       case "$listing" in *"
 "*) return 1 ;; esac
       ;;
-    *) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
+    *) listing="$(/usr/bin/env LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" || return 1 ;;
   esac
   permissions="${listing%% *}"
   case "$permissions" in *+*) return 1 ;; esac
@@ -618,14 +618,20 @@ resolve_verified_adoption_target() {
 
 owner_replacement() {
   local original="$1" replacement="$2" version="$3" payload="$4" retired="$5" pruned="${6:-[]}"
-  local render_plans="${7:-[]}" context="${8:-null}"
+  local render_plans="${7:-[]}" context="${8:-null}" introduced="${9:-}"
+  [ -n "$introduced" ] || introduced='{"link":[],"parents":[],"deferred":[]}'
   jq --arg version "$version" --arg payload "$payload" --argjson retired "$retired" --argjson pruned "$pruned" \
-    --argjson render_plans "$render_plans" --argjson context "$context" '
+    --argjson render_plans "$render_plans" --argjson context "$context" --argjson introduced "$introduced" '
     if ([.artifacts[] | select(.path == ".trellis/runtime" and .kind == "symlink")] | length) != 1
     then error("missing owned runtime anchor")
     else .release = $version
       | .artifacts |= map(if .path == ".trellis/runtime" then .target = $payload else . end)
       | .artifacts |= map(.path as $path | select(any($retired[]; .path == $path) | not))
+      | .artifacts = ([.artifacts[] | select(.kind == "parent")] + $introduced.parents
+          + [.artifacts[] | select(.kind != "parent")] + [$introduced.link[] | {kind: "symlink", path, target}])
+      | if ($introduced.deferred | length) > 0
+        then .pre_existing = (((.pre_existing // []) + $introduced.deferred) | sort_by(.path))
+        else . end
       | .artifacts |= map(.path as $path
           | select(.kind == "parent" and any($pruned[]; .path == $path) | not))
       | if ($render_plans | length) > 0 then
@@ -663,6 +669,114 @@ adoption_retired_leaves() {
        | .path as $path | select(($planned | index($path)) == null) | {path,target}]
   ' "$owner" || return "$TRELLIS_EX_STATE"
 }
+
+# The converse of retirement: a payload symlink leaf the new plan selects but
+# this owner neither owns nor defers (1.5.0 adds hooks/lib/attach-verdict.sh;
+# older attachments can also predate leaves an intermediate release added).
+# Without it the committed leaves never match the plan doctor checks, and a
+# legacy stop-verify.sh loses its sibling lib. Emits {link, parents, deferred}:
+# links to create, the missing directories above them (shallow first, owned as
+# attach owns them), and project-owned destinations recorded exactly as attach
+# would. Anything else standing at a new destination refuses BY NAME.
+adoption_introduced_leaves() {
+  local owner="$1" payload="$2" selection="$3" root surfaces unowned deferred harness introduced path parents='[]'
+  local -a harnesses=()
+  if ! command -v surface_plan_emit >/dev/null 2>&1 || ! command -v attach_deferred_leaves >/dev/null 2>&1; then
+    printf '{"link":[],"parents":[],"deferred":[]}\n'
+    return 0
+  fi
+  while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$selection" | jq -r '.[]')
+  surfaces="$(surface_plan_emit "$payload" "${harnesses[@]}")" || return "$?"
+  root="$(jq -r '.worktree_root' "$owner")" || return "$TRELLIS_EX_STATE"
+  unowned="$(printf '%s\n' "$surfaces" | jq -c --slurpfile owner "$owner" '
+    ([$owner[0].artifacts[].path] + [($owner[0].pre_existing // [])[].path]) as $known
+    | .artifacts |= map(select(.kind == "symlink") | .destination as $d | select(($known | index($d)) == null))')" ||
+    return "$TRELLIS_EX_STATE"
+  deferred="$(attach_deferred_leaves "$root" "$payload" "$unowned")" || return "$?"
+  introduced="$(attach_surfaces_without_deferred "$unowned" "$deferred" | jq -c --argjson deferred "$deferred" \
+    --argjson project_claude "$(attach_project_claude_present "$root" && echo true || echo false)" '
+    {link: [.artifacts[] | {path: .destination,
+       target: (if .source_scope == "project"
+                then (if $project_claude then .target else .fallback_target end)
+                else .target end)}],
+     deferred: $deferred}')" || return "$TRELLIS_EX_STATE"
+  # Every ancestor the checkout lacks, once, shallowest first.
+  while IFS= read -r path; do
+    [ -e "$root/$path" ] || [ -L "$root/$path" ] || parents="$(jq -c --arg path "$path" '. + [{kind: "parent", path: $path}]' <<< "$parents")" ||
+      return "$TRELLIS_EX_STATE"
+  done < <(printf '%s\n' "$introduced" | jq -r '
+    [.link[].path | split("/") | .[:-1] as $parts | range(1; ($parts | length) + 1) | $parts[:.] | join("/")]
+    | unique | sort_by(split("/") | length) | .[]')
+  jq -c --argjson parents "$parents" '.parents = $parents' <<< "$introduced" || return "$TRELLIS_EX_STATE"
+}
+
+# Plan-time check for one introduced link: every existing ancestor must be a
+# real directory and nothing may stand at the destination.
+adoption_introduced_leaf_ready() {
+  local root="$1" leaf="$2" path current part
+  local -a parts=()
+  path="$(printf '%s\n' "$leaf" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  current="$root"
+  IFS=/ read -r -a parts <<< "$path"
+  for part in "${parts[@]:0:${#parts[@]}-1}"; do
+    current="$current/$part"
+    [ -e "$current" ] || [ -L "$current" ] || break
+    if [ -L "$current" ] || [ ! -d "$current" ]; then
+      release_err "cannot link $path for the target release: ${current#"$root"/} is not a real directory under $root; move it aside and adopt again"
+      return "$TRELLIS_EX_CONFLICT"
+    fi
+  done
+  if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
+    release_err "cannot link $path for the target release: a non-deferrable entry already stands there under $root; move it aside and adopt again"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+}
+
+# Forward creates an introduced parent only where nothing stands; rollback
+# removes it only while it is still an empty real directory.
+adoption_introduce_parent() {
+  local root="$1" parent="$2" direction="$3" path
+  path="$(printf '%s\n' "$parent" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  _attachment_parent_safe "$root" "$path" || return "$TRELLIS_EX_CONFLICT"
+  case "$direction" in
+    forward)
+      [ -d "$root/$path" ] && [ ! -L "$root/$path" ] && return 0
+      mkdir -- "$root/$path" || return "$TRELLIS_EX_CONFLICT"
+      ;;
+    rollback)
+      [ -e "$root/$path" ] || [ -L "$root/$path" ] || return 0
+      [ -d "$root/$path" ] && [ ! -L "$root/$path" ] || return "$TRELLIS_EX_CONFLICT"
+      rmdir -- "$root/$path" 2>/dev/null || return "$TRELLIS_EX_CONFLICT"
+      ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+}
+
+# Forward creates the link only where nothing stands; rollback removes only
+# the exact link it created.
+adoption_introduce_leaf() (
+  local root="$1" leaf="$2" direction="$3" path target parent base
+  path="$(printf '%s\n' "$leaf" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  target="$(printf '%s\n' "$leaf" | jq -r '.target')" || return "$TRELLIS_EX_STATE"
+  _attachment_parent_safe "$root" "$path" || return "$TRELLIS_EX_CONFLICT"
+  parent="$(dirname "$root/$path")" || return "$TRELLIS_EX_STATE"
+  base="$(basename "$path")" || return "$TRELLIS_EX_STATE"
+  CDPATH='' cd "$parent" || return "$TRELLIS_EX_CONFLICT"
+  [ "$(pwd -P)" = "$parent" ] || return "$TRELLIS_EX_CONFLICT"
+  case "$direction" in
+    forward)
+      _attachment_symlink_matches "./$base" "$target" && return 0
+      [ ! -e "./$base" ] && [ ! -L "./$base" ] || return "$TRELLIS_EX_CONFLICT"
+      ln -s -- "$target" "./$base" || return "$TRELLIS_EX_UNAVAILABLE"
+      ;;
+    rollback)
+      [ -e "./$base" ] || [ -L "./$base" ] || return 0
+      _attachment_symlink_matches "./$base" "$target" || return "$TRELLIS_EX_CONFLICT"
+      rm -- "./$base" || return "$TRELLIS_EX_UNAVAILABLE"
+      ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+)
 
 # Forward unlinks only a name verified as the exact recorded link after it
 # was renamed aside; rollback recreates it only where nothing else stands.
@@ -1713,7 +1827,7 @@ preflight_target() {
   # trellis-release-capability: native-render-migration
   local home="$1" new_version="$2" new_payload="$3" row="$4" work="$5" number="$6"
   local target binding identity root root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier hook_authority
-  local renders='[]' render render_plan index=0 retired pruned='[]' migrate=false context='null'
+  local renders='[]' render render_plan index=0 retired introduced leaf pruned='[]' migrate=false context='null'
   local pi_hooks_required pi_hooks_owned checkout_root fleet recovery_roots recovery_root recovery_harnesses
 
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
@@ -1728,8 +1842,9 @@ preflight_target() {
   trellis_identity="$(printf '%s\n' "$target" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
   hook_authority="$(printf '%s\n' "$target" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
 
-  # Adoption does not add newly declared leaves. Refuse only a legacy Pi
-  # target whose entire owned hook-symlink inventory is absent.
+  # Adoption links newly declared leaves only beneath existing directories
+  # (adoption_introduced_leaves). Refuse a legacy Pi target whose entire owned
+  # hook-symlink inventory is absent: that needs the whole tree, not a leaf.
   pi_hooks_required="$(jq -r '
     any(.harnesses.pi.links[]?;
       (.destination // .destination_dir // "")
@@ -1761,6 +1876,10 @@ preflight_target() {
   new_owner="$work/$number.new.json"
   cp "$owner" "$old_owner" && chmod 600 "$old_owner" || return "$TRELLIS_EX_UNAVAILABLE"
   retired="$(adoption_retired_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
+  introduced="$(adoption_introduced_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
+  while IFS= read -r leaf; do
+    adoption_introduced_leaf_ready "$root" "$leaf" || return "$?"
+  done < <(printf '%s\n' "$introduced" | jq -c '.link[]')
   if printf '%s\n' "$binding" | jq -e '.harnesses | index("pi")' >/dev/null &&
     [ "$pi_hooks_required" = false ]; then
     pruned="$(adoption_pi_hooks_prune_plan "$root" "$retired" "$old_owner")" || return "$?"
@@ -1778,9 +1897,9 @@ preflight_target() {
       return "$TRELLIS_EX_STATE"
   done < <(jq -c '(.renders // [])[]' "$old_owner")
   if [ "$migrate" = true ]; then
-    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" "$renders" "$context" || return "$?"
+    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" "$renders" "$context" "$introduced" || return "$?"
   else
-    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" || return "$?"
+    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" '[]' null "$introduced" || return "$?"
   fi
 
   hooks="$(jq -r '.git_hooks.enabled // false' "$owner")" || return "$TRELLIS_EX_STATE"
@@ -1808,10 +1927,12 @@ preflight_target() {
     --arg root_identity "$root_identity" --arg trellis_identity "$trellis_identity" \
     --arg hooks "$hooks" --arg managed "$managed" --arg hook_authority "$hook_authority" \
     --argjson renders "$renders" --argjson retired "$retired" --argjson pruned "$pruned" \
+    --argjson introduced "$(printf '%s\n' "$introduced" | jq -c '{link, parents}')" \
     '{row:$row,binding:$binding,identity:$identity,owner:$owner,old_owner:$old_owner,new_owner:$new_owner,
       old_version:$old_version,old_payload:$old_payload,new_version:$new_version,new_payload:$new_payload,
       root_identity:$root_identity,trellis_identity:$trellis_identity,hooks:$hooks,managed:$managed,
-      hook_authority:$hook_authority,renders:$renders,retired:$retired,pruned:$pruned}'
+      hook_authority:$hook_authority,renders:$renders,retired:$retired,pruned:$pruned,
+      introduced:$introduced}'
 }
 
 plan_matches_old() {
@@ -1899,6 +2020,12 @@ apply_plan() {
     adoption_retire_leaf "$root" "$leaf" forward || return "$?"
   done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
   while IFS= read -r leaf; do
+    adoption_introduce_parent "$root" "$leaf" forward || return "$?"
+  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.parents // [])[]')
+  while IFS= read -r leaf; do
+    adoption_introduce_leaf "$root" "$leaf" forward || return "$?"
+  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.link // [])[]')
+  while IFS= read -r leaf; do
     adoption_prune_dir "$root" "$leaf" forward || return "$?"
   done < <(printf '%s\n' "$plan" | jq -c '(.pruned // [])[]')
 }
@@ -1939,6 +2066,16 @@ rollback_plan() {
     rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
   fi
 
+  while IFS= read -r leaf; do
+    adoption_introduce_leaf "$root" "$leaf" rollback
+    one=$?
+    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.link // []) | reverse[]')
+  while IFS= read -r leaf; do
+    adoption_introduce_parent "$root" "$leaf" rollback
+    one=$?
+    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.parents // []) | reverse[]')
   while IFS= read -r leaf; do
     adoption_prune_dir "$root" "$leaf" rollback
     one=$?
@@ -2376,6 +2513,7 @@ adopt_group() (
   local home="$1" version="$2" payload="$3" rows="$4" work="$5"
   local plans="$work/plans.jsonl" changed="$work/changed.jsonl" changed_hooks="$work/changed-hooks.jsonl"
   local row plan first checkout common rc=0 number=0 label planned_render repair render_path json_path repair_state dropped_key
+  local adopted_roots root
   local owner planned_hook_authority current_hook_authority
   local lock_held=false committed=false cleanup_started=false active_plan='' active_hook_plan=''
   local durable=false exclude_applied=false replan=false
@@ -2480,6 +2618,15 @@ adopt_group() (
   plans="$work/plans.jsonl"; changed="$work/changed.jsonl"; changed_hooks="$work/changed-hooks.jsonl"
   : > "$changed"; : > "$changed_hooks"
   : > "$plans" || return "$TRELLIS_EX_UNAVAILABLE"
+  # Each row's recorded release is located by several payload_for captures.
+  # Verify each distinct one once in this shell so the memo answers the rest
+  # (see adopt_registry). A failure here is ignored: the per-row call that
+  # follows verifies again and reports it exactly as before.
+  local warm_release
+  while IFS= read -r warm_release; do
+    warm_release="$(local_registry_normalize_release "$warm_release" 2>/dev/null)" && [ -n "$warm_release" ] || continue
+    release_store_locate "$warm_release" >/dev/null 2>&1 || :
+  done < <(jq -r '.release // empty' "$rows" 2>/dev/null | sort -u)
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     number=$((number + 1))
@@ -2583,8 +2730,28 @@ adopt_group() (
   else
     release_adoption_reap_completed_stages "$plans" ''
   fi
+  adopted_roots="$(jq -r '.row.root' "$plans")" || adopted_roots=""
   adopt_group_cleanup 0
-  return "$?"
+  rc=$?
+  # Record the attachment-checks verdict as attach does, once the checkout
+  # lock is released, so the next Stop finds one bound to the new owner
+  # instead of running the whole job inline. The adoption is already
+  # committed: a target release that predates the spawn entry only leaves
+  # the checks to the next Stop, and says so.
+  if [ "$rc" -eq 0 ] && [ "${TRELLIS_ATTACH_POSTJOB:-}" != off ]; then
+    while IFS= read -r root; do
+      [ -n "$root" ] || continue
+      # The preload marker describes this shell's functions, not the fresh
+      # postjob process. Clear it here even for an older immutable target.
+      if ! /usr/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX \
+          -u BASH_ENV -u ENV -u TRELLIS_LIBS_PRELOADED TRELLIS_HOME="$home" \
+          /bin/bash --noprofile --norc "$payload/scripts/lib/attach-postjob.sh" spawn --target "$root" \
+          </dev/null >/dev/null 2>&1; then
+        release_err "attachment checks were not started for $root; the next Stop runs them (or: trellis doctor --fix)"
+      fi
+    done <<< "$adopted_roots"
+  fi
+  return "$rc"
 )
 
 # Writes the selected rows to OUTPUT and, when REJECTED is supplied, the exact
@@ -2613,6 +2780,11 @@ adopt_registry() (
   home="$(release_home)" || return "$?"
   export TRELLIS_HOME="$home"
   version="$(release_store_normalize_version "$version")" || return "$?"
+  # Verify in this shell, not inside $(...), so the verify memo survives for
+  # every later payload_for/locate of the same release in this adoption. Each
+  # of those still runs the ACL refusal and rehashes release.json for the key;
+  # any change to release.json misses the memo and verifies in full again.
+  release_store_locate "$version" >/dev/null 2>&1 || :
   release="$(release_store_locate "$version")" || return "$?"
   payload="$(CDPATH='' cd "$release/payload" && pwd -P)" || return "$TRELLIS_EX_STATE"
   inventory="$(mktemp "${TMPDIR:-/tmp}/trellis.release.inventory.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"

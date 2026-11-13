@@ -63,14 +63,14 @@ EOF
   CLAUDE_PROJECT_DIR="/nonexistent/path/xyz"
   run_with_stderr "$HOOK" '{}'
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"PROJECT_DIR not a directory"* ]]
+  [[ "$stderr" == *"PROJECT_DIR not a directory"* ]] || false
 }
 
 @test "P1.4: bad transcript_path → rc=1 + stderr line" {
   run_with_stderr "$HOOK" '{"transcript_path": "/nonexistent/transcript.jsonl"}'
   [ "$status" -eq 1 ]
   [[ "$stderr" == *"transcript_path"* ]] || { echo "$stderr"; false; }
-  [[ "$stderr" == *"does not exist"* ]]
+  [[ "$stderr" == *"does not exist"* ]] || false
 }
 
 @test "P1.4: empty envelope → rc=0 (transcript_path optional)" {
@@ -83,30 +83,30 @@ EOF
 @test "C6-F12: malformed envelope → exit1 and no file (canonical)" {
   run_with_stderr "$HOOK" '{'
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"save-context-log"* ]]
-  [[ "$stderr" == *"malformed envelope"* ]]
+  [[ "$stderr" == *"save-context-log"* ]] || false
+  [[ "$stderr" == *"malformed envelope"* ]] || false
   [ ! -f "$PROJECT_DIR/context-log.md" ]
 }
 
 @test "C6-F12: malformed envelope with not json → exit1 and no file (canonical)" {
   run_with_stderr "$HOOK" 'not json'
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"save-context-log"* ]]
+  [[ "$stderr" == *"save-context-log"* ]] || false
   [ ! -f "$PROJECT_DIR/context-log.md" ]
 }
 
 @test "C8-F14: malformed envelope → exit1 and no file (codex)" {
   run_with_stderr "$CODEX_HOOK" '{'
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"save-context-log"* ]]
-  [[ "$stderr" == *"malformed envelope"* ]]
+  [[ "$stderr" == *"save-context-log"* ]] || false
+  [[ "$stderr" == *"malformed envelope"* ]] || false
   [ ! -f "$PROJECT_DIR/context-log.md" ]
 }
 
 @test "C8-F14: malformed envelope with not json → exit1 and no file (codex)" {
   run_with_stderr "$CODEX_HOOK" 'not json'
   [ "$status" -eq 1 ]
-  [[ "$stderr" == *"save-context-log"* ]]
+  [[ "$stderr" == *"save-context-log"* ]] || false
   [ ! -f "$PROJECT_DIR/context-log.md" ]
 }
 
@@ -237,8 +237,8 @@ EOF
   chmod 500 "$PROJECT_DIR"
   run_with_stderr "$HOOK" '{}'
   [ "$status" -eq 0 ]
-  [[ "$stderr" == *"save-context-log"* ]]
-  [[ "$stderr" == *"failed"* ]]
+  [[ "$stderr" == *"save-context-log"* ]] || false
+  [[ "$stderr" == *"failed"* ]] || false
   chmod 700 "$PROJECT_DIR"
 }
 
@@ -246,8 +246,8 @@ EOF
   chmod 500 "$PROJECT_DIR"
   run_with_stderr "$CODEX_HOOK" '{}'
   [ "$status" -eq 0 ]
-  [[ "$stderr" == *"save-context-log"* ]]
-  [[ "$stderr" == *"failed"* ]]
+  [[ "$stderr" == *"save-context-log"* ]] || false
+  [[ "$stderr" == *"failed"* ]] || false
   chmod 700 "$PROJECT_DIR"
 }
 
@@ -270,7 +270,7 @@ EOF
   chmod 500 "$PROJECT_DIR"
   run_with_stderr "$HOOK" '{}'
   [ "$status" -eq 0 ]
-  [[ "$stderr" == *"failed to create temp directory"* ]]
+  [[ "$stderr" == *"failed to create temp directory"* ]] || false
   chmod 700 "$PROJECT_DIR"
 }
 
@@ -278,7 +278,7 @@ EOF
   chmod 500 "$PROJECT_DIR"
   run_with_stderr "$CODEX_HOOK" '{}'
   [ "$status" -eq 0 ]
-  [[ "$stderr" == *"failed to create temp directory"* ]]
+  [[ "$stderr" == *"failed to create temp directory"* ]] || false
   chmod 700 "$PROJECT_DIR"
 }
 

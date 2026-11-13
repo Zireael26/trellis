@@ -98,8 +98,8 @@ assert_row_order() {
     run_fixture push "$failure"
     [ "$status" -eq 1 ]
     assert_row_order '0 1 2 4 5 6 7 8 '
-    [[ "$output" == *'Tests & coverage:  ➖ n/a'* ]]
-    [[ "$output" == *'Tests: not run (mode=push: always-hard cheap row failed; battery skipped)'* ]]
+    [[ "$output" == *'Tests & coverage:  ➖ n/a'* ]] || false
+    [[ "$output" == *'Tests: not run (mode=push: always-hard cheap row failed; battery skipped)'* ]] || false
     [ "$(printf '%s\n' "$output" | grep -c '^## process-gate verdict')" -eq 1 ]
     [ "$(printf '%s\n' "$output" | grep -c '^Overall: BLOCKED$')" -eq 1 ]
   done
@@ -108,8 +108,8 @@ assert_row_order() {
   run_fixture push ROW_RC_0=1 ROW_RC_4=1 ROW_RC_7=1 ROW_RC_3=1
   [ "$status" -eq 1 ]
   assert_row_order '0 1 2 4 5 6 7 8 3 '
-  [[ "$output" == *'Tests & coverage:  ❌ fail'* ]]
-  [[ "$output" != *'Tests: not run'* ]]
+  [[ "$output" == *'Tests & coverage:  ❌ fail'* ]] || false
+  [[ "$output" != *'Tests: not run'* ]] || false
 }
 
 @test "push early-failure fixture skips delayed Tests and reports time to refusal" {

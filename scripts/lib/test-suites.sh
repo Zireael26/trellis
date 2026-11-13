@@ -19,7 +19,7 @@
 #
 # Exclusion record format: `<suite>|<scope>|<reason>`
 #   scope=all  never run, anywhere
-#   scope=ci   runs locally, skipped under GitHub Actions
+#   scope=ci   runs locally on Darwin; skipped under CI and local non-Darwin
 # `<suite>` is the basename without the `.bats` extension.
 #
 # The workflow's old hand-list carried a standing claim that "the broader
@@ -91,7 +91,7 @@ test_suites_all() {
     [ -e "$suite" ] || continue
     suite="${suite##*/}"
     printf '%s\n' "${suite%.bats}"
-  done | LC_ALL=C sort
+  done | /usr/bin/env LC_ALL=C sort
 }
 
 # Core Bats groups, as repository-relative files rather than directory stages.
@@ -108,7 +108,7 @@ test_suites_core() {
   for suite in ${files[@]+"${files[@]}"}; do
     [ -f "$suite" ] || continue
     printf '%s\n' "${suite#"$root/"}"
-  done | LC_ALL=C sort
+  done | /usr/bin/env LC_ALL=C sort
 }
 
 # Native Rust integration targets, as repository-relative files. Cargo names an
@@ -122,7 +122,7 @@ test_suites_native() {
   for suite in "$root"/native/trellis-hooks/tests/*.rs; do
     [ -f "$suite" ] || continue
     printf '%s\n' "${suite#"$root"/}"
-  done | LC_ALL=C sort
+  done | /usr/bin/env LC_ALL=C sort
 }
 
 # Local Pi Node suites, as repository-relative files. Only `*.test.mjs` is a
@@ -135,7 +135,7 @@ test_suites_pi() {
   for suite in "$root"/core-rules/pi/tests/*.test.mjs; do
     [ -f "$suite" ] || continue
     printf '%s\n' "${suite#"$root"/}"
-  done | LC_ALL=C sort
+  done | /usr/bin/env LC_ALL=C sort
 }
 
 # Whether the cargo (native) stages run for this change (owner 2026-11-10, T41).
@@ -222,13 +222,26 @@ test_suites_exclusion_scope() {
   printf '\n'
 }
 
-# Suites to run for a scope: `local` or `ci`.
+# Explanation stored in the same exclusion record used for selection.
+test_suites_exclusion_reason() {
+  local want="$1" record
+  for record in ${TEST_SUITE_EXCLUSIONS[@]+"${TEST_SUITE_EXCLUSIONS[@]}"}; do
+    [ "${record%%|*}" = "$want" ] || continue
+    record="${record#*|}"
+    printf '%s\n' "${record#*|}"
+    return 0
+  done
+  printf '\n'
+}
+
+# Suites to run for an effective scope: `local` or `ci`.
 test_suites_for() {
-  local scope="${1:-local}" suite excluded
+  local scope="${1:-local}" suite excluded all_suites
   case "$scope" in
     local|ci) ;;
     *) printf 'test-suites: unknown scope: %s\n' "$scope" >&2; return 64 ;;
   esac
+  all_suites="$(test_suites_all)" || return $?
   while IFS= read -r suite; do
     [ -n "$suite" ] || continue
     excluded="$(test_suites_exclusion_scope "$suite")"
@@ -237,5 +250,5 @@ test_suites_for() {
       ci)  if [ "$scope" = "ci" ]; then continue; fi ;;
     esac
     printf '%s\n' "$suite"
-  done < <(test_suites_all)
+  done <<< "$all_suites"
 }

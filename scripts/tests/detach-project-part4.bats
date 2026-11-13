@@ -221,6 +221,11 @@ setup() {
 }
 
 teardown() {
+  [ -n "${SANDBOX:-}" ] && [ -d "$SANDBOX" ] || return 0
+  # A detached attach postjob may still be verifying a release inside this
+  # fixture. Do not remove its sandbox while it is writing there.
+  python3 "$REPO_ROOT/scripts/tests/helpers/wait-fixture-postjobs.py" \
+    "$SANDBOX" "${FIXTURE_POSTJOB_WAIT_SECONDS:-900}" || return 1
   chmod -R u+w "$SANDBOX" 2>/dev/null || true
   rm -rf "$SANDBOX"
 }
@@ -609,4 +614,41 @@ attach_and_adopt() {
   run_detach
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   jq -e '. == {"project":"keep"}' "$PROJECT/.claude/settings.local.json"
+}
+
+@test "fixture teardown retains its sandbox while a postjob is alive" {
+  local control="$BATS_TEST_TMPDIR/detach-teardown-control" postjob job tries=0 first_rc first_home
+  postjob="$TRELLIS_HOME/releases/probe/payload/scripts/lib/attach-postjob.sh"
+  mkdir -p "$control" "${postjob%/*}"
+  cat > "$postjob" <<'SH'
+#!/bin/bash
+: > "$DETACH_TEST_CONTROL/held"
+tries=0
+while [ ! -e "$DETACH_TEST_CONTROL/release" ] && [ "$tries" -lt 1200 ]; do
+  tries=$((tries + 1))
+  /bin/sleep 0.1
+done
+SH
+  chmod 700 "$postjob"
+  DETACH_TEST_CONTROL="$control" /bin/bash "$postjob" </dev/null >/dev/null 2>&1 &
+  job=$!
+  until [ -f "$control/held" ]; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 1200 ] || ! kill -0 "$job" 2>/dev/null; then
+      : > "$control/release"
+      wait "$job" 2>/dev/null || true
+      echo 'postjob did not reach the barrier'; false
+    fi
+    sleep 0.1
+  done
+
+  FIXTURE_POSTJOB_WAIT_SECONDS=1 run teardown
+  first_rc=$status
+  first_home=absent; [ ! -d "$SANDBOX" ] || first_home=present
+  : > "$control/release"
+  wait "$job" || { echo 'fixture postjob failed'; false; }
+  FIXTURE_POSTJOB_WAIT_SECONDS=120 run teardown
+  [ "$status" -eq 0 ] || { echo "teardown after release: $output"; false; }
+  [ "$first_rc" -ne 0 ] || { echo 'teardown accepted a live postjob'; false; }
+  [ "$first_home" = present ] || { echo 'teardown removed a live postjob sandbox'; false; }
 }

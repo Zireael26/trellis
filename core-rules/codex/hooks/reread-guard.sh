@@ -151,6 +151,13 @@ if _gr_reread_override_path "$T"; then
   printf '%s\n' "$GR_MSG" >&2
   exit 2
 fi
+if _gr_gate_verdict_path "$T"; then
+  GR_MSG="reread-guard: BLOCKED edit of $T — gate verdicts and their execution logs are written only by the process gate."
+  _gr_json_str "$GR_MSG"
+  printf '{"decision":"block","reason":%s}\n' "$GR_JSON"
+  printf '%s\n' "$GR_MSG" >&2
+  exit 2
+fi
 
 # --- override escape: logged, never silent ---
 if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then

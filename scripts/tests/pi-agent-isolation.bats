@@ -29,7 +29,7 @@ frontmatter_value() {
 }
 
 @test "RW roster agents leave isolation unspecified" {
-  for name in general-purpose haiku haiku-xhigh luna sol-rw; do
+  for name in general-purpose haiku haiku-xhigh terra-medium sol-rw; do
     run frontmatter_value "$AGENTS/$name.md" isolation
     [ "$status" -eq 1 ] || {
       printf '%s.md unexpectedly declares isolation: %s\n' "$name" "$output" >&2
@@ -39,10 +39,10 @@ frontmatter_value() {
 }
 
 @test "RW descriptions do not promise forced worktree isolation" {
-  for name in general-purpose haiku haiku-xhigh luna sol-rw; do
+  for name in general-purpose haiku haiku-xhigh terra-medium sol-rw; do
     run frontmatter_value "$AGENTS/$name.md" description
     [ "$status" -eq 0 ]
-    [[ "$output" != *'Worktree-isolated'* ]]
+    [[ "$output" != *'Worktree-isolated'* ]] || false
   done
 }
 

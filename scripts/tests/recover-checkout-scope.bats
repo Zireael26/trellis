@@ -130,7 +130,7 @@ detach_with_registry_contention() {
   registry_before="$(_attachment_hash "$TRELLIS_HOME/registry.json")"
   detach_with_registry_contention before
   [ "$status" -eq 5 ] || { echo "$output"; return 1; }
-  [[ "$output" == *'timed out waiting for registry lock'* ]]
+  [[ "$output" == *'timed out waiting for registry lock'* ]] || false
   [ -f "$WITNESS_OWNER" ] || { echo 'timeout removed owner'; return 1; }
   [ "$(_attachment_hash "$WITNESS_OWNER")" = "$before" ]
   [ "$(_attachment_hash "$TRELLIS_HOME/registry.json")" = "$registry_before" ]
@@ -191,7 +191,7 @@ detach_with_registry_contention() {
   local before="$(_attachment_hash "$FOREIGN_JOURNAL")" registry_before="$(_attachment_hash "$TRELLIS_HOME/registry.json")"
   run_recover
   [ "$status" -eq 5 ] || { echo "$output"; return 1; }
-  [[ "$output" == *'no matching attachment journal'* ]]
+  [[ "$output" == *'no matching attachment journal'* ]] || false
   [ "$(_attachment_hash "$FOREIGN_JOURNAL")" = "$before" ]
   [ "$(_attachment_hash "$TRELLIS_HOME/registry.json")" = "$registry_before" ]
 }
@@ -208,7 +208,7 @@ detach_with_registry_contention() {
   local before="$(_attachment_hash "$OWN_JOURNAL")" registry_before="$(_attachment_hash "$TRELLIS_HOME/registry.json")"
   run_recover
   [ "$status" -eq 4 ] || { echo "$output"; return 1; }
-  [[ "$output" == *'attachment journal is invalid'* ]]
+  [[ "$output" == *'attachment journal is invalid'* ]] || false
   [ "$(_attachment_hash "$OWN_JOURNAL")" = "$before" ]
   [ "$(_attachment_hash "$TRELLIS_HOME/registry.json")" = "$registry_before" ]
 }
@@ -225,7 +225,7 @@ detach_with_registry_contention() {
   ln -s "$ROOT/foreign-save" "$FOREIGN_JOURNAL"
   run_recover
   [ "$status" -eq 4 ] || { echo "$output"; return 1; }
-  [[ "$output" == *'attachment journal entry is unsafe'* ]]
+  [[ "$output" == *'attachment journal entry is unsafe'* ]] || false
   [ -L "$FOREIGN_JOURNAL" ]
   [ "$(_attachment_hash "$OWN_JOURNAL")" = "$before" ]
 }

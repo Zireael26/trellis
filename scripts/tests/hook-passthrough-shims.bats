@@ -261,7 +261,7 @@ prepare_managed_with_shims() {
   rc="$status"
   chmod 700 "$PREVIOUS"
   [ "$rc" -eq 3 ] || { echo "unreadable hook directory was verified: $output"; false; }
-  [[ "$output" == *"$PREVIOUS"* ]]
+  [[ "$output" == *"$PREVIOUS"* ]] || false
 }
 
 @test "shim recreation refuses an unreadable previous directory without removing hooks" {
@@ -272,7 +272,7 @@ prepare_managed_with_shims() {
   rc="$status"
   chmod 700 "$PREVIOUS"
   [ "$rc" -eq 3 ] || { echo "unreadable hook directory was accepted: $output"; false; }
-  [[ "$output" == *"$PREVIOUS"* ]]
+  [[ "$output" == *"$PREVIOUS"* ]] || false
   [ -f "$MANAGED/pre-commit" ]
   [ -f "$MANAGED/commit-msg" ]
 }

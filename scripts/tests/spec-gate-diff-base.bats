@@ -14,7 +14,7 @@ setup() {
     "$RUNTIME/core-rules/codex/hooks" "$RUNTIME/core-rules/skills/process-gate/scripts/lib" || return 1
   cp "$SOURCE/core-rules/hooks/spec-gate.sh" "$RUNTIME/core-rules/hooks/" || return 1
   cp "$SOURCE/core-rules/codex/hooks/spec-gate.sh" "$RUNTIME/core-rules/codex/hooks/" || return 1
-  cp "$SOURCE/core-rules/hooks/lib/"{spec-gate-core,deps,autonomy}.sh "$RUNTIME/core-rules/hooks/lib/" || return 1
+  cp "$SOURCE/core-rules/hooks/lib/"{spec-gate-core,deps,deps-heavy,autonomy}.sh "$RUNTIME/core-rules/hooks/lib/" || return 1
   cp "$SOURCE/core-rules/skills/process-gate/scripts/lib/diff-base.sh" \
     "$RUNTIME/core-rules/skills/process-gate/scripts/lib/" || return 1
   export TRELLIS_ROOT="$RUNTIME"
@@ -92,7 +92,7 @@ marker() {
     run bash "$gate" --gate
     [ "$status" -eq 1 ]
     receipt "$ATIP" "$output"
-    [[ "$output" == *'120 gated lines over floor 80'* ]]
+    [[ "$output" == *'120 gated lines over floor 80'* ]] || false
   done
   triad 002-child
   git add specs/002-child
@@ -111,7 +111,7 @@ marker() {
   receipt "$ATIP" "$output"
   run bash -c '. "$1"; sg_verdict "$PWD"' _ "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'sub-floor(20<=80)' ]]
+  [[ "$output" == *'sub-floor(20<=80)' ]] || false
 }
 
 @test "sub-floor B passes without its own triad even when A has a triad" {
@@ -121,8 +121,8 @@ marker() {
   receipt "$ATIP" "$output"
   run bash -c '. "$1"; sg_verdict "$PWD"' _ "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'sub-floor(20<=80)' ]]
-  [[ "$output" != *'spec-triad('* ]]
+  [[ "$output" == *'sub-floor(20<=80)' ]] || false
+  [[ "$output" != *'spec-triad('* ]] || false
 }
 
 @test "new surgical marker and verdict share the parent base and B-only ceiling" {
@@ -136,7 +136,7 @@ marker() {
   # 720 lines against main would exceed the 400-line surgical ceiling.
   run bash -c '. "$1"; sg_verdict "$PWD"' _ "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'surgical-marker'* ]]
+  [[ "$output" == *'surgical-marker'* ]] || false
 }
 
 @test "1.3.10 marker bound to the default-branch merge-base still validates" {
@@ -160,7 +160,7 @@ marker() {
   run bash "$GATE" --gate
   [ "$status" -eq 1 ]
   receipt "$ATIP" "$output"
-  [[ "$output" == *'no valid surgical declaration'* ]]
+  [[ "$output" == *'no valid surgical declaration'* ]] || false
 }
 
 @test "explicit carrier range fixes both diff size and triad discovery to its end" {
@@ -179,9 +179,9 @@ marker() {
       fi
       [ "$status" -eq 1 ]
       receipt "$ATIP" "$output"
-      [[ "$output" == *'via explicit (explicit)'* ]]
-      [[ "$output" == *"range=$ATIP..$BTIP"* ]]
-      [[ "$output" == *'120 gated lines over floor 80'* ]]
+      [[ "$output" == *'via explicit (explicit)'* ]] || false
+      [[ "$output" == *"range=$ATIP..$BTIP"* ]] || false
+      [[ "$output" == *'120 gated lines over floor 80'* ]] || false
     done
   done
 }
@@ -198,9 +198,9 @@ marker() {
   run bash "$GATE" --gate --range=main..HEAD
   [ "$status" -eq 1 ]
   receipt "$m1" "$output"
-  [[ "$output" == *'start not ancestor of head (tree diff)'* ]]
-  [[ "$output" == *'range=main..HEAD'* ]]
-  [[ "$output" == *'770 gated lines over floor 80'* ]]
+  [[ "$output" == *'start not ancestor of head (tree diff)'* ]] || false
+  [[ "$output" == *'range=main..HEAD'* ]] || false
+  [[ "$output" == *'770 gated lines over floor 80'* ]] || false
 }
 
 @test "broken core or invalid verdict blocks both twins without blocking valid passes" {
@@ -247,7 +247,7 @@ marker() {
   for gate in "$GATE" "$CODEX_GATE"; do
     run bash "$gate" --gate
     [ "$status" -eq 4 ]
-    [[ "$output" == *'BLOCKED: diff-base resolver missing from trusted runtime'* ]]
+    [[ "$output" == *'BLOCKED: diff-base resolver missing from trusted runtime'* ]] || false
   done
   run bash "$GATE" --mark 'cannot bind without resolver'
   [ "$status" -eq 1 ]
@@ -269,7 +269,7 @@ marker() {
   run bash "$GATE" --gate
   [ "$status" -eq 1 ]
   receipt "$M0" "$output" detached
-  [[ "$output" == *'BLOCKED: detached-or-unknown-branch'* ]]
+  [[ "$output" == *'BLOCKED: detached-or-unknown-branch'* ]] || false
 }
 
 @test "unresolvable explicit range refuses instead of passing a sub-floor branch" {
@@ -278,7 +278,7 @@ marker() {
   [ "$status" -eq 1 ]
   [ "$(printf '%s\n' "$output" | grep -c '^diff-base: ')" -eq 1 ]
   printf '%s\n' "${output%%$'\n'*}" | grep -Eq '^diff-base: - - via refused \(.*\) range=- head=feature/b$'
-  [[ "$output" == *'BLOCKED: cannot-resolve-diff-base'* ]]
+  [[ "$output" == *'BLOCKED: cannot-resolve-diff-base'* ]] || false
 }
 
 # R21: each assertion starts from its own X/Y fixture; fixture errors are fatal.
@@ -332,7 +332,7 @@ foreign_marker() {
   run bash "$GATE" --gate --ref feature/x
   [ "$status" -eq 1 ]
   receipt "$M0" "$output" feature/x || return 1
-  [[ "$output" == *'120 gated lines over floor 80'* ]]
+  [[ "$output" == *'120 gated lines over floor 80'* ]] || false
 }
 
 @test "R21 emergency audit names pushed X, not checked-out Y" {
@@ -362,7 +362,7 @@ foreign_marker() {
   foreign_ref triad-y || return 1
   run bash "$GATE" --gate --ref=feature/x --head="$XTIP" --range="$M0..$XTIP"
   [ "$status" -eq 1 ]
-  [[ "$output" == *'no in-range spec triad'* ]]
+  [[ "$output" == *'no in-range spec triad'* ]] || false
 }
 
 @test "R21 pushed policy ceiling 800 wins over canonical worktree ceiling 400" {
@@ -372,7 +372,7 @@ foreign_marker() {
   [ "$status" -eq 0 ]
   [[ "$output" == $'pass\t'* ]] || return 1
   [[ "$output" == *'head=feature/x'* ]] || return 1
-  [[ "$output" == *'surgical-marker'* ]]
+  [[ "$output" == *'surgical-marker'* ]] || false
 }
 
 @test "R21 ref autonomy uses X's decisions log rather than Y's L3 interview path" {
@@ -429,7 +429,7 @@ foreign_marker() {
   run bash "$CODEX_GATE" --gate --ref feature/x --head "$XTIP"
   [ "$status" -eq 0 ]
   receipt "$M0" "$output" feature/x || return 1
-  [[ "$output" == *"range=${M0:0:12}..${XTIP:0:12}"* ]]
+  [[ "$output" == *"range=${M0:0:12}..${XTIP:0:12}"* ]] || false
 }
 
 @test "R21 absent ref policy falls back to runtime, never the canonical policy" {
@@ -443,7 +443,7 @@ foreign_marker() {
   run bash -c '. "$1"; sg_verdict "$PWD" "$2" feature/x "$3"' _ "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$M0..$XTIP" "$XTIP"
   [ "$status" -eq 0 ]
   [[ "$output" == $'pass\t'* ]] || return 1
-  [[ "$output" == *'sub-floor(121<=200)'* ]]
+  [[ "$output" == *'sub-floor(121<=200)'* ]] || false
 }
 
 @test "R21 malformed committed policy blocks even though Y has valid policy" {
@@ -456,7 +456,7 @@ foreign_marker() {
   git checkout -q feature/y || return 1
   run bash "$GATE" --gate --ref feature/x --head "$XTIP"
   [ "$status" -eq 1 ]
-  [[ "$output" == *'config present but malformed'* ]]
+  [[ "$output" == *'config present but malformed'* ]] || false
 }
 
 @test "R21 resolver default policy also comes from X rather than the Y worktree" {
@@ -464,7 +464,7 @@ foreign_marker() {
   printf '{"template":{"branch":"feature/y"},"mandatory_pipeline":{"enabled":true}}\n' > .trellis.json || return 1
   run bash "$GATE" --gate --ref feature/x --head "$XTIP"
   [ "$status" -eq 1 ]
-  [[ "$output" == "diff-base: ${M0:0:12} origin/main via default "* ]]
+  [[ "$output" == "diff-base: ${M0:0:12} origin/main via default "* ]] || false
 }
 
 @test "L4 interview requires the complete branch identity at head and in the worktree" {
@@ -637,7 +637,7 @@ SH
   # With no trusted runtime resolver, the gate must refuse with exit 4
   # without sourcing the planted project file.
   [ "$status" -eq 4 ]
-  [[ "$output" == *"trusted"* || "$output" == *"runtime"* ]]
+  [[ "$output" == *"trusted"* || "$output" == *"runtime"* ]] || false
   [ ! -e "$BATS_TEST_TMPDIR/sweep-fx1-planted-executed" ]
   mv "$SANDBOX/saved-resolver-planted.sh" "$RUNTIME/core-rules/skills/process-gate/scripts/lib/diff-base.sh"
 }
@@ -647,7 +647,7 @@ SH
   mv "$RUNTIME/core-rules/skills/process-gate/scripts/lib/diff-base.sh" "$SANDBOX/saved-resolver.sh"
   run bash "$GATE" --gate
   [ "$status" -eq 4 ]
-  [[ "$output" == *"trusted"* || "$output" == *"runtime"* ]]
+  [[ "$output" == *"trusted"* || "$output" == *"runtime"* ]] || false
   mv "$SANDBOX/saved-resolver.sh" "$RUNTIME/core-rules/skills/process-gate/scripts/lib/diff-base.sh"
 }
 
@@ -659,7 +659,7 @@ SH
   mkdir -p "$proj/.claude/hooks/lib" "$proj/.claude/skills/process-gate/scripts/lib"
   cp "$SOURCE/core-rules/hooks/spec-gate.sh" "$proj/.claude/hooks/"
   cp "$SOURCE/core-rules/hooks/lib/spec-gate-core.sh" "$proj/.claude/hooks/lib/"
-  cp "$SOURCE/core-rules/hooks/lib/deps.sh" "$proj/.claude/hooks/lib/"
+  cp "$SOURCE/core-rules/hooks/lib/deps.sh" "$SOURCE/core-rules/hooks/lib/deps-heavy.sh" "$proj/.claude/hooks/lib/"
   cp "$SOURCE/core-rules/hooks/lib/autonomy.sh" "$proj/.claude/hooks/lib/"
   cp "$SOURCE/core-rules/skills/process-gate/scripts/lib/diff-base.sh" "$proj/.claude/skills/process-gate/scripts/lib/"
   cd "$proj" || return 1
@@ -688,7 +688,7 @@ direct_copy_project() {
   [ "$hooks" = .codex/hooks ] && twin=codex/
   cp "$SOURCE/core-rules/${twin}hooks/spec-gate.sh" "$proj/$hooks/" || return 1
   cp "$SOURCE/core-rules/hooks/lib/spec-gate-core.sh" "$proj/$hooks/lib/" || return 1
-  cp "$SOURCE/core-rules/${twin}hooks/lib/deps.sh" "$SOURCE/core-rules/${twin}hooks/lib/autonomy.sh" "$proj/$hooks/lib/" || return 1
+  cp "$SOURCE/core-rules/${twin}hooks/lib/deps.sh" "$SOURCE/core-rules/${twin}hooks/lib/deps-heavy.sh" "$SOURCE/core-rules/${twin}hooks/lib/autonomy.sh" "$proj/$hooks/lib/" || return 1
   cp "$SOURCE/core-rules/skills/process-gate/scripts/lib/diff-base.sh" "$proj/$skills/process-gate/scripts/lib/" || return 1
   cd "$proj" || return 1
   git init -q -b main
@@ -707,10 +707,10 @@ direct_copy_project() {
   direct_copy_project "$SANDBOX/codex-direct-copy" .codex/hooks .agents/skills || return 1
   run env -u TRELLIS_ROOT bash -p .codex/hooks/spec-gate.sh --gate
   [ "$status" -eq 0 ]
-  [[ "$output" == *"diff-base: "* ]]
+  [[ "$output" == *"diff-base: "* ]] || false
   run env -u TRELLIS_ROOT CODEX_PROJECT_DIR="$PWD" bash .codex/hooks/spec-gate.sh <<<'{"hook_event_name":"Stop","stop_hook_active":false,"session_id":"m1"}'
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"block"'* ]]
+  [[ "$output" != *'"block"'* ]] || false
   cd "$REPO_DIR" || return 1
 }
 

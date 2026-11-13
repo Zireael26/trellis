@@ -331,7 +331,7 @@ partial_registry_proposal() {
     run "$ATTACH" recover --home "$TRELLIS_HOME" "$PROJECT"
     [ "$status" -eq 4 ] || { echo "$filter: $output"; false; }
     if [ "$filter" = 'del(.external.registry_update)' ]; then
-      [[ "$output" == *"legacy partial detach journal lacks a trusted registry snapshot"* ]]
+      [[ "$output" == *"legacy partial detach journal lacks a trusted registry snapshot"* ]] || false
     fi
     [ "$(detach_state_snapshot)" = "$before" ]
   done

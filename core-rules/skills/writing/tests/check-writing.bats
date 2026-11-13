@@ -11,31 +11,31 @@ FIXTURES="$BATS_TEST_DIRNAME/../scripts/fixtures"
 @test "red blog names dash offense" {
   run "$SCRIPT" --blog "$FIXTURES/red-blog.md"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"dash:"* ]]
+  [[ "$output" == *"dash:"* ]] || false
 }
 
 @test "red blog names slop vocab offense" {
   run "$SCRIPT" --blog "$FIXTURES/red-blog.md"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"slop vocab:"* ]]
+  [[ "$output" == *"slop vocab:"* ]] || false
 }
 
 @test "red blog names bold lead-in offense" {
   run "$SCRIPT" --blog "$FIXTURES/red-blog.md"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"bold lead-in bullet"* ]]
+  [[ "$output" == *"bold lead-in bullet"* ]] || false
 }
 
 @test "red blog names antithesis offense" {
   run "$SCRIPT" --blog "$FIXTURES/red-blog.md"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"antithesis pattern"* ]]
+  [[ "$output" == *"antithesis pattern"* ]] || false
 }
 
 @test "green blog exits 0" {
   run "$SCRIPT" --blog "$FIXTURES/green-blog.md"
   [ "$status" -eq 0 ]
-  [[ "$output" == "blog: checked "* ]]
+  [[ "$output" == "blog: checked "* ]] || false
 }
 
 @test "red thread exits 1 and names count length and link offenses" {
@@ -43,25 +43,25 @@ FIXTURES="$BATS_TEST_DIRNAME/../scripts/fixtures"
   [ "$status" -eq 1 ]
   [[ "$output" == *"thread count:"* ]] || { echo "$output"; false; }
   [[ "$output" == *"thread length:"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"thread link:"* ]]
+  [[ "$output" == *"thread link:"* ]] || false
 }
 
 @test "green thread exits 0" {
   run "$SCRIPT" --thread "$FIXTURES/green-thread.txt"
   [ "$status" -eq 0 ]
-  [[ "$output" == "thread: checked 5 blocks; 0 offenses" ]]
+  [[ "$output" == "thread: checked 5 blocks; 0 offenses" ]] || false
 }
 
 @test "fenced em dash is not counted" {
   run "$SCRIPT" --blog "$FIXTURES/green-blog.md"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"dash:"* ]]
+  [[ "$output" != *"dash:"* ]] || false
 }
 
 @test "missing file exits 2" {
   run "$SCRIPT" --blog "$FIXTURES/missing.md"
   [ "$status" -eq 2 ]
-  [[ "$output" == usage:* ]]
+  [[ "$output" == usage:* ]] || false
 }
 
 @test "red blog names extended slop terms (journey / comprehensive / landscape)" {
@@ -70,7 +70,7 @@ FIXTURES="$BATS_TEST_DIRNAME/../scripts/fixtures"
   [[ "$output" == *"journey"* ]] || { echo "$output"; false; }
   [[ "$output" == *"comprehensive"* ]] || { echo "$output"; false; }
   [[ "$output" == *"landscape"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"navigate-the"* ]]
+  [[ "$output" == *"navigate-the"* ]] || false
 }
 
 @test "period-separated antithesis form is counted" {
@@ -84,5 +84,5 @@ FIXTURES="$BATS_TEST_DIRNAME/../scripts/fixtures"
   run "$SCRIPT" --blog "$tmp"
   rm -f "$tmp"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"antithesis pattern"* ]]
+  [[ "$output" == *"antithesis pattern"* ]] || false
 }

@@ -34,11 +34,11 @@ _se_require_jq "post-compact-context"
 _se_utf8_head() {
   local text="$1" max="$2" cut size run byte need drop
   [ "$max" -gt 0 ] || return 0
-  cut="$(printf '%s' "$text" | LC_ALL=C head -c "$max")"
+  cut="$(printf '%s' "$text" | /usr/bin/env LC_ALL=C head -c "$max")"
   run=0
   byte=""
   while [ "$run" -lt 4 ]; do
-    byte="$(printf '%s' "$cut" | LC_ALL=C tail -c "$((run + 1))" | LC_ALL=C head -c 1 | od -An -tu1 | tr -d '[:space:]')"
+    byte="$(printf '%s' "$cut" | /usr/bin/env LC_ALL=C tail -c "$((run + 1))" | /usr/bin/env LC_ALL=C head -c 1 | od -An -tu1 | tr -d '[:space:]')"
     [ -n "$byte" ] || break
     [ "$byte" -ge 128 ] && [ "$byte" -le 191 ] || break
     run=$((run + 1))
@@ -59,8 +59,8 @@ _se_utf8_head() {
     fi
   fi
   if [ "$drop" -gt 0 ]; then
-    size="$(printf '%s' "$cut" | LC_ALL=C wc -c | tr -d '[:space:]')"
-    cut="$(printf '%s' "$cut" | LC_ALL=C head -c "$((size - drop))")"
+    size="$(printf '%s' "$cut" | /usr/bin/env LC_ALL=C wc -c | tr -d '[:space:]')"
+    cut="$(printf '%s' "$cut" | /usr/bin/env LC_ALL=C head -c "$((size - drop))")"
   fi
   printf '%s' "$cut"
 }
@@ -132,7 +132,7 @@ _se_task_context_block() {
     _se_task_context_unavailable "empty_advisory"
     return 0
   fi
-  bytes=$(printf '%s\n' "$advisory" | LC_ALL=C wc -c | tr -d '[:space:]')
+  bytes=$(printf '%s\n' "$advisory" | /usr/bin/env LC_ALL=C wc -c | tr -d '[:space:]')
   if [ "$bytes" -gt 512 ]; then
     _se_task_context_unavailable "advisory_bound"
     return 0

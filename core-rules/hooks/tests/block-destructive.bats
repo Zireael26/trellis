@@ -29,113 +29,113 @@ run_codex_with_cmd() {
 
 @test "P1.1: blocks rm -rf /" {
   out="$(run_with_cmd 'rm -rf /')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.1: blocks rm -rf /Users/me/foo" {
   out="$(run_with_cmd 'rm -rf /Users/me/foo')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.1: blocks rm -rf ~/work" {
   out="$(run_with_cmd 'rm -rf ~/work')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.1: blocks rm -rf \$HOME/cache" {
   out="$(run_with_cmd 'rm -rf $HOME/cache')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.1: blocks rm -rf .." {
   out="$(run_with_cmd 'rm -rf ..')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.1: blocks rm -rf ../foo/bar" {
   out="$(run_with_cmd 'rm -rf ../foo/bar')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.1: allows rm -rf . (relative cwd)" {
   out="$(run_with_cmd 'rm -rf .')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 @test "P1.1: allows rm -rf ./build" {
   out="$(run_with_cmd 'rm -rf ./build')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 @test "P1.1: allows rm -rf node_modules" {
   out="$(run_with_cmd 'rm -rf node_modules')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 @test "P1.1: allows rm -rf dist" {
   out="$(run_with_cmd 'rm -rf dist')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 # --- P1.2 DELETE-without-WHERE (covers terminated SQL) ---
 
 @test "P1.2: blocks DELETE FROM users (no WHERE, no semicolon)" {
   out="$(run_with_cmd 'DELETE FROM users')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.2: blocks DELETE FROM users; (terminated, no WHERE)" {
   out="$(run_with_cmd 'DELETE FROM users;')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.2: blocks delete from users (lowercase)" {
   out="$(run_with_cmd 'delete from users')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.2: blocks DELETE FROM with backtick-quoted table" {
   out="$(run_with_cmd 'DELETE FROM `users`')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.2: blocks DELETE FROM with double-quote-quoted table" {
   out="$(run_with_cmd 'DELETE FROM "users"')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.2: blocks DELETE FROM schema.users" {
   out="$(run_with_cmd 'DELETE FROM schema.users')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.1: blocks rm -rf with quoted absolute path (audit M6a)" {
   out="$(run_with_cmd 'rm -rf "/tmp/a b"')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "force-push: blocks --force-with-lease=<value> (audit M6b)" {
   out="$(run_with_cmd 'git push --force-with-lease=main origin main')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "git-reset: bare --hard is denied by both Claude and Codex hooks" {
   out="$(run_with_cmd 'git reset --hard')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 
   set +e
   out="$(run_codex_with_cmd 'git reset --hard')"
   rc=$?
   set -e
   [ "$rc" -eq 2 ]
-  [[ "$out" == *'"decision":"block"'* ]]
+  [[ "$out" == *'"decision":"block"'* ]] || false
 }
 
 @test "git-reset: Claude denies HEAD with suffix options" {
   for suffix in '--quiet' '--'; do
     run run_with_cmd "git reset --hard HEAD $suffix"
     [ "$status" -eq 0 ]
-    [[ "$output" == *deny* ]]
+    [[ "$output" == *deny* ]] || false
   done
 }
 
@@ -143,7 +143,7 @@ run_codex_with_cmd() {
   for suffix in '--quiet' '--'; do
     run run_codex_with_cmd "git reset --hard HEAD $suffix"
     [ "$status" -eq 2 ]
-    [[ "$output" == *'"decision":"block"'* ]]
+    [[ "$output" == *'"decision":"block"'* ]] || false
   done
 }
 
@@ -151,10 +151,10 @@ run_codex_with_cmd() {
   for cmd in 'git reset --hard HEAD' 'git reset --hard HEAD~2 --quiet' 'git reset --hard origin/main --' 'git reset --hard; git status'; do
     run run_with_cmd "$cmd"
     [ "$status" -eq 0 ]
-    [[ "$output" == *deny* ]]
+    [[ "$output" == *deny* ]] || false
     run run_codex_with_cmd "$cmd"
     [ "$status" -eq 2 ]
-    [[ "$output" == *'"decision":"block"'* ]]
+    [[ "$output" == *'"decision":"block"'* ]] || false
   done
   for cmd in 'git reset --soft HEAD' 'git reset --harder HEAD' 'git reset --hard HEADnotes --quiet' 'git reset --hard feature/topic'; do
     run run_with_cmd "$cmd"
@@ -168,7 +168,7 @@ run_codex_with_cmd() {
 
 @test "git-reset: similarly prefixed option remains outside the --hard rule" {
   out="$(run_with_cmd 'git reset --harder')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 
   set +e
   out="$(run_codex_with_cmd 'git reset --harder')"
@@ -180,44 +180,44 @@ run_codex_with_cmd() {
 
 @test "P1.2: blocks unbounded DELETE shielded by an unrelated WHERE (audit M7)" {
   out="$(run_with_cmd 'SELECT * FROM audit WHERE id=1; DELETE FROM users;')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "P1.2: allows DELETE FROM users WHERE id=1;" {
   out="$(run_with_cmd 'DELETE FROM users WHERE id=1;')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 @test "P1.2: allows SELECT * FROM users" {
   out="$(run_with_cmd 'SELECT * FROM users')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 @test "P1.2: blocks psql -c \"DELETE FROM users;\"" {
   out="$(run_with_cmd 'psql -c "DELETE FROM users;"')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 # --- codex hatch + max/ultra compound ---
 
 @test "hatch: blocks codex bypass-sandbox + ultra" {
   out="$(run_with_cmd 'codex exec --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort="ultra" "task"')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "hatch: blocks codex -s danger-full-access + max" {
   out="$(run_with_cmd 'codex exec -s danger-full-access -c model_reasoning_effort=max "task"')"
-  [[ "$out" == *deny* ]]
+  [[ "$out" == *deny* ]] || false
 }
 
 @test "hatch: allows sandboxed ultra (workspace-write)" {
   out="$(run_with_cmd 'codex exec --json -s workspace-write -c model_reasoning_effort="ultra" "task" </dev/null')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 @test "hatch: allows bypass-sandbox at xhigh" {
   out="$(run_with_cmd 'codex exec --dangerously-bypass-approvals-and-sandbox -c model_reasoning_effort="xhigh" "task"')"
-  [[ "$out" != *deny* ]]
+  [[ "$out" != *deny* ]] || false
 }
 
 # --- P1.5 jq-missing fails closed ---
@@ -231,8 +231,8 @@ run_codex_with_cmd() {
   PATH="$PATH_BACKUP"
   rm -rf "$jq_free_path"
   [ "$status" -eq 2 ]
-  [[ "$stderr" == *"refusing"* ]]
-  [[ "$stderr" == *"install jq"* ]]
+  [[ "$stderr" == *"refusing"* ]] || false
+  [[ "$stderr" == *"install jq"* ]] || false
 }
 
 @test "P1.5: Codex twin without jq blocks with a decision document" {
@@ -243,7 +243,7 @@ run_codex_with_cmd() {
   rm -rf "$jq_free_path"
   [ "$status" -eq 2 ]
   [ "$output" = '{"decision":"block","reason":"block-destructive: jq required but not found; refusing"}' ]
-  [[ "$stderr" == *"install jq"* ]]
+  [[ "$stderr" == *"install jq"* ]] || false
 }
 
 # A bright-line guard must never become a no-op (spec 074 E5): the degrade
@@ -260,11 +260,11 @@ run_codex_with_cmd() {
   PATH="$PATH_BACKUP"
   rm -rf "$jq_free_path"
   [ "$claude_status" -eq 2 ] || { echo "claude rc=$claude_status $claude_err"; false; }
-  [[ "$claude_err" == *"jq required but not found; refusing"* ]]
-  [[ "$claude_err" != *"degrading"* ]]
+  [[ "$claude_err" == *"jq required but not found; refusing"* ]] || false
+  [[ "$claude_err" != *"degrading"* ]] || false
   [ "$status" -eq 2 ] || { echo "codex rc=$status $output $stderr"; false; }
   [ "$output" = '{"decision":"block","reason":"block-destructive: jq required but not found; refusing"}' ]
-  [[ "$stderr" != *"degrading"* ]]
+  [[ "$stderr" != *"degrading"* ]] || false
 }
 
 # --- **/secrets/** reads: GCP/k8s resource identifiers are not file reads -----

@@ -107,7 +107,7 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   code_range
   run_row
   [ "$status" -eq 0 ]
-  [[ "$output" == *'typecheck and lint: included in full test battery'* ]]
+  [[ "$output" == *'typecheck and lint: included in full test battery'* ]] || false
   [ "$(count battery)" -eq 1 ]
   [ "$(count mypy)" -eq 1 ]
   [ "$(count ruff-check)" -eq 1 ]
@@ -119,8 +119,8 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   export STATIC_FAILURE=lint
   run_row
   [ "$status" -eq 1 ]
-  [[ "$output" == *'tests: `python3 scripts/run-tests-local.py` exited 1'* ]]
-  [[ "$output" == *'F821 Undefined name fixture_lint_error'* ]]
+  [[ "$output" == *'tests: `python3 scripts/run-tests-local.py` exited 1'* ]] || false
+  [[ "$output" == *'F821 Undefined name fixture_lint_error'* ]] || false
   [ "$(count battery)" -eq 1 ]
   [ "$(count ruff-check)" -eq 1 ]
 }
@@ -130,8 +130,8 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   export STATIC_FAILURE=lint
   run_row
   [ "$status" -eq 1 ]
-  [[ "$output" == *'Tests: narrowed (docs-only: 1 files)'* ]]
-  [[ "$output" == *'lint: '*"exited 1"*'F821 Undefined name fixture_lint_error'* ]]
+  [[ "$output" == *'Tests: narrowed (docs-only: 1 files)'* ]] || false
+  [[ "$output" == *'lint: '*"exited 1"*'F821 Undefined name fixture_lint_error'* ]] || false
   [ "$(count battery)" -eq 0 ]
   [ "$(count mypy)" -eq 1 ]
   [ "$(count ruff-check)" -eq 1 ]
@@ -142,8 +142,8 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   export STATIC_FAILURE=lint
   run_row
   [ "$status" -eq 1 ]
-  [[ "$output" == *'Tests: narrowed (docs-only: 1 files)'* ]]
-  [[ "$output" == *'F821 Undefined name fixture_lint_error'* ]]
+  [[ "$output" == *'Tests: narrowed (docs-only: 1 files)'* ]] || false
+  [[ "$output" == *'F821 Undefined name fixture_lint_error'* ]] || false
   [ "$(count battery)" -eq 0 ]
   [ "$(count narrowed)" -eq 1 ]
   [ "$(count mypy)" -eq 1 ]
@@ -156,7 +156,7 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   export STATIC_FAILURE=lint
   run_row
   [ "$status" -eq 1 ]
-  [[ "$output" == *'F821 Undefined name fixture_lint_error'* ]]
+  [[ "$output" == *'F821 Undefined name fixture_lint_error'* ]] || false
   [ "$(count battery)" -eq 0 ]
   [ "$(count narrowed)" -eq 1 ]
   [ "$(count mypy)" -eq 1 ]
@@ -168,7 +168,7 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   export STATIC_FAILURE=typecheck
   run_row
   [ "$status" -eq 1 ]
-  [[ "$output" == *'typecheck: '*"exited 1"*'Incompatible types in assignment'* ]]
+  [[ "$output" == *'typecheck: '*"exited 1"*'Incompatible types in assignment'* ]] || false
   [ "$(count mypy)" -eq 1 ]
   [ "$(count ruff-check)" -eq 1 ]
   [ "$(count shellcheck)" -eq 1 ]
@@ -179,8 +179,8 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   docs_range 'tests python3 scripts/run-tests-local.py'
   run_row
   [ "$status" -eq 0 ]
-  [[ "$output" == *'Tests: narrowed (docs-only: 1 files)'* ]]
-  [[ "$output" != *'typecheck and lint: included in full test battery'* ]]
+  [[ "$output" == *'Tests: narrowed (docs-only: 1 files)'* ]] || false
+  [[ "$output" != *'typecheck and lint: included in full test battery'* ]] || false
   [ "$(count battery)" -eq 1 ]
   [ "$(count mypy)" -eq 2 ]
   [ "$(count ruff-check)" -eq 2 ]
@@ -192,7 +192,7 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   code_range
   run_row
   [ "$status" -eq 0 ]
-  [[ "$output" != *'typecheck and lint: included in full test battery'* ]]
+  [[ "$output" != *'typecheck and lint: included in full test battery'* ]] || false
   [ "$(count battery)" -eq 1 ]
   [ "$(count mypy)" -eq 2 ]
   [ "$(count ruff-check)" -eq 2 ]
@@ -210,7 +210,7 @@ count() { grep -cFx "$1" "$STATIC_LOG" || true; }
   export PROCESS_GATE_TEST_COVERS_STATIC='python3 scripts/run-tests-local.py'
   run_row
   [ "$status" -eq 0 ]
-  [[ "$output" != *'typecheck and lint: included in full test battery'* ]]
+  [[ "$output" != *'typecheck and lint: included in full test battery'* ]] || false
   [ "$(count battery)" -eq 1 ]
   [ "$(count mypy)" -eq 2 ]
   [ "$(count ruff-check)" -eq 2 ]

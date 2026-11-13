@@ -54,7 +54,7 @@ sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from receipt_provenance import safe_capture, emit
 from gate_receipts import state_root as gate_state_root, digest, passing_rows, private
-from gate_verdict import safe_inputs, find_verdict, key as verdict_key, describe as describe_verdict
+from gate_verdict import SCHEMA as VERDICT_SCHEMA, safe_inputs, find_verdict, key as verdict_key, describe as describe_verdict, ref_rows
 
 MAX_SHARD_COUNT = 16
 
@@ -1104,6 +1104,15 @@ def _remove_run_root(data: Dict[str, Any]) -> None:
     if str(root) != os.path.realpath(root):
         raise ContainmentError("run root no longer matches recorded path: {}".format(root))
     _private_directory(root)  # Recheck ownership/mode and refuse symlinks.
+    # Tests seal fixtures read-only (0555 release payloads); rmtree cannot
+    # unlink inside them. Grant owner write and search on the real directories
+    # under the verified root first; symlinks are never followed or changed.
+    for parent, names, _files in os.walk(root, followlinks=False):
+        for name in names:
+            path = os.path.join(parent, name)
+            info = os.lstat(path)
+            if stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid():
+                os.chmod(path, stat.S_IMODE(info.st_mode) | stat.S_IRWXU)
     shutil.rmtree(root)
 
 
@@ -1194,17 +1203,18 @@ def _invalidate_verdicts(state: RunState, root: Path, end: float) -> None:
             continue
 
 
-def _write_verdict(state: RunState, before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]], kept: Path) -> None:
+def _write_verdict(state: RunState, before: Optional[Dict[str, Any]], after: Optional[Dict[str, Any]], kept: Path,
+                   refs: Optional[List[str]] = None) -> None:
     if before is None or (state.root / "reuse-disabled.json").exists() or after != before:
         return
     record = json.loads((kept / "run.json").read_text(encoding="utf-8"))
     directory = state.root / "verdicts"
     _private_directory(directory)
     save_record(directory / (verdict_key(before) + ".json"), {
-        "schema": 1, "key": verdict_key(before), "inputs": before,
+        "schema": VERDICT_SCHEMA, "key": verdict_key(before), "inputs": before,
         "status": "pass", "complete": True, "containment": "verified-empty",
         "id": record["id"], "aggregate_sha256": record["aggregate_sha256"],
-        "completed_at": record["completed_at"]})
+        "completed_at": record["completed_at"], "refs": refs})
     print("run-tests-local: wrote verdict {}".format(record["id"]), flush=True)
 
 
@@ -1597,6 +1607,7 @@ def main(argv: Sequence[str]) -> int:
     state = None
     inputs = None
     after_inputs = None
+    refs: Optional[List[str]] = None
     kept = None
     try:
         state = RunState(head=provenance.get("head", "unknown") if argv != ["--runs-reap"] else "reap",
@@ -1699,9 +1710,12 @@ def main(argv: Sequence[str]) -> int:
             if observe_exit(process):
                 return "unavailable: probe exit {}".format(observe_exit(process))
             lines = planner_output.read_text(encoding="utf-8", errors="replace").strip().splitlines()
-            return lines[0] if lines else "unavailable: empty probe"
+            if not lines:
+                return "unavailable: empty probe"
+            return "\n".join(lines) if command and command[-1] == "-vV" else lines[0]
 
         inputs = None if selected else safe_inputs(root, gated_head, version_probe=contained_probe)
+        refs = None if inputs is None else ref_rows(root)
         with planner_output.open("wb") as stream:
             planner = _spawn(data, record_path, sentinel_fd, processes,
                              ["bash", str(runner), "--scope=local", "--shard=1/{}".format(SHARD_COUNT), "--plan", *selected],
@@ -1725,6 +1739,12 @@ def main(argv: Sequence[str]) -> int:
             raise ValueError("empty shard plan")
         if set(totals) != set(range(1, SHARD_COUNT + 1)):
             raise ValueError("shard plan missing total rows")
+        # The keyed native-stage decision must be the one this plan made; a
+        # base that moved in between would otherwise publish a skip as a run.
+        if inputs is not None and inputs.get("native") != (
+                "run" if any(stage.startswith("cargo ") for stage in expected) else "skip"):
+            print("run-tests-local: native-stage decision changed before planning; no verdict", flush=True)
+            inputs = None
         print("run-tests-local: planned shard totals: " + ", ".join(
             "shard {}={}".format(i, totals[i]) for i in range(1, SHARD_COUNT + 1)), flush=True)
         # Only shards are niced: the planner above keeps inherited priority.
@@ -1765,6 +1785,8 @@ def main(argv: Sequence[str]) -> int:
             e["process"] is not None and observe_exit(e["process"]) == 0 for e in shards) else 1
         if result == 0 and inputs is not None:
             after_inputs = None if selected else safe_inputs(root, gated_head, version_probe=contained_probe)
+            if refs is not None and ref_rows(root) != refs:
+                refs = None
     except _DeadlineExit:
         print("run-tests-local: global deadline exceeded (productive cutoff)", file=sys.stderr)
         result = 124
@@ -1830,7 +1852,7 @@ def main(argv: Sequence[str]) -> int:
             try:
                 _receipt(data, survivors, record_path.exists())
                 if not survivors and not result and interrupt is None and kept is not None:
-                    _write_verdict(state, inputs, after_inputs, kept)
+                    _write_verdict(state, inputs, after_inputs, kept, refs)
             except (_DeadlineExit, OSError):
                 result = 124 if not survivors else 71
             else:

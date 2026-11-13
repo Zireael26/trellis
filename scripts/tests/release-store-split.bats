@@ -19,7 +19,7 @@ setup() {
 @test "release-store parts retain every original test name and body byte for byte" {
   run bash "$CHECK"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *'OK: 86 release-store test names and bodies are byte-identical'* ]]
+  [[ "$output" == *'OK: 86 release-store test names and bodies are byte-identical (17 lane additions)'* ]] || { echo "$output"; false; }
 }
 
 @test "release-store split check accepts an unchanged union and rejects a dropped case" {
@@ -28,21 +28,21 @@ setup() {
   head -n 6 "$ORIGINAL" > "$PART"
   run bash "$CHECK" "$TREE"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'dropped: a second case'* ]]
+  [[ "$output" == *'dropped: a second case'* ]] || { echo "$output"; false; }
 }
 
 @test "release-store split check rejects the same case in two parts" {
   cp "$PART" "$TREE/scripts/tests/release-store-part2.bats"
   run bash "$CHECK" "$TREE"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'doubled: a second case'* ]]
+  [[ "$output" == *'doubled: a second case'* ]] || { echo "$output"; false; }
 }
 
 @test "release-store split check rejects an edited body including heredoc bytes" {
   sed 's/"unchanged":true/"unchanged":false/' "$ORIGINAL" > "$PART"
   run bash "$CHECK" "$TREE"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'edited: a heredoc brace is part of the body'* ]]
+  [[ "$output" == *'edited: a heredoc brace is part of the body'* ]] || { echo "$output"; false; }
 }
 
 @test "release-store split check admits a new case only inside a lane block" {
@@ -51,20 +51,20 @@ setup() {
   printf '%s\n' '# BEGIN LANE Z9' "$header \"a lane case\" {" '  [ 3 -eq 3 ]' '}' '# END LANE Z9' >> "$PART"
   run bash "$CHECK" "$TREE"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *'(1 lane additions)'* ]]
+  [[ "$output" == *'(1 lane additions)'* ]] || { echo "$output"; false; }
 
   cp "$ORIGINAL" "$PART"
   printf '%s\n' "$header \"a stray case\" {" '  [ 3 -eq 3 ]' '}' >> "$PART"
   run bash "$CHECK" "$TREE"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'added or renamed: a stray case'* ]]
+  [[ "$output" == *'added or renamed: a stray case'* ]] || { echo "$output"; false; }
 
   # A lane block excuses only its own part's case of that name.
   printf '%s\n' '# BEGIN LANE Z9' "$header \"a stray case\" {" '  [ 3 -eq 3 ]' '}' '# END LANE Z9' \
     > "$TREE/scripts/tests/release-store-part2.bats"
   run bash "$CHECK" "$TREE"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'added or renamed: a stray case'* ]]
+  [[ "$output" == *'added or renamed: a stray case'* ]] || { echo "$output"; false; }
   rm "${TREE:?}/scripts/tests/release-store-part2.bats"
 
   # A lane block cannot re-home or rewrite an original case.
@@ -72,11 +72,11 @@ setup() {
   printf '%s\n' '# BEGIN LANE Z9' "$header \"a second case\" {" '  [ 2 -eq 2 ]' '}' '# END LANE Z9' >> "$PART"
   run bash "$CHECK" "$TREE"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'lane case reuses an original name: a second case'* ]]
+  [[ "$output" == *'lane case reuses an original name: a second case'* ]] || { echo "$output"; false; }
 
   cp "$ORIGINAL" "$PART"
   printf '%s\n' '# BEGIN LANE Z9' "$header \"an open lane\" {" '  [ 3 -eq 3 ]' '}' >> "$PART"
   run bash "$CHECK" "$TREE"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *'unbalanced lane markers'* ]]
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'unbalanced lane markers'* ]] || { echo "$output"; false; }
 }

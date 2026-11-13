@@ -286,13 +286,62 @@ _gr_reread_override_active() {
 }
 
 # _gr_reread_override_path <normalized-path> — succeeds when the path is an
-# override record or its directory, in any letter case (macOS volumes usually
-# fold case). Edits there are refused: only the CLI writes overrides.
+# override record or its directory: only the CLI writes overrides.
 _gr_reread_override_path() {
+  _gr_guarded_state_path "$1" reread-overrides
+}
+
+# _gr_gate_verdict_path <normalized-path> — succeeds when the path is in the
+# process-gate verdict store ($TRELLIS_HOME/state/gate-verdicts): only the gate
+# writes verdicts, their execution logs and the reuse kill switch.
+_gr_gate_verdict_path() {
+  _gr_guarded_state_path "$1" gate-verdicts
+}
+
+# _gr_guarded_state_path <normalized-path> <directory> — succeeds when the path
+# names <directory> under a state directory, or a file in it, in any letter
+# case (macOS volumes usually fold case); also through the real path of its
+# deepest existing ancestor, so a symlinked parent reaches the same answer; and
+# when it is another name — a hard link, or a symlink — for a file in
+# $GR_TRELLIS_HOME/state/<directory>, whatever its spelling. Mirrors
+# is_guarded_state_path and guarded_inode in read_state.rs and
+# isGuardedStatePath and guardedInode in the Pi extension.
+_gr_guarded_state_path() {
+  local path=$1 dir=$2 real rest='' probe store file
+  _gr_guarded_state_named "$path" "$dir" && return 0
+  real=$path
+  while [ -n "$real" ] && [ ! -d "$real" ]; do
+    rest=/${real##*/}$rest
+    real=${real%/*}
+  done
+  [ -n "$real" ] || real=/
+  # Resolve only when some component is a symlink: an ordinary path forks nothing.
+  probe=$real
+  while [ -n "$probe" ] && [ "$probe" != / ] && [ ! -L "$probe" ]; do probe=${probe%/*}; done
+  if [ -n "$probe" ] && [ "$probe" != / ]; then
+    real=$(cd -P -- "$real" 2>/dev/null && pwd -P) &&
+      _gr_guarded_state_named "${real%/}$rest" "$dir" && return 0
+  fi
+  [ -f "$path" ] || return 1
+  _gr_trellis_home
+  store=$GR_TRELLIS_HOME/state/$dir
+  [ -n "$GR_TRELLIS_HOME" ] && [ -d "$store" ] || return 1
+  # Only a symlink or a file with more than one link can be another name, so an
+  # ordinary edit never walks the store.
+  if [ ! -L "$path" ]; then
+    [ -n "$(find "$path" -prune -links +1 -print 2>/dev/null)" ] || return 1
+  fi
+  while IFS= read -r file; do
+    [ "$path" -ef "$file" ] && return 0
+  done < <(find "$store" -type f 2>/dev/null)
+  return 1
+}
+
+_gr_guarded_state_named() {
   local folded=0 rc=1
   shopt -q nocasematch && folded=1 || shopt -s nocasematch
   case $1 in
-    */state/reread-overrides|*/state/reread-overrides/*) rc=0 ;;
+    */state/"$2"|*/state/"$2"/*) rc=0 ;;
   esac
   [ "$folded" -eq 1 ] || shopt -u nocasematch
   return "$rc"

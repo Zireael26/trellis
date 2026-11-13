@@ -28,8 +28,13 @@ _trellis_attach_verdict_file_sha256() {
   printf '%s\n' "${out%% *}"
 }
 
+# Capture each dialect separately: GNU `stat -f` is --file-system, prints a
+# filesystem block on stdout and then fails, so a chained `||` in one capture
+# appends the GNU mode to that block and the verdict fast path never matches.
 _trellis_attach_verdict_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null
+  local mode
+  mode="$(stat -f '%Lp' "$1" 2>/dev/null)" || mode="$(stat -c '%a' "$1" 2>/dev/null)" || return 1
+  printf '%s\n' "$mode"
 }
 
 trellis_attach_verdict_stop() {
@@ -101,7 +106,7 @@ trellis_attach_verdict_stop() {
   # As the attach spawn runs the job: the installed release, the harness PATH
   # (the checks need its jq and git), no Git or shell-startup overrides.
   out="$(/usr/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX \
-    -u BASH_ENV -u ENV TRELLIS_HOME="$home" \
+    -u BASH_ENV -u ENV -u TRELLIS_LIBS_PRELOADED TRELLIS_HOME="$home" \
     /bin/bash --noprofile --norc "$gate" gate --for stop --target "$root" 2>&1 >/dev/null </dev/null)"
   rc=$?
   [ "$rc" -ne 0 ] || return 0

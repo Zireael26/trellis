@@ -60,6 +60,7 @@ deploy_hooks() {
   cp "$src/stop-verify.sh" "$deploy/stop-verify.sh"
   cp "$src/session-context.sh" "$deploy/session-context.sh"
   cp "$src/lib/deps.sh" "$deploy/lib/deps.sh"
+  cp "$src/lib/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   cp "$src/lib/pm.sh" "$deploy/lib/pm.sh"
   cp "$src/lib/autonomy.sh" "$deploy/lib/autonomy.sh"
   # Spec 074 T14 (amended): Stop step 0 sources the attachment-verdict lib.

@@ -11,10 +11,11 @@ import { deliveredFixture } from './delivered-fixture.mjs';
 
 const destructive = JSON.parse(readFileSync(new URL('../../hooks/rules/destructive.json', import.meta.url), 'utf8'));
 const reread = JSON.parse(readFileSync(new URL('../../hooks/rules/reread.json', import.meta.url), 'utf8'));
-// The one exemption-bearing rule, wherever later rules are appended.
+// The gcloud/kubectl exemption-bearing rule, wherever later rules are appended;
+// the verdict-store rules carry their own read-only allowlist exemptions.
 const exempting = doc => {
-  const rules = doc.rules.filter(rule => rule.exempt);
-  assert.equal(rules.length, 1, 'exactly one destructive rule carries an exemption');
+  const rules = doc.rules.filter(rule => rule.id === 'secrets-read' && rule.exempt);
+  assert.equal(rules.length, 1, 'secrets-read carries an exemption');
   return rules[0];
 };
 function fixture(t, mutate) {

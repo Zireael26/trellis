@@ -29,7 +29,7 @@ teardown() {
   before="$(shasum -a 256 "$EXT/trellis-web-search.ts")"
   TWS_BLOCKED_LIST="$SANDBOX/blocked.sha256" run "$INSTALLER" --home "$H" install "$SANDBOX/blocked.ts"
   [ "$status" -eq 3 ]
-  [[ "$output" == *"refused"* ]]
+  [[ "$output" == *"refused"* ]] || false
   [ "$(shasum -a 256 "$EXT/trellis-web-search.ts")" = "$before" ]
   [ ! -e "$H/.pi/agent/backups" ]
 }
@@ -57,8 +57,8 @@ teardown() {
   [ "$(shasum -a 256 "${backups[0]}" | awk '{print $1}')" = "$old_sha" ]
   # Nothing but the new file is left where pi loads extensions from.
   [ "$(ls -A "$EXT")" = "trellis-web-search.ts" ]
-  [[ "$output" == *"before: $old_sha"* ]]
-  [[ "$output" == *"after: $(shasum -a 256 "$SANDBOX/good.ts" | awk '{print $1}')"* ]]
+  [[ "$output" == *"before: $old_sha"* ]] || false
+  [[ "$output" == *"after: $(shasum -a 256 "$SANDBOX/good.ts" | awk '{print $1}')"* ]] || false
 }
 
 @test "R14: two installs in the same second keep both backups" {
@@ -164,7 +164,7 @@ EOF
   PATH="$SHIMS:$PATH" CORRUPT_INSTALL=1 TWS_BLOCKED_LIST="$SANDBOX/blocked.sha256" \
     run "$INSTALLER" --home "$H" install "$SANDBOX/good.ts"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"does not match vetted digest"* ]]
+  [[ "$output" == *"does not match vetted digest"* ]] || false
   [ ! -e "$EXT/trellis-web-search.ts" ]
 }
 
@@ -174,8 +174,8 @@ EOF
   run "$INSTALLER" --home "$H" remove
   [ "$status" -eq 0 ]
   # The receipt describes the link; nothing tried to read its missing target.
-  [[ "$output" == *"before: symlink -> $SANDBOX/nowhere.ts"* ]]
-  [[ "$output" != *"No such file"* ]]
+  [[ "$output" == *"before: symlink -> $SANDBOX/nowhere.ts"* ]] || false
+  [[ "$output" != *"No such file"* ]] || false
   [ ! -e "$EXT/trellis-web-search.ts" ] && [ ! -L "$EXT/trellis-web-search.ts" ]
   backups=("$H"/.pi/agent/backups/extensions/trellis-web-search.ts.*)
   [ -L "${backups[0]}" ]
@@ -270,7 +270,7 @@ EOF
   done
   PATH="$PATHDIR" TWS_BLOCKED_LIST="$SANDBOX/blocked.sha256" run "$INSTALLER" --home "$H" install "$SANDBOX/good.ts"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"after: $(shasum -a 256 "$SANDBOX/good.ts" | awk '{print $1}')"* ]]
+  [[ "$output" == *"after: $(shasum -a 256 "$SANDBOX/good.ts" | awk '{print $1}')"* ]] || false
   PATH="$PATHDIR" TWS_BLOCKED_LIST="$SANDBOX/blocked.sha256" run "$INSTALLER" --home "$H" install "$SANDBOX/blocked.ts"
   [ "$status" -eq 3 ]
 }

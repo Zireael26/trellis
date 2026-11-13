@@ -3,6 +3,8 @@
 # Bash 3.2 compatible.
 
 set -u
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
 # Every private capture and rendered task input starts owner-only even before
 # its explicit chmod. The materializer never writes to a project root.
 umask 077
@@ -65,7 +67,7 @@ sha256_file() {
     materialize_error "a SHA-256 command (shasum or sha256sum) is required"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
-  if ! printf '%s' "$digest" | LC_ALL=C grep -Eq '^[a-f0-9]{64}$'; then
+  if ! printf '%s' "$digest" | /usr/bin/env LC_ALL=C grep -Eq '^[a-f0-9]{64}$'; then
     materialize_error "could not calculate SHA-256 for $path"
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
@@ -255,7 +257,7 @@ task_publish_identity() {
     return "$TRELLIS_EX_UNAVAILABLE"
   fi
   identity="$(python3 "$TASK_PUBLISH_HELPER" identity "$path")" || return "$?"
-  if ! printf '%s' "$identity" | LC_ALL=C grep -Eq '^[0-9]+:[0-9]+$'; then
+  if ! printf '%s' "$identity" | /usr/bin/env LC_ALL=C grep -Eq '^[0-9]+:[0-9]+$'; then
     materialize_error "fd-pinned task publication helper returned an invalid directory identity"
     return "$TRELLIS_EX_STATE"
   fi

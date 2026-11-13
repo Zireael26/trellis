@@ -252,7 +252,7 @@ wm_prune_would_remove() {
     case "${item##*/}" in *$'\n'*|*$'\r'*|*$'\t'*) return 2 ;; esac
   done
   # Git writes its verbose dry-run decisions to stderr, not stdout.
-  listing="$(LC_ALL=C wm_git --git-dir="$common" worktree prune --dry-run --verbose "--expire=$expiry" 2>&1)" || return 2
+  listing="$( { export LC_ALL=C && wm_git --git-dir="$common" worktree prune --dry-run --verbose "--expire=$expiry"; } 2>&1)" || return 2
   while IFS= read -r line; do
     [ "$line" != "Removing worktrees/$name: gitdir file points to non-existent location" ] || return 0
   done <<EOF

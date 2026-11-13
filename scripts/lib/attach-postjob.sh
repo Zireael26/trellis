@@ -214,7 +214,8 @@ trellis_attach_postjob_spawn() {
       POSIX::close($_) for @fds;
       exec { $ARGV[0] } @ARGV or POSIX::_exit(127);
     ' "$log" /usr/bin/env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR -u GIT_PREFIX \
-      -u TMPDIR TRELLIS_HOME="$home" /bin/bash --noprofile --norc "$postjob" run --target "$root" \
+      -u TMPDIR -u TRELLIS_LIBS_PRELOADED TRELLIS_HOME="$home" \
+      /bin/bash --noprofile --norc "$postjob" run --target "$root" \
       </dev/null >/dev/null 2>&1; then
       # What the bounded readiness wait reads, from this same spawn.
       _ATTACH_POSTJOB_SPAWNED="$root"
@@ -713,10 +714,13 @@ attach_postjob_main() {
       *) printf 'attach-postjob: unknown argument: %s\n' "$1" >&2; return "$TRELLIS_EX_USAGE" ;;
     esac
   done
-  [ -n "$root" ] || { printf 'usage: attach-postjob.sh run|prepush|gate --target ROOT [--home PATH] [--sync] [--for stop|push] [--wait SECONDS]\n' >&2; return "$TRELLIS_EX_USAGE"; }
+  [ -n "$root" ] || { printf 'usage: attach-postjob.sh run|spawn|prepush|gate --target ROOT [--home PATH] [--sync] [--for stop|push] [--wait SECONDS]\n' >&2; return "$TRELLIS_EX_USAGE"; }
   home="$(trellis_home_resolve "$home_opt")" || return "$?"
   case "$command" in
     run) attach_postjob_run "$home" "$root" "$sync" ;;
+    # `release adopt` (1.5.1): the attach spawn, for a CLI bundle that does
+    # not load this library. Pending status, detached job, immediate return.
+    spawn) trellis_attach_postjob_spawn "$home" "$root" ;;
     prepush) attach_postjob_prepush "$home" "$root" ;;
     gate)
       case "$gate_for" in stop|push) ;; *) printf 'attach-postjob: gate needs --for stop|push\n' >&2; return "$TRELLIS_EX_USAGE" ;; esac
@@ -728,6 +732,9 @@ attach_postjob_main() {
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -u
+  # This is a fresh shell: an inherited marker cannot certify that its
+  # dependencies were sourced here. Do not change the sourced-library case.
+  unset TRELLIS_LIBS_PRELOADED
   _APJ_LIB="${_ATTACH_POSTJOB_SELF%/*}"
   # shellcheck source=trellis-home.sh
   . "$_APJ_LIB/trellis-home.sh"

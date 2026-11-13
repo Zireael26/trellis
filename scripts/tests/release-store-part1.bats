@@ -17,6 +17,8 @@ setup_file() {
     mkdir -p "$SANDBOX" || return 1
     initialize_release_store_machine || return 1
     group_plan_build_group history || return 1
+    # Never capture live postjob state in the reusable machine baseline.
+    wait_for_fixture_postjobs "$SANDBOX" || return 1
     group_plan_assert_no_journal || return 1
     fixture_clone "$SANDBOX" "$GROUP_PLAN_RELEASE_CACHE/baseline" || return 1
     find "$SANDBOX" -depth -type d -exec chmod u+w {} \; || return 1
@@ -26,15 +28,16 @@ setup_file() {
 
 teardown_file() {
   [ -d "${GROUP_PLAN_RELEASE_CACHE:-}" ] || return 0
+  wait_for_fixture_postjobs "$GROUP_PLAN_RELEASE_CACHE/machine" || return 1
   find "$GROUP_PLAN_RELEASE_CACHE" -depth -type d -exec chmod u+w {} \; 2>/dev/null || true
   rm -rf "$GROUP_PLAN_RELEASE_CACHE"
 }
 
 setup() {
-  # Fixture attaches must not leave a detached post-attach job behind: it
-  # re-asserts a husky-reset core.hooksPath and takes the checkout lock while
-  # the case stages operator state and adopts. run-tests.sh sets this too; the
-  # suite must not depend on its runner. attach-postjob.bats covers the job.
+  # Direct fixture attaches skip postjobs; adoption's clean release bootstrap
+  # does not inherit this switch. The shared teardown drains those jobs before
+  # deleting the machine or releasing its lease. The suite also sets the switch
+  # itself so direct attaches do not depend on run-tests.sh.
   export TRELLIS_ATTACH_POSTJOB=off
   GROUP_PLAN_CASE_LOCK_HELD=false
   case "$BATS_TEST_DESCRIPTION" in
@@ -124,7 +127,7 @@ setup() {
     [ "$status" -eq 3 ]
     [ -s "$SANDBOX/sync.err" ]
     stderr="$(cat "$SANDBOX/sync.err")"
-    [[ "$stderr" == *'stale owned exclude plan'*'info/exclude'*'checkout '*"$GROUP_PLAN_NEW"*'release 1.3.9'*'recorded '*'live '*'desired '*'hookspath-guard.sh'*'remedy:'* ]]
+    [[ "$stderr" == *'stale owned exclude plan'*'info/exclude'*'checkout '*"$GROUP_PLAN_NEW"*'release 1.3.9'*'recorded '*'live '*'desired '*'hookspath-guard.sh'*'remedy:'* ]] || false
     [ "$(group_plan_state)" = "$before" ]
     [ ! -e "$GROUP_PLAN_NEW/.trellis/runtime" ]
     ! owner_for_root "$GROUP_PLAN_NEW"
@@ -161,7 +164,7 @@ setup() {
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c 'cd "$1" && bash "$2" add gp-blocked' _ \
     "$GROUP_PLAN_MAIN" "$REPO_ROOT/scripts/worktree.sh"
   [ "$status" -eq 3 ]
-  [[ "$output" == *'stale owned exclude plan'*'remedy:'* ]]
+  [[ "$output" == *'stale owned exclude plan'*'remedy:'* ]] || false
   [ ! -e "$GROUP_PLAN_NEW" ]
   run git -C "$GROUP_PLAN_MAIN" show-ref --verify --quiet refs/heads/gp-blocked
   [ "$status" -ne 0 ]

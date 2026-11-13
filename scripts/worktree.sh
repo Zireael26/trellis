@@ -13,6 +13,9 @@
 
 set -euo pipefail
 
+# Reconcile children run in fresh shells, not the caller's preloaded bundle.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 usage() {

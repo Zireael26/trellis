@@ -208,8 +208,8 @@ snapshot_directory_identity() {
 path_has_extended_acl() {
   local path="$1" listing marker
   case "${INSTALLER_SYSTEM_NAME:-$("/usr/bin/uname" -s)}" in
-    Darwin) listing="$(LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" ;;
-    *) listing="$(LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" ;;
+    Darwin) listing="$(/usr/bin/env LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" ;;
+    *) listing="$(/usr/bin/env LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" ;;
   esac
   [ -n "$listing" ] || return 2
   # Darwin's ls prints an xattr's "@" in place of an ACL's "+"; with -e each

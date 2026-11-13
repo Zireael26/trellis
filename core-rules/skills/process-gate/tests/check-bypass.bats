@@ -73,7 +73,7 @@ commit_body_and_check() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"core.hooksPath"* ]] || { echo "$output"; false; }
   [[ "$output" == *"actively set to disable hooks"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"/dev/null"* ]]
+  [[ "$output" == *"/dev/null"* ]] || false
 }
 
 @test "§3a: core.hooksPath unset -> no finding from this check (exit 0)" {
@@ -85,14 +85,14 @@ commit_body_and_check() {
   fi
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"actively set to disable hooks"* ]]
+  [[ "$output" != *"actively set to disable hooks"* ]] || false
 }
 
 @test "§3a: core.hooksPath=/custom/path -> no finding (legitimate override)" {
   git -C "$PROJECT_DIR" config core.hooksPath /custom/path
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"actively set to disable hooks"* ]]
+  [[ "$output" != *"actively set to disable hooks"* ]] || false
 }
 
 # --- §3b: commit.gpgsign actively disabled ---
@@ -102,14 +102,14 @@ commit_body_and_check() {
   run_check
   [ "$status" -eq 2 ]
   [[ "$output" == *"commit.gpgsign"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"actively disabled via persistent config"* ]]
+  [[ "$output" == *"actively disabled via persistent config"* ]] || false
 }
 
 @test "§3b: commit.gpgsign=true -> no finding (exit 0)" {
   git -C "$PROJECT_DIR" config commit.gpgsign true
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"actively disabled via persistent config"* ]]
+  [[ "$output" != *"actively disabled via persistent config"* ]] || false
 }
 
 @test "§3b: commit.gpgsign unset -> no finding (exit 0)" {
@@ -118,7 +118,7 @@ commit_body_and_check() {
   fi
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"actively disabled via persistent config"* ]]
+  [[ "$output" != *"actively disabled via persistent config"* ]] || false
 }
 
 # --- §1a: PROCESS_GATE_SKIP=1 commit-trailer detection ---
@@ -127,19 +127,19 @@ commit_body_and_check() {
   commit_body_and_check "PROCESS_GATE_SKIP=1"
   [ "$status" -eq 2 ]
   [[ "$output" == *"PROCESS_GATE_SKIP=1"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"must be justified"* ]]
+  [[ "$output" == *"must be justified"* ]] || false
 }
 
 @test "§1a: no PROCESS_GATE_SKIP trailer -> no finding from this check (exit 0)" {
   commit_body_and_check "ordinary body with no override trailers"
   [ "$status" -eq 0 ]
-  [[ "$output" != *"PROCESS_GATE_SKIP=1 found"* ]]
+  [[ "$output" != *"PROCESS_GATE_SKIP=1 found"* ]] || false
 }
 
 @test "§1 baseline: TRELLIS_ALLOW_MAIN_PUSH=1 trailer in range -> warn (exit 2)" {
   commit_body_and_check "TRELLIS_ALLOW_MAIN_PUSH=1"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"TRELLIS_ALLOW_MAIN_PUSH=1"* ]]
+  [[ "$output" == *"TRELLIS_ALLOW_MAIN_PUSH=1"* ]] || false
 }
 
 # --- §4: hooks registration across both settings files ---
@@ -246,8 +246,8 @@ with open(owner_path, "w") as destination:
   run_check
   [ "$status" -eq 1 ]
   [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || { echo "$output"; false; }
-  [[ "$output" == *".claude/settings.json"* ]]
-  [[ "$output" == *".claude/settings.local.json"* ]]
+  [[ "$output" == *".claude/settings.json"* ]] || false
+  [[ "$output" == *".claude/settings.local.json"* ]] || false
 }
 
 @test "§4: hooks in settings.json (legacy layout) -> pass (exit 0)" {
@@ -291,7 +291,7 @@ with open(owner_path, "w") as destination:
   [ ! -e "$PROJECT_DIR/.trellis.json" ]
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" != *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 # Deleting the settings pair fails when this worktree's owner declares Claude.
@@ -302,7 +302,7 @@ with open(owner_path, "w") as destination:
   run_check
   [ "$status" -eq 1 ]
   [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"neither file exists"* ]]
+  [[ "$output" == *"neither file exists"* ]] || false
 }
 
 # --- §4: Codex registration and per-harness tampering ---
@@ -332,7 +332,7 @@ registered_codex_fixture() {
 @test "§4: codex-only rendered hooks.json -> pass (exit 0)" {
   registered_codex_fixture
   [ ! -e "$PROJECT_DIR/.claude" ]
-  [[ "$output" != *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" != *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "§4: codex-only empty hooks.json -> fail (exit 1)" {
@@ -340,7 +340,7 @@ registered_codex_fixture() {
   write_codex_hooks '{ "hooks": {} }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]]
+  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]] || false
 }
 
 @test "§4: codex-only event keys stripped of command entries -> fail (exit 1)" {
@@ -348,7 +348,7 @@ registered_codex_fixture() {
   write_codex_hooks '{ "hooks": { "PreToolUse": [], "Stop": [] } }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]]
+  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]] || false
 }
 
 @test "§4: codex-only event groups stripped of command entries -> fail (exit 1)" {
@@ -356,7 +356,7 @@ registered_codex_fixture() {
   write_codex_hooks '{ "hooks": { "PreToolUse": [{ "matcher": "Bash", "hooks": [] }] } }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]]
+  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]] || false
 }
 
 @test "§4: codex-only empty or missing command string -> fail (exit 1)" {
@@ -365,7 +365,7 @@ registered_codex_fixture() {
     write_codex_hooks "{\"hooks\":{\"Stop\":[{\"hooks\":[$entry]}]}}"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]]
+    [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]] || false
   done
 }
 
@@ -374,7 +374,7 @@ registered_codex_fixture() {
   write_codex_hooks '{ "hooks": { "Stop": [] }, "project": { "type": "command", "command": "unrelated" } }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]]
+  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]] || false
 }
 
 @test "§4: codex-only invalid hook shapes or malformed JSON -> fail (exit 1)" {
@@ -383,7 +383,7 @@ registered_codex_fixture() {
     write_codex_hooks "$json"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]]
+    [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]] || false
   done
 }
 
@@ -393,7 +393,7 @@ registered_codex_fixture() {
   [ ! -e "$PROJECT_DIR/.claude" ]
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 @test "§4: codex-only entire hook surface deleted but tracked -> fail (exit 1)" {
@@ -402,7 +402,7 @@ registered_codex_fixture() {
   rm -rf "$PROJECT_DIR/.codex"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 @test "§4: staged deletion of committed Codex registration -> fail (exit 1)" {
@@ -413,7 +413,7 @@ registered_codex_fixture() {
   rm -rf "$PROJECT_DIR/.codex"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 @test "§4: Codex owner ignores stray Claude skills and unowned Pi files -> pass (exit 0)" {
@@ -425,7 +425,7 @@ registered_codex_fixture() {
     '# --- end Trellis local attachment exclude block ---' >> "$PROJECT_DIR/.git/info/exclude"
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" != *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "§4: no hooks in any harness declared by the owner -> fail (exit 1)" {
@@ -434,8 +434,8 @@ registered_codex_fixture() {
   rm -rf "$PROJECT_DIR/.codex"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]] || false
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 @test "§4: empty Claude settings cannot be masked by registered Codex hooks -> fail (exit 1)" {
@@ -444,7 +444,7 @@ registered_codex_fixture() {
     write_settings "$settings" '{ "hooks": {} }'
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".claude/settings.json / .claude/settings.local.json: no \"hooks\" event with a command entry"* ]]
+    [[ "$output" == *".claude/settings.json / .claude/settings.local.json: no \"hooks\" event with a command entry"* ]] || false
     rm "$PROJECT_DIR/.claude/$settings"
   done
 }
@@ -457,7 +457,7 @@ registered_codex_fixture() {
   write_codex_hooks '{ "hooks": {} }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]]
+  [[ "$output" == *".codex/hooks.json: no \"hooks\" event with a command entry"* ]] || false
 }
 
 @test "§4: deleted tracked Claude settings cannot be masked by Codex hooks -> fail (exit 1)" {
@@ -470,7 +470,7 @@ registered_codex_fixture() {
   rm "$PROJECT_DIR/.claude/settings.json"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]]
+  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]] || false
 }
 
 @test "§4: ignored Claude registration in owner cannot be deleted behind Codex -> fail (exit 1)" {
@@ -485,7 +485,7 @@ registered_codex_fixture() {
   rm -rf "$PROJECT_DIR/.claude"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]]
+  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]] || false
 }
 
 @test "§4: ignored Codex registration declared by attach cannot be deleted behind Claude -> fail (exit 1)" {
@@ -498,7 +498,7 @@ registered_codex_fixture() {
   rm -rf "$PROJECT_DIR/.codex"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 # --- §4: local ownership versus manifest-only clones ---
@@ -509,15 +509,15 @@ registered_codex_fixture() {
   write_attachment_owner claude
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "§4: manifest-only checkout before attachment -> warn not attached (exit 2)" {
   printf '{"schema_version":1,"project_id":"fixture"}\n' > "$PROJECT_DIR/.trellis.json"
   run_check
   [ "$status" -eq 2 ]
-  [[ "$output" == *"not attached in this checkout"* ]]
-  [[ "$output" != *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"not attached in this checkout"* ]] || false
+  [[ "$output" != *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "§4: tracked hook files and managed excludes do not attach a raw clone -> warn (exit 2)" {
@@ -528,14 +528,14 @@ registered_codex_fixture() {
     '/.codex/hooks.json' '# --- end Trellis local attachment exclude block ---' >> "$PROJECT_DIR/.git/info/exclude"
   run_check
   [ "$status" -eq 2 ]
-  [[ "$output" == *"not attached in this checkout"* ]]
+  [[ "$output" == *"not attached in this checkout"* ]] || false
 }
 
 @test "§4: no manifest or local owner preserves legacy unattached behavior -> pass (exit 0)" {
   write_codex_hooks '{ "hooks": {} }'
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "§4: owner without a manifest still requires its Codex hooks -> pass then fail" {
@@ -546,7 +546,7 @@ registered_codex_fixture() {
   rm "$PROJECT_DIR/.codex/hooks.json"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 @test "§4: runtime anchor without an owner fails closed instead of warning (exit 1)" {
@@ -557,7 +557,7 @@ registered_codex_fixture() {
   ln -s "$BATS_TEST_TMPDIR/missing-runtime" "$PROJECT_DIR/.trellis/runtime"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"owner record unavailable or invalid"* ]]
+  [[ "$output" == *"owner record unavailable or invalid"* ]] || false
 }
 
 @test "§4: malformed owner cannot downgrade attachment to a warning (exit 1)" {
@@ -565,7 +565,7 @@ registered_codex_fixture() {
   printf '{"schema_version":' > "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"owner record unavailable or invalid"* ]]
+  [[ "$output" == *"owner record unavailable or invalid"* ]] || false
 }
 
 @test "§4: wrong-root owner is rejected rather than borrowing its harness set (exit 1)" {
@@ -574,7 +574,7 @@ registered_codex_fixture() {
   mv "$OWNER_PATH.tmp" "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"owner record unavailable or invalid"* ]]
+  [[ "$output" == *"owner record unavailable or invalid"* ]] || false
 }
 
 @test "§4: sibling worktree does not inherit this worktree's owner -> warn (exit 2)" {
@@ -588,7 +588,7 @@ registered_codex_fixture() {
   run_check
   PROJECT_DIR="$original_root"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"not attached in this checkout"* ]]
+  [[ "$output" == *"not attached in this checkout"* ]] || false
 }
 
 @test "§4: unset TRELLIS_HOME reads owner from HOME/.trellis -> pass (exit 0)" {
@@ -599,7 +599,7 @@ registered_codex_fixture() {
   unset TRELLIS_HOME
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "§4: deferred Claude without a recorded baseline cannot authenticate arbitrary hooks" {
@@ -609,11 +609,11 @@ registered_codex_fixture() {
   mv "$OWNER_PATH.tmp" "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]]
+  [[ "$output" == *".claude/settings.json / .claude/settings.local.json: neither file exists"* ]] || false
   write_settings settings.local.json '{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "dod-receipt" }] }] } }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "§4: legacy shared-agent owner without Pi still requires Codex hooks" {
@@ -626,7 +626,7 @@ registered_codex_fixture() {
   rm "$PROJECT_DIR/.codex/hooks.json"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 @test "§4: symlink alias of worktree root resolves to its canonical owner -> pass (exit 0)" {
@@ -636,7 +636,7 @@ registered_codex_fixture() {
   export CLAUDE_PROJECT_DIR="$alias_root"
   run_check
   [ "$status" -eq 0 ]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "§4: manifest-only warning cannot mask empty Claude settings -> fail (exit 1)" {
@@ -644,8 +644,8 @@ registered_codex_fixture() {
   write_settings settings.json '{ "hooks": {} }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"not attached in this checkout"* ]]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"not attached in this checkout"* ]] || false
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 # --- §4: Pi native artifacts, pinned to the local owner ---
@@ -745,7 +745,7 @@ PY
   registered_pi_fixture
   [ ! -e "$PROJECT_DIR/.codex/hooks.json" ]
   [ ! -e "$PROJECT_DIR/.claude" ]
-  [[ "$output" != *"not registered"* ]]
+  [[ "$output" != *"not registered"* ]] || false
 }
 
 @test "§4: Pi extension missing -> fail (exit 1)" {
@@ -753,7 +753,7 @@ PY
   rm "$PROJECT_DIR/.pi/extensions/trellis.ts"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Pi dispatcher missing -> fail (exit 1)" {
@@ -761,7 +761,7 @@ PY
   rm "$PROJECT_DIR/.pi/hooks/dispatch.sh"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Pi symlink artifacts replaced by regular copies -> fail (exit 1)" {
@@ -773,7 +773,7 @@ PY
     cp "$BATS_TEST_TMPDIR/pi-replacement" "$PROJECT_DIR/$path"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *"$path: native Pi hook artifact"* ]]
+    [[ "$output" == *"$path: native Pi hook artifact"* ]] || false
     rm "$PROJECT_DIR/$path"
     ln -s "$target" "$PROJECT_DIR/$path"
   done
@@ -786,7 +786,7 @@ PY
     : > "$PI_PAYLOAD/core-rules/pi/$path"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".pi/$path: native Pi hook artifact"* ]]
+    [[ "$output" == *".pi/$path: native Pi hook artifact"* ]] || false
     cp "$BATS_TEST_TMPDIR/pi-backup" "$PI_PAYLOAD/core-rules/pi/$path"
   done
 }
@@ -797,8 +797,8 @@ PY
   rm -rf "$PROJECT_DIR/.pi"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Pi symlink retargeted to identical content still differs from owner -> fail (exit 1)" {
@@ -808,7 +808,7 @@ PY
   ln -s "$BATS_TEST_TMPDIR/other-extension.ts" "$PROJECT_DIR/.pi/extensions/trellis.ts"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Pi newline-suffixed link target is not the recorded target -> fail (exit 1)" {
@@ -818,7 +818,7 @@ PY
   ln -s '../../.trellis/runtime/core-rules/pi/extensions/trellis.ts'$'\n' "$PROJECT_DIR/.pi/extensions/trellis.ts"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Pi broken symlink with unchanged recorded target -> fail (exit 1)" {
@@ -826,7 +826,7 @@ PY
   rm "$PI_PAYLOAD/core-rules/pi/hooks/dispatch.sh"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Pi files present but a native artifact absent from owner -> fail (exit 1)" {
@@ -836,7 +836,7 @@ PY
   mv "$OWNER_PATH.tmp" "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Pi regular-file artifacts use recorded content hashes, not hard-coded contents" {
@@ -860,7 +860,7 @@ PY
     printf 'different file content\n' > "$PROJECT_DIR/$path"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *"$path: native Pi hook artifact"* ]]
+    [[ "$output" == *"$path: native Pi hook artifact"* ]] || false
     cp "$BATS_TEST_TMPDIR/pi-copy" "$PROJECT_DIR/$path"
   done
 }
@@ -877,7 +877,7 @@ PY
   rm "$PROJECT_DIR/.pi/hooks/dispatch.sh"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "§4: Codex+Pi requires both registrations independently" {
@@ -886,14 +886,14 @@ PY
   rm "$PROJECT_DIR/.codex/hooks.json"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
 }
 
 @test "§4: unrelated command cannot mask stripped Claude hooks -> fail (exit 1)" {
   write_settings settings.json '{ "hooks": { "Stop": [] }, "project": { "type": "command", "command": "unrelated" } }'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 # --- Round 1: authenticate the complete owner-recorded registration ---
@@ -924,7 +924,7 @@ mutate_hook_file() {
   mutate_hook_file .codex/hooks.json '.hooks = {Stop:[{hooks:[.hooks.Stop[0].hooks[0]]}]}'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: Codex dummy event with true cannot mask stripped real events" {
@@ -932,7 +932,7 @@ mutate_hook_file() {
   write_codex_hooks '{"hooks":{"Stop":[],"PreToolUse":[],"X":[{"hooks":[{"type":"command","command":"true"}]}]}}'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: Codex command replacement in a real event fails against the recorded render" {
@@ -940,7 +940,7 @@ mutate_hook_file() {
   mutate_hook_file .codex/hooks.json '.hooks.PreToolUse[0].hooks[0].command = "true"'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: Codex missing one expected event fails despite all other commands" {
@@ -948,7 +948,7 @@ mutate_hook_file() {
   mutate_hook_file .codex/hooks.json 'del(.hooks.SessionStart)'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: Codex changed matcher fails with every recorded command still present" {
@@ -956,7 +956,7 @@ mutate_hook_file() {
   mutate_hook_file .codex/hooks.json '.hooks.PreToolUse[0].matcher = "NeverMatches"'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: hash-only owner authenticates Codex bytes and rejects command replacement" {
@@ -968,7 +968,7 @@ mutate_hook_file() {
   mutate_hook_file .codex/hooks.json '.hooks.Stop[0].hooks[0].command = "true"'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: identical Codex hooks behind a substituted file symlink fail" {
@@ -977,7 +977,7 @@ mutate_hook_file() {
   ln -s "$BATS_TEST_TMPDIR/copied-hooks.json" "$PROJECT_DIR/.codex/hooks.json"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: identical Codex hooks behind a substituted parent symlink fail" {
@@ -986,7 +986,7 @@ mutate_hook_file() {
   ln -s "$BATS_TEST_TMPDIR/decoy-codex" "$PROJECT_DIR/.codex"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: Claude full rendered registration passes in either settings file" {
@@ -1008,7 +1008,7 @@ mutate_hook_file() {
   write_settings settings.local.json '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"true"}]}]}}'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "R1: Claude missing expected event fails despite surviving real commands" {
@@ -1016,7 +1016,7 @@ mutate_hook_file() {
   mutate_hook_file .claude/settings.local.json 'del(.hooks.SessionStart)'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "R1: Claude replaced command fails despite every other real command" {
@@ -1024,7 +1024,7 @@ mutate_hook_file() {
   mutate_hook_file .claude/settings.local.json '.hooks.PreToolUse[0].hooks[0].command = "true"'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "R1: Claude other settings file with a dummy command cannot mask stripped owned hooks" {
@@ -1033,7 +1033,7 @@ mutate_hook_file() {
   mutate_hook_file .claude/settings.local.json '.hooks = {}'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "R1: every attached JSON harness fails closed when its expectation baseline is lost" {
@@ -1046,8 +1046,8 @@ mutate_hook_file() {
   mv "$OWNER_PATH.tmp" "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: full Claude hooks cannot mask a single lost owner-recorded Codex event" {
@@ -1059,7 +1059,7 @@ mutate_hook_file() {
   mutate_hook_file .codex/hooks.json 'del(.hooks.PostToolUse)'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]]
+  [[ "$output" == *"matching owner-recorded Trellis hooks"* ]] || false
 }
 
 @test "R1: deferred Claude with recorded render expectations cannot lose a command" {
@@ -1074,7 +1074,7 @@ mutate_hook_file() {
   mutate_hook_file .claude/settings.local.json '.hooks.Stop[0].hooks[0].command = "true"'
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 # --- Round 1: pin the runtime and resolve Pi leaves, not just readlink text ---
@@ -1102,8 +1102,8 @@ pi_decoy_fixture() {
   [ -s "$PROJECT_DIR/.pi/hooks/dispatch.sh" ]
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "R1: runtime anchor replaced by a nonempty directory fails its recorded kind" {
@@ -1114,7 +1114,7 @@ pi_decoy_fixture() {
   [ -s "$PROJECT_DIR/.pi/extensions/trellis.ts" ]
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
 }
 
 @test "R1: replaced pi parent cannot run decoys with unchanged recorded leaf links" {
@@ -1128,8 +1128,8 @@ pi_decoy_fixture() {
   done
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "R1: each Pi leaf parent rejects a symlink to a decoy with the same link text" {
@@ -1143,7 +1143,7 @@ pi_decoy_fixture() {
     [ "$(readlink "$PROJECT_DIR/.pi/$relative")" = "../../.trellis/runtime/core-rules/pi/$relative" ]
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".pi/$relative: native Pi hook artifact"* ]]
+    [[ "$output" == *".pi/$relative: native Pi hook artifact"* ]] || false
     rm "$PROJECT_DIR/.pi/$parent"
     mv "$BATS_TEST_TMPDIR/original-parent" "$PROJECT_DIR/.pi/$parent"
   done
@@ -1157,7 +1157,7 @@ pi_decoy_fixture() {
     [ -s "$PROJECT_DIR/.pi/$relative" ]
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".pi/$relative: native Pi hook artifact"* ]]
+    [[ "$output" == *".pi/$relative: native Pi hook artifact"* ]] || false
     rm "$PI_PAYLOAD/core-rules/pi/$relative"
     mv "$BATS_TEST_TMPDIR/external-payload-file" "$PI_PAYLOAD/core-rules/pi/$relative"
   done
@@ -1171,7 +1171,7 @@ pi_decoy_fixture() {
     [ -s "$PROJECT_DIR/.pi/$relative" ]
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".pi/$relative: native Pi hook artifact"* ]]
+    [[ "$output" == *".pi/$relative: native Pi hook artifact"* ]] || false
     rm "$PI_PAYLOAD/core-rules/pi/$relative"
     mv "$PI_PAYLOAD/other-file" "$PI_PAYLOAD/core-rules/pi/$relative"
   done
@@ -1184,7 +1184,7 @@ pi_decoy_fixture() {
   [ -s "$PROJECT_DIR/.pi/hooks/dispatch.sh" ]
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "R1: linked trellis surface parent cannot mask unchanged anchor and Pi leaves" {
@@ -1194,7 +1194,7 @@ pi_decoy_fixture() {
   [ -s "$PROJECT_DIR/.pi/hooks/dispatch.sh" ]
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/hooks/dispatch.sh: native Pi hook artifact"* ]] || false
 }
 
 @test "R1: Pi owner must record its runtime target rather than borrowing the live anchor" {
@@ -1203,7 +1203,7 @@ pi_decoy_fixture() {
   mv "$OWNER_PATH.tmp" "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]]
+  [[ "$output" == *".pi/extensions/trellis.ts: native Pi hook artifact"* ]] || false
 }
 
 # --- Round 1: git-toplevel identity and private owner reads ---
@@ -1216,8 +1216,8 @@ pi_decoy_fixture() {
     export "$harness_env=$PROJECT_DIR/subdirectory"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *"project root must equal the Git worktree top level"* ]]
-    [[ "$output" != *"not attached"* ]]
+    [[ "$output" == *"project root must equal the Git worktree top level"* ]] || false
+    [[ "$output" != *"not attached"* ]] || false
   done
 }
 
@@ -1230,8 +1230,8 @@ pi_decoy_fixture() {
   git -C "$PROJECT_DIR" -c commit.gpgsign=false commit -qm "redirecting config"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"process-gate local config is not data: .claude/skills/process-gate-local/local.config.sh:1: CLAUDE_PROJECT_DIR="* ]]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" == *"process-gate local config is not data: .claude/skills/process-gate-local/local.config.sh:1: CLAUDE_PROJECT_DIR="* ]] || false
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "R1: subdirectory PWD fallback canonicalizes to the real attached toplevel" {
@@ -1243,8 +1243,8 @@ pi_decoy_fixture() {
   rm "$PROJECT_DIR/.codex/hooks.json"
   run "$BASH_BIN" -c "cd '$PROJECT_DIR/subdirectory' && '$BASH_BIN' '$SCRIPT'"
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "R1: missing HOME and TRELLIS_HOME cannot silently read phantom root attachment state" {
@@ -1252,8 +1252,8 @@ pi_decoy_fixture() {
   unset HOME TRELLIS_HOME
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"owner record unavailable or invalid"* ]]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" == *"owner record unavailable or invalid"* ]] || false
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "R1: non-private owner record fails rather than authenticating hook commands" {
@@ -1261,7 +1261,7 @@ pi_decoy_fixture() {
   chmod 644 "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"owner record unavailable or invalid"* ]]
+  [[ "$output" == *"owner record unavailable or invalid"* ]] || false
 }
 
 @test "R1: symlinked owner record cannot authenticate even identical attachment contents" {
@@ -1270,7 +1270,7 @@ pi_decoy_fixture() {
   ln -s "$OWNER_PATH.copy" "$OWNER_PATH"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"owner record unavailable or invalid"* ]]
+  [[ "$output" == *"owner record unavailable or invalid"* ]] || false
 }
 
 # --- Round 4: managed Git hook authority survives package installs ---
@@ -1291,8 +1291,8 @@ managed_hooks_fixture() {
   git -C "$PROJECT_DIR" config core.hooksPath .husky/_
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core.hooksPath: local path does not match owner-recorded managed dispatcher"* ]]
-  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]]
+  [[ "$output" == *"core.hooksPath: local path does not match owner-recorded managed dispatcher"* ]] || false
+  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]] || false
 }
 
 @test "R4: unset managed hooksPath fails even with package.json" {
@@ -1302,8 +1302,8 @@ managed_hooks_fixture() {
   fi
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core.hooksPath: local path does not match owner-recorded managed dispatcher"* ]]
-  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]]
+  [[ "$output" == *"core.hooksPath: local path does not match owner-recorded managed dispatcher"* ]] || false
+  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]] || false
 }
 
 @test "R4: owner-recorded managed hooksPath requires doctor's literal path" {
@@ -1311,12 +1311,12 @@ managed_hooks_fixture() {
   git -C "$PROJECT_DIR" config core.hooksPath "$MANAGED_HOOKS"
   run_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" != *"core.hooksPath:"* ]]
+  [[ "$output" != *"core.hooksPath:"* ]] || false
   ln -s "$MANAGED_HOOKS" "$PROJECT_DIR/.hooks-alias"
   git -C "$PROJECT_DIR" config core.hooksPath .hooks-alias
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"restore with: git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]]
+  [[ "$output" == *"restore with: git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]] || false
 }
 
 @test "R4: git_hooks disabled in a truly unmanaged checkout preserves hooksPath behavior" {
@@ -1333,11 +1333,11 @@ managed_hooks_fixture() {
     run_check
     if [ "$path" = /dev/null ]; then
       [ "$status" -eq 1 ]
-      [[ "$output" == *"actively set to disable hooks"* ]]
+      [[ "$output" == *"actively set to disable hooks"* ]] || false
     else
       [ "$status" -eq 0 ] || { echo "$output"; false; }
     fi
-    [[ "$output" != *"owner-recorded managed dispatcher"* ]]
+    [[ "$output" != *"owner-recorded managed dispatcher"* ]] || false
   done
 }
 
@@ -1364,20 +1364,20 @@ linked_managed_hooks_fixture() {
   [ "$(git -C "$MAIN_PROJECT_DIR" config --local --get core.hooksPath)" = .husky/_ ]
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"core.hooksPath: local path does not match owner-recorded managed dispatcher"* ]]
-  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]]
+  [[ "$output" == *"core.hooksPath: local path does not match owner-recorded managed dispatcher"* ]] || false
+  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]] || false
 }
 
 @test "R5: linked-worktree managed hooksPath passes but its realpath alias fails" {
   linked_managed_hooks_fixture
   run_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" != *"core.hooksPath:"* ]]
+  [[ "$output" != *"core.hooksPath:"* ]] || false
   ln -s "$MANAGED_HOOKS" "$PROJECT_DIR/.hooks-alias"
   git -C "$PROJECT_DIR" config core.hooksPath .hooks-alias
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"restore with: git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]]
+  [[ "$output" == *"restore with: git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]] || false
 }
 
 @test "R5: enabled sibling alone supplies its recorded managed path" {
@@ -1391,7 +1391,7 @@ linked_managed_hooks_fixture() {
   git -C "$PROJECT_DIR" config core.hooksPath .husky/_
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]]
+  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]] || false
 }
 
 @test "R5: managed directory alone rejects a linked-worktree husky reset" {
@@ -1400,7 +1400,7 @@ linked_managed_hooks_fixture() {
   git -C "$PROJECT_DIR" config core.hooksPath .husky/_
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]]
+  [[ "$output" == *"git config --replace-all core.hooksPath $MANAGED_HOOKS"* ]] || false
 }
 
 @test "R5: managed directory alone accepts the linked-worktree managed path" {
@@ -1408,7 +1408,7 @@ linked_managed_hooks_fixture() {
   rm "$MAIN_OWNER_PATH"
   run_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" != *"core.hooksPath:"* ]]
+  [[ "$output" != *"core.hooksPath:"* ]] || false
 }
 
 # --- Round 3: every harness pins the runtime and the owner-recorded root ---
@@ -1420,8 +1420,8 @@ linked_managed_hooks_fixture() {
   ln -s "$BATS_TEST_TMPDIR/other-payload" "$PROJECT_DIR/.trellis/runtime"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]]
-  [[ "$output" != *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]] || false
+  [[ "$output" != *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "R3: Codex-only owner rejects a retargeted runtime with unchanged hooks" {
@@ -1431,8 +1431,8 @@ linked_managed_hooks_fixture() {
   ln -s "$BATS_TEST_TMPDIR/other-payload" "$PROJECT_DIR/.trellis/runtime"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]]
-  [[ "$output" != *"Tier 1+2 hooks not registered"* ]]
+  [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]] || false
+  [[ "$output" != *"Tier 1+2 hooks not registered"* ]] || false
 }
 
 @test "R3: JSON harness owners reject missing and directory-replaced runtime anchors" {
@@ -1444,11 +1444,11 @@ linked_managed_hooks_fixture() {
     rm "$PROJECT_DIR/.trellis/runtime"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]]
+    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]] || false
     mkdir "$PROJECT_DIR/.trellis/runtime"
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]]
+    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]] || false
     rmdir "$PROJECT_DIR/.trellis/runtime"
     ln -s "$target" "$PROJECT_DIR/.trellis/runtime"
   done
@@ -1465,7 +1465,7 @@ linked_managed_hooks_fixture() {
     [ "$(readlink "$PROJECT_DIR/.trellis/runtime")" = "$target" ]
     run_check
     [ "$status" -eq 1 ]
-    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]]
+    [[ "$output" == *".trellis/runtime: runtime anchor missing or does not match owner"* ]] || false
     rm "$target"
     mv "$BATS_TEST_TMPDIR/moved-payload" "$target"
   done
@@ -1487,14 +1487,14 @@ linked_managed_hooks_fixture() {
     export "$harness_env=$nested"
     run "$BASH_BIN" -c "cd '$nested' && '$BASH_BIN' '$SCRIPT'"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"project root must equal the owner-recorded worktree path"* ]]
-    [[ "$output" != *"not attached"* ]]
+    [[ "$output" == *"project root must equal the owner-recorded worktree path"* ]] || false
+    [[ "$output" != *"not attached"* ]] || false
   done
   unset CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR
   run "$BASH_BIN" -c "cd '$nested' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"project root must equal the owner-recorded worktree path"* ]]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" == *"project root must equal the owner-recorded worktree path"* ]] || false
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "R3: exported Git identity variables cannot hide the attached worktree" {
@@ -1507,21 +1507,21 @@ linked_managed_hooks_fixture() {
   export GIT_COMMON_DIR="$decoy/.git" GIT_INDEX_FILE="$decoy/.git/index"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
+  [[ "$output" != *"not attached"* ]] || false
   # The PWD fallback must also ignore the exported identity before discovery.
   unset CLAUDE_PROJECT_DIR CODEX_PROJECT_DIR
   export GIT_WORK_TREE="$decoy"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *".codex/hooks.json: file missing"* ]]
+  [[ "$output" == *".codex/hooks.json: file missing"* ]] || false
   # A plain subdirectory cannot become a toplevel through GIT_WORK_TREE.
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR/subdirectory"
   export GIT_WORK_TREE="$CLAUDE_PROJECT_DIR"
   run_check
   [ "$status" -eq 1 ]
-  [[ "$output" == *"project root must equal the Git worktree top level"* ]]
-  [[ "$output" != *"not attached"* ]]
+  [[ "$output" == *"project root must equal the Git worktree top level"* ]] || false
+  [[ "$output" != *"not attached"* ]] || false
 }
 
 @test "143-pg: reflog subject is not hook evidence and the limitation is visible" {
@@ -1531,14 +1531,14 @@ linked_managed_hooks_fixture() {
   [ -f "$BATS_TEST_TMPDIR/hook-ran" ]
   run "$BASH_BIN" -c "cd '$PROJECT_DIR' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"Bypass coverage: Git reflog does not record --no-verify"* ]]
-  [[ "$output" == *"hook execution cannot be verified post-hoc"* ]]
-  [[ "$output" != *"committed with --no-verify"* ]]
+  [[ "$output" == *"Bypass coverage: Git reflog does not record --no-verify"* ]] || false
+  [[ "$output" == *"hook execution cannot be verified post-hoc"* ]] || false
+  [[ "$output" != *"committed with --no-verify"* ]] || false
   mkdir "$PROJECT_DIR/.husky"
   printf '#!/bin/sh\nexit 0\n' > "$PROJECT_DIR/.husky/pre-push"
   run "$BASH_BIN" -c "cd '$PROJECT_DIR' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"short-circuit"* && "$output" == *"Bypass coverage:"* ]]
+  [[ "$output" == *"short-circuit"* && "$output" == *"Bypass coverage:"* ]] || false
 }
 
 @test "143-pg-r2: leading no-ops cannot hide exit zero" {
@@ -1548,12 +1548,12 @@ linked_managed_hooks_fixture() {
     printf '#!/bin/sh\n%s\n# comment\n\nexit 0\npnpm test\n' "$line" > "$hook"
     run_check
     [ "$status" -eq 1 ] || { echo "missed $line then exit: $output"; false; }
-    [[ "$output" == *"short-circuit"* ]]
+    [[ "$output" == *"short-circuit"* ]] || false
   done
   printf '#!/bin/sh\ntrue\n : # no-op\necho check\n' > "$hook"
   run_check
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"Husky coverage:"* && "$output" == *"heuristic"* ]]
+  [[ "$output" == *"Husky coverage:"* && "$output" == *"heuristic"* ]] || false
 }
 
 @test "143-pg-r2: large commit messages preserve both trailer warnings" {
@@ -1566,7 +1566,7 @@ PY
   git -C "$PROJECT_DIR" -c commit.gpgsign=false commit --allow-empty -q -F "$message"
   run "$BASH_BIN" -c "cd '$PROJECT_DIR' && '$BASH_BIN' '$SCRIPT' --range=HEAD~1..HEAD"
   [ "$status" -eq 2 ] || { echo "$output"; false; }
-  [[ "$output" == *"TRELLIS_ALLOW_MAIN_PUSH=1 found"* && "$output" == *"PROCESS_GATE_SKIP=1 found"* ]]
+  [[ "$output" == *"TRELLIS_ALLOW_MAIN_PUSH=1 found"* && "$output" == *"PROCESS_GATE_SKIP=1 found"* ]] || false
 }
 
 @test "143-pg: symlinked husky directory is scanned and valid hooks still pass" {
@@ -1579,7 +1579,7 @@ PY
   printf '#!/bin/sh\nexit 0\n' > "$outside/pre-commit"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *".husky/pre-commit: short-circuit"* ]]
+  [[ "$output" == *".husky/pre-commit: short-circuit"* ]] || false
 }
 
 @test "143-pg: symlinked hook is scanned without rejecting a valid target" {
@@ -1592,7 +1592,7 @@ PY
   printf '#!/bin/sh\nexit 0\n' > "$target"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *".husky/pre-push: short-circuit"* ]]
+  [[ "$output" == *".husky/pre-push: short-circuit"* ]] || false
 }
 
 @test "143-pg: first effective hook command catches exit variants, not ordinary commands" {
@@ -1607,12 +1607,12 @@ PY
     printf '#!/bin/sh\n  # a comment\n%s\necho check\n' "$line" > "$hook"
     run_check
     [ "$status" -eq 1 ] || { echo "missed $line: $output"; false; }
-    [[ "$output" == *"short-circuit"* ]]
+    [[ "$output" == *"short-circuit"* ]] || false
   done
   printf 'exit 0\necho check\n' > "$hook"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"short-circuit"* ]]
+  [[ "$output" == *"short-circuit"* ]] || false
 }
 
 @test "143-pg: leading no-op is not a short circuit when checks follow" {
@@ -1644,24 +1644,24 @@ PY
   chmod 644 "$MAIN_OWNER_PATH"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]] || false
   chmod 600 "$MAIN_OWNER_PATH"
   printf '{broken\n' > "$MAIN_OWNER_PATH"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]] || false
   # Parseable JSON with only the managed-hook fields is not an owner record.
   jq -n --arg checkout "$(jq -r '.checkout_id' "$OWNER_PATH")" \
     '{schema_version:1,status:"committed",checkout_id:$checkout,git_hooks:{enabled:false}}' > "$MAIN_OWNER_PATH"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]] || false
   jq '.worktree_root = "/different/worktree"' "$BATS_TEST_TMPDIR/valid-sibling-owner" > "$MAIN_OWNER_PATH"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]] || false
   jq '.git_hooks = {}' "$BATS_TEST_TMPDIR/valid-sibling-owner" > "$MAIN_OWNER_PATH"
   run_check
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]]
+  [[ "$output" == *"sibling"* && "$output" == *"invalid"* ]] || false
 }

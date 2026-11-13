@@ -12,6 +12,7 @@
 REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 LAUNCHER_TEMPLATE="$REPO_ROOT/scripts/trellis-launcher.sh"
 load helpers/native-launcher
+load helpers/heavy-supervisor-legacy
 
 setup() {
   SANDBOX="$(mktemp -d "$BATS_TEST_TMPDIR/heavy.XXXXXX")"
@@ -625,10 +626,10 @@ EOF
   leader="$(<"$SANDBOX/leader")"
   kill -0 "$supervisor" "$descendant"
   state="$(/bin/ps -p "$supervisor" -o stat=)"
-  [[ -n "$state" && "$state" != *Z* ]]
+  [[ -n "$state" && "$state" != *Z* ]] || false
   state="$(/bin/ps -p "$descendant" -o stat=)"
-  [[ -n "$state" && "$state" != *Z* ]]
-  [[ "$(/bin/ps -p "$leader" -o stat=)" == *Z* ]]
+  [[ -n "$state" && "$state" != *Z* ]] || false
+  [[ "$(/bin/ps -p "$leader" -o stat=)" == *Z* ]] || false
   run "${HEAVY[@]}" --status
   [ "$status" -eq 0 ] && [[ "$output" == *"slot 1: held lane=fresh-scan pid=$supervisor"* ]] || { echo "$output"; false; }
   [ "$(cat "$SANDBOX/trace")" = "$(printf '%s\n' fork exec leader-zombie)" ] || { cat "$SANDBOX/trace"; false; }
@@ -659,7 +660,7 @@ EOF
   wait_for_file "$SANDBOX/leader"
   wait_for_file "$SANDBOX/trace"
   [ ! -e "$SANDBOX/gc-done" ]
-  [[ "$(ps -o stat= -p "$(cat "$SANDBOX/leader")")" == *Z* ]]
+  [[ "$(ps -o stat= -p "$(cat "$SANDBOX/leader")")" == *Z* ]] || false
   wait "$BG_PID"
   [ -e "$SANDBOX/gc-done" ]
   [ "$(cat "$SANDBOX/trace")" = "$(printf '%s\n' fork exec leader-zombie group-empty reap)" ] || { cat "$SANDBOX/trace"; false; }
@@ -700,9 +701,9 @@ EOF
   [ "$(awk -F'\t' '{ print NF }' "$SANDBOX/info")" -eq 4 ]
   local pid lane started argv
   IFS=$'\t' read -r pid lane started argv < "$SANDBOX/info"
-  [[ "$pid" =~ ^[0-9]+$ ]]
+  [[ "$pid" =~ ^[0-9]+$ ]] || false
   [ "$lane" = lane-h4 ]
-  [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+  [[ "$started" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || false
   eval "set -- $argv"
   [ "$#" -eq 6 ]
   [ "$1" = "$SANDBOX/copy-info.sh" ]
@@ -726,7 +727,7 @@ EOF
   local line
   line="$(grep -m1 'held:' "$SANDBOX/waiter.out")"
   [[ "$line" == *"held: 1=hb-lane/$holder 2=unknown" ]] || { echo "$line"; false; }
-  [[ "$line" != *"3="* ]]
+  [[ "$line" != *"3="* ]] || false
 }
 
 # ---------------------------------------------------------------- H5
@@ -829,14 +830,7 @@ p.write_text(head+"\n"+'[ "${1:-}" = fd-probe ] && exec /usr/bin/perl -MPOSIX -e
 PY
       ;;
     native-old-supervisor)
-      python3 -I - "$PAYLOAD/scripts/lib/heavy-supervisor.pl" <<'PY'
-import pathlib,sys
-p=pathlib.Path(sys.argv[1]);s=p.read_text()
-for old,new in [('SIGHUP SIGQUIT SIG_BLOCK','SIGHUP SIG_BLOCK'),('HUP => SIGHUP, QUIT => SIGQUIT','HUP => SIGHUP'),('SIGINT, SIGTERM, SIGHUP, SIGQUIT','SIGINT, SIGTERM, SIGHUP')]:
-    assert s.count(old)==1
-    s=s.replace(old,new)
-p.write_text(s)
-PY
+      make_legacy_heavy_supervisor "$PAYLOAD/scripts/lib/heavy-supervisor.pl"
       ;;
   esac
   chmod 755 "$PAYLOAD/scripts/trellis" "$PAYLOAD/scripts/heavy.sh"
@@ -1131,7 +1125,21 @@ assert_native_nested_parity() {
 FD_PROBE='for (3..1023) { next if $_ eq ($ENV{TRELLIS_HEAVY_FD} // ""); my $d = POSIX::dup($_); next unless defined $d; POSIX::close($d); print "$_\n" }'
 
 fd_probe_with_caller_descriptors() {
-  "$@" 3>&- 5<"$SANDBOX/fd-five" 64<"$SANDBOX/fd-sixty-four" 71<"$SANDBOX/fd-seventy-one"
+  [ "$1" = native_bounded ] || return 2
+  shift
+  # Descriptor parity is independent of the runner's unrelated environment.
+  # In particular, a large environment can make the test-only grep -q hook
+  # close its pipe early and put a Broken pipe diagnostic in Bats' output.
+  local name
+  local -a probe_env=("HOME=$HOME" "TRELLIS_HOME=$TRELLIS_HOME" "TMPDIR=$TMPDIR" "PATH=$PATH"
+    "TRELLIS_HEAVY_TEST=$TRELLIS_HEAVY_TEST" "TRELLIS_HEAVY_DIR=$TRELLIS_HEAVY_DIR"
+    "TRELLIS_HEAVY_TEST_POLL=$TRELLIS_HEAVY_TEST_POLL")
+  for name in LANG LC_ALL GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_OPTIONAL_LOCKS \
+    TRELLIS_TEST_GIT_FENCE_ROOT TRELLIS_TEST_REAL_GIT TRELLIS_TEST_REAL_MKTEMP TRELLIS_TEST_REAL_PYTHON; do
+    [ -z "${!name:-}" ] || probe_env+=("$name=${!name}")
+  done
+  native_bounded /usr/bin/env -i "${probe_env[@]}" "$@" \
+    3>&- 5<"$SANDBOX/fd-five" 64<"$SANDBOX/fd-sixty-four" 71<"$SANDBOX/fd-seventy-one"
 }
 
 assert_fd_parity() {
@@ -1161,6 +1169,18 @@ import pathlib,sys
 p=pathlib.Path(sys.argv[1]);s=p.read_text();old='launcher_native_run_if_available() {\n';assert s.count(old)==1
 p.write_text(s.replace(old,old+'  return 10 # test-only shell route reference\n',1))
 PY
+}
+
+@test "T60 fd parity caller excludes unrelated runner environment" {
+  local T152_FD_PROBE_NOISE
+  T152_FD_PROBE_NOISE="$(printf '%065536d' 0)"
+  export T152_FD_PROBE_NOISE
+  : > "$SANDBOX/fd-five"; : > "$SANDBOX/fd-sixty-four"; : > "$SANDBOX/fd-seventy-one"
+  run fd_probe_with_caller_descriptors native_bounded /usr/bin/env
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *T152_FD_PROBE_NOISE=* ]] || { echo 'fd probe inherited unrelated runner environment'; false; }
+  [[ "$output" == *TRELLIS_HEAVY_TEST=1* ]] || { echo 'fd probe lost its test switch'; false; }
+  [[ "$output" == *"TRELLIS_HEAVY_DIR=$TRELLIS_HEAVY_DIR"* ]] || { echo 'fd probe lost its private slot directory'; false; }
 }
 
 @test "T60 fd parity: native heavy fast path passes exactly the caller descriptors" {

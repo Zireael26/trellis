@@ -1122,7 +1122,7 @@ children_dead() {
 }
 
 assert_empty() {
-  [[ "$output" == *"containment=qualified"*"survivors=0 record=deleted"* ]]
+  [[ "$output" == *"containment=qualified"*"survivors=0 record=deleted"* ]] || false
   run bash "$REPO_ROOT/scripts/gate-runs.sh" status
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
@@ -1293,7 +1293,7 @@ PY
       TRELLIS_LOCAL_GATE_RESERVE=8 python3 "$WRAPPER"
     [ "$status" -eq 0 ] || { echo "$output"; false; }
     [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq "$count" ]
-    [[ "$output" == *"shard $count/$count elapsed_seconds="*"status=0"* ]]
+    [[ "$output" == *"shard $count/$count elapsed_seconds="*"status=0"* ]] || false
     [ "$(awk 'END {print NR-1}' "$TRELLIS_LOCAL_GATE_RECEIPT")" -eq "$count" ]
   done
 }
@@ -1304,14 +1304,14 @@ PY
     TRELLIS_LOCAL_GATE_RESERVE=8 python3 "$WRAPPER"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq "$count" ]
-  [[ "$output" == *"shard $count/$count elapsed_seconds="*"status=0"* ]]
+  [[ "$output" == *"shard $count/$count elapsed_seconds="*"status=0"* ]] || false
 }
 
 @test "non-eight failing shard retention names the selected count" {
   run env TRELLIS_TEST_SHARDS=12 FAKE_MODE=fail TRELLIS_LOCAL_GATE_DEADLINE=30 \
     TRELLIS_LOCAL_GATE_RESERVE=8 python3 "$WRAPPER"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"shard 3/12"*"status=7"*"retained failing shard 3/12 output:"* ]]
+  [[ "$output" == *"shard 3/12"*"status=7"*"retained failing shard 3/12 output:"* ]] || false
 }
 
 @test "shards run at nice -n 10 relative to the planner, and the receipt names it" {
@@ -1379,9 +1379,10 @@ PY
   for shard in 1 2 3 4 5 6 7 8; do
     grep -F -- "--scope=local --shard=$shard/8" "$FAKE_INVOCATIONS"
     expected="${expected}fake-shard-$shard"$'\n'
-    [[ "$output" == *"shard $shard=100"* ]]
+    [[ "$output" == *"shard $shard=100"* ]] || { echo "no shard $shard total: $output"; false; }
   done
-  [[ "$output" == *"${expected%$'\n'}"* ]]
+  # Bash 3.2's errexit ignores a false [[ ]], so fail explicitly.
+  [[ "$output" == *"${expected%$'\n'}"* ]] || { echo "shard output out of order: $output"; false; }
   assert_empty
 }
 
@@ -1408,7 +1409,7 @@ PY
   FAKE_MODE=fail run_wrapper
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
-  [[ "$output" == *"shard 3/8"*"status=7"*"aggregate receipt:"* ]]
+  [[ "$output" == *"shard 3/8"*"status=7"*"aggregate receipt:"* ]] || false
   [ ! -e "$SANDBOX/state/passing-runs" ]
   assert_empty
 }
@@ -1421,11 +1422,11 @@ PY
   local kept
   kept="$(find "$SANDBOX/state/failed-shards" -type f | sort)"
   [ "$(printf '%s\n' "$kept" | wc -l | tr -d ' ')" -eq 2 ] || { echo "$kept"; false; }
-  [[ "$kept" == "$SANDBOX/state/failed-shards/"*"/shard-3.out"$'\n'"$SANDBOX/state/failed-shards/"*"/shard-3.tsv" ]]
+  [[ "$kept" == "$SANDBOX/state/failed-shards/"*"/shard-3.out"$'\n'"$SANDBOX/state/failed-shards/"*"/shard-3.tsv" ]] || false
   grep -qx 'fake-shard-3' "$SANDBOX"/state/failed-shards/*/shard-3.out
   grep -qx $'3\tfake-stage-3\t3\t0' "$SANDBOX"/state/failed-shards/*/shard-3.tsv
   [ "$(stat -f '%Lp' "$SANDBOX"/state/failed-shards/*)" = 700 ]
-  [[ "$output" == *"retained failing shard 3/8 output: $SANDBOX/state/failed-shards/"*"/shard-3.out"*"survivors=0 record=deleted"* ]]
+  [[ "$output" == *"retained failing shard 3/8 output: $SANDBOX/state/failed-shards/"*"/shard-3.out"*"survivors=0 record=deleted"* ]] || false
   assert_empty
 }
 
@@ -1434,7 +1435,7 @@ PY
   run_wrapper
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ ! -e "$SANDBOX/state/failed-shards" ]
-  [[ "$output" != *"retained failing shard"* ]]
+  [[ "$output" != *"retained failing shard"* ]] || false
   python3 -I - "$SANDBOX/state/passing-runs" "$TRELLIS_LOCAL_GATE_RECEIPT" <<'PY'
 import hashlib, json, pathlib, stat, sys
 runs = list(pathlib.Path(sys.argv[1]).iterdir())
@@ -1471,7 +1472,7 @@ PY
   # Inversion: eight total rows with no stages produce a passing empty gate.
   FAKE_MODE=empty-plan run_wrapper
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"empty shard plan"* ]]
+  [[ "$output" == *"empty shard plan"* ]] || false
   [ ! -s "$FAKE_INVOCATIONS" ]
   assert_empty
 }
@@ -1485,7 +1486,7 @@ PY
 @test "aggregate rejects a missing ordinal" {
   FAKE_MODE=missing-row run_wrapper
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"incomplete receipt"* ]]
+  [[ "$output" == *"incomplete receipt"* ]] || false
   # A red run keeps its receipt as evidence; the exit status still fails.
   [ -s "$TRELLIS_LOCAL_GATE_RECEIPT" ]
   assert_empty
@@ -1494,7 +1495,7 @@ PY
 @test "aggregate rejects a duplicate ordinal" {
   FAKE_MODE=duplicate-row run_wrapper
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"incomplete receipt"* ]]
+  [[ "$output" == *"incomplete receipt"* ]] || false
   # A red run keeps its receipt as evidence; the exit status still fails.
   [ -s "$TRELLIS_LOCAL_GATE_RECEIPT" ]
   assert_empty
@@ -1503,7 +1504,7 @@ PY
 @test "aggregate rejects a wrong stage" {
   FAKE_MODE=wrong-stage run_wrapper
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"incomplete receipt"* ]]
+  [[ "$output" == *"incomplete receipt"* ]] || false
   # A red run keeps its receipt as evidence; the exit status still fails.
   [ -s "$TRELLIS_LOCAL_GATE_RECEIPT" ]
   assert_empty
@@ -1512,7 +1513,7 @@ PY
 @test "aggregate rejects a nonzero row exit even when every shard exits zero" {
   FAKE_MODE=nonzero-row run_wrapper
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"nonzero timing receipt exit"* ]]
+  [[ "$output" == *"nonzero timing receipt exit"* ]] || false
   # A red run keeps its receipt as evidence; the exit status still fails.
   [ -s "$TRELLIS_LOCAL_GATE_RECEIPT" ]
   awk -F'\t' 'NR > 1 && $4 != 0 { found = 1 } END { exit !found }' "$TRELLIS_LOCAL_GATE_RECEIPT"
@@ -1606,7 +1607,7 @@ PY
   export TRELLIS_LOCAL_GATE_DEADLINE=4 TRELLIS_LOCAL_GATE_RESERVE=2
   FAKE_MODE=planner-hang run_wrapper
   [ "$status" -eq 124 ] || { echo "$output"; false; }
-  [[ "$output" == *"global deadline exceeded"* ]]
+  [[ "$output" == *"global deadline exceeded"* ]] || false
   [ ! -s "$FAKE_INVOCATIONS" ]
   children_dead
   assert_empty
@@ -1627,7 +1628,7 @@ PY
   export FAKE_MODE=ignore-term
   run_driver partial-spawn
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *"shard 3/8"*"status=127"* ]]
+  [[ "$output" == *"shard 3/8"*"status=127"* ]] || false
   children_dead
   assert_empty
   FAKE_MODE=exec-fail run_wrapper
@@ -1677,12 +1678,35 @@ PY
   SIGNAL_WRAPPER_PID=''
   run bash "$REPO_ROOT/scripts/gate-runs.sh" status
   [ "$status" -eq 1 ]
-  [[ "$output" == *".json"* ]]
+  [[ "$output" == *".json"* ]] || false
   run_wrapper
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 16 ]
   children_dead
   assert_empty
+}
+
+@test "reap removes a dead run root holding a read-only nested directory" {
+  # Inversion (l151-reuse2): rmtree cannot unlink inside a 0555 directory (a
+  # sealed release fixture), so the record stays and every later admission on
+  # the host fails the same way.
+  start_wrapper
+  kill -KILL "$SIGNAL_WRAPPER_PID"
+  wait "$SIGNAL_WRAPPER_PID" || true
+  SIGNAL_WRAPPER_PID=''
+  root="$(python3 -c 'import json,sys,pathlib; print(json.loads(next(pathlib.Path(sys.argv[1], "runs").glob("*.json")).read_text())["run_root"])' "$TRELLIS_GATE_STATE_DIR")"
+  sealed="$root/tmp/portable-home/releases/1.2.3/payload/scripts"
+  mkdir -p "$sealed"
+  printf 'x\n' > "$sealed/entry"
+  chmod 0555 "$sealed" "$sealed/.." "$sealed/../.."
+  ln -s "$BATS_TEST_TMPDIR" "$root/tmp/outside-link"
+  run bash "$REPO_ROOT/scripts/gate-runs.sh" reap
+  [ "$status" -eq 0 ] || { echo "$output"; chmod -R u+w "$root" 2>/dev/null; false; }
+  [ ! -e "$root" ]
+  [ -d "$BATS_TEST_TMPDIR" ]  # The symlink was removed, never followed.
+  run bash "$REPO_ROOT/scripts/gate-runs.sh" status
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  children_dead
 }
 
 @test "live owner quarantines admission and explicit reap without launching another planner" {
@@ -1691,13 +1715,13 @@ PY
   start_wrapper
   run_wrapper
   [ "$status" -eq 70 ] || { echo "$output"; false; }
-  [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]]
+  [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]] || false
   kill -0 "$SIGNAL_WRAPPER_PID"
   [ "$(wc -l < "$SANDBOX/planner" | tr -d ' ')" -eq 1 ]
   [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
   run bash "$REPO_ROOT/scripts/gate-runs.sh" reap
   [ "$status" -eq 70 ] || { echo "$output"; false; }
-  [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]]
+  [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]] || false
   [ "$(wc -l < "$SANDBOX/planner" | tr -d ' ')" -eq 1 ]
   [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
   run bash "$REPO_ROOT/scripts/gate-runs.sh" status
@@ -1732,7 +1756,7 @@ PY
     [ "$status" -eq 1 ]
     run_wrapper
     [ "$status" -eq 70 ] || { echo "$output"; false; }
-    [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]]
+    [[ "$output" == *"queue position=1"*"queue wait bounded exit 70"* ]] || false
     kill -0 "$GATE_PID"
     [ "$(wc -l < "$SANDBOX/planner" | tr -d ' ')" -eq 1 ]
     [ "$(wc -l < "$FAKE_INVOCATIONS" | tr -d ' ')" -eq 8 ]
@@ -1761,7 +1785,7 @@ PY
     : > "$FAKE_CHILD_PIDS"
     run_driver "$mode"
     [ "$status" -eq 71 ] || { echo "$output"; false; }
-    [[ "$output" == *"record=retained"* ]]
+    [[ "$output" == *"record=retained"* ]] || false
     [ -s "$FAKE_CHILD_PIDS" ]
     ! children_dead
     run bash "$REPO_ROOT/scripts/gate-runs.sh" status
@@ -1785,7 +1809,7 @@ PY
   run_wrapper
   [ "$status" -eq 70 ]; [[ "$output" == *"$record"* ]]
   [ -e "$record" ]; [ ! -s "$FAKE_INVOCATIONS" ]; [ ! -e "$SANDBOX/planner" ]
-  [[ "$output" != *Traceback* ]]
+  [[ "$output" != *Traceback* ]] || false
 }
 
 @test "capability failures return 70 before any child is launched" {
@@ -1822,7 +1846,7 @@ PY
   FAKE_MODE=shard-out run "$FAKE_REAL_PYTHON" "$WRAPPER"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   children_dead
-  [[ "$output" == *"unreadable_excluded=0"* ]]
+  [[ "$output" == *"unreadable_excluded=0"* ]] || false
   assert_empty
 }
 
@@ -1843,7 +1867,7 @@ PY
   for value in 7200.001 20000; do
     TRELLIS_LOCAL_GATE_DEADLINE="$value" run_wrapper
     [ "$status" -eq 64 ] || { echo "$output"; false; }
-    [[ "$output" == *"must not exceed 7200"* ]]
+    [[ "$output" == *"must not exceed 7200"* ]] || false
     [ ! -s "$FAKE_INVOCATIONS" ]; [ ! -e "$SANDBOX/planner" ]
   done
   TRELLIS_LOCAL_GATE_DEADLINE=7200 run_wrapper
@@ -1854,7 +1878,7 @@ PY
 @test "backwards wall clock uses a safer birth bound and records clock_step" {
   run_driver clock-step
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"clock_step=1"* ]]
+  [[ "$output" == *"clock_step=1"* ]] || false
 }
 
 @test "EIO from KERN_PROCARGS2 on a live process is env-absent, other errors stay ambiguous" {
@@ -1918,8 +1942,8 @@ PY
   for mode in unreadable-files unreadable-environment unreadable-preflight-files unreadable-preflight-environment; do
     run_driver "$mode"
     [ "$status" -eq 0 ] || { echo "$output"; false; }
-    [[ "$output" == *"unreadable_excluded pid="*'executable="/bin/sleep"'* ]]
-    [[ "$output" == *"survivors=0 record=deleted unreadable_excluded=1"* ]]
+    [[ "$output" == *"unreadable_excluded pid="*'executable="/bin/sleep"'* ]] || false
+    [[ "$output" == *"survivors=0 record=deleted unreadable_excluded=1"* ]] || false
     assert_empty
   done
 }
@@ -1964,7 +1988,7 @@ PY
   export TRELLIS_LOCAL_GATE_RESERVE=0.5
   run_driver foreign-output
   [ "$status" -eq 71 ] || { echo "$output"; false; }
-  [[ "$output" == *"survivors=1 record=retained"* ]]
+  [[ "$output" == *"survivors=1 record=retained"* ]] || false
   run bash "$REPO_ROOT/scripts/gate-runs.sh" status
   [ "$status" -eq 1 ]
   run bash "$REPO_ROOT/scripts/gate-runs.sh" reap
@@ -1976,7 +2000,7 @@ PY
   export PG_TESTS_RECEIPT_FILE="$SANDBOX/scope-receipt"
   run_driver foreign-output
   [ "$status" -eq 71 ] || { echo "$output"; false; }
-  [[ "$output" == *"survivors=1 record=retained"* ]]
+  [[ "$output" == *"survivors=1 record=retained"* ]] || false
   [ ! -e "$PG_TESTS_RECEIPT_FILE" ]
 }
 
@@ -2067,7 +2091,7 @@ PY
     bash "$REPO_ROOT/scripts/run-tests.sh" --scope=local --shard=1/1 --list
   [ "$status" -eq 0 ]; [ ! -e "$SANDBOX/list.tsv" ]
   [ ! -e "$SANDBOX/list.tsv.provenance.jsonl" ]
-  [[ "$output" == *"shellcheck (CI scope, severity=warning)"* ]]
+  [[ "$output" == *"shellcheck (CI scope, severity=warning)"* ]] || false
   printf '%s\n' "$output" | sort > "$baseline"
   : > "$combined"
   for shard in 1 2 3 4 5 6 7 8; do
@@ -2234,7 +2258,7 @@ check_inventory() {
   printf '@test "dirty decoy" { true; }\n' > "$GIT_FIXTURE/scripts/tests/doctor-fix-part1.bats"
   check_inventory
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == "inventory: PASS "* ]]
+  [[ "$output" == "inventory: PASS "* ]] || false
 }
 
 @test "inventory rejects missing duplicate nonzero and changed stages" {
@@ -2256,7 +2280,7 @@ Path(sys.argv[2]).write_text('\n'.join(rows) + '\n')
 PY
     check_inventory
     [ "$status" -ne 0 ] || { echo "$mode incorrectly passed"; false; }
-    [[ "$output" == "inventory: FAIL "* ]]
+    [[ "$output" == "inventory: FAIL "* ]] || false
   done
 }
 
@@ -2287,9 +2311,9 @@ PY
     check_inventory
     [ "$status" -ne 0 ]
     if [ "$mode" = gate ]; then
-      [[ "$output" == *"protected process-gate path changed"* ]]
+      [[ "$output" == *"protected process-gate path changed"* ]] || false
     else
-      [[ "$output" == *"changed beyond the timeout default"* ]]
+      [[ "$output" == *"changed beyond the timeout default"* ]] || false
     fi
     mv "$fixture" "$SANDBOX/fixture-$mode"
   done
@@ -2391,7 +2415,7 @@ PY
     HEAD_SHA="$(git -C "$GIT_FIXTURE" rev-parse HEAD)"
     check_inventory
     [ "$status" -ne 0 ] || { echo "$mode pair incorrectly passed"; false; }
-    [[ "$output" == *"test file outside the split changed"* ]]
+    [[ "$output" == *"test file outside the split changed"* ]] || false
     mv "$GIT_FIXTURE" "$SANDBOX/fixture-$mode"
   done
 }

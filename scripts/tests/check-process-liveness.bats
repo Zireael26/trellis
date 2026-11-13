@@ -50,7 +50,7 @@ check_gate() {
   touch "$SANDBOX/process cwd/scripts/lint.sh" \
     "$SANDBOX/process cwd/scripts/push-test-map.py" "$SANDBOX/absolute/trellis"
   cd "$SANDBOX/process cwd"
-  pid="$BASHPID"
+  pid="$(exec sh -c 'echo "$PPID"')"  # this shell's pid; bash 3.2 has no BASHPID
   fixture="$pid 1 $pid bash bash scripts/lint.sh --only scripts/run-tests.sh
 $pid 1 $pid python3 python3 scripts/push-test-map.py scripts/run-tests-local.py
 $pid 1 $pid bash bash $SANDBOX/absolute/trellis heavy --light --lane rv -- bats scripts/tests/foo.bats"
@@ -65,7 +65,7 @@ $pid 1 $pid bash bash $SANDBOX/absolute/trellis heavy --light --lane rv -- bats 
 220 1 220 bash bash /repo/scripts/run-tests.sh"
   [ "$status" -eq 1 ]
   [ "${#lines[@]}" -eq 1 ]
-  [[ "$output" == *$'pgid=220\tcomm=bash\ttarget=run-tests.sh'* ]]
+  [[ "$output" == *$'pgid=220\tcomm=bash\ttarget=run-tests.sh'* ]] || false
 }
 
 @test "gate check keeps ambiguity for missing process cwd files even if the probe cwd has one" {
@@ -73,16 +73,16 @@ $pid 1 $pid bash bash $SANDBOX/absolute/trellis heavy --light --lane rv -- bats 
   mkdir -p "$SANDBOX/target" "$SANDBOX/probe"
   touch "$SANDBOX/probe/agent.py"
   cd "$SANDBOX/target"
-  pid="$BASHPID"
+  pid="$(exec sh -c 'echo "$PPID"')"  # this shell's pid; bash 3.2 has no BASHPID
   run bash -c 'cd "$1"; PATH="$2:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$3" "$4" --gate' \
     cwd-probe "$SANDBOX/probe" "$BIN" \
     "$pid 1 $pid python3 python3 agent.py scripts/run-tests-local.py" "$CHECK"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ambiguous interpreter script path"* ]]
+  [[ "$output" == *"ambiguous interpreter script path"* ]] || false
 
   check_gate '999999999 1 999999999 python3 python3 agent.py scripts/run-tests-local.py'
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ambiguous interpreter script path"* ]]
+  [[ "$output" == *"ambiguous interpreter script path"* ]] || false
 }
 
 @test "gate check matches an interpreter script position and deduplicates one process group" {
@@ -94,7 +94,7 @@ $pid 1 $pid bash bash $SANDBOX/absolute/trellis heavy --light --lane rv -- bats 
 
   [ "$status" -eq 1 ]
   [ "${#lines[@]}" -eq 1 ]
-  [[ "$output" == *$'pgid=200\tcomm=bash\ttarget=run-all.sh'* ]]
+  [[ "$output" == *$'pgid=200\tcomm=bash\ttarget=run-all.sh'* ]] || false
 }
 
 @test "gate check recognizes the Python runner and direct Bats groups" {
@@ -106,8 +106,8 @@ $pid 1 $pid bash bash $SANDBOX/absolute/trellis heavy --light --lane rv -- bats 
 
   [ "$status" -eq 1 ]
   [ "${#lines[@]}" -eq 2 ]
-  [[ "$output" == *$'pgid=300\tcomm=python3\ttarget=run-tests-local.py'* ]]
-  [[ "$output" == *$'pgid=400\tcomm=bash\ttarget=bats'* ]]
+  [[ "$output" == *$'pgid=300\tcomm=python3\ttarget=run-tests-local.py'* ]] || false
+  [[ "$output" == *$'pgid=400\tcomm=bash\ttarget=bats'* ]] || false
 }
 
 @test "gate check fails closed on whitespace-ambiguous primary script paths" {
@@ -122,9 +122,9 @@ $pid 1 $pid bash bash $SANDBOX/absolute/trellis heavy --light --lane rv -- bats 
 
   [ "$status" -eq 2 ]
   [ "${#lines[@]}" -eq 5 ]
-  [[ "$output" == *$'ERROR\tpid=310\t'*"ambiguous interpreter script path"* ]]
-  [[ "$output" == *$'ERROR\tpid=311\t'*"ambiguous interpreter script path"* ]]
-  [[ "$output" != *CLEAR* && "$output" != *BUSY* ]]
+  [[ "$output" == *$'ERROR\tpid=310\t'*"ambiguous interpreter script path"* ]] || false
+  [[ "$output" == *$'ERROR\tpid=311\t'*"ambiguous interpreter script path"* ]] || false
+  [[ "$output" != *CLEAR* && "$output" != *BUSY* ]] || false
 }
 
 @test "gate check never promotes an ambiguous runner argument to verified BUSY" {
@@ -132,8 +132,8 @@ $pid 1 $pid bash bash $SANDBOX/absolute/trellis heavy --light --lane rv -- bats 
   check_gate '320 1 320 python3 python3 /repo/agent.py prompt /repo with spaces/scripts/run-tests-local.py'
 
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ambiguous interpreter script path"* ]]
-  [[ "$output" != *CLEAR* && "$output" != *BUSY* ]]
+  [[ "$output" == *"ambiguous interpreter script path"* ]] || false
+  [[ "$output" != *CLEAR* && "$output" != *BUSY* ]] || false
 }
 
 @test "gate check refuses quiet for live shell and Python runner paths with spaces" {
@@ -188,7 +188,7 @@ PY
   local fixture project="$SANDBOX/project" other="$SANDBOX/other" pid
   mkdir -p "$project" "$other"
   cd "$other"
-  pid="$BASHPID"
+  pid="$(exec sh -c 'echo "$PPID"')"  # this shell's pid; bash 3.2 has no BASHPID
   fixture="500 1 500 node node $project/node_modules/vite/bin/vite.js build
 $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
 502 1 502 node node /opt/herdr.js agent prompt $project vite build"
@@ -197,17 +197,17 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
 
   [ "$status" -eq 1 ]
   [ "${#lines[@]}" -eq 1 ]
-  [[ "$output" == *$'pgid=500\tcomm=node\ttarget=vite.js'* ]]
+  [[ "$output" == *$'pgid=500\tcomm=node\ttarget=vite.js'* ]] || false
 
   run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='503 1 503 node-MainThread node /repo/node_modules/vite/bin/vite.js build' \
     PS_EXIT=0 "$CHECK" --build /repo
   [ "$status" -eq 1 ]
-  [[ "$output" == *$'pgid=503\tcomm=node-MainThread\ttarget=vite.js'* ]]
+  [[ "$output" == *$'pgid=503\tcomm=node-MainThread\ttarget=vite.js'* ]] || false
 
   run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='504 1 504 MainThread node /repo/node_modules/vite/bin/vite.js build' \
     PS_EXIT=0 "$CHECK" --build /repo
   [ "$status" -eq 1 ]
-  [[ "$output" == *$'pgid=504\tcomm=MainThread\ttarget=vite.js'* ]]
+  [[ "$output" == *$'pgid=504\tcomm=MainThread\ttarget=vite.js'* ]] || false
 }
 
 @test "build check recognizes named bundlers and default emitting actions" {
@@ -216,7 +216,7 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
     fixture="600 1 600 node node /repo/node_modules/.bin/$program build"
     run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build /repo
     [ "$status" -eq 1 ] || { echo "$program went clear: $output"; false; }
-    [[ "$output" == *"target=$program"* ]]
+    [[ "$output" == *"target=$program"* ]] || false
   done
   for fixture in 'node node /repo/node_modules/.bin/webpack --mode production' \
                  'node node /repo/node_modules/.bin/tsc'; do
@@ -248,7 +248,7 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
   for option in -r --import --loader -C --env-file; do
     run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="610 1 610 node node $option dependency /repo/node_modules/.bin/next build" PS_EXIT=0 "$CHECK" --build /repo
     [ "$status" -eq 1 ] || { echo "$option went clear: $output"; false; }
-    [[ "$output" == *'target=next'* ]]
+    [[ "$output" == *'target=next'* ]] || false
   done
   run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='611 1 611 node node -r dependency /opt/app.js /repo next build' PS_EXIT=0 "$CHECK" --build /repo
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -259,7 +259,7 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
   mkdir -p "$project" "$other"
   ln -s "$project" "$SANDBOX/project-link"
   cd "$project"
-  pid="$BASHPID"
+  pid="$(exec sh -c 'echo "$PPID"')"  # this shell's pid; bash 3.2 has no BASHPID
   for invocation in \
     'node node /npx-cache/node_modules/.bin/vite build' \
     'esbuild /opt/homebrew/bin/esbuild src/x.ts --outdir=dist' \
@@ -269,7 +269,7 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
     fixture="$pid 1 $pid $invocation"
     run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$SANDBOX/project-link"
     [ "$status" -eq 1 ] || { echo "missed $invocation: $output"; false; }
-    [[ "$output" == *'BUSY'* ]]
+    [[ "$output" == *'BUSY'* ]] || false
   done
   cd "$other"
   fixture="$pid 1 $pid node node /opt/homebrew/lib/node_modules/vite/bin/vite.js build"
@@ -283,7 +283,7 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
                 --conditions --disable-warning --unhandled-rejections --dns-result-order; do
     run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE="610 1 610 node node $option value /repo/node_modules/.bin/next build" PS_EXIT=0 "$CHECK" --build /repo
     [ "$status" -eq 1 ] || { echo "$option went clear: $output"; false; }
-    [[ "$output" == *'target=next'* ]]
+    [[ "$output" == *'target=next'* ]] || false
   done
   run env PATH="$BIN:/usr/bin:/bin" PS_FIXTURE='611 1 611 node node --experimental-loader x /opt/app.js /repo next build' PS_EXIT=0 "$CHECK" --build /repo
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -307,7 +307,7 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
 
   mkdir -p "$project" "$other"
   cd "$project"
-  pid="$BASHPID"
+  pid="$(exec sh -c 'echo "$PPID"')"  # this shell's pid; bash 3.2 has no BASHPID
   fixture="$pid 1 $pid node node --future-option value /opt/global/vite/bin/vite.js build"
   run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$project"
   [ "$status" -eq 1 ] && [[ "$output" == *'target=vite.js'* ]] || { echo "$output"; false; }
@@ -321,11 +321,11 @@ $pid 1 501 node node /other/node_modules/vite/bin/vite.js build
   mkdir -p "$project" "$other"
   ln -s "$project" "$SANDBOX/alias"
   cd "$project"
-  pid="$BASHPID"
+  pid="$(exec sh -c 'echo "$PPID"')"  # this shell's pid; bash 3.2 has no BASHPID
   fixture="$pid 1 $pid node node ./node_modules/.bin/next build"
   run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$SANDBOX/alias"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'target=next'* ]]
+  [[ "$output" == *'target=next'* ]] || false
   cd "$other"
   run env PATH="$BIN:/usr/bin:/bin:/usr/sbin:/sbin" PS_FIXTURE="$fixture" PS_EXIT=0 "$CHECK" --build "$project"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -460,7 +460,7 @@ PY
   check_gate "" 3
 
   [ "$status" -eq 2 ]
-  [[ "$output" == *"ERROR process-table snapshot unavailable"* ]]
+  [[ "$output" == *"ERROR process-table snapshot unavailable"* ]] || false
 }
 
 @test "source detector catches full-argv probes and permits exact identity checks" {
@@ -522,10 +522,10 @@ GOOD
   run env GIT_CEILING_DIRECTORIES="$SANDBOX" bats --filter '^tracked live sources' \
     "$export_root/scripts/tests/check-process-liveness.bats"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"ERROR tracked source inventory unavailable"* ]]
+  [[ "$output" == *"ERROR tracked source inventory unavailable"* ]] || false
 
   git -C "$export_root" init -q
   run bats --filter '^tracked live sources' "$export_root/scripts/tests/check-process-liveness.bats"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"ERROR tracked source inventory empty"* ]]
+  [[ "$output" == *"ERROR tracked source inventory empty"* ]] || false
 }

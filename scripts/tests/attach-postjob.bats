@@ -172,6 +172,108 @@ wait_for_state() {
   [ "$(state_of)" = failed ]
 }
 
+@test "direct attach does not silently succeed without attaching when preload marker is inherited" {
+  build_portable_doctor_fix_home
+  install_portable_doctor_release
+  run env -u TRELLIS_CONFIG TRELLIS_LIBS_PRELOADED=1 TRELLIS_ATTACH_POSTJOB=off \
+    HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    /bin/bash "$REPO_ROOT/scripts/attach-project.sh" attach --home "$PORTABLE_HOME" \
+      --fleet personal --release 1.2.3 --harness claude --harness codex "$PORTABLE_PROJECT" </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  owner="$PORTABLE_HOME/state/attachments/$PORTABLE_CHECKOUT_ID/$PORTABLE_WORKTREE_ID.json"
+  [ -f "$owner" ] || { echo "attach returned success without an owner: $output"; false; }
+  [ -L "$PORTABLE_PROJECT/.trellis/runtime" ] || { echo "attach returned success without a runtime: $output"; false; }
+}
+
+@test "both Stop twins clear a preload marker before executing an older gate" {
+  postjob_attach
+  legacy="$SANDBOX/legacy-payload"
+  mkdir -p "$legacy/scripts/lib"
+  printf '%s\n' '#!/bin/bash' \
+    '[ -z "${TRELLIS_LIBS_PRELOADED+x}" ] || { echo marker-leaked >&2; exit 1; }' \
+    'exit 0' > "$legacy/scripts/lib/attach-postjob.sh"
+  for surface in hooks codex/hooks; do
+    mkdir -p "$legacy/core-rules/$surface/lib"
+    cp "$REPO_ROOT/core-rules/$surface/lib/attach-verdict.sh" "$legacy/core-rules/$surface/lib/attach-verdict.sh"
+    run env -u TRELLIS_CONFIG TRELLIS_LIBS_PRELOADED=1 HOME="$PORTABLE_ACCOUNT_HOME" \
+      TRELLIS_HOME="$PORTABLE_HOME" bash -c '
+        . "$1"; trellis_attach_verdict_stop "$2"' _ \
+      "$legacy/core-rules/$surface/lib/attach-verdict.sh" "$PORTABLE_PROJECT" </dev/null
+    [ "$status" -eq 0 ] || { echo "$surface: $output"; false; }
+  done
+}
+
+@test "fresh postjob loads its libraries despite an inherited preload marker and still refuses render drift" {
+  postjob_attach
+  jq -e 'any(.renders[]; .path == ".claude/settings.local.json")' "$HF_OWNER" >/dev/null || false
+
+  # A launcher bundle exports this marker, but its shell functions do not cross
+  # exec. The standalone job must load its own libraries, not trust the marker.
+  run env -u TRELLIS_CONFIG -u TRELLIS_ATTACH_POSTJOB TRELLIS_LIBS_PRELOADED=1 \
+    HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    /bin/bash "$JOB" run --sync --target "$PORTABLE_PROJECT" </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(state_of)" = ok ] || { cat "$ST"; false; }
+  [ "$(jq -r '.owner_sha256' "$ST")" = "$(sha_of "$HF_OWNER")" ] || false
+  [ "$(jq -r '.checks[] | select(.name == "owner-artifacts") | .result' "$ST")" = ok ] || false
+
+  # A sourced spawn also crosses into a fresh detached shell.
+  run env -u TRELLIS_CONFIG -u TRELLIS_ATTACH_POSTJOB -u TRELLIS_LIBS_PRELOADED \
+    HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" bash -c '
+      . "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/release-store.sh"
+      . "$1/scripts/lib/local-registry.sh"; . "$1/scripts/lib/attachment.sh"
+      . "$1/scripts/lib/attach-postjob.sh"
+      export TRELLIS_LIBS_PRELOADED=1
+      trellis_attach_postjob_spawn "$2" "$3"' _ "$REPO_ROOT" "$PORTABLE_HOME" "$PORTABLE_PROJECT" </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  tries=0
+  while [ "$(state_of)" != ok ]; do
+    case "$(state_of)" in failed|blocked-by-journal) cat "$ST" "${ST%.json}.log"; return 1 ;; esac
+    tries=$((tries + 1))
+    [ "$tries" -lt 1200 ] || { cat "$ST" "${ST%.json}.log"; return 1; }
+    sleep 0.5
+  done
+
+  # An older target may not reset the flag at entry. Probe the spawn exec
+  # itself with a legacy stand-in: its only job is to record the inherited env.
+  old_release="$SANDBOX/old-release"
+  mkdir -p "$old_release/payload/scripts/lib"
+  printf '%s\n' '#!/bin/bash' \
+    'printf "%s\\n" "${TRELLIS_LIBS_PRELOADED-unset}" > "$TEST_SPAWN_PROBE"' \
+    > "$old_release/payload/scripts/lib/attach-postjob.sh"
+  probe="$SANDBOX/legacy-spawn-env"
+  run env -u TRELLIS_CONFIG -u TRELLIS_ATTACH_POSTJOB -u TRELLIS_LIBS_PRELOADED \
+    TEST_SPAWN_PROBE="$probe" HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" bash -c '
+      . "$1/scripts/lib/trellis-home.sh"; . "$1/scripts/lib/release-store.sh"
+      . "$1/scripts/lib/local-registry.sh"; . "$1/scripts/lib/attachment.sh"
+      . "$1/scripts/lib/attach-postjob.sh"
+      OLD_RELEASE_DIR="$4"
+      release_store_locate() { printf "%s\\n" "$OLD_RELEASE_DIR"; }
+      export TRELLIS_LIBS_PRELOADED=1
+      trellis_attach_postjob_spawn "$2" "$3"' _ "$REPO_ROOT" "$PORTABLE_HOME" "$PORTABLE_PROJECT" "$old_release" </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  tries=0
+  while [ ! -f "$probe" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 200 ] || { echo 'legacy postjob did not start'; return 1; }
+    sleep 0.1
+  done
+  [ "$(<"$probe")" = unset ] || { echo "legacy postjob inherited: $(<"$probe")"; false; }
+
+  # The environment fix must not weaken the same check on a changed render.
+  render="$PORTABLE_PROJECT/.claude/settings.local.json"
+  jq 'del(.hooks)' "$render" > "$SANDBOX/drifted-settings.json"
+  cp "$SANDBOX/drifted-settings.json" "$render"
+  run env -u TRELLIS_CONFIG -u TRELLIS_ATTACH_POSTJOB TRELLIS_LIBS_PRELOADED=1 \
+    HOME="$PORTABLE_ACCOUNT_HOME" TRELLIS_HOME="$PORTABLE_HOME" \
+    /bin/bash "$JOB" run --sync --target "$PORTABLE_PROJECT" </dev/null
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  jq -e '.state == "failed" and .failure.check == "owner-artifacts"' "$ST" >/dev/null || { cat "$ST"; false; }
+  run_pre_push
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"attachment checks FAILED at owner-artifacts"* ]] || { echo "$output"; false; }
+}
+
 @test "A4 journal, lock contention and the husky hooksPath reassert" {
   postjob_attach
   local journal="$PORTABLE_HOME/state/attachment-journals/11111111-1111-4111-8111-111111111111.json"

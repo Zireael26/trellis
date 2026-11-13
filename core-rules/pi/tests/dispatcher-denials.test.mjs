@@ -124,6 +124,7 @@ test('real deployed Codex destructive block stays enforced without repeating std
   mkdirSync(resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib'), { recursive: true });
   copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/block-destructive.sh'));
   copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib/deps.sh'));
+  copyFileSync(new URL('lib/deps-heavy.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib/deps-heavy.sh'));
   const result = f.run(false, 'rm -rf /absolute-fixture');
   assert.equal(result.status, 1);
   assert.equal(result.decision.decision, 'deny');
@@ -137,6 +138,7 @@ test('real deployed non-block stderr remains unknown and warns', t => {
   mkdirSync(resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib'), { recursive: true });
   copyFileSync(new URL('block-destructive.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/block-destructive.sh'));
   copyFileSync(new URL('lib/deps.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib/deps.sh'));
+  copyFileSync(new URL('lib/deps-heavy.sh', hookDir), resolve(f.cwd, '.trellis/runtime/core-rules/codex/hooks/lib/deps-heavy.sh'));
   const result = f.run(false, 'cat .env');
   assert.equal(result.status, 0);
   assert.equal(result.decision.decision, 'warn');

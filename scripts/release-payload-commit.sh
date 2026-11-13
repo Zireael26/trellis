@@ -124,7 +124,7 @@ rpc_listed_files() {
   done <<EOF
 $entries
 EOF
-  git ls-tree -r -z --name-only "$commit" -- "${paths[@]}" | LC_ALL=C sort -z
+  git ls-tree -r -z --name-only "$commit" -- "${paths[@]}" | /usr/bin/env LC_ALL=C sort -z
 }
 
 # rpc_ident <commit> <author|committer> <NAME|EMAIL|DATE>: read the raw commit
@@ -210,11 +210,11 @@ rpc_verify_candidate() {
     [ "$status" = D ] || rpc_refuse "payload changes more than deletions: $status $path"
     actual="$actual$path"$'\n'
   done < <(git diff-tree -r -z --no-renames --name-status "$approved" "$payload")
-  actual="$(printf '%s' "$actual" | LC_ALL=C sort)"
+  actual="$(printf '%s' "$actual" | /usr/bin/env LC_ALL=C sort)"
   if [ "$actual" != "$expected" ]; then
-    path="$(LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | sed -n 1p)"
+    path="$(/usr/bin/env LC_ALL=C comm -23 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | sed -n 1p)"
     [ -z "$path" ] || rpc_refuse "listed file is not deleted in the payload: $path"
-    path="$(LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | sed -n 1p)"
+    path="$(/usr/bin/env LC_ALL=C comm -13 <(printf '%s\n' "$expected") <(printf '%s\n' "$actual") | sed -n 1p)"
     rpc_refuse "payload deletes a file outside the listed paths: $path"
   fi
 

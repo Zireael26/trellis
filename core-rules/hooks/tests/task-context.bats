@@ -61,13 +61,13 @@ assert_bounded() {
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=2 pending=3"* ]]
-  [[ "$output" == *"- \"tasks.md\": current checked=2 pending=3"* ]]
-  [[ "$output" == *"Canonical task documents are authoritative"* ]]
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=2 pending=3"* ]] || false
+  [[ "$output" == *"- \"tasks.md\": current checked=2 pending=3"* ]] || false
+  [[ "$output" == *"Canonical task documents are authoritative"* ]] || false
   # No raw task text, table id, or checkbox syntax reaches the advisory.
-  [[ "$output" != *SENTINEL* ]]
-  [[ "$output" != *"T1"* ]]
-  [[ "$output" != *"[x]"* ]]
+  [[ "$output" != *SENTINEL* ]] || false
+  [[ "$output" != *"T1"* ]] || false
+  [[ "$output" != *"[x]"* ]] || false
 }
 
 @test "task context reads validates and renders in one Python invocation" {
@@ -85,7 +85,7 @@ SHIM
   export TASK_CONTEXT_REAL_PYTHON="$real_python" TASK_CONTEXT_PYTHON_CALLS="$WORK/python-calls"
   run env PATH="$WORK/bin:$PATH" bash "$WORK/run.sh" "$LIB" "$PROJECT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"checked=1 pending=1"* ]]
+  [[ "$output" == *"checked=1 pending=1"* ]] || false
   [ "$(wc -l < "$WORK/python-calls" | tr -d ' ')" -eq 1 ]
 }
 
@@ -104,8 +104,8 @@ TRIPWIRE
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=0"* ]]
-  [[ "$output" != *SENTINEL* ]]
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=0"* ]] || false
+  [[ "$output" != *SENTINEL* ]] || false
 }
 
 @test "the combined publisher retains the primitive deadline and reads only once" {
@@ -129,7 +129,7 @@ PROBE
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=0"* ]]
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=0"* ]] || false
 }
 
 @test "deadline expiry during combined publication emits only an unavailable advisory" {
@@ -143,8 +143,8 @@ EXPIRE
   context
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=output_or_budget_failure"* ]]
-  [[ "$output" != *'"documents"'* ]]
+  [[ "$output" == *"status=unavailable reason=output_or_budget_failure"* ]] || false
+  [[ "$output" != *'"documents"'* ]] || false
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
 }
 
@@ -158,8 +158,8 @@ LATE_FAILURE
   context
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable"* ]]
-  [[ "$output" != *"status=no_records"* ]]
+  [[ "$output" == *"status=unavailable"* ]] || false
+  [[ "$output" != *"status=no_records"* ]] || false
 }
 
 @test "unexpected helper stdout before or after publication never yields two advisories" {
@@ -182,8 +182,8 @@ NOISY
     context
     [ "$status" -eq 1 ]
     assert_bounded
-    [[ "$output" == *"status=unavailable"* ]]
-    [[ "$output" != *SENTINEL* ]]
+    [[ "$output" == *"status=unavailable"* ]] || false
+    [[ "$output" != *SENTINEL* ]] || false
     [ "$(printf '%s\n' "$output" | grep -c 'task-context v1:')" -eq 1 ]
   done
 }
@@ -198,9 +198,9 @@ INVALID
   context
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]]
-  [[ "$output" != *SENTINEL* ]]
-  [[ "$output" != *"tasks.md"* ]]
+  [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]] || false
+  [[ "$output" != *SENTINEL* ]] || false
+  [[ "$output" != *"tasks.md"* ]] || false
 }
 
 @test "duplicate keys and unknown protocol fields are explicitly unavailable" {
@@ -218,8 +218,8 @@ STUB
     context "$broken"
     [ "$status" -eq 1 ]
     assert_bounded
-    [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]]
-    [[ "$output" != *SENTINEL* ]]
+    [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]] || false
+    [[ "$output" != *SENTINEL* ]] || false
   done
 }
 
@@ -230,8 +230,8 @@ STUB
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=0 pending=0"* ]]
-  [[ "$output" == *"- \"tasks.md\": stale"* ]]
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=0 pending=0"* ]] || false
+  [[ "$output" == *"- \"tasks.md\": stale"* ]] || false
 }
 
 @test "a deleted source is reported missing and contributes no counts" {
@@ -241,8 +241,8 @@ STUB
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=0 pending=0"* ]]
-  [[ "$output" == *"- \"tasks.md\": missing"* ]]
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=0 pending=0"* ]] || false
+  [[ "$output" == *"- \"tasks.md\": missing"* ]] || false
 }
 
 @test "an uncaptured worktree yields the bounded no_records advisory" {
@@ -250,7 +250,7 @@ STUB
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=no_records documents=0 foreign_records=0 checked=0 pending=0"* ]]
+  [[ "$output" == *"status=no_records documents=0 foreign_records=0 checked=0 pending=0"* ]] || false
   # Status line and authority note only: no per-document detail is invented.
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
 }
@@ -269,9 +269,9 @@ STUB
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=1 foreign_records=1 checked=1 pending=0"* ]]
-  [[ "$output" == *"- \"tasks.md\": current checked=1 pending=0"* ]]
-  [[ "$output" != *"other.md"* ]]
+  [[ "$output" == *"status=available documents=1 foreign_records=1 checked=1 pending=0"* ]] || false
+  [[ "$output" == *"- \"tasks.md\": current checked=1 pending=0"* ]] || false
+  [[ "$output" != *"other.md"* ]] || false
 }
 
 @test "long document paths across several documents force an explicit omission" {
@@ -286,10 +286,10 @@ STUB
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=5 foreign_records=0 checked=5 pending=5"* ]]
-  [[ "$output" == *"summary-omitted"* ]]
-  [[ "$output" == *"run the installed hooks/lib/task-state.py read --cwd <worktree>"* ]]
-  [[ "$output" != *"$deep"* ]]
+  [[ "$output" == *"status=available documents=5 foreign_records=0 checked=5 pending=5"* ]] || false
+  [[ "$output" == *"summary-omitted"* ]] || false
+  [[ "$output" == *"run the installed hooks/lib/task-state.py read --cwd <worktree>"* ]] || false
+  [[ "$output" != *"$deep"* ]] || false
 }
 
 @test "the 512-byte bound is measured in UTF-8 bytes, not characters" {
@@ -304,9 +304,9 @@ STUB
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=1"* ]]
-  [[ "$output" == *"summary-omitted"* ]]
-  [[ "$output" != *"$deep"* ]]
+  [[ "$output" == *"status=available documents=1 foreign_records=0 checked=1 pending=1"* ]] || false
+  [[ "$output" == *"summary-omitted"* ]] || false
+  [[ "$output" != *"$deep"* ]] || false
 }
 
 @test "a state directory that lost its private mode is reported unavailable" {
@@ -316,7 +316,7 @@ STUB
   context
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=unsafe_state documents=0 foreign_records=0 checked=0 pending=0"* ]]
+  [[ "$output" == *"status=unavailable reason=unsafe_state documents=0 foreign_records=0 checked=0 pending=0"* ]] || false
 }
 
 @test "a missing sibling helper produces a bounded unavailable advisory" {
@@ -326,14 +326,14 @@ STUB
   context "$lonely"
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=helper_unavailable"* ]]
+  [[ "$output" == *"status=unavailable reason=helper_unavailable"* ]] || false
 }
 
 @test "a missing python3 produces a bounded unavailable advisory" {
   run env PATH=/nonexistent-task-context-path /bin/bash "$WORK/run.sh" "$LIB" "$PROJECT"
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=python_unavailable"* ]]
+  [[ "$output" == *"status=unavailable reason=python_unavailable"* ]] || false
 }
 
 @test "truncated protocol output is reported unavailable, never rendered as a read" {
@@ -350,7 +350,7 @@ STUB
   context "$broken"
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]]
+  [[ "$output" == *"status=unavailable reason=malformed_protocol"* ]] || false
 }
 
 @test "empty stdout is never mistaken for a successful read" {
@@ -361,7 +361,7 @@ STUB
   context "$silent"
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=empty_protocol_output"* ]]
+  [[ "$output" == *"status=unavailable reason=empty_protocol_output"* ]] || false
 }
 
 @test "a nonzero CLI exit carrying an available payload is refused" {
@@ -379,7 +379,7 @@ STUB
   context "$mismatched"
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable reason=cli_status_mismatch"* ]]
+  [[ "$output" == *"status=unavailable reason=cli_status_mismatch"* ]] || false
 }
 
 @test "an unavailable record without a source sorts last and is never dropped" {
@@ -399,7 +399,7 @@ STUB
   context "$unsorted"
   [ "$status" -eq 1 ]
   assert_bounded
-  [[ "$output" == *"status=unavailable documents=3 foreign_records=4 checked=0 pending=0"* ]]
+  [[ "$output" == *"status=unavailable documents=3 foreign_records=4 checked=0 pending=0"* ]] || false
   printf '%s\n' "$output" | grep -q -- '- "alpha.md": stale'
   printf '%s\n' "$output" | grep -q -- '- "zeta.md": missing'
   printf '%s\n' "$output" | grep -q -- '- (source unavailable): unavailable'
@@ -423,7 +423,7 @@ STUB
   printf '%s\n' '- [ ] untouched' > "$PROJECT/tasks.md"
   context "$recorder"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"status=no_records"* ]]
+  [[ "$output" == *"status=no_records"* ]] || false
   run cat "$recorder/argv.json"
   [ "$status" -eq 0 ]
   [ "$output" = "[\"read\", \"--cwd\", \"$PROJECT\"]" ]
@@ -444,8 +444,8 @@ STUB
   context
   [ "$status" -eq 0 ]
   assert_bounded
-  [[ "$output" == *"status=no_records documents=0 foreign_records=1 checked=0 pending=0"* ]]
-  [[ "$output" != *"other.md"* ]]
+  [[ "$output" == *"status=no_records documents=0 foreign_records=1 checked=0 pending=0"* ]] || false
+  [[ "$output" != *"other.md"* ]] || false
   [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 2 ]
 }
 
@@ -457,5 +457,5 @@ STUB
   [ "$status" -eq 0 ]
   assert_bounded
   printf '%s\n' "$output" | python3 -I -c 'import json,sys; line=sys.stdin.read().splitlines()[2]; value,end=json.JSONDecoder().raw_decode(line[2:]); assert value == sys.argv[1]; assert line[2+end:] == ": current checked=1 pending=0"' "$path"
-  [[ "$output" != *"private task text"* ]]
+  [[ "$output" != *"private task text"* ]] || false
 }

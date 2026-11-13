@@ -3,6 +3,9 @@
 
 set -u
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=lib/local-registry.sh
 . "$SCRIPT_DIR/lib/local-registry.sh"
@@ -615,7 +618,7 @@ rebuild_candidates() {
       printf '%s\n' "$manifest" >> "$safe" || { rm -f "$ignores" "$found" "$safe" "$sorted"; return "$TRELLIS_EX_UNAVAILABLE"; }
       rebuild_progress "$progress" "found $manifest"
     done < "$found"
-    count="$(LC_ALL=C awk 'END { print NR }' "$safe")" || count="?"
+    count="$(/usr/bin/env LC_ALL=C awk 'END { print NR }' "$safe")" || count="?"
     rebuild_progress "$progress" "scanned $root: $count manifest(s)"
     if ! LC_ALL=C sort "$safe" > "$sorted"; then
       rm -f "$ignores" "$found" "$safe" "$sorted"

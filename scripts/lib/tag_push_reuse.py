@@ -69,9 +69,6 @@ def evaluate(root: Path, identity: str, range_spec: str) -> dict:
     tree = git(root, "rev-parse", release + "^{tree}").decode().strip()
     if current is None or current["tree"] != tree:
         raise ValueError("checkout is not the exact release tree")
-    tag_row = tag + " " + expected
-    if tag_row not in current["refs"]:
-        raise ValueError("verified tag disappeared")
     state = state_root()
     matches = []
     mismatched = set()
@@ -79,16 +76,10 @@ def evaluate(root: Path, identity: str, range_spec: str) -> dict:
         candidate = record["inputs"]
         if find_verdict(candidate, state) is None:
             continue
-        # The only allowed key difference is creation of this verified tag.
-        # Tree, environment, runner, inventory, tools and every other ref bind.
-        refs = candidate["refs"]
-        if not isinstance(refs, list):
-            continue
-        adjusted = dict(candidate)
-        if not any(row.startswith(tag + " ") for row in refs):
-            adjusted["refs"] = sorted([*refs, tag_row])
-        mismatched.update(name for name in current if adjusted.get(name) != current[name])
-        if encoded(adjusted) == encoded(current):
+        # Refs are not keyed, so creating the verified tag changes nothing.
+        # Tree, command, runner, tools and platform must all match exactly.
+        mismatched.update(name for name in current if candidate.get(name) != current[name])
+        if encoded(candidate) == encoded(current):
             matches.append(record)
     if len(matches) != 1:
         raise ValueError("no unambiguous T30-validated exact-tree verdict; changed inputs: " + ", ".join(sorted(mismatched)))

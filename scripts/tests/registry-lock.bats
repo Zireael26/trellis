@@ -33,8 +33,8 @@ setup() {
     exit "$rc"
   ' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 5 ]
-  [[ "$output" == *$'backoff=1\nbackoff=2\nbackoff=4\n'* ]]
-  [[ "$output" == *'timed out waiting for registry lock'*'held by pid'* ]]
+  [[ "$output" == *$'backoff=1\nbackoff=2\nbackoff=4\n'* ]] || false
+  [[ "$output" == *'timed out waiting for registry lock'*'held by pid'* ]] || false
   [ -d "$HOME_FIX/locks/registry.lock" ]
 }
 
@@ -68,7 +68,7 @@ setup() {
     trellis_home_lock_acquire "$2" registry 5
   ' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 5 ]
-  [[ "$output" == *$'backoff=1\nbackoff=2\nbackoff=2\n'* ]]
+  [[ "$output" == *$'backoff=1\nbackoff=2\nbackoff=2\n'* ]] || false
 }
 
 @test "registry backoff never exceeds eight seconds" {
@@ -80,7 +80,7 @@ setup() {
     trellis_home_lock_acquire "$2" registry 24
   ' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 5 ]
-  [[ "$output" == *$'backoff=1\nbackoff=2\nbackoff=4\nbackoff=8\nbackoff=8\nbackoff=1\n'* ]]
+  [[ "$output" == *$'backoff=1\nbackoff=2\nbackoff=4\nbackoff=8\nbackoff=8\nbackoff=1\n'* ]] || false
 }
 
 @test "real registry attach and clear writers wait through contention before publishing" {
@@ -119,7 +119,7 @@ setup() {
   mkdir "$HOME_FIX/locks/registry.lock"
   run bash -c '. "$1"; trellis_home_lock_acquire "$2" registry 0' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 5 ]
-  [[ "$output" == *'still initializing'* ]]
+  [[ "$output" == *'still initializing'* ]] || false
   [ -d "$HOME_FIX/locks/registry.lock" ]
   [ ! -e "$HOME_FIX/locks/registry.lock/pid" ]
 }
@@ -133,7 +133,7 @@ setup() {
     trellis_home_lock_acquire "$2" registry 7
   ' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 4 ]
-  [[ "$output" != *'UNEXPECTED RETRY'* ]]
+  [[ "$output" != *'UNEXPECTED RETRY'* ]] || false
   [ "$(< "$HOME_FIX/locks/registry.lock/pid")" = not-a-pid ]
   (cd "$HOME_FIX/locks/registry.lock" && rm ./pid)
   rmdir "$HOME_FIX/locks/registry.lock"
@@ -159,7 +159,7 @@ setup() {
     trellis_home_lock_acquire "$2" registry 3
   ' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 5 ]
-  [[ "$output" == *'timed out waiting for registry lock'*'kept changing'* ]]
+  [[ "$output" == *'timed out waiting for registry lock'*'kept changing'* ]] || false
 }
 
 @test "an indeterminate liveness probe never reclaims a live or unknown holder" {
@@ -231,7 +231,7 @@ sys.exit(1)
     trellis_home_lock_release
   ' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 0 ]
-  [[ "$output" == *'recovered stale registry lock'* ]]
+  [[ "$output" == *'recovered stale registry lock'* ]] || false
   [ ! -e "$HOME_FIX/locks/registry.lock" ]
 }
 
@@ -252,7 +252,7 @@ sys.exit(1)
     exit "$rc"
   ' _ "$REPO_ROOT" "$HOME_FIX"
   [ "$status" -eq 5 ] || { echo "$output"; return 1; }
-  [[ "$output" == *'timed out waiting for registry lock'* ]]
+  [[ "$output" == *'timed out waiting for registry lock'* ]] || false
 }
 
 @test "non-registry lock timeout retains its existing state classification" {
@@ -260,7 +260,7 @@ sys.exit(1)
   printf '%s\n' "$$" > "$HOME_FIX/locks/config.lock/pid"
   run bash -c '. "$1"; trellis_home_lock_acquire "$2" config 0' _ "$HOME_LIB" "$HOME_FIX"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'timed out waiting for config lock'* ]]
+  [[ "$output" == *'timed out waiting for config lock'* ]] || false
 }
 
 # Exercise the real postjob control flow with deterministic verification and
@@ -291,15 +291,15 @@ postjob_registry_result() {
 @test "postjob keeps unavailable registry reconciliation pending for retry" {
   run postjob_registry_result 5
   [ "$status" -eq 5 ]
-  [[ "$output" == *'status=pending'* ]]
-  [[ "$output" != *'failed=registry'* ]]
+  [[ "$output" == *'status=pending'* ]] || false
+  [[ "$output" != *'failed=registry'* ]] || false
   [ -f "$HOME_FIX/released" ]
 }
 
 @test "postjob preserves the actual corrupt-registry failure code instead of negation status zero" {
   run postjob_registry_result 4
   [ "$status" -eq 1 ]
-  [[ "$output" == *'failed=registry code=4'* ]]
+  [[ "$output" == *'failed=registry code=4'* ]] || false
   [ -f "$HOME_FIX/released" ]
 }
 
@@ -320,9 +320,9 @@ postjob_registry_result() {
     bash "$3/dispatcher" old new 1
   ' _ "$HOME_LIB" "$ATTACHMENT_LIB" "$HOME_FIX"
   [ "$status" -eq 5 ]
-  [[ "$output" == *'attachment reconciliation failed'* ]]
-  [[ "$output" == *'timed out waiting for registry lock'* ]]
-  [[ "$output" != *'unsafe worktree'* ]]
+  [[ "$output" == *'attachment reconciliation failed'* ]] || false
+  [[ "$output" == *'timed out waiting for registry lock'* ]] || false
+  [[ "$output" != *'unsafe worktree'* ]] || false
 }
 
 @test "stale-lock recovery never deletes a pid record it no longer owns" {

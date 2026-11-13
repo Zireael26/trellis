@@ -25,13 +25,24 @@
 # `.claude/skills/security-gate-local/local.config.sh` pins the security gate's
 # ShellCheck scope to the same carve-out so the two gates agree.
 #
-# Usage: lint-shell-tree.sh [--list]   (run from the repository root)
+# Assignment guard: a bounded lexical check of temporary command prefixes in
+# redirected $(...) and backticks, including nested/multiline forms, conservative
+# pipeline redirects, and recognizable generated-shell heredocs. It scans this
+# same shell tree, including extensionless shell scripts, but not .bats files.
+# It does not follow helper calls, eval, or bash -c strings, nor later quoted
+# chunks of the multi-heredoc attachment dispatcher; complex shell syntax may
+# also escape it. This is a guard, not a full shell parser or execution proof.
+#
+# Usage: lint-shell-tree.sh [--list|--write-assignment-baseline] (from repo root)
+# Review the working tree and resulting JSON diff before accepting a regenerated
+# baseline. Locale assignments are never admitted; see the scanner's --help.
 
 set -uo pipefail
 
-LIST_ONLY=0
+MODE=lint
 case "${1:-}" in
-  --list) LIST_ONLY=1 ;;
+  --list) MODE=list ;;
+  --write-assignment-baseline) MODE=write-baseline ;;
   "") ;;
   *) printf 'lint-shell-tree: unknown argument: %s\n' "$1" >&2; exit 64 ;;
 esac
@@ -48,7 +59,7 @@ shebang_is_shell() {
   # multibyte conversion failure" on binary bytes (the shipped
   # core-rules/native/*/trellis-hooks), which would fail the whole stage.
   local kind
-  kind="$(head -c 256 "$1" | LC_ALL=C awk '
+  kind="$(head -c 256 "$1" | /usr/bin/env LC_ALL=C awk '
        NR == 1 {
          sub(/\r$/, "")
          if ($0 ~ /^#!/) {
@@ -108,9 +119,65 @@ shell_tree_files() {
   fi
 }
 
-if [ "$LIST_ONLY" -eq 1 ]; then
+if [ "$MODE" = list ]; then
   shell_tree_files | tr '\0' '\n'
   exit $?
 fi
 
-shell_tree_files | xargs -0 shellcheck --severity=warning
+# Both checks consume the same complete NUL-framed inventory; traversal or a
+# missing/unreadable baseline must never turn into a clean scan. In particular,
+# do not use process substitution here: its exit status would be lost.
+inventory="$(mktemp "${TMPDIR:-/tmp}/trellis-shell-tree.XXXXXXXX")" || exit 1
+trap 'rm -f -- "$inventory"' EXIT
+shell_tree_files > "$inventory" || exit 1
+scanner=(python3 -I scripts/lint-shell-assignments.py --files0-from "$inventory"
+         --baseline scripts/lint-shell-assignments-baseline.json)
+if [ "$MODE" = write-baseline ]; then
+  "${scanner[@]}" --write-baseline
+  exit $?
+fi
+
+# A BSD `stat -f` probe with its fallback inside the same command substitution,
+# `$(stat -f %Lp f 2>/dev/null || stat -c %a f)`, is wrong on Linux: GNU
+# `stat -f` is --file-system, so it prints a filesystem block on stdout before
+# failing and the fallback's answer is appended to that block. Probe GNU first
+# (BSD `stat -c` fails with nothing on stdout) or give each probe its own
+# assignment. ShellCheck skips Bats files and the doctor-fix helper (Bats
+# context); this check reads them too. A substitution still open at the end of
+# its line is flagged as well, since its fallback may follow there.
+STAT_SUBST='\$\([[:space:]]*(command[[:space:]]+)?(/usr/bin/)?stat[[:space:]]+-f[^)]*(\|\||$)'
+stat_dialect_check() {
+  local list path findings rc=0
+  local -a files=()
+  list="$(tr '\0' '\n' < "$inventory")" || return 2
+  while IFS= read -r path; do
+    [ -z "$path" ] || files+=("$path")
+  done <<< "$list"
+  list="$(find "${ROOTS[@]}" \
+    \( -path 'core-rules/evals' -o -path '.claude/worktrees' \) -prune -o \
+    \( -name '*.bats' -type f -print \))" || {
+    printf 'lint-shell-tree: bats-file traversal failed\n' >&2
+    return 2
+  }
+  while IFS= read -r path; do
+    [ -z "$path" ] || files+=("$path")
+  done <<< "$list"
+  [ ! -f scripts/tests/doctor-fix-common.bash ] || files+=(scripts/tests/doctor-fix-common.bash)
+  [ "${#files[@]}" -gt 0 ] || return 0
+  findings="$(grep -HnE -- "$STAT_SUBST" "${files[@]}")" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) return 0 ;;
+    *) printf 'lint-shell-tree: stat dialect scan failed\n' >&2; return 2 ;;
+  esac
+  findings="$(printf '%s\n' "$findings" | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#')" || return 0
+  printf '%s\n' "$findings"
+  printf 'lint-shell-tree: BSD-first stat -f fallback inside one command substitution (see above); probe GNU first or use separate assignments\n' >&2
+  return 1
+}
+
+status=0
+"${scanner[@]}" || status=1
+xargs -0 shellcheck --severity=warning < "$inventory" || status=1
+stat_dialect_check || status=1
+exit "$status"

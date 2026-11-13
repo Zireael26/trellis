@@ -7,6 +7,9 @@
 # shellcheck disable=SC1090,SC2034
 set -o pipefail
 source "$1"
+# Load deps-heavy.sh now: its first-call stubs would source it again and
+# replace the helper seams below with the real definitions.
+_se_load_heavy || exit 1
 source "$2"
 PROJECT_DIR="$3" FIXTURE="$4" FIELD="$5" KEY_SOURCE="$2"
 export HOME="$FIXTURE/home" RUSTUP_HOME="$FIXTURE/rustup"

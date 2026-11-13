@@ -127,7 +127,7 @@ mirror_fleet_identity_tokens() {
     grep -oE '"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+"[[:space:]]*:[[:space:]]*\{' "$source" 2>/dev/null
   } |
     sed -E 's/.*"([^"]*)"[[:space:]]*:?[[:space:]]*\{?$/\1/; s#.*/##' |
-    LC_ALL=C tr '[:upper:]' '[:lower:]' |
+    /usr/bin/env LC_ALL=C tr '[:upper:]' '[:lower:]' |
     sed -E 's/\.(com|org|net|money|live|dev|in|ai|site)$//' |
     grep -vE '^.{0,2}$' |
     sort -u |
@@ -191,7 +191,7 @@ mirror_fleet_identity_tokens_by_visibility() {
       inproj = 0; pid = ""; pub = 0; next
     }
   ' "$source" 2>/dev/null |
-    LC_ALL=C tr '[:upper:]' '[:lower:]' |
+    /usr/bin/env LC_ALL=C tr '[:upper:]' '[:lower:]' |
     sed -E 's#.*/##; s/\.(com|org|net|money|live|dev|in|ai|site)$//' |
     sed -E '/^.{0,2}$/d' |
     sort -u
@@ -269,7 +269,11 @@ try:
     require(manifest == trusted_manifest, 'native manifest differs from trusted payload')
     d = json.loads(manifest.decode('utf-8'), object_pairs_hook=pairs)
     closed(d, 'schema_version version source_commit generation inputs toolchain install_path adapter assets')
-    require(type(d['schema_version']) is int and d['schema_version'] == 1 and d['version'] == '1.5.0', 'invalid native version')
+    # The expected version is the trusted payload's core-rules/VERSION, never a pin here.
+    version, _ = read_file(payload, 'core-rules/VERSION')
+    version = version.decode('ascii', errors='replace')
+    require(re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?\n', version) is not None, 'trusted payload VERSION is not one version line')
+    require(type(d['schema_version']) is int and d['schema_version'] == 1 and d['version'] == version[:-1], 'invalid native version')
     require(d['install_path'] == 'bin/native/{version}/{target}/{sha256}/trellis-hooks', 'invalid native install path')
     require(type(d['source_commit']) is str and re.fullmatch('[0-9a-f]{40}', d['source_commit']), 'invalid source provenance')
     require(type(d['inputs']) is dict and bool(d['inputs']), 'missing native inputs')
@@ -466,8 +470,8 @@ lint_mirror() {
       home_is_binary=0
       # ASCII controls, NULs or invalid UTF-8 mark a byte-oriented payload.
       # An unavailable validation tool fails closed as binary.
-      if LC_ALL=C grep -aqE "$home_control_re" -- "$home_source_file" 2>/dev/null || \
-         ! cmp -s "$home_source_file" <(LC_ALL=C tr -d '\000' < "$home_source_file") || \
+      if /usr/bin/env LC_ALL=C grep -aqE "$home_control_re" -- "$home_source_file" 2>/dev/null || \
+         ! cmp -s "$home_source_file" <(/usr/bin/env LC_ALL=C tr -d '\000' < "$home_source_file") || \
          ! /usr/bin/iconv -f UTF-8 -t UTF-8 "$home_source_file" >/dev/null 2>&1; then
         home_is_binary=1
       fi
@@ -594,7 +598,7 @@ $mirror_allowed_tokens"
             fi
             ;;
         esac
-        if LC_ALL=C tr '\000' '\n' < "$scan_file" | awk -v allowed_tokens="$mirror_allowed_tokens" '
+        if /usr/bin/env LC_ALL=C tr '\000' '\n' < "$scan_file" | awk -v allowed_tokens="$mirror_allowed_tokens" '
           {
             line = $0
             # Longest first: pi-/google- prefixes must be consumed before the
@@ -651,7 +655,7 @@ $mirror_allowed_tokens"
       [ -n "$identity_token" ] || continue
       # Treat underscore as an identifier separator but keep alphanumeric word
       # boundaries, so HELIOS_HOME is caught without flagging heliospheric.
-      identity_ere="$(printf '%s' "$identity_token" | LC_ALL=C sed 's/[][\\.^$*+?{}()|]/\\&/g')"
+      identity_ere="$(printf '%s' "$identity_token" | /usr/bin/env LC_ALL=C sed 's/[][\\.^$*+?{}()|]/\\&/g')"
       identity_pattern="(^|[^[:alnum:]])${identity_ere}([^[:alnum:]]|$)"
       while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -660,13 +664,13 @@ $mirror_allowed_tokens"
           scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
           *) printf '%s: local fleet project identifier must not publish\n' "$rel"; rc=1 ;;
         esac
-      done < <(LC_ALL=C mirror_lint_grep "$mirror_dir" "$scan_dir" -aliE "$identity_pattern")
+      done < <(export LC_ALL=C && mirror_lint_grep "$mirror_dir" "$scan_dir" -aliE "$identity_pattern")
       # Filenames, directory names and symlink names are published too. Never
       # follow links; NUL delimiters keep unusual path bytes in one record.
       while IFS= read -r -d '' f; do
         [ "$f" != "$mirror_dir" ] || continue
         rel="${f#"$mirror_dir"/}"
-        if printf '%s\n' "$rel" | LC_ALL=C grep -qiE -- "$identity_pattern"; then
+        if printf '%s\n' "$rel" | /usr/bin/env LC_ALL=C grep -qiE -- "$identity_pattern"; then
           printf '%s: local fleet project identifier must not publish\n' "$rel"
           rc=1
         fi

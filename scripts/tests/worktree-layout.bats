@@ -81,8 +81,8 @@ rows() {
   rows
   [ "$status" -eq 0 ]
   [[ "$output" == *$'0\t'"worktree root $ROOT is excluded from Time Machine"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *$'0\tworktree root carries .metadata_never_index'* ]]
-  [[ "$output" == *$'0\t'"Spotlight returns no hits under $ROOT"* ]]
+  [[ "$output" == *$'0\tworktree root carries .metadata_never_index'* ]] || false
+  [[ "$output" == *$'0\t'"Spotlight returns no hits under $ROOT"* ]] || false
   grep -q "mdfind -onlyin $ROOT" "$STUB_LOG"
 }
 
@@ -97,7 +97,7 @@ rows() {
   mkdir -p "$ROOT"
   rows
   [[ "$output" == *$'2\t'"worktree root $ROOT is not excluded from Time Machine"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *$'2\tworktree root has no .metadata_never_index'* ]]
+  [[ "$output" == *$'2\tworktree root has no .metadata_never_index'* ]] || false
 }
 
 @test "doctor --fix runs root-init; --fix --dry-run only says it would" {
@@ -113,7 +113,7 @@ rows() {
   mkdir -p "$HOME/.codex/worktrees/abcd" "$HOME/.cursor/worktrees"
   rows
   [[ "$output" == *$'2\t'"1 entr(ies) under $HOME/.codex/worktrees: in the Codex app set Settings > Worktrees > Worktree root to $ROOT/_codex"* ]] || { echo "$output"; return 1; }
-  [[ "$output" == *$'2\t'"$HOME/.cursor/worktrees exists: Cursor's cleanup keeps 25 worktrees"* ]]
+  [[ "$output" == *$'2\t'"$HOME/.cursor/worktrees exists: Cursor's cleanup keeps 25 worktrees"* ]] || false
   CODEX_HOME="$SANDBOX/codex" rows
   [[ "$output" != *"entr(ies) under"* ]] || { echo "$output"; return 1; }
 }

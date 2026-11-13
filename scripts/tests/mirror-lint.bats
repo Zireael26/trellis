@@ -130,6 +130,7 @@ d['assets']={t:dict(path=t+'/trellis-hooks',size=len(b),sha256=hashlib.sha256(b)
 (base/'artifacts.json').write_text(json.dumps(d))
 PY
   cp -R "$PAYLOAD_ROOT/core-rules/native" "$MIRROR/core-rules/native"
+  cp "$REPO_ROOT/core-rules/VERSION" "$PAYLOAD_ROOT/core-rules/VERSION"
 }
 
 @test "T57 native: verified binary packed IPv4 bytes do not trigger text findings" {
@@ -143,24 +144,48 @@ PY
   export PAYLOAD_ROOT="$BATS_TEST_TMPDIR/trusted-payload"
   mkdir -p "$PAYLOAD_ROOT/core-rules" "$MIRROR/core-rules"
   cp -R "$REPO_ROOT/core-rules/native" "$PAYLOAD_ROOT/core-rules/native"
+  cp "$REPO_ROOT/core-rules/VERSION" "$PAYLOAD_ROOT/core-rules/VERSION"
   cp -R "$PAYLOAD_ROOT/core-rules/native" "$MIRROR/core-rules/native"
   run lint_mirror "$MIRROR"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   printf '\n8.8.8.8\n' >> "$MIRROR/core-rules/native/artifacts.json"
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ]
-  [[ "$output" == *'artifacts.json: routable IP literal must not publish'* ]]
+  [[ "$output" == *'artifacts.json: routable IP literal must not publish'* ]] || false
 }
 
 @test "T57 native: printable binary host paths and routable addresses still refuse" {
   t57_native_fixture 'https://8.8.8.8/path'
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'core-rules/native/x86_64-unknown-linux-musl/trellis-hooks: routable IP literal must not publish'* ]]
+  [[ "$output" == *'core-rules/native/x86_64-unknown-linux-musl/trellis-hooks: routable IP literal must not publish'* ]] || false
   t57_native_fixture "/Users/${BATS_TEST_NUMBER:-fixture}-operator/path"
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'core-rules/native/x86_64-unknown-linux-musl/trellis-hooks: absolute-path leak'* ]]
+  [[ "$output" == *'core-rules/native/x86_64-unknown-linux-musl/trellis-hooks: absolute-path leak'* ]] || false
+}
+
+# The expected native version is the trusted payload's core-rules/VERSION,
+# never a pin in mirror-lint.sh: another version, or no usable file, refuses.
+@test "T57 native: the manifest version must equal the trusted payload VERSION" {
+  t57_native_fixture
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run grep -nF "d['version'] == '" "$REPO_ROOT/scripts/lib/mirror-lint.sh"
+  [ "$status" -eq 1 ] || { echo "mirror-lint still pins: $output"; false; }
+  printf '9.9.9\n' > "$PAYLOAD_ROOT/core-rules/VERSION"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'native runtime verification failed: invalid native version'* ]] || { echo "$output"; false; }
+  printf 'latest\n' > "$PAYLOAD_ROOT/core-rules/VERSION"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'trusted payload VERSION is not one version line'* ]] || { echo "$output"; false; }
+  rm "$PAYLOAD_ROOT/core-rules/VERSION"
+  ln -s "$REPO_ROOT/core-rules/VERSION" "$PAYLOAD_ROOT/core-rules/VERSION"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ] || { echo "symlinked VERSION accepted: $output"; false; }
+  [[ "$output" == *'native runtime verification failed'* ]] || { echo "$output"; false; }
 }
 
 @test "T57 native: forged digest and unlisted files refuse without an exemption" {
@@ -175,12 +200,12 @@ a['size']=len(b); a['sha256']=hashlib.sha256(b).hexdigest(); p.write_text(json.d
 PY
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'native'* ]]
+  [[ "$output" == *'native'* ]] || false
   cp -R "$PAYLOAD_ROOT/core-rules/native/." "$MIRROR/core-rules/native/"
   printf '8.8.8.8\n' > "$MIRROR/core-rules/native/unlisted.txt"
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'unlisted.txt: routable IP literal must not publish'* ]]
+  [[ "$output" == *'unlisted.txt: routable IP literal must not publish'* ]] || false
 }
 
 @test "T57 native: missing assets and wrong digest cannot buy an exemption" {
@@ -189,12 +214,12 @@ PY
   rm "${asset:?}"
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ]
-  [[ "$output" == *'native runtime verification failed'* ]]
+  [[ "$output" == *'native runtime verification failed'* ]] || false
   cp "$PAYLOAD_ROOT/core-rules/native/x86_64-unknown-linux-musl/trellis-hooks" "$asset"
   printf '\000changed\000' >> "$asset"
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ]
-  [[ "$output" == *'native runtime verification failed'* ]]
+  [[ "$output" == *'native runtime verification failed'* ]] || false
 }
 
 @test "clean portable mirror passes without local redaction inputs" {
@@ -653,7 +678,7 @@ EOF
     printf '%s\n' "$path" > "$MIRROR/README.md"
     run lint_mirror "$MIRROR"
     [ "$status" -eq 1 ] || { echo "missed $path: $output"; false; }
-    [[ "$output" == *'README.md: absolute-path leak'* ]]
+    [[ "$output" == *'README.md: absolute-path leak'* ]] || false
   done
 }
 
@@ -662,7 +687,7 @@ EOF
   printf '%s\n' "/Volumes/Work\\ Disk/User""s/$username" > "$MIRROR/README.md"
   run lint_mirror "$MIRROR"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
-  [[ "$output" == *'README.md: absolute-path leak'* ]]
+  [[ "$output" == *'README.md: absolute-path leak'* ]] || false
 }
 
 @test "unquoted whitespace separates a rooted token from relative prose" {
@@ -955,7 +980,7 @@ JSON
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/pi/web-search/notes.ts: stale 'antigravity'"* ]]
+  [[ "$output" == *"core-rules/pi/web-search/notes.ts: stale 'antigravity'"* ]] || false
 }
 
 @test "an unenumerated capitalised form fails inside the allowed adapter paths" {
@@ -965,7 +990,7 @@ JSON
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/pi/web-search/x.ts: stale 'antigravity'"* ]]
+  [[ "$output" == *"core-rules/pi/web-search/x.ts: stale 'antigravity'"* ]] || false
 }
 
 @test "an adapter contract token fails OUTSIDE the allowed adapter paths" {
@@ -975,7 +1000,7 @@ JSON
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"README.md: stale 'antigravity'"* ]]
+  [[ "$output" == *"README.md: stale 'antigravity'"* ]] || false
 }
 
 @test "an unenumerated ANTIGRAVITY_ env name fails inside the allowed adapter paths" {
@@ -989,7 +1014,7 @@ JSON
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/pi/web-search/leak.ts: stale 'antigravity'"* ]]
+  [[ "$output" == *"core-rules/pi/web-search/leak.ts: stale 'antigravity'"* ]] || false
 }
 
 @test "the public web-search guide publishes with its env contract" {
@@ -1015,7 +1040,7 @@ JSON
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"docs/other-guide.md: stale 'antigravity'"* ]]
+  [[ "$output" == *"docs/other-guide.md: stale 'antigravity'"* ]] || false
 }
 
 @test "the public web-search guide is in the sync allowlist (GUARD ONLY)" {
@@ -1073,7 +1098,7 @@ SEARCH_EXT=core-rules/pi/extensions/trellis-web-search.ts
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"core-rules/pi/extensions/other-search.ts: stale 'antigravity'"* ]]
+  [[ "$output" == *"core-rules/pi/extensions/other-search.ts: stale 'antigravity'"* ]] || false
 }
 
 @test "053: an ANTIGRAVITY_ env name fails inside the extension path" {
@@ -1084,7 +1109,7 @@ SEARCH_EXT=core-rules/pi/extensions/trellis-web-search.ts
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]]
+  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]] || false
 }
 
 @test "053: an unenumerated compound fails inside the extension path" {
@@ -1094,7 +1119,7 @@ SEARCH_EXT=core-rules/pi/extensions/trellis-web-search.ts
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]]
+  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]] || false
 }
 
 @test "053: the retired harness spelling still fails inside the extension path" {
@@ -1104,7 +1129,7 @@ SEARCH_EXT=core-rules/pi/extensions/trellis-web-search.ts
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]]
+  [[ "$output" == *"$SEARCH_EXT: stale 'antigravity'"* ]] || false
 }
 
 # --- Spec 072 T32: the generated release-metadata audit ---------------------
@@ -1131,7 +1156,7 @@ HARNESS_ADR=docs/adr/2026-05-20-antigravity-third-harness.md
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"scripts/tests/other-audit.json: stale 'antigravity'"* ]]
+  [[ "$output" == *"scripts/tests/other-audit.json: stale 'antigravity'"* ]] || false
 }
 
 @test "072: another antigravity reference fails inside the audit" {
@@ -1142,5 +1167,5 @@ HARNESS_ADR=docs/adr/2026-05-20-antigravity-third-harness.md
   run lint_mirror "$MIRROR"
 
   [ "$status" -eq 1 ]
-  [[ "$output" == *"$AUDIT: stale 'antigravity'"* ]]
+  [[ "$output" == *"$AUDIT: stale 'antigravity'"* ]] || false
 }

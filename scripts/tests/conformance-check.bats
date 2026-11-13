@@ -19,7 +19,7 @@ check_conformance() {
   check_conformance
   [ "$status" -ne 0 ] || { echo "absolute path was ignored: $output"; false; }
   [[ "$output" == *"MISS: engineering-process.md:1"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"$operator_root/scripts/gone.sh"* ]]
+  [[ "$output" == *"$operator_root/scripts/gone.sh"* ]] || false
 
   printf 'Use `scripts/existing.sh` and example `/Users/you/project/scripts/example.sh`\n' > "$ROOT/engineering-process.md"
   check_conformance

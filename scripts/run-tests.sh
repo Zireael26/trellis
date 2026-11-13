@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run exactly what CI runs, in one command.
+# Run exactly what CI runs, in one command (except the narrowed diagnostic).
 #
 # The process-gate's Tests & coverage row used to be pointed at `:` on the
 # grounds that "Trellis is a configuration repository … no test runner". That
@@ -18,18 +18,20 @@
 # excluded there.
 #
 # Usage: scripts/run-tests.sh [--quick] [--scope=local|ci] [--shard=I/N] [--list] [--plan]
-#                              [--base=REV] [--native-stages=auto|always]
+#                              [--base=REV] [--native-stages=auto|always] [--native-cargo-only]
 #   --quick        run only the fast deterministic slice (shellcheck, AEO static
 #                  + python, conformance, bootstrap prologues). Intended for a
 #                  tight local loop, never for a gate run.
-#   --scope=ci     apply the CI exclusions as well as the global ones.
+#   --scope=ci     apply the CI exclusions as well as the global ones. Local
+#                  runs off Darwin also apply the Darwin-only CI exclusions.
 #   --shard=I/N    assign stages with deterministic longest-processing-time (LPT)
 #                  scheduling over scripts/tests/stage-weights.tsv. Missing stages
 #                  use the documented 30-second default weight.
 #                  The workflow fans these out across a matrix; locally the
 #                  default 1/1 runs everything.
-#   --test-file=P  select an existing scripts/tests/*.bats file (repeatable),
-#                  retaining static/core stages, recipe lint and normal LPT/fencing.
+#   --test-file=P  select an existing scripts/tests/*.bats or core hook test
+#                  file (repeatable), retaining static stages, recipe lint and
+#                  normal LPT/fencing.
 #   --list         print only the stage names this invocation would run, and exit 0.
 #                  Concatenating the four shards' lists must reproduce the 1/1
 #                  list as a set — suite-coverage.bats asserts that.
@@ -45,6 +47,15 @@
 #                  in scripts/lib/test-suites.sh; owner 2026-11-10). An unknown base
 #                  runs them. A skip prints one labelled line per stage, never a
 #                  silent pass. always: register them regardless.
+#   --native-cargo-only
+#                  run a narrowed native Cargo diagnostic, NOT a full battery.
+#                  Requires TRELLIS_NATIVE_CARGO_ONLY=qualification, including
+#                  for --list/--plan. Refuses --quick, --scope, --shard,
+#                  --test-file, --base, --native-stages, and combined --list
+#                  and --plan. Refuses the parent gate interface if PG_TESTS_BASE,
+#                  PG_TESTS_HEAD, PG_TESTS_RECEIPT_FILE, or PG_PUSH_TEST_SCOPE
+#                  is set (even empty). Qualifies script stage 03 only; this
+#                  opt-in is not an authorization boundary.
 #
 # Environment:
 #   TRELLIS_SLOW_TESTS=1  also run the slow tier: test cases that skip without it
@@ -71,16 +82,23 @@ RUN_TESTS_DIR="${BASH_SOURCE[0]%/*}"
 ROOT="$(CDPATH='' cd "$RUN_TESTS_DIR/.." && pwd -P)"
 cd "$ROOT" || exit 1
 
-# Fixture attaches must not leave detached post-attach jobs racing teardown.
-# Safe to skip: pre-push runs the deferred checks inline when no status is
-# recorded. attach-postjob.bats unsets this to exercise the spawn.
+# Direct fixture attaches skip detached post-attach jobs: pre-push runs deferred
+# checks inline when no status is recorded. The release.sh pathname bootstrap
+# and the installed launcher use env -i, so this test-only switch does not cross
+# those boundaries. Fixtures invoking them must wait for their own postjobs
+# before teardown. attach-postjob.bats unsets the switch to exercise spawning.
 export TRELLIS_ATTACH_POSTJOB=off
 
-# START precedes argument validation, fence setup and any planner/test. Inventory
-# interfaces never probe tools or bind a sidecar, even with inherited receipts.
+# START precedes ordinary argument validation, fence setup and any planner/test.
+# Inventory interfaces and refused native-only admission never probe tools or
+# bind a sidecar, even with inherited receipts.
 CAPTURE_PROVENANCE=1
+NATIVE_CARGO_ONLY=0
 for arg in "$@"; do
-  case "$arg" in --list|--plan) CAPTURE_PROVENANCE=0 ;; esac
+  case "$arg" in
+    --list|--plan) CAPTURE_PROVENANCE=0 ;;
+    --native-cargo-only) NATIVE_CARGO_ONLY=1 ;;
+  esac
 done
 capture_runner_provenance() {
   local phase="$1" record='' reason='python3 not found'
@@ -101,6 +119,31 @@ capture_runner_provenance() {
   fi
   printf '%s\n' "$record" >&2 || true
 }
+# Refuse unsafe native-only admission before even the START probe or sidecar.
+# Presence of a parent gate interface, including an empty value, is enough.
+if [ "$NATIVE_CARGO_ONLY" -eq 1 ]; then
+  if [ "${TRELLIS_NATIVE_CARGO_ONLY:-}" != qualification ]; then
+    printf 'run-tests: --native-cargo-only requires TRELLIS_NATIVE_CARGO_ONLY=qualification\n' >&2; exit 64
+  fi
+  if [ -n "${PG_TESTS_BASE+x}${PG_TESTS_HEAD+x}${PG_TESTS_RECEIPT_FILE+x}${PG_PUSH_TEST_SCOPE+x}" ]; then
+    printf 'run-tests: --native-cargo-only refuses inherited PG_TESTS_BASE, PG_TESTS_HEAD, PG_TESTS_RECEIPT_FILE, or PG_PUSH_TEST_SCOPE\n' >&2; exit 64
+  fi
+  _native_list=0
+  _native_plan=0
+  for arg in "$@"; do
+    case "$arg" in
+      --quick|--scope|--scope=*|--shard|--shard=*|--test-file|--test-file=*|--base|--base=*|--native-stages|--native-stages=*)
+        printf 'run-tests: --native-cargo-only refuses %s\n' "$arg" >&2; exit 64 ;;
+      --list) _native_list=1 ;;
+      --plan) _native_plan=1 ;;
+    esac
+  done
+  if [ "$_native_list" -eq 1 ] && [ "$_native_plan" -eq 1 ]; then
+    printf 'run-tests: --native-cargo-only refuses combined --list and --plan\n' >&2; exit 64
+  fi
+fi
+# The qualifier is an invocation opt-in, never an input to any test stage.
+unset TRELLIS_NATIVE_CARGO_ONLY
 if [ "$CAPTURE_PROVENANCE" -eq 1 ]; then
   PROVENANCE_RECEIPT="${TRELLIS_TEST_PROVENANCE_RECEIPT:-${TRELLIS_TEST_TSV:-}}"
   capture_runner_provenance start "$@"
@@ -131,6 +174,7 @@ for arg in "$@"; do
     --quick) QUICK=1 ;;
     --list) LIST=1 ;;
     --plan) PLAN=1 ;;
+    --native-cargo-only) ;;
     --test-file=*) SELECTED_TESTS+=( "${arg#--test-file=}" ) ;;
     --scope=*) SCOPE="${arg#--scope=}" ;;
     --base=*) RANGE_BASE="${arg#--base=}" ;;
@@ -160,11 +204,27 @@ if [ "$SHARD_TOTAL" -lt 1 ] || [ "$SHARD_INDEX" -lt 1 ] || [ "$SHARD_INDEX" -gt 
   exit 64
 fi
 
+# CI's excluded suites exercise Darwin-only launchd/plist boundaries. Local
+# runs on other hosts use the same exclusions without changing their scope or
+# native-stage policy. A fixed system uname keeps PATH shims from changing the
+# plan independently of the platform bound into a reusable verdict.
+SUITE_SCOPE="$SCOPE"
+if [ "$SCOPE" = local ] && [ "$QUICK" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ]; then
+  HOST_OS=''
+  for _uname in /usr/bin/uname /bin/uname; do
+    [ -x "$_uname" ] || continue
+    HOST_OS="$("$_uname" -s)" || { printf 'run-tests: unable to identify host OS\n' >&2; exit 1; }
+    break
+  done
+  [ -n "$HOST_OS" ] || { printf 'run-tests: unable to identify host OS\n' >&2; exit 1; }
+  [ "$HOST_OS" = Darwin ] || SUITE_SCOPE=ci
+fi
+
 # Decide the cargo stages once, before the Git fence, so every shard of one run
 # (same checkout, same base) registers the same plan.
 NATIVE_DECISION=run
 NATIVE_REASON=''
-if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ]; then
   if [ "$NATIVE_STAGES" = always ]; then
     NATIVE_REASON='--native-stages=always'
   elif [ "${TRELLIS_SLOW_TESTS:-}" = 1 ]; then
@@ -186,16 +246,38 @@ native_note() {
 }
 
 for test_file in ${SELECTED_TESTS[@]+"${SELECTED_TESTS[@]}"}; do
-  if [[ ! "$test_file" =~ ^scripts/tests/[A-Za-z0-9_-]+\.bats$ ]] ||
+  if [[ ! "$test_file" =~ ^(scripts/tests|core-rules/hooks/tests|core-rules/codex/hooks/tests)/[A-Za-z0-9_-]+\.bats$ ]] ||
      [ ! -f "$test_file" ] || [ -L "$test_file" ] || [ "$QUICK" -eq 1 ]; then
     printf 'run-tests: invalid selected test: %s\n' "$test_file" >&2; exit 64
   fi
-  suite="${test_file##*/}"
-  excluded="$(test_suites_exclusion_scope "${suite%.bats}")"
-  if [ "$excluded" = all ] || { [ "$SCOPE" = ci ] && [ "$excluded" = ci ]; }; then
-    printf 'run-tests: selected test excluded in %s: %s\n' "$SCOPE" "$test_file" >&2; exit 64
-  fi
+  # Never let a symlinked parent redirect an apparently in-tree selection.
+  test_parent="$test_file"
+  while [[ "$test_parent" == */* ]]; do
+    test_parent="${test_parent%/*}"
+    if [ -L "$test_parent" ]; then
+      printf 'run-tests: invalid selected test: %s\n' "$test_file" >&2; exit 64
+    fi
+  done
+  case "$test_file" in
+    scripts/tests/*)
+      suite="${test_file##*/}"
+      excluded="$(test_suites_exclusion_scope "${suite%.bats}")"
+      if [ "$excluded" = all ] || { [ "$SUITE_SCOPE" = ci ] && [ "$excluded" = ci ]; }; then
+        reason="$(test_suites_exclusion_reason "${suite%.bats}")"
+        printf 'run-tests: selected test excluded in %s: %s (%s)\n' "$SCOPE" "$test_file" "$reason" >&2; exit 64
+      fi
+      ;;
+  esac
 done
+
+suite_selected() {
+  local file
+  [ "${#SELECTED_TESTS[@]}" -gt 0 ] || return 0
+  for file in "${SELECTED_TESTS[@]}"; do
+    [ "$file" != "$1" ] || return 0
+  done
+  return 1
+}
 
 # Git invokes hooks with repository-routing variables exported for the hook's
 # checkout. They are poison for a fixture suite: `git -C "$fixture"` does NOT
@@ -643,23 +725,42 @@ aeo_static_and_python() {
     bash scripts/tests/aeo-gate.test.sh
 }
 
-stage "shellcheck (CI scope, severity=warning)" shellcheck_tree
-stage "POSIX bootstrap prologues" bats scripts/tests/posix-bootstrap-prologue.bats
-stage "AEO contract, static, and entrypoint" aeo_static_and_python
-stage "conformance-check" bash scripts/conformance-check.sh
+# Load only when an actual native stage executes: --list/--plan and quick
+# fixtures need no Cargo inputs or test-helper side effects.
+NATIVE_CARGO_STAGE_PREPARED=0
+native_cargo_stage() {
+  # shellcheck source=scripts/tests/helpers/native-cargo.bash
+  . "$ROOT/scripts/tests/helpers/native-cargo.bash" || return 1
+  native_cargo_run "$@"
+}
 
-if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+if [ "$NATIVE_CARGO_ONLY" -eq 1 ]; then
+  stage "cargo test native/trellis-hooks (native-only)" native_cargo_stage +1.97.1 test --locked --offline \
+    --manifest-path "$ROOT/native/trellis-hooks/Cargo.toml"
+else
+  stage "shellcheck (CI scope, severity=warning)" shellcheck_tree
+  stage "POSIX bootstrap prologues" bats scripts/tests/posix-bootstrap-prologue.bats
+  stage "AEO contract, static, and entrypoint" aeo_static_and_python
+  stage "conformance-check" bash scripts/conformance-check.sh
+fi
+
+if [ "$QUICK" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ]; then
   # HC_* must not reach the hook suites: code-reviewer.sh takes the rung-2a
   # (`pi`) branch inside an hc terminal, so every rung-2b assertion fails against
   # the operator's live roles-resolved.json when the gate is launched from the
   # Herdr app (run-tests-local.py spawns shards with os.environ.copy()). Scrubbed
   # here so it holds for every suite in the stage, including the files that do
   # not `load helpers`. Suites that need hc set it per-invocation.
+  core_hook_suites="$(test_suites_core hooks)" || { printf 'run-tests: could not enumerate core hook suites\n' >&2; exit 1; }
   while IFS= read -r suite; do
     [ -n "$suite" ] || continue
+    suite_selected "$suite" || continue
     stage "bats $suite" env -u HC_SCOPE -u HC_TERMINAL_ID -u HC_TERMINAL_SOCKET \
       bats "$suite"
-  done < <(test_suites_core hooks)
+  done <<< "$core_hook_suites"
+fi
+
+if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ]; then
   while IFS= read -r suite; do
     [ -n "$suite" ] || continue
     stage "bats $suite" bats "$suite"
@@ -683,13 +784,13 @@ if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
     [ -n "$suite" ] || continue
     target="${suite##*/}"
     target="${target%.rs}"
-    native_stage "cargo test $suite" cargo +1.97.1 test --locked --offline \
-      --manifest-path native/trellis-hooks/Cargo.toml --test "$target"
+    native_stage "cargo test $suite" native_cargo_stage +1.97.1 test --locked --offline \
+      --manifest-path "$ROOT/native/trellis-hooks/Cargo.toml" --test "$target"
   done < <(test_suites_native)
   # The crate's own #[cfg(test)] modules (lib and bin). `--test <stem>` above
   # never compiles them, so without this stage they ran nowhere.
-  native_stage "cargo unit-tests native/trellis-hooks (lib + bins)" cargo +1.97.1 test --locked \
-    --offline --manifest-path native/trellis-hooks/Cargo.toml --lib --bins
+  native_stage "cargo unit-tests native/trellis-hooks (lib + bins)" native_cargo_stage +1.97.1 test --locked \
+    --offline --manifest-path "$ROOT/native/trellis-hooks/Cargo.toml" --lib --bins
   while IFS= read -r suite; do
     [ -n "$suite" ] || continue
     stage "node --test $suite" node --test --test-reporter=tap "$suite"
@@ -697,21 +798,25 @@ if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
 
 fi
 
-if [ "$QUICK" -eq 0 ]; then
+if [ "$QUICK" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ]; then
   stage "recipe routing lint" bash scripts/lint-recipe-routing.sh
+  # Full local runs off Darwin label each host exclusion from the shared CI
+  # list. Narrow selections validate their files above, so do not imply other
+  # suites were selected; inventory interfaces suppress labels via native_note.
+  if [ "$SCOPE" = local ] && [ "$SUITE_SCOPE" = ci ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+    while IFS= read -r suite; do
+      [ "$(test_suites_exclusion_scope "$suite")" = ci ] || continue
+      native_note "skipped stage 'bats scripts/tests/$suite.bats': $(test_suites_exclusion_reason "$suite")"
+    done < <(test_suites_all)
+  fi
   # One stage per suite: a failure names the suite that caused it, and the exit
   # code stays an honest count of failing suites.
+  script_suites="$(test_suites_for "$SUITE_SCOPE")" || { printf 'run-tests: could not enumerate test suites\n' >&2; exit 1; }
   while IFS= read -r suite; do
     [ -n "$suite" ] || continue
     # posix-bootstrap-prologue already ran above as part of the quick slice.
     [ "$suite" = "posix-bootstrap-prologue" ] && continue
-    if [ "${#SELECTED_TESTS[@]}" -gt 0 ]; then
-      selected=0
-      for test_file in "${SELECTED_TESTS[@]}"; do
-        [ "$test_file" != "scripts/tests/$suite.bats" ] || selected=1
-      done
-      [ "$selected" -eq 1 ] || continue
-    fi
+    suite_selected "scripts/tests/$suite.bats" || continue
     case "$suite" in
       rollout-hooks-part*|sync-hooks-settings-part*|doctor-part*|t6-phase-a-integration|detach-project-part*|pi-attachment|release-store-part*|setup-runbooks|attach-project|disk-janitor-apply)
         # These suites allocate all mutable fixtures per test. Keep the outer
@@ -722,8 +827,22 @@ if [ "$QUICK" -eq 0 ]; then
         ;;
       *) stage "bats scripts/tests/$suite.bats" bats "scripts/tests/$suite.bats" ;;
     esac
-  done < <(test_suites_for "$SCOPE")
+  done <<< "$script_suites"
 fi
+
+# A narrowed run must not succeed if discovery omitted or duplicated any
+# selected test. The bootstrap prologue has its historical fixed stage name.
+for test_file in ${SELECTED_TESTS[@]+"${SELECTED_TESTS[@]}"}; do
+  expected_stage="bats $test_file"
+  [ "$test_file" != scripts/tests/posix-bootstrap-prologue.bats ] || expected_stage='POSIX bootstrap prologues'
+  matches=0
+  for ((index=1; index<=STAGE_ORDINAL; index++)); do
+    [ "${STAGE_NAMES[$index]}" != "$expected_stage" ] || matches=$((matches + 1))
+  done
+  if [ "$matches" -ne 1 ]; then
+    printf 'run-tests: selected test registered %s times: %s\n' "$matches" "$test_file" >&2; exit 1
+  fi
+done
 
 build_stage_plan || exit 1
 
@@ -765,11 +884,17 @@ printf '\n===============================\n'
 printf 'run-tests: receipt=%s\n' "$TRELLIS_TEST_TSV"
 printf 'run-tests: scope=%s shard=%s/%s stages ran=%s skipped=%s\n' \
   "$SCOPE" "$SHARD_INDEX" "$SHARD_TOTAL" "$RAN" "$SKIPPED"
-if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
+if [ "$NATIVE_CARGO_ONLY" -eq 1 ]; then
+  printf 'run-tests: native-cargo-only: narrowed diagnostic, NOT A FULL BATTERY\n'
+elif [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ]; then
   printf 'run-tests: native cargo stages: %s (%s)\n' "$NATIVE_DECISION" "$NATIVE_REASON"
 fi
 if [ "$FAILED" -eq 0 ]; then
-  printf 'run-tests: all stages passed\n'
+  if [ "$NATIVE_CARGO_ONLY" -eq 1 ]; then
+    printf 'run-tests: narrowed native-only stage passed (NOT A FULL BATTERY)\n'
+  else
+    printf 'run-tests: all stages passed\n'
+  fi
 else
   printf 'run-tests: %s stage(s) failed:\n' "$FAILED"
   printf '  - %s\n' ${FAILED_STAGES[@]+"${FAILED_STAGES[@]}"}

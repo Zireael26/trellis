@@ -7,6 +7,9 @@
 
 set -euo pipefail
 
+# This process has not inherited any of its caller's shell functions.
+unset TRELLIS_LIBS_PRELOADED
+
 readonly SYNC_TMPDIR="${TMPDIR:-/tmp}"
 
 SCRIPT_DIR="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -23,9 +26,9 @@ SYNC_NAME=sync-merge-gate.sh
 
 # Render dynamic values without allowing a registry path or child diagnostic to
 # introduce terminal controls into this command's output.
-diagnostic_escape() {
-  LC_ALL=C printf '%q' "${1-}"
-}
+diagnostic_escape() (
+  export LC_ALL=C && printf '%q' "${1-}"
+)
 
 usage() {
   printf 'Usage: %s [--home PATH] [--fleet NAME] [--dry-run] [--yes] [PROJECT_ID]\n' \
@@ -465,10 +468,10 @@ relink_one() {
   if output="$(
     set -o pipefail
     {
-      TRELLIS_HOME="$HOME_PATH" \
-        release_store_emit_verified_attachment_bundle \
-          "$ACTIVE_REPAIR_SNAPSHOT" "$ACTIVE_REPAIR_RELEASE_DIGEST" \
-          "$ACTIVE_REPAIR_RELEASE_VERSION" |
+      export TRELLIS_HOME="$HOME_PATH"
+      release_store_emit_verified_attachment_bundle \
+        "$ACTIVE_REPAIR_SNAPSHOT" "$ACTIVE_REPAIR_RELEASE_DIGEST" \
+        "$ACTIVE_REPAIR_RELEASE_VERSION" |
         /usr/bin/env -i \
           "HOME=${HOME:-}" \
           "TRELLIS_HOME=$HOME_PATH" \
@@ -478,7 +481,6 @@ relink_one() {
           "PATH=/usr/bin:/bin:/usr/sbin:/sbin" \
           "LC_ALL=C" \
           "TRELLIS_VERIFIED_PAYLOAD=$ACTIVE_REPAIR_SNAPSHOT/payload" \
-          "TRELLIS_LIBS_PRELOADED=1" \
           /bin/bash --noprofile --norc -s -- relink --home "$HOME_PATH" --fleet "$fleet" \
             "${binding_args[@]}" "$root"
     } 2>&1

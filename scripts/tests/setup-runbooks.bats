@@ -118,6 +118,7 @@ make_policy_source_clone() {
   # doctor's guard-registration row reads native baseline arming through the
   # payload's hook dependency library (spec 074 T62) and fails closed without it.
   cp "$REPO_ROOT/core-rules/hooks/lib/deps.sh" "$root/core-rules/hooks/lib/deps.sh"
+  cp "$REPO_ROOT/core-rules/hooks/lib/deps-heavy.sh" "$root/core-rules/hooks/lib/deps-heavy.sh"
   printf '# fixture canonical policy\n' > "$root/core-rules/CLAUDE.md"
   printf '%s\n' "$version" > "$root/core-rules/VERSION"
   cat > "$root/core-rules/inheritance-manifest.json" <<'JSON'
@@ -266,6 +267,29 @@ wait_for_postjob() {
     [ "$tries" -lt 9000 ] || { echo 'attach postjob did not finish within 900 s'; return 1; }
     sleep 0.1
   done
+}
+
+# This fixture has one owner. Adoption must record a completed check for the
+# exact new owner, not merely leave a healthy live attachment with a stale or
+# failed verdict. Include the job's diagnostic when the assertion fails.
+assert_adoption_checks() {
+  local release="$1" owner status_file digest
+  wait_for_postjob || return 1
+  owner="$(find "$TRELLIS_HOME/state/attachments" -type f -name '*.json' -print)"
+  [ -f "$owner" ] || { echo "expected one owner, got: $owner"; return 1; }
+  status_file="$TRELLIS_HOME/state/attachment-status/${owner#"$TRELLIS_HOME/state/attachments/"}"
+  digest="$(shasum -a 256 "$owner" | awk '{print $1}')" || return 1
+  jq -e --arg release "$release" --arg digest "$digest" --slurpfile owner "$owner" '
+    .state == "ok" and .release == $release and .owner_sha256 == $digest
+    and .attachment_id == $owner[0].attachment_id
+    and .worktree_root == $owner[0].worktree_root
+    and any(.checks[]; .name == "owner-artifacts" and .result == "ok")
+  ' "$status_file" >/dev/null || {
+    echo "attachment checks did not pass for release $release"
+    [ ! -f "$status_file" ] || jq . "$status_file"
+    [ ! -f "${status_file%.json}.log" ] || cat "${status_file%.json}.log"
+    return 1
+  }
 }
 
 # AGENT_SETUP.md §5 / AGENT_ONBOARD_PROJECT.md §3, verbatim.
@@ -608,9 +632,37 @@ refute_line_matches() {
 }
 
 @test "AGENT_SETUP 9, AGENT_ONBOARD_PROJECT 6, README adopt: verified project-scoped adoption and rollback" {
+  # Model an already-installed older target which does not sanitize a preload
+  # marker itself: its spawn entry refuses rather than running with missing
+  # functions. The new caller must clear the marker even on rollback to it.
+  python3 - "$SOURCE_ROOT/scripts/lib/attach-postjob.sh" "$SOURCE_ROOT/scripts/release.sh" <<'PY'
+import pathlib
+import sys
+path = pathlib.Path(sys.argv[1])
+first, rest = path.read_text().split('\n', 1)
+path.write_text(first + '''
+if [ "${BASH_SOURCE[0]-}" = "$0" ] && [ "${1:-}" = spawn ] && [ "${TRELLIS_LIBS_PRELOADED:-}" = 1 ]; then
+  exit 73
+fi
+''' + rest)
+# Model an older caller which still exports the marker. This keeps the
+# caller-side old-target test effective even after the bundle is fixed.
+path = pathlib.Path(sys.argv[2])
+text = path.read_text()
+needle = '  if [ "$rc" -eq 0 ] && [ "${TRELLIS_ATTACH_POSTJOB:-}" != off ]; then\n'
+if text.count(needle) != 1:
+    raise SystemExit('adoption spawn boundary not found exactly once')
+path.write_text(text.replace(needle, '  export TRELLIS_LIBS_PRELOADED=1\n' + needle))
+PY
+  fixture_commit_repo "$SOURCE_ROOT" 'older postjob boundary fixture'
+  fixture_git -C "$SOURCE_ROOT" tag -f -a "v$RELEASE_VERSION" -m "release $RELEASE_VERSION" >/dev/null
   prepare_attached_machine
   commit_portable_manifest "$PROJECT_ROOT"
 
+  # The forward target uses the current executable; only the already-installed
+  # rollback target retains the old-boundary probe.
+  cp "$REPO_ROOT/scripts/lib/attach-postjob.sh" "$SOURCE_ROOT/scripts/lib/attach-postjob.sh"
+  cp "$REPO_ROOT/scripts/release.sh" "$SOURCE_ROOT/scripts/release.sh"
   publish_release "$SOURCE_ROOT" "$NEXT_RELEASE"
   run "$TRELLIS" release install "$NEXT_RELEASE" --remote "$RELEASE_REMOTE"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -622,6 +674,7 @@ refute_line_matches() {
   run "$TRELLIS" release adopt "$TARGET_RELEASE" --project "$PROJECT_ID" --fleet "$FLEET"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(readlink "$PROJECT_ROOT/.trellis/runtime")" = "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload" ]
+  assert_adoption_checks "$TARGET_RELEASE" || return 1
 
   run "$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" --project "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -636,6 +689,7 @@ refute_line_matches() {
   run "$TRELLIS" release adopt "$ROLLBACK_RELEASE" --project "$PROJECT_ID" --fleet "$FLEET"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(readlink "$PROJECT_ROOT/.trellis/runtime")" = "$TRELLIS_HOME/releases/$ROLLBACK_RELEASE/payload" ]
+  assert_adoption_checks "$ROLLBACK_RELEASE" || return 1
 
   run "$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" --project "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -652,6 +706,7 @@ refute_line_matches() {
 
   [ -d "$TRELLIS_HOME/releases/$UPGRADE_RELEASE/payload" ]
   [ "$(readlink "$PROJECT_ROOT/.trellis/runtime")" = "$TRELLIS_HOME/releases/$UPGRADE_RELEASE/payload" ]
+  assert_adoption_checks "$UPGRADE_RELEASE" || return 1
 
   run "$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" --project "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }

@@ -384,7 +384,7 @@ JSON
   build_alpha_with_stale_cache
   local shim_dir="$SANDBOX/failing-bin" real_python marker="$SANDBOX/cache-walker-reached"
   real_python="$(command -v python3)"
-  [[ "$real_python" = /* ]]
+  [[ "$real_python" = /* ]] || false
   mkdir -p "$shim_dir"
   # Fail only dj_find_caches: registry identity validation must still run.
   cat > "$shim_dir/python3" <<EOF

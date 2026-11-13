@@ -390,6 +390,16 @@ def native_completion(companion):
                    stop_hook_active=event.get('stop_hook_active'))
     if isinstance(event.get('session_file'), str):
         request['session_file'] = event['session_file']
+    # Keep the 1.5.0 closed completion envelope. An old but verified native
+    # companion forwards turn_id to the proven shell unchanged, so a reserved
+    # prefix can only make that shell re-verify; it never authorizes a skip.
+    if 'allow_turn_baseline' in event:
+        if type(event['allow_turn_baseline']) is not bool:
+            return None, 'invalid Pi baseline safety flag'
+        if not event['allow_turn_baseline']:
+            if not isinstance(request['turn_id'], str) or not request['turn_id']:
+                return None, 'invalid Pi completion turn identity'
+            request['turn_id'] = 'trellis-baseline-untrusted:' + request['turn_id']
     completed = subprocess.run([companion, 'event', 'pi', 'agent_before_settle', cwd],
                                input=json.dumps(request, ensure_ascii=False).encode('utf-8'),
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=native_env, close_fds=True)
@@ -416,8 +426,15 @@ def native_completion(companion):
 # T34: Pi lifecycle events run as ONE native call when the companion
 # verifies (T52b's rule); otherwise the labelled sequential route below.
 def native_lifecycle(companion, phase):
-    request = dict(schema_version=1, harness='pi', phase=phase, cwd=cwd,
-                   session_id=string_value(default(event.get('session_id'), '')))
+    sid = event.get('session_id')
+    if phase == 'before_agent_start':
+        # Preserve identity exactly: normalizing control characters here could
+        # publish into another session's baseline namespace.
+        if not isinstance(sid, str) or not sid or any(c in sid for c in ('\0', '\r', '\n')):
+            return None, 'invalid Pi prompt session identity'
+    else:
+        sid = string_value(default(sid, ''))
+    request = dict(schema_version=1, harness='pi', phase=phase, cwd=cwd, session_id=sid)
     if isinstance(event.get('session_file'), str):
         request['session_file'] = event['session_file']
     if isinstance(event.get('reason'), str):
@@ -544,6 +561,26 @@ elif phase == 'post_action' and native == 'tool_result':
     else:
         capability = 'unsupported'
         unsupported('post_action/' + family, 'checks skipped due to failed result' if family == 'file_mutation' and status == 'failed' else 'no post-action handler')
+elif phase == 'lifecycle' and native == 'before_agent_start':
+    # A prompt must use the proof-bound native publisher. No legacy fallback:
+    # an unavailable or malformed result cannot make an old carry look fresh.
+    capability = 'unknown'
+    companion, why = native_companion()
+    batch = None
+    if companion:
+        batch, why = native_lifecycle(companion, native)
+    try:
+        row = batch['members'][0]
+        valid = (len(batch['members']) == 1 and batch['decision'] == 'allow'
+                 and row['member'] == 'turn-baseline' and row['result']['status'] == 'allow'
+                 and row['result'].get('exit_code') == 0 and row['result'].get('error_class') is None)
+    except (TypeError, KeyError, IndexError):
+        valid = False
+    if valid:
+        capability = 'enforced'
+    else:
+        decision = 'deny'
+        messages.append('turn-baseline: unavailable — ' + (why or 'native prompt did not publish a baseline'))
 elif phase == 'lifecycle' and native in ('session_start', 'session_compact'):
     capability = 'advisory'
     if native == 'session_start':

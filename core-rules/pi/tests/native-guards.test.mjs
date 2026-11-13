@@ -2,7 +2,7 @@
 // returns backstop pi >=1.4's throw-to-block contract on older hosts too.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { linkSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { deliveredFixture } from './delivered-fixture.mjs';
 import { mockDispatchExec } from './dispatch-test-transport.mjs';
@@ -217,6 +217,70 @@ test('override records are refused to builtin mutations and numbered shell redir
   }
   assert.equal(await f.fire('tool_call', f.call('bash', { command: `ls ${dir} 2>/dev/null` })), undefined);
   assert.equal(await f.fire('tool_call', f.call('write', { path: resolve(f.cwd, 'trellis/state/other'), content: 'x' })), undefined);
+});
+
+// r151-sol H1: process-gate verdicts live in the guarded state area; no agent
+// mutation or shell write reaches them, through any spelling.
+test('the gate verdict store is refused to builtin mutations and shell writes', async t => {
+  const f = await deliveredFixture(t);
+  f.pi.exec = mockDispatchExec(async () => allow);
+  const dir = resolve(f.cwd, 'trellis/state/gate-verdicts');
+  mkdirSync(resolve(dir, 'verdicts'), { recursive: true });
+  symlinkSync(resolve(f.cwd, 'trellis/state'), resolve(f.cwd, 'gv-alias'));
+  for (const [tool, input] of [
+    ['write', { path: resolve(dir, 'verdicts/k.json'), content: '{}' }],
+    ['write', { path: resolve(dir, 'reuse-disabled'), content: '' }],
+    ['write', { path: 'trellis/State/Gate-Verdicts/logs/x.log', content: 'x' }],
+    ['write', { path: 'gv-alias/gate-verdicts/verdicts/k.json', content: '{}' }],
+  ]) {
+    const call = await f.fire('tool_call', f.call(tool, input));
+    assert.equal(call?.block, true, `${tool} ${input.path}`);
+    assert.match(call.reason, /written only by the process gate/);
+  }
+  for (const command of [`printf '{}' > ${dir}/verdicts/k.json`, `echo x | tee ${dir}/logs/x.log`, `rm -f ${dir}/reuse-disabled`]) {
+    assert.equal((await f.fire('tool_call', f.call('bash', { command })))?.block, true, command);
+  }
+  assert.equal(await f.fire('tool_call', f.call('bash', { command: `ls ${dir} 2>/dev/null` })), undefined);
+});
+
+// r151-reuse2 Sol N1: a hard link made through the symlinked state parent is the
+// stored file, for builtin Write and Edit; dot-path and parent-rename shell
+// spellings of the store are refused too.
+test('hard links to stored files and spelled-out store paths are refused', async t => {
+  const f = await deliveredFixture(t);
+  f.pi.exec = mockDispatchExec(async () => allow);
+  const saved = process.env.TRELLIS_HOME;
+  process.env.TRELLIS_HOME = resolve(f.cwd, 'trellis');
+  t.after(() => { if (saved === undefined) delete process.env.TRELLIS_HOME; else process.env.TRELLIS_HOME = saved; });
+  const home = process.env.TRELLIS_HOME, dir = resolve(home, 'state/gate-verdicts');
+  mkdirSync(resolve(dir, 'verdicts'), { recursive: true });
+  mkdirSync(resolve(home, 'state/reread-overrides'), { recursive: true });
+  writeFileSync(resolve(dir, 'verdicts/k.json'), '{"x":1}');
+  writeFileSync(resolve(home, 'state/reread-overrides/0123456789abcdef'), 'r\n');
+  symlinkSync(resolve(home, 'state'), resolve(f.cwd, 'gv-alias'));
+  linkSync(resolve(f.cwd, 'gv-alias/gate-verdicts/verdicts/k.json'), resolve(f.cwd, 'k.json'));
+  linkSync(resolve(home, 'state/reread-overrides/0123456789abcdef'), resolve(f.cwd, 'record'));
+  writeFileSync(resolve(f.cwd, 'plain'), 'x');
+  linkSync(resolve(f.cwd, 'plain'), resolve(f.cwd, 'plain-twin'));
+  const wrong = [];
+  for (const [path, reason] of [['k.json', /written only by the process gate/], ['record', /written only by trellis reread override/]]) {
+    const read = f.call('read', { path });
+    await f.fire('tool_call', read);
+    await f.result(read);
+    for (const [tool, input] of [['write', { path, content: '{}' }], ['edit', { path, edits: [{ oldText: '1', newText: '2' }] }]]) {
+      const call = await f.fire('tool_call', f.call(tool, input));
+      if (call?.block !== true || !reason.test(call.reason)) wrong.push(`${tool} ${path}`);
+    }
+  }
+  const read = f.call('read', { path: 'plain-twin' });
+  await f.fire('tool_call', read);
+  await f.result(read);
+  if (await f.fire('tool_call', f.call('write', { path: 'plain-twin', content: 'y' })) !== undefined) wrong.push('write plain-twin');
+  for (const command of [`unlink ${home}/state/./gate-verdicts/reuse-disabled`, `ln gv-alias/gate-verdicts/verdicts/k.json k2.json`,
+    'mv ~/.trellis/state ~/.trellis/state-backup', 'mv ${TRELLIS_HOME}/state/ /tmp/s', 'cd ~/.trellis && mv ./state /tmp/s']) {
+    if ((await f.fire('tool_call', f.call('bash', { command })))?.block !== true) wrong.push(command);
+  }
+  assert.deepEqual(wrong, []);
 });
 
 test('override records are refused through case-folded and symlinked spellings', async t => {

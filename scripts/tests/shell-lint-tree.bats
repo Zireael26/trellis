@@ -21,6 +21,10 @@ setup() {
     "$SANDBOX/scripts" "$SANDBOX/scheduled-tasks" "$SANDBOX/local" \
     "$SANDBOX/.claude" "$SANDBOX/specs"
   cp "$LINTER" "$SANDBOX/scripts/lint-shell-tree.sh"
+  cp "$REPO_ROOT/scripts/lint-shell-assignments.py" "$SANDBOX/scripts/lint-shell-assignments.py"
+  # The sandbox has its own shell-tree inventory and no grandfathered hits.
+  # Copying the real tree's baseline would instead leave every entry stale.
+  printf '%s\n' '{"schema_version":1,"entries":[]}' > "$SANDBOX/scripts/lint-shell-assignments-baseline.json"
 }
 
 # $1 = repo-relative path, $2 = first line
@@ -80,7 +84,7 @@ sandbox_list() {
   done
   run bash -c "cd '$SANDBOX' && PATH='$BATS_TEST_TMPDIR/bin:$PATH' bash scripts/lint-shell-tree.sh --list"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *'core-rules/githooks/pre-push'* ]]
+  [[ "$output" == *'core-rules/githooks/pre-push'* ]] || false
 }
 
 @test "both find traversals fail closed in list and shellcheck modes" {
@@ -201,4 +205,43 @@ scripts/trellis"
     run bash -c "grep -vE '^[[:space:]]*#' '$REPO_ROOT/$consumer' | tr '\n' ' ' | grep -qE \"find[[:space:]][^;]*-i?name[[:space:]][^[:space:]]*[*]\\\\.sh\""
     [ "$status" -ne 0 ] || { echo "$consumer grew its own find again"; false; }
   done
+}
+
+# GNU `stat -f` is --file-system: it prints a filesystem block on stdout and
+# then fails, so a fallback inside the same substitution appends its answer to
+# that block and a mode check never matches on Linux (detach-native, tick.sh).
+# The fixtures spell the BSD probe STATF and write it out as `stat -f`, so this
+# file does not itself carry the shape the live-tree lint rejects.
+plant_stat() {
+  local path="$1"
+  shift
+  mkdir -p "$SANDBOX/$(dirname "$path")"
+  printf '%s\n' "$@" | sed 's/STATF/stat -f/g' > "$SANDBOX/$path"
+}
+
+@test "a BSD-first stat fallback inside one substitution fails the lint run, in shell and Bats" {
+  plant_stat core-rules/skills/x/tick.sh '#!/usr/bin/env bash' 'f="$1"' \
+    'chmod "$(STATF '"'%Lp'"' "$f" 2>/dev/null || echo 644)" "$f"'
+  plant_stat scripts/tests/probe.bats '#!/usr/bin/env bats' '@test "t" {' \
+    '  [ "$(STATF %Lp "$BATS_TEST_TMPDIR" 2>/dev/null || stat -c %a "$BATS_TEST_TMPDIR")" = 700 ]' \
+    '  mode="$(/usr/bin/STATF %Lp "$BATS_TEST_TMPDIR" 2>/dev/null ||' \
+    '    stat -c %a "$BATS_TEST_TMPDIR")"' '}'
+  run bash -c "cd '$SANDBOX' && bash scripts/lint-shell-tree.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"core-rules/skills/x/tick.sh:3:"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"scripts/tests/probe.bats:3:"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"scripts/tests/probe.bats:4:"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"BSD-first stat -f fallback inside one command substitution"* ]] || { echo "$output"; false; }
+}
+
+@test "GNU-first and separate-assignment stat probes pass the lint run" {
+  plant_stat scripts/probe.sh '#!/usr/bin/env bash' 'f="$1"' \
+    'mode="$(stat -c %a "$f" 2>/dev/null || STATF %Lp "$f")"' \
+    'mode="$(STATF %Lp "$f" 2>/dev/null)" || mode="$(stat -c %a "$f" 2>/dev/null)" || mode=644' \
+    'if mode="$(STATF %Lp "$f" 2>/dev/null)"; then printf "%s\n" "$mode"; fi' \
+    '# a comment may name $(STATF %Lp f || stat -c %a f)'
+  plant_stat scripts/tests/probe.bats '#!/usr/bin/env bats' '@test "t" {' \
+    '  [ "$(stat -c %a "$BATS_TEST_TMPDIR" 2>/dev/null || STATF %Lp "$BATS_TEST_TMPDIR")" = 700 ]' '}'
+  run bash -c "cd '$SANDBOX' && bash scripts/lint-shell-tree.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

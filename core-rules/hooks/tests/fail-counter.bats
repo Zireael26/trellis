@@ -88,7 +88,7 @@ make_failing_npx_dir() {
 
   run bash "$HOOK" <<<"$(make_envelope "$tx")"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"$ESCALATION"* ]]
+  [[ "$output" == *"$ESCALATION"* ]] || false
 }
 
 # =========================================================================
@@ -110,7 +110,7 @@ make_failing_npx_dir() {
 
   run bash "$HOOK" <<<"$(make_envelope "$tx")"
   [ "$status" -eq 2 ]
-  [[ "$output" != *"$ESCALATION"* ]]
+  [[ "$output" != *"$ESCALATION"* ]] || false
 }
 
 # =========================================================================

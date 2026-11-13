@@ -99,7 +99,10 @@ detach_journal_path() {
 #   intent q_mkdir q_claim q_rm q_rmdir clear phase owner_rm owner_committed
 #   attachment_detach_render_{begin,stage,claim,publish,cleanup,finish}
 #   attachment_detach_mark_external_phase
-# Nothing in the product is instrumented; the wrappers live in this process.
+# and "any": every durable step of the commit loop, whatever its name.
+# Nothing in the product is instrumented; the wrappers live in this process,
+# and the commit loop's points come from a copy of the detach program whose
+# no-op checkpoint seam is replaced (as attachment-journal-v2.bats does).
 kill_detach_at() {
   local point="$1" nth="$2" counter
   shift 2
@@ -140,6 +143,32 @@ kill_detach_at() {
           *".phase = \$phase"*) __after phase __orig_update "$@" ;;
           *) __orig_update "$@" ;;
         esac
+      }
+      # The commit removal loop runs in one Python process; its durable steps
+      # call checkpoint(<point>) with the same names, and this copy of the
+      # program counts and kills there.
+      __seam="    return None  # crash-test seam"
+      __kill_seam="    if os.environ.get(\"KILL_POINT\") in (label, \"any\"):
+        with open(os.environ[\"KILL_COUNTER\"]) as counter:
+            hits = int(counter.read()) + 1
+        with open(os.environ[\"KILL_COUNTER\"], \"w\") as counter:
+            counter.write(\"%d\\n\" % hits)
+        if hits == int(os.environ[\"KILL_NTH\"]):
+            os.killpg(0, signal.SIGKILL)"
+      eval "$(declare -f _attachment_detach_program | sed "1s/^_attachment_detach_program /__orig_program /")"
+      # One python3 substitution: bash 3.2 pattern substitution over the
+      # program text takes over a minute per call.
+      _attachment_detach_program() {
+        local program
+        program=$(__orig_program) || return 1
+        printf "%s\n" "$program" | SEAM="$__seam" KILL_SEAM="$__kill_seam" python3 -c "
+import os, sys
+text = sys.stdin.read()
+seam = os.environ[\"SEAM\"]
+if text.count(seam) != 1:
+    sys.exit(1)
+sys.stdout.write(text.replace(seam, os.environ[\"KILL_SEAM\"]))
+"
       }
       mkdir() { case "$*" in *.trellis-attachment-remove-*) __after q_mkdir command mkdir "$@" ;; *) command mkdir "$@" ;; esac; }
       mv() { case "$*" in *.trellis-attachment-remove-*/artifact) __after q_claim command mv "$@" ;; *) command mv "$@" ;; esac; }

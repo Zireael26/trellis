@@ -54,6 +54,10 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "verdict_reuse": {
+          "type": "boolean",
+          "description": "Default true: process-gate reuses a passing test verdict for the same committed tree, test command, runner, toolchain and platform. Set false when tests depend on external state."
+        },
         "env_passthrough": {
           "type": "array",
           "uniqueItems": true,

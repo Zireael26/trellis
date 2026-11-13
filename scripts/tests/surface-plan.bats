@@ -495,9 +495,13 @@ rewrite_manifest() {
   [ "$status" -eq 4 ]
   [[ "$output" == *"could not enumerate links for harness: claude"* ]] || { echo "$output"; false; }
 
-  run bash -c '. "$1"; sort() { return 1; }; surface_plan_emit "$2" claude' _ \
-    "$PLANNER" "$PAYLOAD"
+  mkdir "$SANDBOX/fail-sort"
+  printf '#!/bin/sh\necho invoked > "$SORT_LOG"\nexit 1\n' > "$SANDBOX/fail-sort/sort"
+  chmod +x "$SANDBOX/fail-sort/sort"
+  run env PATH="$SANDBOX/fail-sort:$PATH" SORT_LOG="$SANDBOX/sort.log" \
+    bash -c '. "$1"; surface_plan_emit "$2" claude' _ "$PLANNER" "$PAYLOAD"
   [ "$status" -eq 4 ]
+  [ -s "$SANDBOX/sort.log" ]
   [[ "$output" == *"could not sort immutable source candidates"* ]] || { echo "$output"; false; }
 }
 

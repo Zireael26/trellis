@@ -21,7 +21,7 @@ semver_is_valid() {
   esac
 
   [ -n "$version" ] || return 1
-  printf '%s' "$version" | LC_ALL=C grep -Eq \
+  printf '%s' "$version" | /usr/bin/env LC_ALL=C grep -Eq \
     '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$' \
     || return 1
 

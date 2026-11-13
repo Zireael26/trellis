@@ -46,7 +46,7 @@ invoke_from() {
   [ "$status" -eq 0 ]
   invoke_from "$A/pkg" "$STOP" "$event"
   [ "$status" -eq 0 ]
-  [[ "$output" != *'"decision":"block"'* ]]
+  [[ "$output" != *'"decision":"block"'* ]] || false
 }
 
 @test "T30 Codex mismatch never appends while the nonce lock is held" {

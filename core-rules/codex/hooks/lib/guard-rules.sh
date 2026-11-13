@@ -295,13 +295,62 @@ _gr_reread_override_active() {
 }
 
 # _gr_reread_override_path <normalized-path> — succeeds when the path is an
-# override record or its directory, in any letter case (macOS volumes usually
-# fold case). Edits there are refused: only the CLI writes overrides.
+# override record or its directory: only the CLI writes overrides.
 _gr_reread_override_path() {
+  _gr_guarded_state_path "$1" reread-overrides
+}
+
+# _gr_gate_verdict_path <normalized-path> — succeeds when the path is in the
+# process-gate verdict store ($TRELLIS_HOME/state/gate-verdicts): only the gate
+# writes verdicts, their execution logs and the reuse kill switch.
+_gr_gate_verdict_path() {
+  _gr_guarded_state_path "$1" gate-verdicts
+}
+
+# _gr_guarded_state_path <normalized-path> <directory> — succeeds when the path
+# names <directory> under a state directory, or a file in it, in any letter
+# case (macOS volumes usually fold case); also through the real path of its
+# deepest existing ancestor, so a symlinked parent reaches the same answer; and
+# when it is another name — a hard link, or a symlink — for a file in
+# $GR_TRELLIS_HOME/state/<directory>, whatever its spelling. Mirrors
+# is_guarded_state_path and guarded_inode in read_state.rs and
+# isGuardedStatePath and guardedInode in the Pi extension.
+_gr_guarded_state_path() {
+  local path=$1 dir=$2 real rest='' probe store file
+  _gr_guarded_state_named "$path" "$dir" && return 0
+  real=$path
+  while [ -n "$real" ] && [ ! -d "$real" ]; do
+    rest=/${real##*/}$rest
+    real=${real%/*}
+  done
+  [ -n "$real" ] || real=/
+  # Resolve only when some component is a symlink: an ordinary path forks nothing.
+  probe=$real
+  while [ -n "$probe" ] && [ "$probe" != / ] && [ ! -L "$probe" ]; do probe=${probe%/*}; done
+  if [ -n "$probe" ] && [ "$probe" != / ]; then
+    real=$(cd -P -- "$real" 2>/dev/null && pwd -P) &&
+      _gr_guarded_state_named "${real%/}$rest" "$dir" && return 0
+  fi
+  [ -f "$path" ] || return 1
+  _gr_trellis_home
+  store=$GR_TRELLIS_HOME/state/$dir
+  [ -n "$GR_TRELLIS_HOME" ] && [ -d "$store" ] || return 1
+  # Only a symlink or a file with more than one link can be another name, so an
+  # ordinary edit never walks the store.
+  if [ ! -L "$path" ]; then
+    [ -n "$(find "$path" -prune -links +1 -print 2>/dev/null)" ] || return 1
+  fi
+  while IFS= read -r file; do
+    [ "$path" -ef "$file" ] && return 0
+  done < <(find "$store" -type f 2>/dev/null)
+  return 1
+}
+
+_gr_guarded_state_named() {
   local folded=0 rc=1
   shopt -q nocasematch && folded=1 || shopt -s nocasematch
   case $1 in
-    */state/reread-overrides|*/state/reread-overrides/*) rc=0 ;;
+    */state/"$2"|*/state/"$2"/*) rc=0 ;;
   esac
   [ "$folded" -eq 1 ] || shopt -u nocasematch
   return "$rc"
@@ -401,7 +450,7 @@ _gr_destructive_rules() {
     return 0
   fi
   # secrets-read
-  if [ "$1" = claude ] && ! _gr_m $'\'' $'\'' && ! _gr_m '"' '"' && ! _gr_m $'\\\\' $'\\\\' && ! _gr_m '#' '#' && ! _gr_m '<' '<' && ! _gr_m '>' '>'; then
+  if [ "$1" = claude ] && _gr_m $'(^|[ \t\n\v\f\r|;&(`])([^ \t\n\v\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\v\f\r]+(([^|;&]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|$))' $'((^|\n)|[ \t\n\v\f\r|;&(`])([^ \t\n\v\f\r|;&(`]*/)?(cat|less|head|tail|more|source|\\.|grep|sed|awk|bat)[ \t\n\v\f\r]+(([^|;&]*[ /"\'`<@=])?secrets/([^ \t\n\v\f\r|;&]|(\n|$)))' && ! _gr_m $'\'' $'\'' && ! _gr_m '"' '"' && ! _gr_m $'\\\\' $'\\\\' && ! _gr_m '#' '#' && ! _gr_m '<' '<' && ! _gr_m '>' '>'; then
     _gr_exempt 'gcloud secrets list,gcloud secrets describe,gcloud secrets versions list,gcloud secrets versions describe,gcloud secrets versions access,kubectl get,kubectl describe' 'sudo' \
       ';&|()`' '([^A-Za-z0-9_./~-])((projects|namespaces)/[A-Za-z0-9_-][A-Za-z0-9_.-]*/secrets/)' '<exempt-identifier>' \
       '-f'
@@ -419,6 +468,31 @@ _gr_destructive_rules() {
     GR_DENY_ID=reread-override-direct-write
     GR_DENY_REASON=$'Blocked direct write to a reread override record — only `trellis reread override --session <id> --reason <why>` writes these, with a logged breadcrumb.'
     GR_DENY_JSON=$'"Blocked direct write to a reread override record — only `trellis reread override --session <id> --reason <why>` writes these, with a logged breadcrumb."'
+    return 0
+  fi
+  # gate-verdict-direct-write
+  if case $1 in claude|codex) true ;; *) false ;; esac && _gr_m '(^|[^A-Za-z0-9_.-])gate-verdicts([^A-Za-z0-9_.-]|$)' $'((^|\n)|[^A-Za-z0-9_.-])gate-verdicts([^A-Za-z0-9_.-]|(\n|$))' && ! _gr_m $'(^|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))' $'((^|\n)|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))'; then
+    _gr_exempt 'cat,head,tail,ls,stat,wc,jq,sha256sum,shasum,test,grep,cd,echo,printf,0,1,2,3,4,5,6,7,8,9' '' \
+      ';&|()`' '([^A-Za-z0-9_.-])(gate-verdicts)' '<exempt-identifier>' \
+      ''
+  fi
+  if _gr_m '(^|[^A-Za-z0-9_.-])gate-verdicts([^A-Za-z0-9_.-]|$)' $'((^|\n)|[^A-Za-z0-9_.-])gate-verdicts([^A-Za-z0-9_.-]|(\n|$))'; then
+    GR_DENY_ID=gate-verdict-direct-write
+    GR_DENY_REASON=$'Blocked a command that names the process-gate verdict store — only read-only tools (cat, head, tail, ls, stat, wc, jq, sha256sum, shasum, test, grep, cd, echo, printf) may name it; only the gate writes or removes verdicts, their execution logs and the reuse kill switch, and an operator changes them outside the agent.'
+    GR_DENY_JSON=$'"Blocked a command that names the process-gate verdict store — only read-only tools (cat, head, tail, ls, stat, wc, jq, sha256sum, shasum, test, grep, cd, echo, printf) may name it; only the gate writes or removes verdicts, their execution logs and the reuse kill switch, and an operator changes them outside the agent."'
+    return 0
+  fi
+  _gr_lines_of "$2"
+  # gate-verdict-ancestor-write
+  if case $1 in claude|codex) true ;; *) false ;; esac && _gr_m $'(((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/*(["\' \t\n\v\f\r;&|)<>]|$)|((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/+state(/|["\' \t\n\v\f\r;&|)<>]|$)|((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)/([^ \t\n\v\f\r;&|"\'<>]*/)?\\.\\.([/"\' \t\n\v\f\r;&|)<>]|$)|(^|[ \t;&|(])cd[ \t]+["\']?[^ \t;&|"\']*((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)[^ \t;&|"\']*["\']?[ \t]*(&&|;)[^\n]*[ \t"\'=](\\./)*(\\.\\./)*(state|\\.\\.)(/|["\' \t\n\v\f\r;&|)<>]|$))' $'((((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/*(["\' \t\n\v\f\r;&|)<>]|(\n|$))|(((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/+state(/|["\' \t\n\v\f\r;&|)<>]|(\n|$))|(((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)/([^ \t\n\v\f\r;&|"\'<>]*/)?\\.\\.([/"\' \t\n\v\f\r;&|)<>]|(\n|$))|((^|\n)|[ \t;&|(])cd[ \t]+["\']?[^ \t;&|"\']*(((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)[^ \t;&|"\']*["\']?[ \t]*(&&|;)[^\n]*[ \t"\'=](\\./)*(\\.\\./)*(state|\\.\\.)(/|["\' \t\n\v\f\r;&|)<>]|(\n|$)))' && ! _gr_m $'(^|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))' $'((^|\n)|[^0-9])>|[0-9]>>?[|]?[ \t]*([^&/ \t>|]|&[^0-9-]|/([^d]|d([^e]|e([^v]|v([^/]|/([^n]|n([^u]|u([^l]|l([^l]|l[^ \t\n;&|)])))))))))'; then
+    _gr_exempt 'cat,head,tail,ls,stat,wc,jq,sha256sum,shasum,test,grep,cd,echo,printf,0,1,2,3,4,5,6,7,8,9' '' \
+      ';&|()`' '([^A-Za-z0-9_.-])(\.trellis|\$\{?TRELLIS_HOME[}]?)' '<exempt-identifier>' \
+      ''
+  fi
+  if _gr_m $'(((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/*(["\' \t\n\v\f\r;&|)<>]|$)|((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/+state(/|["\' \t\n\v\f\r;&|)<>]|$)|((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)/([^ \t\n\v\f\r;&|"\'<>]*/)?\\.\\.([/"\' \t\n\v\f\r;&|)<>]|$)|(^|[ \t;&|(])cd[ \t]+["\']?[^ \t;&|"\']*((^|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)[^ \t;&|"\']*["\']?[ \t]*(&&|;)[^\n]*[ \t"\'=](\\./)*(\\.\\./)*(state|\\.\\.)(/|["\' \t\n\v\f\r;&|)<>]|$))' $'((((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/*(["\' \t\n\v\f\r;&|)<>]|(\n|$))|(((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)(/+\\.)*/+state(/|["\' \t\n\v\f\r;&|)<>]|(\n|$))|(((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)/([^ \t\n\v\f\r;&|"\'<>]*/)?\\.\\.([/"\' \t\n\v\f\r;&|)<>]|(\n|$))|((^|\n)|[ \t;&|(])cd[ \t]+["\']?[^ \t;&|"\']*(((^|\n)|[ \t"\'=/])\\.trellis|\\$\\{?TRELLIS_HOME[}]?)[^ \t;&|"\']*["\']?[ \t]*(&&|;)[^\n]*[ \t"\'=](\\./)*(\\.\\./)*(state|\\.\\.)(/|["\' \t\n\v\f\r;&|)<>]|(\n|$)))'; then
+    GR_DENY_ID=gate-verdict-ancestor-write
+    GR_DENY_REASON=$'Blocked a command that names the Trellis home, its state directory or a path under it, which holds the process-gate verdict store — only read-only tools may name them; an operator moves, removes or replaces them outside the agent.'
+    GR_DENY_JSON=$'"Blocked a command that names the Trellis home, its state directory or a path under it, which holds the process-gate verdict store — only read-only tools may name them; an operator moves, removes or replaces them outside the agent."'
     return 0
   fi
   return 1

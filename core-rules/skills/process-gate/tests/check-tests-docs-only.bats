@@ -172,7 +172,7 @@ tests exit 3"
   run_gate
   [ "$status" -eq 1 ]
   assert_narrowed 1
-  [[ "$output" == *'tests: `exit 3` exited 3'* ]]
+  [[ "$output" == *'tests: `exit 3` exited 3'* ]] || false
 }
 
 @test "typecheck and lint still run on a narrowed range" {
@@ -183,7 +183,7 @@ tests exit 3"
   run_gate
   [ "$status" -eq 1 ]
   assert_narrowed 1
-  [[ "$output" == *'lint: `exit 4` exited 4'* ]]
+  [[ "$output" == *'lint: `exit 4` exited 4'* ]] || false
 }
 
 @test "a three-dot range narrows over its merge-base" {
@@ -219,7 +219,7 @@ tests exit 3"
   branch rename
   gfx mv tools/build.py docs/adr/0002-build.md
   commit "rename"
-  [[ "$(gfx diff --name-status -M main HEAD)" == R* ]]
+  [[ "$(gfx diff --name-status -M main HEAD)" == R* ]] || false
   run_gate
   assert_full
 }
@@ -297,7 +297,7 @@ tests exit 3"
   commit "adr"
   run_gate
   assert_full
-  [[ "$output" == *"docs-only: full tests"*"line 1"* ]]
+  [[ "$output" == *"docs-only: full tests"*"line 1"* ]] || false
 }
 
 @test "an unknown policy keyword or invalid regex runs the full battery" {
@@ -334,7 +334,7 @@ tests exit 3"
   commit "add policy"
   run_gate
   assert_full
-  [[ "$output" != *"docs-only"* ]]
+  [[ "$output" != *"docs-only"* ]] || false
 }
 
 @test "an uncommitted working-tree policy is never read" {
@@ -347,7 +347,7 @@ tests exit 3"
   write_policy .claude "$(trellis_policy)"
   run_gate
   assert_full
-  [[ "$output" != *"docs-only"* ]]
+  [[ "$output" != *"docs-only"* ]] || false
 }
 
 @test "two base policies that differ run the full battery" {
@@ -458,7 +458,7 @@ tests exit 3"
   [ "$status" -eq 0 ]
   assert_narrowed 1
   [ ! -f "$cov" ]
-  [[ "$output" != *"mutation spot-check"* ]]
+  [[ "$output" != *"mutation spot-check"* ]] || false
 }
 
 # --- Trellis's own policy ----------------------------------------------------
@@ -472,7 +472,9 @@ trellis_fixture() {
   export CONSUMER_LOG
   : > "$CONSUMER_LOG"
   mkdir -p "$BATS_TEST_TMPDIR/stub-bin"
-  printf '#!/usr/bin/env bash\nprintf "bats %%s\\n" "$*" >> "$CONSUMER_LOG"\n' \
+  # The Tests verdict key probes `bats --version` as a toolchain identity read;
+  # only suite runs are consumers.
+  printf '#!/usr/bin/env bash\n[ "$*" != --version ] || { echo "Bats 1.0.0-stub"; exit 0; }\nprintf "bats %%s\\n" "$*" >> "$CONSUMER_LOG"\n' \
     > "$BATS_TEST_TMPDIR/stub-bin/bats"
   chmod +x "$BATS_TEST_TMPDIR/stub-bin/bats"
   export PATH="$BATS_TEST_TMPDIR/stub-bin:$PATH"

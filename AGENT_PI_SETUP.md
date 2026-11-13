@@ -176,7 +176,7 @@ cat > "$HOME/.pi/agent/settings.json" <<'JSON'
   "doubleEscapeAction": "tree",
   "shellCommandPrefix": "if [ -d \"${TRELLIS_PI_TMPDIR:-}\" ]; then export TMPDIR=\"$TRELLIS_PI_TMPDIR\"; fi",
   "modelThinkingLevels": {
-    "openai-codex/gpt-6-luna": "max",
+    "openai-codex/gpt-6.1-terra": "medium",
     "openai-codex/gpt-6.1-sol": "high",
     "openai-codex/gpt-6-astra": "high",
     "openai-codex/gpt-5.3-codex-spark": "xhigh",
@@ -291,7 +291,7 @@ agent = Path.home() / ".pi" / "agent"
 raw = (agent / "settings.json").read_bytes()
 assert raw == (json.dumps(json.loads(raw), indent=2) + "\n").encode(), "settings.json: not the step-2 rendering"
 settings = json.loads((agent / "settings.json").read_text(encoding="utf-8"))
-assert settings["modelThinkingLevels"]["openai-codex/gpt-6-luna"] == "max", settings
+assert settings["modelThinkingLevels"]["openai-codex/gpt-6.1-terra"] == "medium", settings
 assert settings["defaultProvider"] == "openai-codex", settings
 assert settings["defaultModel"] == "gpt-6.1-sol", settings
 assert settings["extensions"] == ["-builtin:mcp"], settings

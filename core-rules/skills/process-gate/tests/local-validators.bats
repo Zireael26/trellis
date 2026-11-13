@@ -142,13 +142,14 @@ seed_lister() {
   [[ "$output" == pass* ]] || { echo "$output"; false; }
 }
 
-@test "shfmt validator: a misformatted script fails, and nothing is rewritten" {
+@test "shfmt validator: a misformatted script warns (advisory, never fails), and nothing is rewritten" {
   seed_lister ugly.sh
   printf '#!/usr/bin/env bash\nif  [  x  ] ;then\necho hi\nfi\n' > "$REPO/ugly.sh"
   shim_base
   fake_tool shfmt defect ugly.sh
   run bash -c "cd '$REPO' && PATH='$SHIM' CLAUDE_PROJECT_DIR='$REPO' bash '$SHFMT_CHECK' --range=HEAD"
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 2 ]
+  [[ "$output" == warn* ]] || { echo "$output"; false; }
   [[ "$output" == *"ugly.sh"* ]] || { echo "$output"; false; }
   [[ "$output" != pass* ]] || { echo "$output"; false; }
   # Check-only: the seed is byte-identical after the run (no reformat).

@@ -496,14 +496,14 @@ create_release_missing_attachment() {
   prepare_fixture
   rm "$PROJECT/.trellis/runtime"
 
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+  run env -u TRELLIS_CONFIG TRELLIS_LIBS_PRELOADED=1 TRELLIS_HOME="$HOME_PATH" \
     bash "$MOVED_RUNNER/scripts/sync-hooks.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qF 'attachment relinked' <<<"$output"
   [ "$(grep -cF source-poisoned <<<"$output")" -eq 0 ] || { echo "$output"; false; }
 
   rm "$PROJECT/.trellis/runtime"
-  run env -u TRELLIS_CONFIG TRELLIS_HOME="$HOME_PATH" \
+  run env -u TRELLIS_CONFIG TRELLIS_LIBS_PRELOADED=1 TRELLIS_HOME="$HOME_PATH" \
     bash "$MOVED_RUNNER/scripts/sync-codex-hooks.sh" --home "$HOME_PATH" --fleet personal --yes "$PROJECT_ID"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qF 'attachment relinked' <<<"$output"

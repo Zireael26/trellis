@@ -20,7 +20,7 @@
 //                             conductor process's normal permission mode).
 //   args.authorAgent  string  REQUIRED on auto-execution paths: the named agent
 //                             that owns Auto-spec + Auto-execute (e.g. 'sol',
-//                             'ox-alpha', 'luna'). The engine routes via
+//                             'ox-alpha', 'terra-medium'). The engine routes via
 //                             agentType in agent() opts.
 //   args.reviewerAgent string REQUIRED on auto-execution paths: the named
 //                             agent that owns Review specs (must be a different
@@ -90,11 +90,15 @@ const SAFETY_BUDGET_CEILING_USD = 60
 // Per-stage author/reviewer family contract — mirroring core-rules/skills/herdr-foreman/roles.json
 const AGENT_FAMILIES = {
   sol: 'openai', 'sol-xhigh': 'openai', 'sol-max': 'openai',
-  luna: 'openai', astra: 'openai', 'code-reviewer': 'openai',
+  'terra-medium': 'openai', 'terra-low': 'openai',
+  astra: 'openai', 'code-reviewer': 'openai',
   opus: 'anthropic', haiku: 'anthropic', 'haiku-xhigh': 'anthropic', sonnet: 'anthropic',
   'security-reviewer': 'openai',
   'ox-alpha': 'stealth', 'ox-alpha-go': 'stealth', 'ox-alpha-zen': 'stealth',
   gemini: 'google', flash: 'google', argon: 'google',
+  carbon: 'google', 'carbon-high': 'google',
+  muse: 'meta', 'muse-2': 'meta', 'muse-3': 'meta',
+  deepseek: 'deepseek', 'deepseek-2': 'deepseek', 'deepseek-3': 'deepseek',
 }
 function familyOf(agent) {
   if (typeof agent !== 'string') return null

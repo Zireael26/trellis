@@ -34,6 +34,7 @@ __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -f "$__se_lib" ] || { echo "ui-verify: missing sibling lib at $__se_lib — re-run sync-hooks" >&2; exit 1; }
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib"
+_se_load_heavy || { echo "ui-verify: missing sibling lib deps-heavy.sh beside $__se_lib — re-run sync-hooks" >&2; exit 1; }
 _se_require_jq "ui-verify"
 
 STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active == true')

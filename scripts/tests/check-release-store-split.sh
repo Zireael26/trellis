@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
-# Compare names and exact bodies against the pre-split a2a8746e4 original.
+# Compare names and exact bodies against the tracked reviewed baseline, derived
+# from pre-split a2a8746e4 and updated only for reviewed post-split test edits;
+# Git retains the history of the original inventory.
 # Cases a lane added inside its own scaffolded `# BEGIN LANE <id>` ...
 # `# END LANE <id>` block are new, not part of the split: they may carry a name
-# the original lacks, and are counted separately. Every original case must still
-# appear exactly once, byte for byte, and no lane case may reuse its name.
+# the original lacks, and are counted separately.
+# Markers must be unindented and outside quotes or heredocs.
+# Every original case must still appear exactly once, byte for byte, and no
+# lane case may reuse its name.
 # The retained .txt is not a runnable suite. Reuse the quote/heredoc-aware R1
 # parser (including bash -n and bats --count), not a brace-counting shortcut.
 # Optional root supports isolated mutation probes without editing the checkout.

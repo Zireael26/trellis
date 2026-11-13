@@ -119,7 +119,7 @@ printf 'pi-web-search-tests: node_exit=%s tests=%s pass=%s fail=%s elapsed=%ss f
 # Minimal JSON string escaping for the receipt (quote and backslash). Tabs and
 # newlines in adapter file names are out of scope: a tab would already have
 # broken the tab-delimited hash list above.
-json_escape() { printf '%s' "${1-}" | LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
+json_escape() { printf '%s' "${1-}" | /usr/bin/env LC_ALL=C sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
 if [ -n "$RECEIPT" ]; then
   {

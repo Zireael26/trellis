@@ -38,13 +38,15 @@ assert_scratch_clean() {
 
 @test "T57 preseal stages and validates the complete native asset set" {
   cp -R "$REPO_ROOT/core-rules/native" "$SOURCE/core-rules/native"
+  # The checkout's own version names the native generation it must carry.
+  cp "$REPO_ROOT/core-rules/VERSION" "$SOURCE/core-rules/VERSION"
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
-  [[ "$output" == *'mirror-preseal: staged public policy clean'* ]]
+  [[ "$output" == *'mirror-preseal: staged public policy clean'* ]] || false
   printf '\000changed\000' >> "$SOURCE/core-rules/native/aarch64-apple-darwin/trellis-hooks"
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 4 ] || { printf '%s\n' "$output"; return 1; }
-  [[ "$output" == *'native runtime verification failed'* ]]
+  [[ "$output" == *'native runtime verification failed'* ]] || false
   assert_scratch_clean
 }
 
@@ -62,8 +64,8 @@ assert_scratch_clean() {
   done
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
-  [[ "$output" == *'mirror-preseal: linting '*' staged files'* ]]
-  [[ "$output" == *'mirror-preseal: staged public policy clean'* ]]
+  [[ "$output" == *'mirror-preseal: linting '*' staged files'* ]] || false
+  [[ "$output" == *'mirror-preseal: staged public policy clean'* ]] || false
   # Source bytes are never redacted in place.
   [ "$(< "$SOURCE/dependency-baseline.json")" = fixtureproj ]
   [ "$(< "$SOURCE/audits/fleet-remediation-ledger.json")" = fixtureproj ]
@@ -93,7 +95,7 @@ assert_scratch_clean() {
   printf 'fixtureproj\n' > "$SOURCE/docs/adr/public-record.md"
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'docs/adr/public-record.md: local fleet project identifier must not publish'* ]]
+  [[ "$output" == *'docs/adr/public-record.md: local fleet project identifier must not publish'* ]] || false
   assert_scratch_clean
 }
 
@@ -101,7 +103,7 @@ assert_scratch_clean() {
   rm -rf "$SOURCE/docs/adr/padding"
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'mirror-preseal: incomplete stage ('* ]]
+  [[ "$output" == *'mirror-preseal: incomplete stage ('* ]] || false
   assert_scratch_clean
 }
 
@@ -109,7 +111,7 @@ assert_scratch_clean() {
   rm "$SOURCE/core-rules/hooks/tests/task-state.bats"
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'mirror-preseal: missing staged sentinel: core-rules/hooks/tests/task-state.bats'* ]]
+  [[ "$output" == *'mirror-preseal: missing staged sentinel: core-rules/hooks/tests/task-state.bats'* ]] || false
   assert_scratch_clean
 }
 
@@ -122,7 +124,7 @@ path.write_text(path.read_text().replace('stage_verified_payload() {', 'renamed_
 PY
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'mirror-preseal: publisher extraction boundary changed: stage_verified_payload() {'* ]]
+  [[ "$output" == *'mirror-preseal: publisher extraction boundary changed: stage_verified_payload() {'* ]] || false
   assert_scratch_clean
 }
 
@@ -135,7 +137,7 @@ path.write_text(path.read_text().replace("payload_no_publish=(", "payload_no_pub
 PY
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'payload_no_publish entry is missing its exact delist prune pair: scripts/private-fixture'* ]]
+  [[ "$output" == *'payload_no_publish entry is missing its exact delist prune pair: scripts/private-fixture'* ]] || false
   assert_scratch_clean
 }
 
@@ -143,6 +145,6 @@ PY
   rm "$TRELLIS_MIRROR_IDENTITY_SOURCE"
   run bash "$CHECK" "$SOURCE"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'fleet identity source unreadable'* ]]
+  [[ "$output" == *'fleet identity source unreadable'* ]] || false
   assert_scratch_clean
 }

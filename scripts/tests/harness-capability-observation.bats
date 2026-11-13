@@ -24,7 +24,7 @@ _claims() {
   done
   [ "$status" -eq "$HC_INFO" ] || return 1
   [ "$output" = "$expected" ] || return 1
-  [[ "$output" != *enforced* ]]
+  [[ "$output" != *enforced* ]] || false
 }
 
 _wiring() {
@@ -84,7 +84,7 @@ PY
   bash -n "$mutant"
   run _wiring "$mutant"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"AssertionError: observation invocation missing or duplicated"* ]]
+  [[ "$output" == *"AssertionError: observation invocation missing or duplicated"* ]] || false
 }
 
 @test "false native and installation claims fail business assertions with helper still INFO" {
@@ -106,7 +106,7 @@ PY
     bash -n "$LIBRARY"
     run _observe '["claude","codex","pi"]' false attached true
     [ "$status" -eq "$HC_INFO" ]
-    [[ "$output" == *"harness-capability: claude installation="* ]]
+    [[ "$output" == *"harness-capability: claude installation="* ]] || false
     if _claims unverified claude codex pi; then
       printf 'business assertion accepted %s mutation\n' "$mutation" >&2
       return 1

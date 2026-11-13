@@ -108,7 +108,7 @@ write_lines() {
     envelope="$(jq -nc --arg t "$PROJECT_DIR/src/gaps.ts" --arg cwd "$PROJECT_DIR" '{cwd:$cwd,tool_name:"Edit",tool_input:{file_path:$t}}')"
     run_with_stderr "$hook" "$envelope"
     [ "$status" -eq 0 ]
-    [[ "$output" != *"ts-any-signature"* ]]
+    [[ "$output" != *"ts-any-signature"* ]] || false
     envelope="$(jq -nc --arg t "$PROJECT_DIR/src/params.ts" --arg cwd "$PROJECT_DIR" '{cwd:$cwd,tool_name:"Edit",tool_input:{file_path:$t}}')"
     run_with_stderr "$hook" "$envelope"
     [ "$status" -eq 0 ]
@@ -139,7 +139,7 @@ write_lines() {
   [ "$status" -eq 0 ]
   msg="$(ctx)"
   [[ "$msg" == *"slop-tripwire: py-any-annotation at $PROJECT_DIR/src/client.py:3"* ]] || { echo "$msg"; false; }
-  [[ "$msg" == *"evidence doctrine: $DOCTRINE"* ]]
+  [[ "$msg" == *"evidence doctrine: $DOCTRINE"* ]] || false
 }
 
 @test "py-red: a bare '# type: ignore' trips, a coded one does not" {
@@ -296,6 +296,7 @@ write_lines() {
   mkdir -p "$deploy/lib"
   cp "$TRIPWIRE" "$deploy/slop-tripwire.sh"
   cp "$HOOKS_DIR/lib/deps.sh" "$deploy/lib/deps.sh"
+  cp "$HOOKS_DIR/lib/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   chmod +x "$deploy/slop-tripwire.sh"
   write_lines src/hit.ts 'const bad = raw as any;'
   write_lines notes.md 'const bad = raw as any;'
@@ -316,6 +317,7 @@ write_lines() {
   mkdir -p "$deploy/lib"
   cp "$TRIPWIRE" "$deploy/slop-tripwire.sh"
   cp "$HOOKS_DIR/lib/deps.sh" "$deploy/lib/deps.sh"
+  cp "$HOOKS_DIR/lib/deps-heavy.sh" "$deploy/lib/deps-heavy.sh"
   cp "$HOOKS_DIR/lib/slop-patterns.sh" "$deploy/lib/slop-patterns.sh"
   chmod +x "$deploy/slop-tripwire.sh"
   write_lines src/hit.ts 'const bad = raw as any;'

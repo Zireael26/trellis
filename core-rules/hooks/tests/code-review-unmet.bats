@@ -149,6 +149,7 @@ deploy_codex_hook() {
   cp "$CODEX_HOOKS_DIR/code-review-subagent.sh" "$hookdir/code-review-subagent.sh"
   cp "$CORE_LIB_DIR/code-reviewer.sh"           "$hookdir/lib/code-reviewer.sh"
   cp "$CODEX_HOOKS_DIR/lib/deps.sh"             "$hookdir/lib/deps.sh"
+  cp "$CODEX_HOOKS_DIR/lib/deps-heavy.sh"             "$hookdir/lib/deps-heavy.sh"
   cp "$CODEX_HOOKS_DIR/lib/pm.sh"               "$hookdir/lib/pm.sh"
   cp "$CODEX_HOOKS_DIR/lib/autonomy.sh"         "$hookdir/lib/autonomy.sh"
   chmod +x "$hookdir/code-review-subagent.sh" "$hookdir/lib/code-reviewer.sh"

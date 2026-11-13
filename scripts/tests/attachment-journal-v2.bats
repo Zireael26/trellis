@@ -531,7 +531,7 @@ import time"}
   # journal, while the test kills the shell that owns the lock.
   local hold='        hold_transaction_lock(holder, int(owner_pid))'
   ORPHANING=$(_attachment_commit_program)
-  [[ "$ORPHANING" == *"$hold"* ]]
+  [[ "$ORPHANING" == *"$hold"* ]] || false
   ORPHANING=${ORPHANING/"$hold"/"$hold
         with open(os.environ[\"A3_PAUSED\"], \"w\") as handle:
             handle.write(\"%d\\n\" % os.getpid())

@@ -74,7 +74,7 @@ run_codex() {
       : >"$CALLS"
       "$runner"
       [ "$status" -eq 2 ] || { echo "$config $runner: $output"; return 1; }
-      [[ "$output" == *local-eslint-error* ]]
+      [[ "$output" == *local-eslint-error* ]] || false
       grep -q '^local --quiet ' "$CALLS"
     done
     mv "$PROJECT/eslint.config.$config" "$BATS_TEST_TMPDIR/config.$config"
@@ -108,7 +108,7 @@ EOF
     : >"$CALLS"
     "$runner"
     [ "$status" -eq 2 ] || { echo "$runner: $output"; return 1; }
-    [[ "$output" == *'workspace lint failed'* ]]
+    [[ "$output" == *'workspace lint failed'* ]] || false
     grep -Fx "cwd=$PROJECT/packages/web" "$CALLS"
   done
 }
@@ -124,7 +124,7 @@ EOF
     : >"$CALLS"
     "$runner"
     [ "$status" -eq 2 ] || { echo "$runner: $output"; return 1; }
-    [[ "$output" == *local-eslint-error* ]]
+    [[ "$output" == *local-eslint-error* ]] || false
     grep -q '^local --quiet ' "$CALLS"
   done
   local_eslint 0

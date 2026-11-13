@@ -33,7 +33,7 @@ make_upgrade_bundle() {
   {
     printf '%s\n' \
       'TRELLIS_LIBS_PRELOADED=1' \
-      'export TRELLIS_LIBS_PRELOADED' \
+      'export -n TRELLIS_LIBS_PRELOADED' \
       'TRELLIS_VERIFIED_COMMAND_BUNDLE=upgrade' \
       'TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN=bundle-token'
     cat <<'BUNDLE'
@@ -90,7 +90,7 @@ make_stdin_consuming_upgrade_bundle() {
   {
     printf '%s\n' \
       'TRELLIS_LIBS_PRELOADED=1' \
-      'export TRELLIS_LIBS_PRELOADED' \
+      'export -n TRELLIS_LIBS_PRELOADED' \
       'TRELLIS_VERIFIED_COMMAND_BUNDLE=upgrade' \
       'TRELLIS_VERIFIED_COMMAND_BUNDLE_TOKEN=bundle-token'
     cat <<'BUNDLE'

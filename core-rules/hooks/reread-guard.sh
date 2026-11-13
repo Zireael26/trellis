@@ -111,6 +111,12 @@ if _gr_reread_override_path "$T"; then
   printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' "$GR_JSON"
   exit 0
 fi
+if _gr_gate_verdict_path "$T"; then
+  GR_MSG="reread-guard: BLOCKED edit of $T — gate verdicts and their execution logs are written only by the process gate."
+  _gr_json_str "$GR_MSG"
+  printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":%s}}\n' "$GR_JSON"
+  exit 0
+fi
 
 # --- override escape: logged, never silent ---
 if [ "${TRELLIS_REREAD_OVERRIDE:-0}" = "1" ]; then

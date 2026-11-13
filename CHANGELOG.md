@@ -6,6 +6,164 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.5.2] - 2026-11-13
+
+**Highlights.** This release reduces repeated work in read-only doctor, registry
+classification, sync and native Stop, and includes the reviewed worktree-create
+changes. Existing attachments remain pinned until explicitly adopted. See
+`docs/UPGRADING.md` for direct 1.5.0 and 1.4.x upgrade paths.
+
+### Fixed
+
+- Doctor's read-only usage probes no longer write Python bytecode caches to the
+  user's home or an inspected library. Attach and detach also avoid bytecode
+  caches beside `attachment_fs.py` in a writable source checkout.
+- Native detach sends shell-leaf arguments over stdin rather than argv, avoiding
+  Linux `E2BIG` for large inputs. Portability and detached-job test fixtures were
+  also corrected.
+- Owner-batch locale setup uses an external environment instead of a temporary
+  locale assignment inside the captured shell path. Qualification fixtures also
+  correct the optional checkout helper, split-store expected evidence and
+  inherited signal-disposition tests. These fixes do not by themselves establish
+  the cause of every prior macOS Bash crash.
+
+### Changed
+
+- **Read-only doctor.** Available owner artifacts are checked together; only
+  positive results with matching owner and ancestor identities are reused. Other
+  rows follow the existing checks. `doctor --fix` never reuses the batch verdicts.
+- **Registry and sync.** Ordinary Git rows are batch-classified; ambiguous rows
+  fall back. Sync re-observes the resolver's Git identity at use, and its release
+  inventory lookup verifies each release once per sync process. Repair copies
+  and emitted command bundles still receive fresh release checks.
+- **Worktree creation.** Attach validates donor candidates through the registry
+  batch classifier. Candidate identities are re-observed when a slow fallback can
+  have changed them; uncertain cases use the canonical checks or refuse. Final
+  publication checks and post-Git readiness remain in place. The pre-add shared
+  donor/seed verifier, create-release and detach-b work are deferred to 1.5.3.
+- **Native Stop.** Default-branch resolution is reused within a verdict and
+  decided passes return earlier. There is no spec-gate Stop pass cache; decisions
+  are recomputed, including after configuration or attribute changes.
+
+### Development measurements (not release benchmarks)
+
+These are measurements of development revisions, not the final sealed package;
+results vary by workload. No new benchmark was run for this release preparation.
+
+- Doctor, one before/after sample each on a Mac with 120 linked worktrees plus
+  the main row: **1098.2 → 920.0 s**, identical output and exit status. The
+  candidate run's peak one-minute load reached 67.83, so the pair is indicative,
+  not a controlled quiet-host benchmark.
+- Sync dry-run through the installed launcher on 121 rows: median of three
+  alternating runs **34.03 → 27.07 s**; output/status matched. This comparison
+  measured the development sync change, not the final package.
+- Paired Mac native no-op first-round p50: Claude Stop **822 → 585 ms**, Codex
+  Stop **825 → 612 ms**, Pi `agent_before_settle` **850 → 779 ms**. These are
+  development builds and fixture events, not a latency guarantee.
+- Worktree-create timing was **not measured after the final integrated changes**;
+  no release-speed claim is made for that path.
+
+### Known limits
+
+- Read-only doctor's owner-batch proof compares the identities, not timestamps,
+  of strict ancestors above `TRELLIS_HOME`. A same-user swap and restore during
+  the batch can make a positive verdict describe another tree. Artifact leaves
+  and render-context dependencies can also change after batching. This is a
+  reporting window, not an atomic integrity audit; `--fix` does not reuse it.
+- A nested ACL added after sync's release-inventory prepass can go unreported
+  for a row already in sync. Repair rechecks ACLs and content before copying or
+  executing; changed releases are refused. Listings and sync are not atomic
+  views of concurrent same-user filesystem changes.
+- Registry identity proofs fall back for unusual Git layouts, configuration,
+  tool shims, coarse timestamps or unavailable safety checks. The older sync
+  pin needs an explicit absolute `GIT_CONFIG_GLOBAL` and
+  `GIT_CONFIG_NOSYSTEM=1`; otherwise that pin falls back.
+- The verified command bundle carries the registry batch program and
+  `attachment_fs.py` as manifest-attested data. Some other attachment-repair
+  helpers, including `trellis-python.sh` and `owner_verify.py`, still use
+  snapshot paths; a changed copied snapshot is refused before execution.
+
+## [1.5.1] - Not published separately; its changes ship in 1.5.2
+
+**Highlights.** The planned 1.5.1 changes, included in 1.5.2, reduce repeated work when switching branches, removing worktrees and adopting a release. They repair upgrade and interrupted-detach problems from 1.5.0, and can reuse a recent passing test result instead of running the same eligible test command again. A worktree is a separate working directory sharing one Git repository. Upgrade directly to 1.5.2 as described in `docs/UPGRADING.md`, “`1.5.0` → `1.5.2`”.
+
+Here, **hooks** are checks invoked by an assistant or Git. An **attachment** is Trellis's managed links and settings for a project or user; its **owner record** tracks those files. **Adoption** switches an existing project attachment to a release. A **symlink** is a filesystem pointer; a **render** is a generated settings file. **Native** means the precompiled program rather than the shell-script fallback.
+
+### What got faster
+
+These are development before/after measurements, not timings of the final published package or promises for another machine. The historical 1.5.1 development asset hashes below are not the 1.5.2 release assets. **N** means timed runs per version; warmups are discarded. **p50** is the median; **p90** is the 90th percentile.
+
+| Operation | Before → after | Machine and conditions |
+|---|---|---|
+| Claude Code worktree removal callback | p50 **39.65 s → 8.23 s**; p90 **40.47 s → 8.42 s** | Development Mac; hardware model not recorded. N=5 plus 2 warmups per version; separate fresh test environments. 1.5.0 source versus the detach repair. Contended: load average fell from 15.35 to 10.85 during “before”, then to 9.08 during “after”; not a matched quiet-machine comparison or certified end-to-end completion boundary. |
+| `git switch` in a linked worktree | p50 **10.47 s → 0.47 s** | Development Mac, 14 CPU cores; hardware model not recorded. One linked sibling; N=5 after 1 warmup. Alternating before/after runs under load average 7.3–10.4. The comparison isolates the branch-switch repair, not the complete release. |
+| Security diff check | Median **16.70 s → 12.03 s** | Development Mac, 14 CPU cores; hardware model not recorded. N=3 alternating runs per version, load average 17–21; warmup count not recorded. Same development change range and identical verdict output. ShellCheck, the shell-script analyser, now checks files concurrently, at most four at once. |
+
+Other reductions remove unnecessary work without a final-release timing claim:
+
+- Release adoption verifies each release once within that adoption command instead of repeatedly verifying it in child shells. Explicit `release verify` remains a full check.
+- The native launcher keeps directory handles and checks every entry in its verified snapshot by name, avoiding repeated walks through its parent directories. It still checks file identity before reading it.
+- Independent after-tool and Pi lifecycle checks run concurrently. Lightweight shell hooks load a small shared helper first; heavier checks load the rest when needed.
+- Read-only `doctor`, the attachment diagnostic command, reuses an unchanged checkout-owner scan and release surface plan. Doctor was not re-timed on the final release. A development comparison took **2749 s → 934 s**, one complete run per version, with the same 141 attached rows and identical findings; total registry rows differed (165 versus 189), other tests ran concurrently, and the hardware model was not recorded. This is not a final-release benchmark.
+- **Linux, 1.5.0 → 1.5.1 hook events**: one AMD Ryzen 5 4500U laptop (6 logical CPUs, Linux 7.2, Btrfs), N=30 plus 2 warmups per row, rendered fixture events rather than live assistant CLIs, readiness checked only as “no denial”. The 1.5.1 side ran development source `d2718a846` with the x86_64 Linux binary recorded at the rehearsal head (SHA-256 `b099ec1b…`); it predates the final release freeze and is not a final-package timing. The 1.5.0 side's section aborted part-way, so its rows are exploratory. Claude PostToolUse Edit p50 **70.1 → 25.1 ms** and Write **67.6 → 23.3 ms**; Codex PostToolUse Edit **125.5 → 42.5 ms**. **Regression:** PreToolUse Bash p50 **11.8 → 14.0 ms** (Claude) and **11.8 → 14.3 ms** (Codex). Stop has no comparison because the 1.5.0 Stop rows failed readiness, and Pi has no 1.5.0 number because the 1.5.0 native program has no Pi harness.
+
+### Fixed
+
+- **Upgrade and user settings.** The first configure when moving directly from 1.4.x to a fixed 1.5.x release can keep a user-level attachment: it uses the complete shell registrations until the second configure installs the native companion. Identical existing non-hook user settings can be adopted without an extra flag and are restored on detach. Hook arrays and unequal values still require the documented conflict handling.
+- **Adopting projects.** Adoption links newly declared missing symlink leaves and records their ownership, including missing parent directories. An existing project file is deferred rather than overwritten; unsafe conflicts refuse. Adoption also starts the attachment-checks job for the new owner, so the next Stop—the assistant's end-of-turn checks—can find the right result. This does not promise that checks have already passed when adoption returns.
+- **Doctor false alarms.** Doctor accepts both supported forms of native guard registration, rather than reporting an error solely because adoption could not find the same Claude Code executable.
+- **Removed worktrees.** After successful Git removal, the managed removal hook retires the worktree's registry row. If that cleanup fails, it names the command to retry; it does not pretend the worktree still exists or undo its removal.
+- **Missing attachment files.** `trellis relink --restore-absent PATH` restores absent owned links, directories and eligible rendered files from their recorded state. A present but changed owned path makes it refuse before creating anything. It is a repair command, not a release selector.
+- **Interrupted detach.** Artifact removal and restoration of merged settings use fewer processes while preserving the recovery journal—the private record of completed and pending steps. Removal completion and its phase advance are now one durable write. Recovery also finishes interrupted render claims and cleanup that 1.5.0 could leave stuck. Two older stuck states still need the narrowly checked manual procedures in `docs/UPGRADING.md`.
+- **Owner enumeration.** Batched detach validation checks exactly one record for every requested owner file. Empty, whitespace-only or multiple-document files cannot silently disappear from validation. Non-canonical owner paths and repeated paths fall back to the individual checks; malformed records still refuse.
+- **Linux attachment checks.** Shell mode checks no longer combine incompatible macOS and GNU `stat` output. A valid stored attachment-checks result is recognised on Linux instead of unnecessarily rerunning the checks. The same probe correction applies to disk-cleanup agent validation.
+- **Large spec checks and shell portability.** The specification-completeness check no longer reports a broken pipe on a large changed-file list. Locale settings inside captured shell commands use the crash-safe form on macOS Bash 5.3; skill-size helpers also retain Bash 3.2 compatibility. GNU `stat`, the Linux file-metadata tool, is probed first so failed macOS-style probes cannot contaminate captured mode values.
+- **Fresh-process attachment checks.** A child shell no longer inherits a marker falsely saying its libraries are loaded. This repairs false failed adoption checks and a direct attachment entry that could silently do nothing in a custom environment. Unsupported non-Bash or POSIX-mode shell invocation now refuses with a labelled error.
+- **Pi read-only turns.** Pi, one of the supported assistant applications, records the checkout state when a prompt starts. An unchanged turn can skip repeated typecheck, lint and test work even in a checkout with earlier edits. Concurrent edits or an uncertain snapshot trigger checks; attachment readiness and other mandatory checks remain.
+- **Bounded primer reminders.** The advisory suggesting a reusable project-context summary examines at most 200 reported paths and has a three-second supervision budget. Incomplete scans report a notice; missing Python 3 skips only this advisory with a notice. Ignored files and nested repositories no longer consume an expanded untracked-file scan unnecessarily.
+- **Test reliability.** Bash 3.2 assertions now fail when their conditions are false; test drivers load the required helpers before installing fault simulations. Split release tests preserve the reviewed inventory and verify exact Pi link targets and ownership. Rust worktree fixtures use separate Git options accepted by the test fence. Test-run cleanup can remove read-only directories inside a verified, abandoned private environment.
+
+### Changed
+
+- **Reuse of eligible test results is on by default.** The process gate, which checks whether a change is ready to merge or push, can skip an eligible Tests command when its committed files, exact command, gate code, effective toolchain, platform and selected environment values match a recent passing run. The result expires after seven days. Changes to Git refs, general Git configuration and unlisted session variables no longer automatically split results. Other gate checks retain their normal behaviour.
+- Reuse is restricted to recognised forms of pytest (Python), Jest/Vitest/`node --test` (JavaScript), Cargo/Cargo nextest (Rust) and Go tests, including supported committed root npm/pnpm/yarn package scripts. Unknown commands, `make`, shell wrappers, command-separating control characters and unsupported options run rather than gaining a reusable result. Old-format results miss once and run again. See `core-rules/skills/process-gate/references/tests.md`, “Verdict reuse”.
+- **Conservative input checks.** External settings that replace test executors, custom reporters outside the committed tree, unread subproject configurations, submodules and unsupported tracked symlinks prevent reuse, not test execution. A reporter is code that formats test output and can affect a run. Only runner-specific ignored-directory exceptions apply; there is no universal cache-directory exemption. Some harmless setups therefore always rerun, including directory symlinks, Jest string `projects` entries, Yarn plugins and JavaScript/TypeScript configs mentioning a reporter.
+- **Native test preparation.** Source-checkout native tests use private offline Cargo data and independently verify cached dependency archives against the lockfile. Required native stages fail if prerequisites are unavailable; individual native fixtures can explicitly skip, which is not release qualification. Linux local test selection excludes the same macOS-only suites as Linux continuous integration. These are maintainer/test-runner changes; installing the prebuilt release still needs no Rust compiler.
+- **Opt out** by merging `"verdict_reuse": false` into the existing `gate` object in `.trellis.json` and committing it. For a machine-wide opt-out, the operator can create `$TRELLIS_HOME/state/gate-verdicts/reuse-disabled` outside an agent session. **Projects relying on `PG_TESTS_BASE`, `PG_TESTS_HEAD` or `PG_TESTS_RECEIPT_FILE` for range selection must opt out.** These variables describe the change range and report what was tested. Generic commands tracked for reuse no longer receive them; the contained local runner and separately selected-range paths keep their existing handling.
+- Shell-formatting disagreements from the local `shfmt-check` validator are advisory warnings rather than hard failures. This is not a claim that the source tree has been reformatted.
+- Bulk adoption logs default to a fresh private temporary directory, rather than a predictable shared temporary path.
+
+### Security
+
+- Project-command test results live in the guarded Trellis state directory and name a retained execution log whose SHA-256 content hash is checked on lookup. Agent file tools refuse direct edits, including through symlinked parents and hard-link aliases. Shell guards use a conservative read-only command allowlist when a command names the result store or protected Trellis-state paths.
+- Recognised test-filter and code-injection environment variables prevent reuse. Forwarded project environment values and their trusted policy are part of the key. External and committed executor settings are checked; permitted committed paths must be tracked and relative. Supported toolchain managers bind the selected executable, not just the manager's proxy program. Native full-battery results also bind the pinned compiler and whether native stages were required by the selected change range.
+- An unavailable toolchain identity probe loses reuse, not failure tracking: tests run and a failure still invalidates earlier passes for the same tree and command. Tracked runs register in-progress records before execution; failures invalidate matching passes under a lock, and abandoned runs are resolved as failures at resolution time. An unhealthy store holding old passes is moved aside before a new run; if it cannot be moved, Tests fails without executing the command. If no old passes remain and a fresh store cannot be created, the command may run with a reported store error but cannot publish reusable evidence.
+- Linux release checks reject NFSv4 and RichACL access-control attributes and executable file capabilities, in addition to POSIX access-control lists. These are permissions or privileges not fully described by ordinary file mode bits. The NFSv4 behaviour has simulated unit-test coverage, not qualification on a live NFSv4 mount.
+
+### Known limits and residuals
+
+- **Rollback to 1.5.0:** Published 1.5.0 adoption cannot add a missing target-release leaf. In a Linux rehearsal starting with a clean Claude+Codex+Pi attachment, 1.5.1 retired `.agents/agents/luna.md`; configuring back and adopting 1.5.0 returned success but did not restore it, so scoped doctor exited 3. Detach and reattach with the same three harnesses under 1.5.0 restored the leaf and zero-exit doctor in the single-worktree fixture. See `docs/UPGRADING.md` for the exact commands and checkout-group safeguards; never hand-create the link or treat a failed doctor as a verified rollback.
+- A reused result is evidence for the **configured command**, not proof of full-project coverage. A committed command can select a package, directory, feature set or even zero Go test repetitions. The gate now prints `Tests: reused: configured command`, not `Tests: full`. No final-release reuse speedup or hit-rate measurement is available.
+- The latest focused review confirms the reported reuse repairs; it is not a whole-repository security approval or a final integrated test-battery pass.
+- Dependency contents in permitted ignored directories, installed Python packages, external services, time-sensitive data and unlisted environment values can change without changing the reuse key. Committed executable test/configuration code can still depend on external state; the conservative declarative-path checks are not a sandbox for that code. Opt out where these affect correctness; retain uncached release qualification.
+- The result store is not isolated from other processes running as your operating-system user. Tests or an agent-written script can still forge a result and matching log. Shell guards recognise command text, not every dynamically constructed path. They can also refuse harmless commands such as `find`, `rg`, `du`, `less`, `file` or Python inspection when a protected path is mentioned. Use an operator shell for necessary state maintenance; do not remove the guards.
+- The existing Trellis full-battery runner keeps its separate result store; moving project-command results does not move or newly protect every old gate record.
+- Doctor's reused scan is keyed on owner-record changes, not every live artifact it examined. Files and hook authority can change between checking and reporting, especially in a long run. `doctor --fix` does not reuse that scan.
+- Adoption adds missing symlink leaves, not newly declared rendered settings files. A release needing a new project render still requires the documented detach/attach procedure with the same intended assistant integrations.
+- The primer reminder can miss or misclassify names containing tabs, newlines, quotes or backslashes. Ordinary spaces are supported. Git may internally inspect more paths than it reports before the deadline. Its deadline is not an operating-system sandbox: deliberately detached descendants can escape its process group, and stalled kernel operations can delay cleanup. The unrelated retired rule-proposal hook remains unbounded.
+- The qualified full-battery Python wrapper still refuses to start on Linux because its process-containment support requires macOS. Direct Linux runner results are diagnostic, not an equivalent qualified gate pass. The supplied earlier Linux battery contains failures and skips; later focused repairs do not turn that historical run green.
+- Worktree removal still takes seconds in the measured fixture; the whole-transaction single-process rewrite is deferred to 1.5.3. Later-development measurements for large-checkout registry, sync and creation work are not 1.5.1 claims.
+- Prompt snapshots do not prove that no edit ever occurred: editing and exactly reverting can look unchanged, and a background edit after the final confirmation can miss that turn's checks. The next turn does not receive a valid carry for a mismatching tree.
+- Native hooks remain limited to arm64 macOS (Apple silicon) and x86_64 Linux (64-bit Intel/AMD). Intel macOS and aarch64 Linux (64-bit Arm) retain the shell fallback; no new hardware qualification is claimed. Native checks within one event are not individually isolated. The legacy shell re-read override still compares path spellings rather than resolving every alias, as in 1.5.0.
+- Native asset SHA-256 content hashes recorded at rehearsal source `da9a4ba27` (recheck against the final freeze before publication): arm64 macOS `43b63d0c1b5ba533d3d52da84f74eef40c287803a6ec05c6c15e0029f7185519`; x86_64 Linux `b099ec1b41ae4a6751d564af062695dd049c91bc06bdb265ee40dfbfc70e2e19`. Final qualification must use the matching shell payload and rebuilt companion; the old 1.5.0 companion does not contain the newly split helpers.
+
+### Upgrade steps
+
+1. Follow `docs/UPGRADING.md`, “`1.5.0` → `1.5.2`”, using the installed launcher and the release remote. Install and verify 1.5.2 before configuring or adopting it.
+2. Review test-reuse opt-outs **before the first gate run**, especially for projects using the `PG_TESTS_*` range interface or external state.
+3. Configure the machine release, adopt only the reviewed project/fleet scope, then run scoped `doctor`. Restart Claude Code and Codex; reload or restart Pi. Do not edit release payloads or attachment records by hand.
+4. For an already interrupted 1.5.0 detach, use the runbook's exact recovery checks; upgrading alone cannot repair every old journal. Keep 1.5.0 installed until verification and any required recovery checks are complete.
+
 ## [1.5.0] - 2026-11-10
 
 **Highlights.** Most Trellis hooks now run as one small native program instead of many separate shell commands. This covers Claude Code, Codex and Pi. Every check still runs and still fails closed; the work just happens in one process. Creating a worktree no longer waits for its post-attach checks. 1.5.0 also includes all of the planned 1.4.3 security and correctness hardening, listed further down. Upgrade steps are in `docs/UPGRADING.md` under "`1.4.x` → `1.5.0`".
@@ -43,7 +201,7 @@ Measured before/after timings for 1.5.0 follow after the release. This entry con
 
 ### Known limits
 
-- **Worktree remove is still slow** (tens of seconds; most of the time is the journaled detach). 1.5.0 includes the safe cuts only (about 23% less detach wall time; one `gh` query instead of two). The single-process detach rewrite, which keeps the same journal and checks, is planned for **1.5.1**.
+- **Worktree remove is still slow** (tens of seconds; most of the time is the journaled detach). 1.5.0 includes the safe cuts only (about 23% less detach wall time; one `gh` query instead of two). The whole-transaction single-process detach rewrite is deferred to **1.5.3**.
 - **Intel (x86_64) macOS is not hardware-qualified in 1.5.0.** It stays on the legacy shell hooks. That route's logic is tested on arm64 macOS with the native target removed, not on Intel hardware.
 - Per-member 15 s isolation inside one native event is not in 1.5.0. The event's whole-process deadline still applies.
 - On the legacy shell route (Intel Mac), the re-read guard compares override paths lexically, so a symlinked or case-folded alias of the state directory is not caught there. The native and Pi routes resolve real paths.

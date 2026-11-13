@@ -11,7 +11,7 @@ make_path_without() {
   local missing="$1" out cmd source
   out="$BATS_TEST_TMPDIR/path-without-$missing"
   mkdir -p "$out"
-  for cmd in jq cat dirname awk head tr wc; do
+  for cmd in jq cat dirname awk head tr wc python3; do
     [ "$cmd" = "$missing" ] && continue
     source="$(command -v "$cmd" 2>/dev/null)"
     [ -n "$source" ] || continue
@@ -37,8 +37,8 @@ run_hook_without() {
 
 assert_missing_tool_notice() {
   local hook_name="$1" tool="$2"
-  [[ "$stderr" == *"$hook_name"* ]]
-  [[ "$stderr" == *"$tool"* ]]
+  [[ "$stderr" == *"$hook_name"* ]] || false
+  [[ "$stderr" == *"$tool"* ]] || false
 }
 
 @test "missing jq fails closed in skill-slash-guard" {
@@ -99,6 +99,15 @@ assert_missing_tool_notice() {
   assert_missing_tool_notice primer-capture-nudge git
 }
 
+@test "missing python3 degrades visibly in both primer-capture-nudge hooks" {
+  local hooks
+  for hooks in "$HOOKS_DIR" "$CODEX_HOOKS_DIR"; do
+    run_hook_without python3 "$hooks/primer-capture-nudge.sh" '{}'
+    [ "$status" -eq 0 ]
+    assert_missing_tool_notice primer-capture-nudge python3
+  done
+}
+
 @test "missing git degrades visibly in session-context" {
   run_hook_without git "$HOOKS_DIR/session-context.sh" '{"source":"startup"}'
 
@@ -124,7 +133,7 @@ assert_missing_tool_notice() {
     set -e
     stderr=$(cat "$BATS_TEST_TMPDIR/block.stderr")
     [ "$status" -eq 2 ]
-    [[ "$stderr" == *"missing sibling lib"* ]]
+    [[ "$stderr" == *"missing sibling lib"* ]] || false
     rm -rf "$BATS_TEST_TMPDIR/fake-hooks"
   done
 }
@@ -141,7 +150,7 @@ assert_missing_tool_notice() {
     set -e
     stderr=$(cat "$BATS_TEST_TMPDIR/reread.stderr")
     [ "$status" -eq 2 ]
-    [[ "$stderr" == *"missing sibling lib"* ]]
+    [[ "$stderr" == *"missing sibling lib"* ]] || false
     rm -rf "$BATS_TEST_TMPDIR/fake-reread"
   done
 }
@@ -155,6 +164,7 @@ assert_missing_tool_notice() {
     mkdir -p "$BATS_TEST_TMPDIR/fake-bd/lib"
     cp "$hooks/block-destructive.sh" "$BATS_TEST_TMPDIR/fake-bd/block-destructive.sh"
     cp "$real_lib/deps.sh" "$BATS_TEST_TMPDIR/fake-bd/lib/deps.sh"
+    cp "$real_lib/deps-heavy.sh" "$BATS_TEST_TMPDIR/fake-bd/lib/deps-heavy.sh"
     input=$(jq -nc '{tool_input: {command: "rm -rf /tmp/x"}}')
     set +e
     output=$(printf '%s' "$input" | HOME="$BATS_TEST_TMPDIR/home" CLAUDE_PROJECT_DIR="$BATS_TEST_TMPDIR/project" CODEX_PROJECT_DIR="$BATS_TEST_TMPDIR/project" TMPDIR="$BATS_TEST_TMPDIR" /bin/bash "$BATS_TEST_TMPDIR/fake-bd/block-destructive.sh" 2>"$BATS_TEST_TMPDIR/bd2.stderr")
@@ -162,13 +172,14 @@ assert_missing_tool_notice() {
     set -e
     stderr=$(cat "$BATS_TEST_TMPDIR/bd2.stderr")
     [ "$status" -eq 2 ] || { echo "block-destructive guard-rules missing: status $status stderr $stderr"; false; }
-    [[ "$stderr" == *"missing sibling lib"* ]]
+    [[ "$stderr" == *"missing sibling lib"* ]] || false
     rm -rf "$BATS_TEST_TMPDIR/fake-bd"
     # reread-guard: autonomy missing (deps present)
     rm -rf "$BATS_TEST_TMPDIR/fake-rr1"
     mkdir -p "$BATS_TEST_TMPDIR/fake-rr1/lib"
     cp "$hooks/reread-guard.sh" "$BATS_TEST_TMPDIR/fake-rr1/reread-guard.sh"
     cp "$real_lib/deps.sh" "$BATS_TEST_TMPDIR/fake-rr1/lib/deps.sh"
+    cp "$real_lib/deps-heavy.sh" "$BATS_TEST_TMPDIR/fake-rr1/lib/deps-heavy.sh"
     # autonomy may live beside lib (check both)
     input=$(jq -nc '{tool_input: {file_path: "/tmp/x"}}')
     set +e
@@ -177,13 +188,14 @@ assert_missing_tool_notice() {
     set -e
     stderr=$(cat "$BATS_TEST_TMPDIR/rr1.stderr")
     [ "$status" -eq 2 ] || { echo "reread autonomy missing: status $status stderr $stderr"; false; }
-    [[ "$stderr" == *"missing sibling"* ]]
+    [[ "$stderr" == *"missing sibling"* ]] || false
     rm -rf "$BATS_TEST_TMPDIR/fake-rr1"
     # reread-guard: guard-rules missing (deps+autonomy present)
     rm -rf "$BATS_TEST_TMPDIR/fake-rr2"
     mkdir -p "$BATS_TEST_TMPDIR/fake-rr2/lib"
     cp "$hooks/reread-guard.sh" "$BATS_TEST_TMPDIR/fake-rr2/reread-guard.sh"
     cp "$real_lib/deps.sh" "$BATS_TEST_TMPDIR/fake-rr2/lib/deps.sh"
+    cp "$real_lib/deps-heavy.sh" "$BATS_TEST_TMPDIR/fake-rr2/lib/deps-heavy.sh"
     if [ -f "$real_lib/autonomy.sh" ]; then cp "$real_lib/autonomy.sh" "$BATS_TEST_TMPDIR/fake-rr2/lib/autonomy.sh"; fi
     if [ -f "$hooks/../lib/autonomy.sh" ]; then cp "$hooks/../lib/autonomy.sh" "$BATS_TEST_TMPDIR/fake-rr2/lib/autonomy.sh" 2>/dev/null || true; fi
     # Also try hooks/lib/autonomy (Claude) vs codex layout
@@ -195,7 +207,7 @@ assert_missing_tool_notice() {
     set -e
     stderr=$(cat "$BATS_TEST_TMPDIR/rr2.stderr")
     [ "$status" -eq 2 ] || { echo "reread guard-rules missing: status $status stderr $stderr"; false; }
-    [[ "$stderr" == *"missing sibling"* ]]
+    [[ "$stderr" == *"missing sibling"* ]] || false
     rm -rf "$BATS_TEST_TMPDIR/fake-rr2"
   done
 }

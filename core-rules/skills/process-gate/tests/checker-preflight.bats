@@ -21,10 +21,10 @@ EOF
 @test "all delegated checker binaries resolve with path and version" {
   run /usr/bin/env PATH="$BIN" /bin/bash "$SCRIPT"
   [ "$status" -eq 0 ]
-  [[ "$output" == *"gitleaks=$BIN/gitleaks version=gitleaks 1.0"* ]]
-  [[ "$output" == *"semgrep=$BIN/semgrep version=semgrep 1.0"* ]]
-  [[ "$output" == *"osv-scanner=$BIN/osv-scanner version=osv-scanner 1.0"* ]]
-  [[ "$output" == *"jq=$BIN/jq version=jq 1.0"* ]]
+  [[ "$output" == *"gitleaks=$BIN/gitleaks version=gitleaks 1.0"* ]] || false
+  [[ "$output" == *"semgrep=$BIN/semgrep version=semgrep 1.0"* ]] || false
+  [[ "$output" == *"osv-scanner=$BIN/osv-scanner version=osv-scanner 1.0"* ]] || false
+  [[ "$output" == *"jq=$BIN/jq version=jq 1.0"* ]] || false
 }
 
 @test "missing jq fails closed" {
@@ -32,7 +32,7 @@ EOF
 
   run /usr/bin/env PATH="$BIN" /bin/bash "$SCRIPT"
   [ "$status" -eq 4 ]
-  [[ "$output" == *"fail checker-preflight: jq not found on PATH"* ]]
+  [[ "$output" == *"fail checker-preflight: jq not found on PATH"* ]] || false
 }
 
 @test "checker version failure fails closed" {
@@ -41,7 +41,7 @@ EOF
 
   run /usr/bin/env PATH="$BIN" /bin/bash "$SCRIPT"
   [ "$status" -eq 4 ]
-  [[ "$output" == *"fail checker-preflight: jq version check failed at $BIN/jq"* ]]
+  [[ "$output" == *"fail checker-preflight: jq version check failed at $BIN/jq"* ]] || false
 }
 
 jq_missing_fixture() {
@@ -96,7 +96,7 @@ run_all_without_jq() {
   [[ "$output" == *'Anti-slop:'*'n/a'* && "$output" == *'check did not run'* && "$output" == *'Overall: MERGEABLE'* ]] || { echo "$output"; false; }
   run /usr/bin/env PATH="$BIN" /bin/bash "$SCRIPT"
   [ "$status" -eq 4 ]
-  [[ "$output" == *'fail checker-preflight: jq not found on PATH'* ]]
+  [[ "$output" == *'fail checker-preflight: jq not found on PATH'* ]] || false
 }
 
 @test "jq missing: enforced and unknown posture fail at both entry points" {

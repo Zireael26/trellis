@@ -116,7 +116,7 @@ full_fingerprint() {
 assert_baseline_state_unknown() {
   local bin="$1" expected
   expected="$(full_fingerprint)"
-  [[ "$expected" =~ ^[0-9a-f]{40,64}\ [0-9a-f]{64}$ ]]
+  [[ "$expected" =~ ^[0-9a-f]{40,64}\ [0-9a-f]{64}$ ]] || false
   run_baseline_helper "$bin" _se_turn_state_dir "$PROJECT_DIR"
   [ "$status" -ne 0 ] && [ -z "$output" ] ||
     { echo "unavailable hash produced state: $status $output"; return 1; }
@@ -150,7 +150,7 @@ assert_fingerprint_unknown() {
   expected="$(cd "$PROJECT_DIR" && pwd -P)"
   expected="$(printf '%s' "$expected" | sha256sum)"
   expected="${expected%% *}"
-  [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || false
   run_baseline_helper "$bin" _se_turn_state_dir "$PROJECT_DIR"
   [ "$status" -eq 0 ]
   [ "$output" = "$TRELLIS_HOME/state/turn-baseline/${expected:0:16}" ]
@@ -159,7 +159,7 @@ assert_fingerprint_unknown() {
   [ "$status" -eq 0 ]
   [ "$output" = "$(full_fingerprint)" ]
   [ "${output%% *}" = "$(git -C "$PROJECT_DIR" rev-parse HEAD)" ]
-  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]] || false
   before="$output"
   run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
   [ "$status" -eq 0 ]
@@ -167,7 +167,7 @@ assert_fingerprint_unknown() {
   printf 'actual edit this turn\n' >> "$PROJECT_DIR/app.js"
   run_baseline_helper "$bin" _se_tree_fingerprint "$PROJECT_DIR"
   [ "$status" -eq 0 ]
-  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]]
+  [[ "${output#* }" =~ ^[0-9a-f]{64}$ ]] || false
   [ "$output" != "$before" ]
 }
 

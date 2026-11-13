@@ -338,6 +338,15 @@ and shared state first, does not silently select a different release, and never
 edits tracked project files. It is the repair path after a local-home relocation
 or lost anchor; explicit adoption remains the only way to change release.
 
+`relink --restore-absent PATH` (1.5.1) also recreates owned leaves that were
+deleted, exactly as the owner record holds them: recorded symlink targets,
+attach-created rendered files from their recorded bytes (hash-checked), and any
+missing ancestor directory. It refuses, creating nothing, when any owned path is
+present but different, an ancestor is not a real directory, or a missing render
+had a project file before attach. Detach checks every owner in a checkout, so a
+worktree with deleted surfaces blocks detach for its siblings until it is
+restored this way.
+
 ## 10. User-global skills
 
 Harness skill roots hold no Trellis-copied skill bodies. Every harness refers

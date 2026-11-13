@@ -181,6 +181,27 @@ JSON
     "$HOME/.local/bin/trellis" attach --home "$TRELLIS_HOME" --fleet "$fleet" --release "$release" \
       --harness "$harness" "$root"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+  wait_for_attach_postjobs
+}
+
+# Attach returns once attached (spec 074 T14 amendment) and leaves a detached
+# post-attach job that takes the checkout lock, so a rollout run straight after
+# it can find the checkout busy. Settle every job on its recorded verdict and
+# a free checkout lock before the test acts.
+wait_for_attach_postjobs() {
+  local tries=0 statuses
+  while :; do
+    statuses=("$TRELLIS_HOME"/state/attachment-status/*/*.json)
+    # No status record: attach spawned no job.
+    if { [ ! -e "${statuses[0]}" ] ||
+         jq -se 'all(.[]; .state | IN("ok","failed","blocked-by-journal"))' "${statuses[@]}" >/dev/null 2>&1; } &&
+       ! compgen -G "$TRELLIS_HOME/state/locks/attachment-checkout-*.lock" >/dev/null; then
+      return 0
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 600 ] || { echo 'post-attach jobs did not settle' >&2; return 1; }
+    sleep 0.1
+  done
 }
 
 make_project() {

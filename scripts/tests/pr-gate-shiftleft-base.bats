@@ -174,7 +174,7 @@ head_table() {
     invoke "$hook" 'gh pr create --base feature/a --title $(printf T) --head pr'
     [ "$(git -C "$SESSION" config --get branch.session.trellisPrBase)" = preserved ]
     [ -z "$(git -C "$SESSION" config --get branch.pr.trellisPrBase || true)" ]
-    [[ "$output" == *"advisory skipped"* ]]
+    [[ "$output" == *"advisory skipped"* ]] || false
     # Single-quoted substitution is literal data and must not suppress caching.
     invoke "$hook" "gh pr create --base feature/a --title '\$(printf T)' --head pr"
     [ "$(git -C "$SESSION" config --get branch.pr.trellisPrBase)" = feature/a ]

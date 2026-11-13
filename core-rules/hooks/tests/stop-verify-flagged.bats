@@ -375,7 +375,7 @@ EOF
       run env PATH="$COUNTER_BIN:$PATH" bash "$hook" \
         <<<'{"last_assistant_message":"Done. <!-- dod-receipt cmd=fixture exit=0 diff=+1 --> <!-- follow-ups: none -->"}'
       [ "$status" -eq 0 ] || { echo "$h $flag: $output"; false; }
-      [[ "$output" != *'"decision":"block"'* ]]
+      [[ "$output" != *'"decision":"block"'* ]] || false
       [ -s "$RUN_MARKER" ]
       [ "$(wc -l < "$INDEX_SCAN_LOG" | tr -d ' ')" -eq 1 ] || { echo "$h $flag rescanned:"; cat "$INDEX_SCAN_LOG"; false; }
     done
@@ -400,7 +400,7 @@ EOF
       _se_flagged_changed_lines "$project"
     ' _ "$lib" "$cache" "$PROJECT_DIR"
     [ "$status" -eq 0 ]
-    [[ "$output" == *app.js* ]]
+    [[ "$output" == *app.js* ]] || false
     [ "$(wc -l < "$INDEX_SCAN_LOG" | tr -d ' ')" -eq 2 ]
   done
 }
@@ -437,7 +437,7 @@ EOF
     # Emulate a coarse filesystem returning the same recent timestamp across
     # an index rewrite: the recent-time rule must force a content hash.
     run env PATH="$COUNTER_BIN:$PATH" bash -c '
-      . "$1"; __se_flag_cache="$2"; __se_cache_epoch=$(date +%s); project="$3"
+      . "$1"; _se_load_heavy || exit 1; __se_flag_cache="$2"; __se_cache_epoch=$(date +%s); project="$3"
       _se_index_stamp() { printf "1:2:3:%s:%s:coarse" "$__se_cache_epoch" "$__se_cache_epoch"; }
       _se_flagged_changed_lines "$project" || exit 1
       git -C "$project" update-index --assume-unchanged app.js || exit 1
@@ -583,7 +583,7 @@ PY
       _se_flagged_changed_lines "$project"
     ' _ "$lib" "$cache" "$PROJECT_DIR" "$BATS_TEST_TMPDIR/sparse-original"
     [ "$status" -eq 0 ]
-    [[ "$output" == *app.js* ]]
+    [[ "$output" == *app.js* ]] || false
     [ "$(wc -l < "$INDEX_SCAN_LOG" | tr -d ' ')" -eq 1 ]
   done
 }
@@ -706,7 +706,7 @@ EOF
       git -C "$PROJECT_DIR" update-index "--$flag" app.js
       stop "$h"
       [ "$status" -eq 0 ]
-      [[ "$output" != *'"decision":"block"'* ]]
+      [[ "$output" != *'"decision":"block"'* ]] || false
       [ ! -e "$RUN_MARKER" ]
     done
   done
@@ -722,7 +722,7 @@ EOF
       git -C "$PROJECT_DIR" update-index "--$flag" app.js
       stop "$h"
       [ "$status" -eq 0 ] || { echo "$h $flag: $output"; false; }
-      [[ "$output" != *'"decision":"block"'* ]]
+      [[ "$output" != *'"decision":"block"'* ]] || false
       [ ! -e "$RUN_MARKER" ]
     done
   done
@@ -741,8 +741,8 @@ for name in sys.argv[1:]:
   for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
     run bash -c 'source "$1"; _se_flagged_changed_lines "$2"' _ "$lib" "$PROJECT_DIR"
     [ "$status" -eq 0 ]
-    [[ "$output" == *'app.js'* ]]
-    [[ "$output" == *'notes.md'* ]]
+    [[ "$output" == *'app.js'* ]] || false
+    [[ "$output" == *'notes.md'* ]] || false
     cmp "$PROJECT_DIR/.git/index" "$BATS_TEST_TMPDIR/index-before"
     [ "$(git -C "$PROJECT_DIR" ls-files -v app.js)" = 'h app.js' ]
     [ "$(git -C "$PROJECT_DIR" ls-files -v notes.md)" = 'S notes.md' ]
@@ -759,7 +759,7 @@ for name in sys.argv[1:]:
   for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
     run bash -c 'source "$1"; _se_flagged_changed_lines "$2"' _ "$lib" "$PROJECT_DIR"
     [ "$status" -eq 0 ] || { echo "$output"; false; }
-    [[ "$output" == *'app.js'* ]]
+    [[ "$output" == *'app.js'* ]] || false
     cmp "$PROJECT_DIR/.git/index" "$BATS_TEST_TMPDIR/split-before"
   done
 }
@@ -776,7 +776,7 @@ for name in sys.argv[1:]:
     printf 'more documentation\n' >> "$PROJECT_DIR/notes.md"
     stop "$h"
     [ "$status" -eq 0 ] || { echo "$h: $output"; false; }
-    [[ "$output" != *'"decision":"block"'* ]]
+    [[ "$output" != *'"decision":"block"'* ]] || false
     [ ! -e "$RUN_MARKER" ]
   done
 }
@@ -816,7 +816,7 @@ EOF
       printf 'more documentation\n' >> "$PROJECT_DIR/notes.md"
       stop "$h"
       [ "$status" -eq 0 ]
-      [[ "$output" != *'"decision":"block"'* ]]
+      [[ "$output" != *'"decision":"block"'* ]] || false
       [ ! -e "$RUN_MARKER" ]
     done
   done
