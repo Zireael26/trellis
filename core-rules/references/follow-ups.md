@@ -1,15 +1,17 @@
 # follow-ups — the completion-boundary block
 
-The *requirement* lives in `core-rules/CLAUDE.md` § Definition of done: at a
-completion boundary, end the message with a `Follow-ups` block and emit the
-machine marker alongside the DoD receipt. This file carries the mechanism —
-block format, where items are captured durably, and how a follow-up is disposed
-of later. Read it when you are writing a block or taking an item.
+The *requirement* lives in `core-rules/AGENTS.md` § Definition of done: at a
+completion boundary, end the message with a `Follow-ups` block when items
+surfaced during the session (or state `Follow-ups: none`). Verification
+evidence itself is recorded structurally by `stop-verify` into
+`<git-dir>/trellis-local/last-verified.json` rather than scraped from HTML
+comments in chat. This file carries the mechanism — block format, where items
+are captured durably, and how a follow-up is disposed of later.
 
 ## When it fires
 
-A completion boundary is a spec status flip (DECIDED / SHIPPED), a PR open, or a
-DoD-receipt emission on a substantive unit. Trivial turns emit nothing.
+A completion boundary is a spec status flip (DECIDED / SHIPPED), a PR open, or
+completion of a substantive implementation unit. Trivial turns emit nothing.
 
 ## Block format
 
@@ -22,11 +24,15 @@ disposition:
 - Items derive **only** from context already read this session — never launch new
   exploration to find them.
 
-## Markers
+## Verification evidence (structural, not HTML comments)
 
-Alongside the DoD receipt, emit `<!-- follow-ups: <count> -->`, or
-`<!-- follow-ups: none -->` when there are none. Stop hooks **warn** —
-non-blocking, by design — on a receipt without the marker.
+`stop-verify` writes `<git-dir>/trellis-local/last-verified.json` (`0600` in a
+`0700` directory) when checks pass, binding `HEAD`, tree fingerprint, and the
+commands that actually executed (`pre-push` never trusts `last-verified.json`
+and always runs its own gate). Manual `<!-- dod-receipt -->` and
+`<!-- follow-ups: ... -->` HTML comments are retired from `stop-verify`
+enforcement; state the verification command, exit status, and diff summary
+plainly for the human reader.
 
 ## Durable capture
 

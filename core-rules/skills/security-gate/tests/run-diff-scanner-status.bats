@@ -181,6 +181,85 @@ with open(out, 'w') as fh:
 PY
 }
 
+@test "semgrep reports PartialParsing skipped on scanned bundles but keeps findings" {
+  local path
+  for path in vendor/widget.min.js vendor/widget.min.mjs vendor/widget.min.cjs \
+              vendor/widget.umd.js vendor/widget.bundle.js dist/assets/widget.js nested/build/widget.cjs; do
+    mkdir -p "$PROJECT/$(dirname "$path")"
+    printf 'var widget = 1;\n' > "$PROJECT/$path"
+  done
+  commit_change
+  python3 - "$PROJECT" "$TEST_ROOT/semgrep.json" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+paths = sorted(str(path) for path in root.rglob('*') if path.suffix in {'.js', '.mjs', '.cjs'})
+errors = [{'path': path, 'type': ['PartialParsing', [{'path': path}]]} for path in paths]
+# Distinct targets, even when Semgrep reports more than one diagnostic per file.
+errors.append({'path': './dist/assets/widget.js', 'type': 'PartialParsing'})
+clean = {'paths': {'scanned': paths + ['changed.ts']}, 'errors': errors, 'results': []}
+with open(sys.argv[2], 'w') as fh:
+    json.dump(clean, fh)
+clean['results'].append({'path': paths[0], 'check_id': 'bundle-finding', 'start': {'line': 1},
+                         'extra': {'severity': 'ERROR', 'message': 'fixture finding'}})
+with open(sys.argv[2] + '.findings', 'w') as fh:
+    json.dump(clean, fh)
+PY
+  run_diff
+  assert_mergeable
+  [[ "$output" == *"semgrep: PartialParsing skipped (minified/generated bundle): 7 target(s)"* ]] || false
+  [[ "$output" == *"semgrep: ran=1 exit=0 parsed=1 scanned=8"* ]] || false
+  [[ "$output" == *"gitleaks: ran=1 exit=0 parsed=1"* ]] || false
+
+  run_diff SEMGREP_MODE=valid-error
+  assert_blocked semgrep SAST
+  [[ "$output" == *"semgrep did not complete: scanner exit 2"* ]] || false
+
+  mv "$TEST_ROOT/semgrep.json.findings" "$TEST_ROOT/semgrep.json"
+  run_diff
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* && "$output" == *"semgrep/bundle-finding"* ]] || false
+  [[ "$output" != *"did not complete:"* ]] || false
+}
+
+@test "semgrep bundle exception does not hide other diagnostics or a missing source receipt" {
+  printf 'var widget = 1;\n' > "$PROJECT/widget.min.js"
+  commit_change
+  printf '%s\n' '{"results":[],"errors":[{"path":"widget.min.js","type":["PartialParsing",[]]},{"path":"widget.min.js","type":"Timeout"},{"path":"widget.min.js","type":"UnexpectedError"}],"paths":{"scanned":["widget.min.js"]}}' > "$TEST_ROOT/semgrep.json"
+  run_diff
+  assert_blocked semgrep SAST
+  [[ "$output" == *"PartialParsing skipped (minified/generated bundle): 1 target(s)"* ]] || false
+  [[ "$output" == *"JSON errors non-empty (Timeout, UnexpectedError)"* ]] || false
+  [[ "$output" == *'target not scanned: "changed.ts"'* ]] || false
+}
+
+@test "semgrep requires an exact PartialParsing tag and a scanned bundle target" {
+  commit_path widget.min.js
+  local report
+  for report in \
+    '{"results":[],"errors":[{"path":"widget.min.js","type":["PartialParsing",null]}],"paths":{"scanned":["widget.min.js"]}}' \
+    '{"results":[],"errors":[{"path":"widget.min.js","type":["PartialParsing",[{"path":"changed.ts"}]]}],"paths":{"scanned":["widget.min.js"]}}' \
+    '{"results":[],"errors":[{"path":"widget.min.js","type":"PartialParsing"}],"paths":{"scanned":[]}}' \
+    '{"results":[],"errors":[{"path":"unrelated.min.js","type":"PartialParsing"}],"paths":{"scanned":["widget.min.js","unrelated.min.js"]}}'; do
+    printf '%s\n' "$report" > "$TEST_ROOT/semgrep.json"
+    run_diff
+    assert_blocked semgrep SAST
+    [[ "$output" == *"JSON errors non-empty (PartialParsing)"* ]] || false
+    [[ "$output" != *"skipped (minified/generated bundle)"* ]] || false
+  done
+}
+
+@test "semgrep does not exempt source paths resembling generated bundles" {
+  local path
+  for path in distributor/widget.js build-tools/widget.js widget.min.js.ts dist/source.ts; do
+    commit_path "$path"
+    stub_semgrep_error "$path" PartialParsing
+    run_diff
+    assert_blocked semgrep SAST
+    [[ "$output" == *"JSON errors non-empty (PartialParsing)"* ]] || false
+    [[ "$output" != *"skipped (minified/generated bundle)"* ]] || false
+  done
+}
+
 @test "semgrep shell parse errors defer to ShellCheck with a visible count" {
   commit_change shell
   for kind in 'Syntax error' PartialParsing 'Lexical error'; do

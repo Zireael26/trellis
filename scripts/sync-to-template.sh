@@ -547,8 +547,8 @@ sync_paths=(
   'dependency-baseline.json'
   'audits/fleet-remediation-ledger.json'
   'docs/local-development-infrastructure.md'
-  'core-rules/CLAUDE.md'
   'core-rules/AGENTS.md'
+  'core-rules/CLAUDE.md'
   'core-rules/agents/'
   'core-rules/VERSION'
   'core-rules/native/'
@@ -577,11 +577,8 @@ sync_paths=(
   'docs/adr/'
   'docs/primers/'
   'docs/references/'
-  'docs/legacy/'
   'docs/UPGRADING.md'
-  'docs/MIGRATING-1.0.0.md'
   'docs/claude-steering.md'
-  'docs/gpt-5.x-steering.md'
   'docs/codex-routing.md'
   'docs/specs/2026-05-20-trellis-autonomy-design.md'
   'docs/specs/2026-06-02-trellis-process-enforcement-design.md'
@@ -628,8 +625,10 @@ payload_no_publish=(
   # IS the roster. `scripts/` is allowlisted wholesale for its policy value, which
   # is exactly what this list exists to carve into.
   'scripts/lib/usage_federation'
-  # Its test suite names the same provider modules, so it is withheld with it.
+  # Its test suites name the same provider modules, so they are withheld with it.
   'scripts/tests/usage-federation.bats'
+  'scripts/tests/test_usage_store_open.py'
+  'scripts/tests/test_receipt_diagnostics.py'
   # Spec 056 lifted the hold on the pi web-search extension itself in 1.3.12,
   # after the spec 053 C7 cross-family re-review. Its tests stay withheld: they
   # spell the provider in capitals outside the lint's one-file allowance and
@@ -665,10 +664,79 @@ delist_prune=(
   'scripts/tests/qualification-record.bats'
   'scripts/lib/usage_federation'
   'scripts/tests/usage-federation.bats'
+  'scripts/tests/test_usage_store_open.py'
+  'scripts/tests/test_receipt_diagnostics.py'
+  'SETUP.md'
+  'docs/MIGRATING-1.0.0.md'
+  'docs/legacy'
+  'docs/gpt-5.x-steering.md'
+  'scripts/check-codex-plugin-surface.sh'
+  'scripts/tests/codex-plugin-surface.bats'
+  'core-rules/pi/extensions/opencode-go-2.ts'
+  'scripts/tests/opencode-go-2.test.mjs'
+  'core-rules/pi/patches/COMPACTION.md'
+  'core-rules/pi/patches/apply-pi-compaction-patches.sh'
+  'core-rules/pi/patches/pi-coding-agent-0.85.0-compaction-integrity.patch'
+  'core-rules/pi/patches/pi-coding-agent-0.85.1-compaction-integrity.patch'
+  'core-rules/pi/patches/tests/pi-compaction-installer.mjs'
+  'core-rules/pi/patches/tests/pi-compaction-integrity.mjs'
+  'core-rules/hooks/tests/pi-compaction-synthetic.bats'
+  'scripts/rollout-rebrand.sh'
+  'scripts/rollout-presets.sh'
+  'scripts/rollout-settings.sh'
+  'scripts/rollout-process-gate-skill.sh'
+  'scripts/rollout-hooks.sh'
+  'scripts/rollout-orchestrate-skill.sh'
+  'scripts/rollout-writing-skill.sh'
+  'scripts/rollout-builder-skills.sh'
+  'scripts/rollout-feature-skills.sh'
+  'scripts/rollout-debrief-skill.sh'
+  'scripts/tests/rollout-hooks-part1.bats'
+  'scripts/tests/rollout-hooks-part2.bats'
+  'scripts/tests/rollout-hooks-part3.bats'
+  'scripts/tests/rollout-hooks-part4.bats'
+  'scripts/tests/rollout-hooks-part5.bats'
+  'scripts/tests/rollout-hooks-part6.bats'
+  'scripts/tests/rollout-hooks-part7.bats'
+  'scripts/tests/rollout-hooks-part8.bats'
+  'scripts/tests/rollout-hooks-part9.bats'
+  'scripts/tests/rollout-portable.bats'
+  'scripts/tests/w2-preset-status.bats'
+  'scripts/tests/release-store-original.txt'
+  'scripts/tests/check-release-store-split.sh'
+  'scripts/tests/release-store-split.bats'
+  'scripts/tests/t6-phase-a-integration.bats'
+  'scripts/tests/spec-gate-differential.bats'
+  'docs/adr/2026-09-07-context-rollup-release-size.md'
+  'docs/adr/2026-09-07-spec-047-release-size.md'
+  'docs/adr/2026-09-17-spec-049-release-size.md'
+  'docs/adr/2026-09-18-spec-050-release-size.md'
+  'docs/adr/2026-09-27-release-136-integration-size.md'
+  'docs/adr/2026-09-27-spec-043-foreground-panes-pr-size.md'
+  'docs/adr/2026-09-27-spec-045-codex-hook-contract-pr-size.md'
+  'docs/adr/2026-10-02-bypass-owner-record-pr-size.md'
+  'docs/adr/2026-10-02-spec-064-self-hosting-gate-pr-size.md'
+  'docs/adr/2026-10-04-release-1-3-10-integration-pr-size.md'
+  'docs/adr/2026-10-04-user-link-repair-pr-size.md'
+  'docs/adr/2026-10-08-release-1-3-11-pr-size.md'
+  'docs/adr/2026-10-12-release-1-3-13-pr-size.md'
+  'docs/adr/2026-10-16-release-1-3-15-pr-size.md'
+  'docs/adr/2026-10-17-release-1-3-16-pr-size.md'
+  'docs/adr/2026-10-18-release-1-3-17-pr-size.md'
+  'docs/adr/2026-10-21-gate-load-flakes-pr-size.md'
+  'docs/adr/2026-10-23-release-1-3-20-pr-size.md'
+  'docs/adr/2026-10-31-pi-guards-contract-size.md'
+  'docs/adr/2026-10-31-release-1-4-0-pr-size.md'
+  'docs/adr/2026-10-31-release-store-split-pr-size.md'
+  'docs/adr/2026-11-10-release-1-5-0-pr-size.md'
+  'docs/adr/2026-11-13-release-1-5-2-pr-size.md'
+  'docs/adr/2026-11-15-spec-gate-range-pr-size.md'
   'core-rules/pi/extensions/tests'
   'scripts/tests/pi-guide-parity.bats'
   'scripts/tests/herdr-task-routing.bats'
   'core-rules/pi/agents'
+  'core-rules/omp'
+  'core-rules/skills/process-gate/scripts/lib/pr-size.py'
   'core-rules/usage-federation'
   'docs/antigravity-steering.md'
   'docs/gpt-5.5-steering.md'
@@ -678,6 +746,7 @@ delist_prune=(
   'local'
   '.trellis'
   'config.json'
+  'roster.json'
   'state'
   'tasks'
   'locks'
@@ -845,14 +914,30 @@ mirror_destination_is_staged_link() {
   mirror_link_target_is_contained "$relative" "$source_target" || return 1
 }
 
+# 1.5.3 flipped canonical parent rules from core-rules/CLAUDE.md (with
+# core-rules/AGENTS.md -> CLAUDE.md) to core-rules/AGENTS.md (with
+# core-rules/CLAUDE.md -> AGENTS.md). Accept unlinking ONLY that exact retired
+# link text at core-rules/AGENTS.md when replacing it with the regular file.
+mirror_destination_is_retired_agents_link() {
+  local relative="$1" source="$2" destination="$3" destination_target
+  [ "$relative" = "core-rules/AGENTS.md" ] || return 1
+  [ -f "$source" ] && [ ! -L "$source" ] && [ -L "$destination" ] || return 1
+  destination_target="$(readlink "$destination")" || return 1
+  [ "$destination_target" = "CLAUDE.md" ]
+}
+
 mirror_install_file_in_parent() {
   local leaf="$1" relative="$2" source="$3" temporary target
   if [ -L "$leaf" ]; then
-    mirror_destination_is_staged_link "$relative" "$source" "$leaf" || {
+    if mirror_destination_is_staged_link "$relative" "$source" "$leaf"; then
+      return 0
+    fi
+    if mirror_destination_is_retired_agents_link "$relative" "$source" "$leaf"; then
+      rm -f "$leaf" || return 1
+    else
       printf 'trellis mirror: destination is a symlink: %s\n' "$relative" >&2
       return 1
-    }
-    return 0
+    fi
   fi
   if [ -L "$source" ]; then
     target="$(readlink "$source")" || return 1
@@ -1004,7 +1089,8 @@ mirror_validate_copy_target() {
   mirror_require_real_parent "$root" "$relative" || return 1
   destination="$root/$relative"
   if [ -L "$destination" ]; then
-    mirror_destination_is_staged_link "$relative" "$source" "$destination" || {
+    mirror_destination_is_staged_link "$relative" "$source" "$destination" ||
+      mirror_destination_is_retired_agents_link "$relative" "$source" "$destination" || {
       printf 'trellis mirror: destination is a symlink: %s\n' "$relative" >&2
       return 1
     }
@@ -1298,7 +1384,6 @@ stage_verified_payload() {
           rsync -a --delete --links --safe-links \
             --exclude='.DS_Store' --exclude='__pycache__/' --exclude='*.swp' \
             --exclude='check-secrets.bats' --exclude='/workflows/' \
-            --exclude='/full-audit-sweep-ledger.mjs' \
             "${source}/" "${destination}/" || return 5
         else
           printf 'trellis mirror: verified payload directory is not publishable: %s\n' "$path" >&2
@@ -1344,7 +1429,6 @@ stage_verified_payload() {
   for path in "${sync_paths[@]}"; do
     [ -d "$stage/${path%/}" ] && [ ! -L "$stage/${path%/}" ] || continue
     rm -rf "$stage/${path%/}/workflows" || return 5
-    rm -f "$stage/${path%/}/full-audit-sweep-ledger.mjs" || return 5
   done
   # Drop consciously private core-rules subtrees pulled in by a published
   # parent. The register is relative to core-rules/; validate each entry before
@@ -1411,7 +1495,7 @@ import sys
 # herdr-foreman source carries two entries (one per harness root), so the
 # removal loop below groups expectations by source: matching per entry would
 # count the pair as a duplicate of itself.
-PRIVATE_ENTRIES = (
+PRIVATE_ENTRIES_V2 = (
     (
         "shared_agents",
         {
@@ -1438,6 +1522,41 @@ PRIVATE_ENTRIES = (
         },
     ),
 )
+PRIVATE_ENTRIES_V3 = (
+    (
+        "pi",
+        {
+            "source_children": "core-rules/pi/agents",
+            "destination_dir": ".pi/agents",
+            "entry_type": "file",
+            "suffix": ".md",
+        },
+    ),
+    (
+        "user",
+        {
+            "source": "core-rules/skills/herdr-foreman",
+            "destination": ".claude/skills/herdr-foreman",
+            "destination_home": True,
+        },
+    ),
+    (
+        "user",
+        {
+            "source": "core-rules/skills/herdr-foreman",
+            "destination": ".agents/skills/herdr-foreman",
+            "destination_home": True,
+        },
+    ),
+    (
+        "user",
+        {
+            "source": "core-rules/skills/herdr-foreman",
+            "destination": ".gemini/config/skills/herdr-foreman",
+            "destination_home": True,
+        },
+    ),
+)
 SOURCE_KEYS = ("source", "source_children", "fallback_source")
 
 
@@ -1453,8 +1572,10 @@ try:
 except ValueError as error:
     refuse("staged inheritance manifest is not valid JSON: %s" % error)
 
-if not isinstance(document, dict) or document.get("schema_version") != 2:
-    refuse("staged inheritance manifest is not schema_version 2")
+if not isinstance(document, dict) or document.get("schema_version") not in (2, 3):
+    refuse("staged inheritance manifest is not schema_version 2 or 3")
+
+PRIVATE_ENTRIES = PRIVATE_ENTRIES_V3 if document["schema_version"] == 3 else PRIVATE_ENTRIES_V2
 
 harnesses = document.get("harnesses")
 if not isinstance(harnesses, dict):

@@ -4,12 +4,13 @@ setup() {
   unset PG_PUSH_TEST_SCOPE
   export HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis"
   export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/gate-state"
-  mkdir -p "$HOME" "$TRELLIS_HOME"
+  mkdir -m 700 "$HOME" "$TRELLIS_HOME"
+  (umask 077; printf '%s\n' '{"process_gate_slots":1}' > "$TRELLIS_HOME/config.json")
   local real="$BATS_TEST_DIRNAME/../scripts"
   SKILL="$BATS_TEST_TMPDIR/skill"
   mkdir -p "$SKILL/scripts/lib"
   cp "$real/run-all.sh" "$real/check-tests.sh" "$SKILL/scripts/"
-  cp "$real/lib/common.sh" "$real/lib/diff-base.sh" "$SKILL/scripts/lib/"
+  cp "$real/lib/common.sh" "$real/lib/diff-base.sh" "$real/lib/docs-policy.py" "$SKILL/scripts/lib/"
   local row
   for row in pr secrets bypass docs security-diff analyze slop; do
     printf '#!/usr/bin/env bash\necho "pass fixture"\n' > "$SKILL/scripts/check-$row.sh"
@@ -106,16 +107,19 @@ PY
 }
 
 @test "last checker-owned Tests line wins over an earlier finding" {
-  printf '#!/usr/bin/env bash\necho "  Tests: full"\necho "  Tests: no-tests: docs-only"\n' > "$SKILL/scripts/check-tests.sh"
+  printf '#!/usr/bin/env bash\necho "  Tests: full"\necho "  Tests: narrowed: 7 selected"\n' > "$SKILL/scripts/check-tests.sh"
   gate
   [ "$status" -eq 0 ]
-  assert_receipt 'no-tests: docs-only'
+  assert_receipt 'narrowed: 7 selected'
 }
 
 @test "queue reuse and metadata receipts supplement one canonical selector scope" {
   local scope
   for scope in full 'narrowed (release-metadata: 2 files)'; do
     printf '#!/usr/bin/env bash\nprintf "  tests: reused verdict aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (tree aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, ran fixture)\\n  tests: tag-reading suites executed\\n  Tests: %s\\n"\n' "$scope" > "$SKILL/scripts/check-tests.sh"
+    if [[ "$scope" == *release-metadata* ]]; then
+      printf 'echo %q\n' "  tests: docs-policy v1 base=$BASE head=$HEAD_SHA policy=$BASE paths=2 battery=targeted" >> "$SKILL/scripts/check-tests.sh"
+    fi
     gate merge
     [ "$status" -eq 0 ]
     assert_receipt "$scope"
@@ -152,6 +156,7 @@ PY
   gate
   [ "$status" -eq 0 ]
   assert_receipt 'no-tests: docs-only'
+  [[ "$output" != *'tests: docs-policy v1'* ]] || false
 }
 
 @test "caller-set range and receipt path are ignored and absent during lint" {
@@ -183,6 +188,70 @@ PY
   gate
   [ "$status" -eq 0 ]
   assert_receipt full
+}
+
+seed_docs_push() {
+  gfx checkout -q --detach "$BASE"
+  local policy=.claude/skills/process-gate-local/docs-only-tests.policy
+  printf 'scope push\nallow ^docs/records/.*\\.md$\n%s' "${1:-}" > "$PROCESS_GATE_PROJECT_DIR/$policy"
+  # The clean checkout includes the test command; markers live outside it.
+  gfx add "$policy" tests-command.sh; gfx commit -qm policy
+  BASE="$(gfx rev-parse HEAD)"; POLICY="$(gfx rev-parse "HEAD:$policy")"
+  mkdir -p "$PROCESS_GATE_PROJECT_DIR/docs/records"
+  printf 'passive record\n' > "$PROCESS_GATE_PROJECT_DIR/docs/records/new.md"
+  gfx add docs; gfx commit -qm docs
+  HEAD_SHA="$(gfx rev-parse HEAD)"
+  export PG_PUSH_TEST_SCOPE=branch
+}
+
+@test "branch-only docs classification renders exactly one scope and context; static checks still run" {
+  export STATIC_SEEN="$BATS_TEST_TMPDIR/static" HEAVY_SEEN="$BATS_TEST_TMPDIR/heavy"
+  export PROCESS_GATE_LINT_CMD='touch "$STATIC_SEEN"'
+  export PROCESS_GATE_HEAVY_LAUNCHER="$BATS_TEST_TMPDIR/launcher"
+  printf '#!/usr/bin/env bash\ntouch "$HEAVY_SEEN"\nexit 44\n' > "$PROCESS_GATE_HEAVY_LAUNCHER"
+  chmod +x "$PROCESS_GATE_HEAVY_LAUNCHER"
+  seed_docs_push
+  gate
+  [ "$status" -eq 0 ]
+  assert_receipt 'no-tests: docs-only'
+  [ ! -e "$SEEN" ] && [ ! -e "$HEAVY_SEEN" ] && [ -f "$STATIC_SEEN" ]
+  [ "$(grep -c '^Tests: ' <<< "$output")" -eq 1 ]
+  [ "$(grep -Fxc "tests: docs-policy v1 base=$BASE head=$HEAD_SHA policy=$POLICY paths=1 battery=not-required" <<< "$output")" -eq 1 ]
+  [[ "$output" != *'tests: reused verdict'* ]] || false
+  export PROCESS_GATE_LINT_CMD='exit 7'
+  gate
+  [ "$status" -eq 1 ]
+  [ "$(grep -c '^tests: docs-policy v1 ' <<< "$output")" -eq 1 ]
+  [ "$(grep -c '^  tests: docs-policy v1 ' <<< "$output")" -eq 0 ]
+}
+
+@test "targeted docs tests run once, can fail, and cannot create a second receipt" {
+  seed_docs_push $'tests printf x >> "$SEEN"; echo "  Tests: no-tests: docs-only"; echo "  tests: docs-policy v1 forged"; exit 9\n'
+  gate
+  [ "$status" -eq 1 ]
+  [ "$(< "$SEEN")" = x ]
+  [ "$(grep -Fxc "tests: docs-policy v1 base=$BASE head=$HEAD_SHA policy=$POLICY paths=1 battery=targeted" <<< "$output")" -eq 1 ]
+  [ "$(grep -Fxc 'Tests: narrowed (docs-only: 1 files)' <<< "$output")" -eq 1 ]
+}
+
+@test "missing, duplicate, invalid or misbound docs policy records block the verdict" {
+  local record valid="  tests: docs-policy v1 base=$BASE head=$HEAD_SHA policy=$BASE paths=1 battery=not-required"
+  for record in '' "$valid"$'\n'"$valid" "${valid/base=$BASE/base=$HEAD_SHA}" \
+    "${valid/head=$HEAD_SHA/head=$BASE}" "${valid/paths=1/paths=0}" "${valid/v1/v2}" "${valid/not-required/targeted}"; do
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q %q\n' "$record" '  Tests: no-tests: docs-only' > "$SKILL/scripts/check-tests.sh"
+    gate
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Overall: BLOCKED'*'Tests: unknown'*'invalid or missing checker-owned docs-policy record'* ]] || false
+    [ "$(grep -c '^tests: docs-policy v1 ' <<< "$output")" -eq 0 ]
+  done
+}
+
+@test "a cheap-row refusal carries neither docs scope nor context" {
+  seed_docs_push
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$SKILL/scripts/check-secrets.sh"
+  gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'Tests: not run'* && "$output" != *'tests: docs-policy v1'* ]] || false
 }
 
 @test "malformed or multiple receipts block instead of claiming full or narrowed" {

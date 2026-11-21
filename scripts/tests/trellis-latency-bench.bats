@@ -213,8 +213,17 @@ PY
   # Read-only on the caller's store; no sandbox or sandbox process survives.
   [ "$(ls -a "$TRELLIS_HOME/releases")" = "$releases_before" ]
   [ -z "$(find "$TRELLIS_HOME" "$ROOT" -name 'trellis-bench.*' -print -quit)" ]
-  run pgrep -f "$ROOT/.*trellis-bench\."
-  [ "$status" -eq 1 ]
+  run env LC_ALL=C pgrep -f "$ROOT/.*trellis-bench\."
+  [ "$status" -eq 1 ] || {
+    local survivor_status="$status" survivor_pids="$output" survivor_pid
+    printf 'bench survivor check: exit=%s root=%s\n%s\n' "$survivor_status" "$ROOT" "$survivor_pids" >&2
+    env LC_ALL=C pgrep -fl "$ROOT/.*trellis-bench\." >&2 || true
+    for survivor_pid in $survivor_pids; do
+      case "$survivor_pid" in ''|*[!0-9]*) continue ;; esac
+      ps -p "$survivor_pid" -o pid=,ppid=,pgid=,etime=,command= >&2 || true
+    done
+    return 1
+  }
 }
 
 # A fixture sandbox with no Trellis attached and a stub launcher, handed to
@@ -1059,7 +1068,7 @@ finally:
 print('R3: 24 strict families, two-observation lifecycle rows and a six-item same-sandbox pass')
 PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
-  run pgrep -f "$ROOT/.*trellis-bench\."
+  run env LC_ALL=C pgrep -f "$ROOT/.*trellis-bench\."
   [ "$status" -eq 1 ]
 }
 

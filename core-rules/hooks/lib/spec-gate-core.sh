@@ -463,33 +463,136 @@ sg_is_excluded_path() {
   esac
 }
 
-# Echoes the net gated diff size (added+deleted, excluded paths removed) for the
-# exact resolved range. Echoes "-1" if the diff cannot be computed (fail-open).
-sg_compute_gated_diff() {
-  local dir="$1" range="$2" total=0 adds dels relp row old numstat valid=1
-  [ -n "$range" ] || { printf '%s' "-1"; return; }
-  numstat=$(mktemp "${TMPDIR:-/tmp}/trellis-spec-numstat.XXXXXX") || { printf '%s' "-1"; return; }
-  if ! git -C "$dir" diff --numstat -z "$range" > "$numstat" 2>/dev/null; then
-    rm -f -- "${numstat:?}"
-    printf '%s' "-1"; return
+# Only the same base-side resolver that protects the default branch may supply
+# an import anchor. Missing proof retains the full original count.
+_sg_protected_tip() (
+  local dir="$1" root="${2:-}" resolver
+  [ -n "$root" ] || root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
+  resolver=$(sg_find_resolver "$dir" "$root") || return 1
+  # shellcheck source=/dev/null
+  . "$resolver"
+  cd -- "$dir" && db_defbranch || return 1
+  [ -n "$_dd_tip" ] && printf '%s' "$_dd_tip"
+)
+
+# An integrated protected ancestor P and its pre-import ancestor X. Ambiguous,
+# non-ancestor and three-dot ranges are never discounted.
+_sg_import_bounds() {
+  local dir="$1" base="$2" head="$3" tip integrated common
+  git -C "$dir" merge-base --is-ancestor "$base" "$head" 2>/dev/null || return 1
+  tip=$(_sg_protected_tip "$dir" "${4:-}") || return 1
+  integrated=$(git -C "$dir" merge-base --all "$head" "$tip" 2>/dev/null) || return 1
+  case "$integrated" in ''|*$'\n'*) return 1 ;; esac
+  if git -C "$dir" merge-base --is-ancestor "$integrated" "$base" 2>/dev/null; then return 1; fi
+  common=$(git -C "$dir" merge-base --all "$base" "$integrated" 2>/dev/null) || return 1
+  case "$common" in ''|*$'\n'*) return 1 ;; esac
+  printf '%s\t%s' "$integrated" "$common"
+}
+
+# TAB-separated discounted / raw / protected anchor. A whole path transition
+# may be removed only if B == X and H == P at that literal path, including mode
+# and absence. Mixed files and renames retain their entire original numstat.
+_sg_measure_gated_diff() {
+  local dir="$1" range="$2" total=0 raw=0 adds dels relp row old scratch valid=1
+  local base head bounds integrated="-" common proof=0 renamed path retained
+  [ -n "$range" ] || { printf '%s' $'-1\t-1\t-'; return; }
+  case "$range" in
+    *...*) ;; # Preserve the resolver's explicit three-dot semantics verbatim.
+    *..*)
+      base=$(git -C "$dir" rev-parse --verify "${range%%..*}^{commit}" 2>/dev/null) &&
+        head=$(git -C "$dir" rev-parse --verify "${range#*..}^{commit}" 2>/dev/null) || {
+          printf '%s' $'-1\t-1\t-'; return;
+        }
+      range="$base..$head" ;;
+  esac
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/trellis-spec-diff.XXXXXX") || { printf '%s' $'-1\t-1\t-'; return; }
+  case "$scratch" in /*) ;; *) scratch="./$scratch" ;; esac # awk filenames, never var=value operands.
+  if ! git -C "$dir" diff --numstat -z --no-relative --no-ext-diff --no-textconv "$range" > "$scratch/numstat" 2>/dev/null; then
+    rm -rf -- "${scratch:?}"
+    printf '%s' $'-1\t-1\t-'; return
+  fi
+  if [ -n "${base:-}" ] && bounds=$(_sg_import_bounds "$dir" "$base" "$head" "${3:-}"); then
+    IFS=$'\t' read -r integrated common <<EOF
+$bounds
+EOF
+    # diff-tree compares complete tree entries, not text, attributes or rename
+    # guesses. A path in either list cannot be an exact protected transition.
+    if git -C "$dir" diff-tree -r --no-commit-id --name-only -z --no-renames --no-ext-diff --no-textconv --ignore-submodules=none \
+         "$base" "$common" > "$scratch/changed" 2>/dev/null &&
+       git -C "$dir" diff-tree -r --no-commit-id --name-only -z --no-renames --no-ext-diff --no-textconv --ignore-submodules=none \
+         "$head" "$integrated" >> "$scratch/changed" 2>/dev/null; then
+      proof=1; path=""
+      # %q is an injective single-line key: tabs/newlines stay escaped data,
+      # never awk syntax. Both streams use the same shell/locale; no eval.
+      if ! while IFS= read -r -d '' path; do
+        [ -n "$path" ] || { proof=0; break; }
+        sg_is_excluded_path "$path" && continue
+        printf 'p%q\n' "$path" || { proof=0; break; }
+      done < "$scratch/changed" > "$scratch/changed-keys"; then proof=0; fi
+      [ -z "$path" ] || proof=0
+    fi
   fi
   # With -z, a rename is 'adds<TAB>dels<TAB>NUL old<NUL>new<NUL>'.
-  # Classify its destination, while counting only the actual changed lines.
-  while IFS= read -r -d '' row; do
+  row=""
+  if ! while IFS= read -r -d '' row; do
     case "$row" in *$'\t'*$'\t'*) ;; *) valid=0; break ;; esac
     adds=${row%%$'\t'*}; row=${row#*$'\t'}
-    dels=${row%%$'\t'*}; relp=${row#*$'\t'}
+    dels=${row%%$'\t'*}; relp=${row#*$'\t'}; renamed=0
     if [ -z "$relp" ]; then
       IFS= read -r -d '' old && [ -n "$old" ] && IFS= read -r -d '' relp && [ -n "$relp" ] || { valid=0; break; }
+      renamed=1
     fi
     if [ "$adds" = '-' ] && [ "$dels" = '-' ]; then continue; fi
     case "$adds:$dels" in *[!0-9:]*|:*|*:) valid=0; break ;; esac
     sg_is_excluded_path "$relp" && continue
-    total=$(( total + adds + dels ))
-  done < "$numstat"
-  rm -f -- "${numstat:?}"
-  [ "$valid" -eq 1 ] || { printf '%s' "-1"; return; }
-  printf '%s' "$total"
+    raw=$(( raw + adds + dels ))
+    if [ "$proof" -eq 1 ] && [ "$renamed" -eq 0 ]; then
+      printf 'p%q\t%s\n' "$relp" "$((adds + dels))" || proof=0
+    else
+      total=$(( total + adds + dels ))
+    fi
+  done < "$scratch/numstat" > "$scratch/candidate-keys"; then valid=0; fi
+  [ -z "$row" ] || valid=0 # Unterminated trailing bytes are not an empty diff.
+  if [ "$valid" -eq 1 ] && [ "$proof" -eq 1 ]; then
+    # One associative-set pass, including an empty first file (pure import).
+    # System awk reads opaque keys, not paths/code; an unavailable map keeps
+    # the entire known raw count instead of authorizing a partial discount.
+    if retained=$(/usr/bin/env LC_ALL=C /usr/bin/awk -F '\t' '
+      FILENAME == ARGV[1] {
+        if (substr($0, 1, 1) != "p") { bad = 1; exit }
+        changed[$0] = 1; next
+      }
+      NF != 2 || substr($1, 1, 1) != "p" || $2 !~ /^[0-9]+$/ { bad = 1; exit }
+      $1 in changed { kept += $2 }
+      END { if (bad) exit 1; printf "%.0f", kept + 0 }
+    ' "$scratch/changed-keys" "$scratch/candidate-keys") && [[ "$retained" =~ ^[0-9]+$ ]]; then
+      total=$(( total + retained ))
+    else
+      printf '[spec-gate] protected import lookup unavailable; counting full range\n' >&2
+      total=$raw
+    fi
+  elif [ "$proof" -ne 1 ]; then
+    total=$raw
+  fi
+  rm -rf -- "${scratch:?}"
+  [ "$valid" -eq 1 ] || { printf '%s' $'-1\t-1\t-'; return; }
+  [ "$raw" -ne "$total" ] || integrated="-"
+  printf '%s\t%s\t%s' "$total" "$raw" "$integrated"
+}
+
+# Compatibility API: callers needing just the size still receive one integer.
+# An uncertain raw diff is -1 and the mandatory verdict blocks.
+sg_compute_gated_diff() {
+  local measure count raw anchor
+  measure=$(_sg_measure_gated_diff "$1" "$2") || { printf '%s' -1; return; }
+  IFS=$'\t' read -r count raw anchor <<EOF
+$measure
+EOF
+  if [[ "$count" =~ ^[0-9]+$ && "$raw" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$count"
+  else
+    printf '%s' -1
+  fi
 }
 
 # --- spec-triad-in-range (C-CRIT-1) + non-template (C-CRIT-2) ----------------
@@ -589,16 +692,14 @@ sg_branch_token_in_log() {
 }
 
 # L1-3: real interview => clarify.md in the triad OR an explicit spec-waiver.
-# L4-5: agent self-answers => a decisions-log entry for this branch.
+# L4-5: decisions logging is voluntary and left to the operating model's
+# judgment; the spec triad itself satisfies the gate without requiring a
+# decisions-log.md entry.
 sg_interview_artifact_ok() {
   local dir="$1" root="$2" tdir="$3" branch="$4" head="${5:-}" lvl
   lvl=$(sg_autonomy_level "$root") || return 1
   if [ "$lvl" -ge 4 ]; then
-    if [ -n "$head" ]; then
-      sg_ref_file "$dir" "$head" decisions-log.md | sg_branch_token_in_log "$branch"; return
-    fi
-    [ -f "$root/decisions-log.md" ] && sg_branch_token_in_log "$branch" < "$root/decisions-log.md" && return 0
-    return 1
+    return 0
   fi
   if [ -n "$head" ]; then
     sg_ref_file "$dir" "$head" "$tdir/clarify.md" >/dev/null && return 0
@@ -614,22 +715,45 @@ sg_interview_artifact_ok() {
 # mode: surgical | emergency. Honored only on full bind match. Emits audit lines.
 sg_valid_marker() {
   local dir="$1" root="$2" base="$3" diff="$4" ceiling="$5" branch="$6" head="${7:-}"
-  local marker="$root/.claude/session-surgical" log="$root/.claude/spec-gate-audit.log"
-  [ -f "$marker" ] || return 1
-  local m_branch m_wt m_base m_mode m_reason wt
+  local marker="$dir/.claude/session-surgical" log="$root/.claude/spec-gate-audit.log"
+  # Do not consult another checkout, even if it holds a matching legacy marker.
+  [ ! -L "$dir/.claude" ] && [ ! -L "$marker" ] && [ -f "$marker" ] || return 1
+  local m_branch m_wt m_base m_head m_mode m_reason canonical canonical_base measure cumulative raw anchor
   m_branch=$(sed -n '1p' "$marker"); m_wt=$(sed -n '2p' "$marker")
-  m_base=$(sed -n '3p' "$marker");   m_mode=$(sed -n '6p' "$marker")
-  m_reason=$(sed -n '7p' "$marker")
-  wt=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)
-  # Branch/worktree binding is unchanged; only the base has a release-limited
-  # compatibility allowance. An unrelated (or empty) base never qualifies.
-  [ "$m_branch" = "$branch" ] && [ "$m_wt" = "$wt" ] || return 1
-  [ -n "$m_base" ] || return 1
-  if [ "$m_base" != "$base" ]; then
+  m_base=$(sed -n '3p' "$marker");   m_head=$(sed -n '4p' "$marker")
+  m_mode=$(sed -n '6p' "$marker");   m_reason=$(sed -n '7p' "$marker")
+  [ "$m_branch" = "$branch" ] && [ "$m_wt" = "$dir" ] || return 1
+  [ -n "$m_base" ] && [ -n "$m_head" ] || return 1
+  # A declaring HEAD is a frozen object identity, never a floating ref/revspec.
+  case "$m_head" in *[!0-9a-f]*) return 1 ;; esac
+  case "${#m_head}" in 40|64) ;; *) return 1 ;; esac
+  case "$m_mode" in surgical|emergency) ;; *) return 1 ;; esac
+  head=$(git -C "$dir" rev-parse --verify "${head:-HEAD}^{commit}" 2>/dev/null) || return 1
+  git -C "$dir" merge-base --is-ancestor "$m_head" "$head" 2>/dev/null || return 1
+  # Resolve the writer's declaration scope, not remote-old..local. An explicit
+  # update range must fit inside it; an unpublished parent is not declared by B.
+  canonical=$(_sg_resolve_diff_with_root "$dir" "" "refs/heads/$branch" "$head" "$root") || return 1
+  canonical_base=${canonical%%$'\t'*}
+  git -C "$dir" merge-base --is-ancestor "$canonical_base" "$base" 2>/dev/null &&
+    git -C "$dir" merge-base --is-ancestor "$base" "$head" 2>/dev/null &&
+    git -C "$dir" merge-base --is-ancestor "$canonical_base" "$m_head" 2>/dev/null || return 1
+  if [ "$m_base" != "$canonical_base" ]; then
     local legacy
-    legacy=$(sg_legacy_merge_base "$dir" "$(sg_protected_branch "$root")" "$head")
+    legacy=$(sg_legacy_merge_base "$dir" "$(sg_trusted_protected_branch "$dir" "$root")" "$head")
     [ -n "$legacy" ] && [ "$m_base" = "$legacy" ] || return 1
   fi
+  measure=$(_sg_measure_gated_diff "$dir" "$canonical_base..$head" "$root") || return 1
+  IFS=$'\t' read -r cumulative raw anchor <<EOF
+$measure
+EOF
+  [[ "$cumulative" =~ ^[0-9]+$ && "$raw" =~ ^[0-9]+$ ]] || return 1
+  if [ "$raw" -ne "$cumulative" ]; then
+    SG_RECEIPT="${SG_RECEIPT:-}${SG_RECEIPT:+$'\n'}surgical-ceiling: raw=$raw discounted=$cumulative anchor=$anchor"
+  fi
+  [ "$diff" -ge "$cumulative" ] || diff=$cumulative
+  if [ "$m_mode" = "surgical" ] && [ "$diff" -le "$ceiling" ]; then return 0; fi
+  # Audits remain canonical; a linked worktree declaration no longer seeds this directory.
+  mkdir -p "${log%/*}" 2>/dev/null || return 1
   local ts; ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "?")
   if [ "$m_mode" = "emergency" ]; then
     # SAFETY: An emergency override is valid only after its audit record is appended.
@@ -639,7 +763,6 @@ sg_valid_marker() {
     fi
     return 0
   fi
-  if [ "$diff" -le "$ceiling" ]; then return 0; fi
   # Over-ceiling non-emergency surgical claim: invalid + flag for audit.
   printf '%s\toversized-surgical\t%s\tdiff=%s>ceiling=%s\t%s\n' "$ts" "$branch" "$diff" "$ceiling" "$m_reason" >> "$log" 2>/dev/null
   return 1
@@ -650,18 +773,26 @@ sg_valid_marker() {
 # mode: surgical | emergency. Fields (one per line): branch, worktree root,
 # merge-base, declaring HEAD, session id, mode, reason.
 sg_write_marker() {
-  local mode="$1" reason="$2" dir root branch wt base head
+  local mode="$1" reason="$2" dir root branch base head marker tmp
   dir=$(git rev-parse --show-toplevel 2>/dev/null) || return 1
   root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
   branch=$(git -C "$dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
   [ -n "$branch" ] && [ "$branch" != "HEAD" ] || return 1
-  wt="$dir"
   base=$(sg_merge_base "$dir" "$(sg_protected_branch "$root")") || return 1
-  head=$(git -C "$dir" rev-parse HEAD 2>/dev/null)
-  mkdir -p "$root/.claude" 2>/dev/null || return 1
-  printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
-    "$branch" "$wt" "$base" "$head" "${TRELLIS_SESSION_ID:-cli}" "$mode" "$reason" \
-    > "$root/.claude/session-surgical"
+  head=$(git -C "$dir" rev-parse HEAD 2>/dev/null) || return 1
+  marker="$dir/.claude/session-surgical"
+  [ ! -L "$dir/.claude" ] && [ ! -L "$marker" ] || return 1
+  [ ! -e "$marker" ] || [ -f "$marker" ] || return 1
+  mkdir -p "$dir/.claude" 2>/dev/null || return 1
+  # Replace rather than truncate: a hard-linked marker must not modify its peer.
+  tmp=$(mktemp "$marker.XXXXXX") || return 1
+  if printf '%s\n%s\n%s\n%s\n%s\n%s\n%s\n' \
+    "$branch" "$dir" "$base" "$head" "${TRELLIS_SESSION_ID:-cli}" "$mode" "$reason" \
+    > "$tmp" && mv -f -- "$tmp" "$marker"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
 }
 
 # --- the verdict ------------------------------------------------------------
@@ -680,6 +811,17 @@ _sg_defbranch_memo() (
   db_memo_print
 )
 
+# Resolve one right-hand commit without discarding extra range delimiters.
+_sg_range_head() {
+  local right
+  case "$2" in
+    *...*) right=${2#*...} ;;
+    *..*) right=${2#*..} ;;
+    *) return 1 ;;
+  esac
+  git -C "$1" rev-parse --verify "$right^{commit}" 2>/dev/null
+}
+
 # sg_verdict <dir> [range] [ref] [head] [stop]. In stop mode a pass the policy
 # or the protected branch already decides skips the diff range: the Stop early
 # warning prints nothing on a pass. Every other verdict keeps its receipt.
@@ -691,7 +833,9 @@ sg_verdict() {
   fi
   local root; root=$(_se_repo_root "$dir" 2>/dev/null || printf '%s' "$dir")
   local branch="" protected="" protected_known=0 base diff range resolved="" rc=1 SG_RECEIPT=""
+  local measure raw anchor evaluated_head
   local ref="${3:-${SG_REQUEST_REF:-}}" head="${4:-${SG_REQUEST_HEAD:-}}"
+  local explicit_head="$head" requested_range="${2:-${SG_REQUEST_RANGE:-}}"
   local SG_OBJECT_DIR="$dir" SG_OBJECT_HEAD=""
   local _db_memo_key="" _db_memo_rkey="" _db_memo_bkey="" _db_memo_remote="" _db_memo_base_policy=""
   local _db_memo_dd_rc="" _db_memo_dd_ref="" _db_memo_dd_tip="" _db_memo_dd_reason="" memo
@@ -706,6 +850,13 @@ sg_verdict() {
   fi
   if [ -n "$ref" ] || [ -n "$head" ]; then
     SG_OBJECT_HEAD=$(git -C "$dir" rev-parse --verify "$head^{commit}" 2>/dev/null) || { sg_result block invalid-head; return; }
+    if [ -n "$requested_range" ] && evaluated_head=$(_sg_range_head "$dir" "$requested_range"); then
+      if [ -n "$explicit_head" ] && [ "$SG_OBJECT_HEAD" != "$evaluated_head" ]; then
+        sg_result block range-head-mismatch; return
+      fi
+      # A ref without --head identifies the branch, not a later policy tree.
+      SG_OBJECT_HEAD="$evaluated_head"
+    fi
     head="$SG_OBJECT_HEAD"
   fi
   # A valid disabled policy decides a Stop pass before any branch resolution.
@@ -776,8 +927,18 @@ EOF
   if [ "$rc" -ne 0 ]; then
     sg_result block 'cannot-resolve-diff-base'; return
   fi
-  diff=$(sg_compute_gated_diff "$dir" "$range")
-  [ "$diff" = "-1" ] && { sg_result block 'cannot-compute-diff-baseline'; return; }
+  measure=$(_sg_measure_gated_diff "$dir" "$range" "$root") || {
+    sg_result block 'cannot-compute-diff-baseline'; return;
+  }
+  IFS=$'\t' read -r diff raw anchor <<EOF
+$measure
+EOF
+  if ! [[ "$diff" =~ ^[0-9]+$ && "$raw" =~ ^[0-9]+$ ]]; then
+    sg_result block 'cannot-compute-diff-baseline'; return
+  fi
+  if [ "$raw" -ne "$diff" ]; then
+    SG_RECEIPT="${SG_RECEIPT}${SG_RECEIPT:+$'\n'}protected-imports: raw=$raw discounted=$diff anchor=$anchor"
+  fi
   [ "$diff" -le "$floor" ] && { sg_result pass "sub-floor($diff<=$floor)"; return; }
 
   # Option 1 (spec 067): only B's range qualifies. An inherited parent triad
@@ -790,9 +951,12 @@ EOF
     if sg_interview_artifact_ok "$dir" "$root" "$tdir" "$branch" "$SG_OBJECT_HEAD"; then
       sg_result pass "spec-triad($tdir)+interview"; return
     fi
-    sg_result block "spec triad $tdir present but the interview artifact is missing (clarify.md / spec-waiver at L1-3, decisions-log entry at L4-5)"; return
+    sg_result block "spec triad $tdir present but the interview artifact is missing (clarify.md / spec-waiver at L1-3)"; return
   fi
-  if sg_valid_marker "$dir" "$root" "$base" "$diff" "$ceiling" "$branch" "$SG_OBJECT_HEAD"; then
+  evaluated_head=$(_sg_range_head "$dir" "$range") || {
+    sg_result block 'invalid-range-head'; return;
+  }
+  if sg_valid_marker "$dir" "$root" "$base" "$diff" "$ceiling" "$branch" "$evaluated_head"; then
     sg_result pass 'surgical-marker'; return
   fi
   sg_result block "$diff gated lines over floor $floor with no in-range spec triad and no valid surgical declaration"

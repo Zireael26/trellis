@@ -383,11 +383,10 @@ launcher_validate_machine_config() {
       and ((.discovery_roots | unique | length) == (.discovery_roots | length))
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
 
-    # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
-    # alone (spec 054), so a bad value disables only the heavy gate. projects
-    # (per-project host settings such as stop_checks.fast) is typed by the
-    # Stop hook alone (spec 072), so a bad value costs only the faster suite.
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "projects"])
+    # The heavy supervisor owns slot typing (spec 054). A bad
+    # process_gate_slots value must reach it for diagnosis and a cap of 1.
+    # The Stop hook alone types projects (spec 072).
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "process_gate_slots", "projects"])
     and ((has("$schema") | not) or (."$schema" | no_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)
@@ -4334,12 +4333,13 @@ launcher_heavy_forward() {
 launcher_heavy_test_hook() {
   local vars
   vars="$(printf '%s' "${launcher_heavy_caller_env#v1:}" | /usr/bin/base64 -d 2>/dev/null | /usr/bin/tr '\000' '\n')" || return 0
-  printf '%s\n' "$vars" | /usr/bin/grep -qx 'TRELLIS_HEAVY_TEST=1' || return 0
-  if printf '%s\n' "$vars" | /usr/bin/grep -qx 'TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'; then
-    printf 'pause\n'
-  elif printf '%s\n' "$vars" | /usr/bin/grep -qx 'TRELLIS_HEAVY_TEST_FAIL=launcher-ready'; then
-    printf 'fail-ready\n'
-  fi
+  # Exact decoded lines, without an early-exiting reader closing a printf pipe.
+  vars=$'\n'"$vars"$'\n'
+  case "$vars" in *$'\nTRELLIS_HEAVY_TEST=1\n'*) ;; *) return 0 ;; esac
+  case "$vars" in
+    *$'\nTRELLIS_HEAVY_TEST_PAUSE=launcher-startup\n'*) printf 'pause\n' ;;
+    *$'\nTRELLIS_HEAVY_TEST_FAIL=launcher-ready\n'*) printf 'fail-ready\n' ;;
+  esac
 }
 
 # Metadata-only routes, like --version: neither needs the payload, so neither
@@ -4372,13 +4372,16 @@ Existing commands:
   doctor        Diagnose (and --fix) inheritance health
   conformance  Verify live documentation path citations
   disk-janitor  Reclaim build caches, dead worktrees, package stores
+  gc            Reclaim unreachable releases, native binaries, and stale staging
   onboard       Onboard a project into Trellis
   upgrade       Install, verify, and explicitly adopt a named immutable release
                 (launcher-only route; not runnable from this dispatcher)
   mirror        Publish the verified immutable policy payload to a mirror
   sync          Sync Claude hooks into managed projects
   skills        Manage Trellis-owned user skills (list, import, link, unlink)
-  worktree      Create/repair a worktree with Trellis inheritance seeded
+  roster        Manage local machine model roster (discover, show, gaps, probe, latch, unlatch, classify, migrate)
+  lean-audit    Audit mature-repo bloat, oversized files, and redundant test suites
+  worktree      Create/repair/launch a worktree with Trellis inheritance seeded
   usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
   reread        Write a short-lived, logged reread-guard override (reread override --session ID --reason WHY)
   heavy         Run a test command in one of the machine's heavy (or --light) slots (--check, --status)
@@ -4397,6 +4400,7 @@ use warnings;
 use Fcntl qw(:DEFAULT :flock);
 use JSON::PP ();
 use MIME::Base64 ();
+use Time::HiRes ();
 
 my $EX_CONFIG = 78;
 
@@ -4436,6 +4440,9 @@ $dir = $override if defined $override && length $override;
 my %POOL = (
   heavy => {key => 'heavy_slots',       default => 2, prefix => 'slot'},
   light => {key => 'heavy_light_slots', default => 4, prefix => 'light'},
+  overflow => {prefix => 'gate-overflow'},
+  admission => {prefix => 'gate-admission'},
+  repo => {prefix => 'gate-repo'},
 );
 
 # Slot counts per pool: heavy_slots (absent means 2) and heavy_light_slots
@@ -4445,15 +4452,17 @@ sub read_slots {
   # Only the embedded launcher metadata program defines this lexical cache
   # accessor. The standalone supervisor still reads afresh on every poll.
   return launcher_metadata_config() if defined &launcher_metadata_config;
-  open(my $fh, '<', $config) or return (undef, "cannot read machine config $config: $!");
-  my $text = do { local $/; <$fh> };
+  sysopen(my $fh, $config, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    or return (undef, "cannot read machine config $config: $!");
+  my $text = -f $fh ? _pp_slurp($fh, 1048576) : undef;
   close $fh;
-  my $data = eval { JSON::PP->new->decode($text) };
-  return slot_counts($data);
+  return (undef, "cannot read regular machine config $config") unless defined $text;
+  return slot_counts($text);
 }
 
 sub slot_counts {
-  my ($data) = @_;
+  my ($text) = @_;
+  my $data = eval { JSON::PP->new->utf8->allow_bignum->decode($text) };
   return (undef, "machine config is not a JSON object: $config") unless ref $data eq 'HASH';
   my %n;
   for my $p (qw(heavy light)) {
@@ -4462,9 +4471,19 @@ sub slot_counts {
       $n{$p} = $POOL{$p}{default};
       next;
     }
-    my $encoded = JSON::PP->new->allow_nonref->canonical->encode($data->{$key});
-    return (undef, "$key must be an integer >= 1 (found $encoded) in $config") unless $encoded =~ /^[1-9][0-9]{0,5}$/;
+    my $encoded = JSON::PP->new->allow_nonref->allow_bignum->canonical->encode($data->{$key});
+    return (undef, "$key must be an integer >= 1 (found $encoded) in $config") unless $encoded =~ /\A[1-9][0-9]{0,5}\z/;
     $n{$p} = $encoded + 0;
+  }
+  $n{gate} = 1;
+  if (exists $data->{process_gate_slots}) {
+    my $raw = $data->{process_gate_slots};
+    my $encoded = JSON::PP->new->allow_nonref->allow_bignum->encode($raw);
+    if (!ref($raw) && $encoded =~ /\A[12]\z/) {
+      $n{gate} = 0 + $encoded;
+    } else {
+      $n{gate_warning} = 'process_gate_slots must be an integer 1 or 2; using 1';
+    }
   }
   return (\%n);
 }
@@ -4518,7 +4537,14 @@ sub read_token {
 sub open_slot {
   my ($p, $i) = @_;
   sysopen(my $fh, slot_path($p, $i), O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0600) or return undef;
-  unless (-f $fh) { close $fh; return undef; }
+  my @st = stat($fh);
+  # Existing ordinary/light permits may be pre-created in the private
+  # directory. Only the new gate-specific locks require mode 0600.
+  unless (@st && -f _ && $st[4] == $< &&
+      ($p eq 'heavy' || $p eq 'light' || ($st[2] & 07777) == 0600)) {
+    close $fh;
+    return undef;
+  }
   return $fh;
 }
 
@@ -4537,7 +4563,7 @@ sub slot_is_held {
   my ($p, $i) = @_;
   return 0 unless -e slot_path($p, $i);
   my $fh = open_slot($p, $i) or return 0;
-  my $held = !flock($fh, LOCK_EX | LOCK_NB);
+  my $held = !flock($fh, LOCK_EX | LOCK_NB) && ($!{EAGAIN} || $!{EWOULDBLOCK});
   close $fh;
   return $held;
 }
@@ -4552,6 +4578,131 @@ sub read_info {
   my @fields = split /\t/, $line, 4;
   return @fields == 4 ? \@fields : undef;
 }
+
+sub held_summary {
+  my ($p, $n) = @_;
+  my @held;
+  my $max = max_slot_on_disk($p);
+  $max = $n if $n > $max;
+  for my $i (($p eq 'heavy' ? (0) : ()), 1 .. $max) {
+    next unless slot_is_held($p, $i);
+    my $info = read_info($p, $i);
+    push @held, "$i=" . ($info ? "$info->[1]/$info->[0]" : 'unknown');
+  }
+  return @held ? join(' ', @held) : 'none';
+}
+
+# Gate metadata never substitutes for a live, token-matched permit. Primary
+# and overflow use separate records; overflow's token lives on its borrowed
+# ordinary slot. Readers may get an unknown result while a holder exits.
+sub monotime { return Time::HiRes::clock_gettime(Time::HiRes::CLOCK_MONOTONIC()); }
+sub gate_path { return "$dir/gate-$_[0].json"; }
+
+sub read_gate_record {
+  my $kind = shift;
+  sysopen(my $fh, gate_path($kind), O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or return undef;
+  my @st = stat($fh);
+  return undef unless @st && -f _ && $st[4] == $< && ($st[2] & 07777) == 0600 && $st[7] <= 32768;
+  my $text = '';
+  return undef unless defined(sysread($fh, $text, 32769)) && length($text) <= 32768;
+  my $record = eval { JSON::PP->new->utf8->decode($text) };
+  return ref($record) eq 'HASH' ? $record : undef;
+}
+
+sub write_gate_record {
+  my ($kind, $record) = @_;
+  my $path = gate_path($kind);
+  my $tmp = "$path.tmp.$$";
+  my $bytes = JSON::PP->new->utf8->encode($record);
+  return 0 if length($bytes) > 32768;
+  sysopen(my $fh, $tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600) or return 0;
+  my $written = print {$fh} $bytes;
+  my $closed = close $fh;
+  return 1 if $written && $closed && rename($tmp, $path);
+  unlink $tmp;
+  return 0;
+}
+
+sub try_slot {
+  my $fh = open_slot(@_) or return (undef, 'invalid');
+  return ($fh, undef) if flock($fh, LOCK_EX | LOCK_NB);
+  return (undef, ($!{EAGAIN} || $!{EWOULDBLOCK}) ? 'held' : 'invalid');
+}
+
+sub gate_live {
+  my ($kind) = @_;
+  my ($p, $i) = $kind eq 'primary' ? ('heavy', 0) : ('overflow', 1);
+  # Status must not claim a failed probe means a vacant position. Missing
+  # paths are free, but existing unreadable or corrupt lock files are unknown.
+  if (!lstat(slot_path($p, $i))) { return $!{ENOENT} ? undef : {}; }
+  my ($free, $state) = try_slot($p, $i);
+  return undef if $free;
+  return {} unless $state eq 'held';
+  my $r = read_gate_record($kind) or return {};
+  my ($slot, $token, $repo, $since, $worktree, $paths) = @$r{qw(slot token repo since worktree paths)};
+  return {} unless defined $slot && ($kind eq 'primary' ? $slot eq '0' : $slot =~ /\A[1-9][0-9]{0,5}\z/);
+  return {} unless defined $token && $token =~ /\A[0-9a-f]{32}\z/ && (read_token('heavy', $slot) // '') eq $token;
+  return {} if $kind eq 'overflow' && !slot_is_held('heavy', $slot);
+  # An unknown identity can hold the primary exclusively, but never overlap.
+  return $r unless defined $repo;
+  return {} unless $repo =~ /\A[0-9]+:[0-9]+\z/ && slot_is_held('repo', $repo)
+    && defined $since && $since =~ /\A[0-9]+(?:\.[0-9]+)?\z/
+    && defined $worktree && $worktree =~ m{\A/} && (!defined $paths || ref($paths) eq 'ARRAY');
+  return $r;
+}
+
+sub gate_status {
+  my ($n) = @_;
+  my $primary = gate_live('primary');
+  my $overflow = gate_live('overflow');
+  my $last = read_gate_record('last') // {};
+  my $reason = $last->{reason} // 'none';
+  $reason = 'none' unless $reason =~ /\A(?:same-repo|ordinary-full|load|memory|swap|disk|probe-unknown|stagger|config|gate-full|none)\z/;
+  my $effective = 1;
+  my $sole = $primary // $overflow;
+  if ($n->{gate} == 2 && (!$overflow || (defined $overflow->{slot} && $overflow->{slot} <= $n->{heavy}))) {
+    if (($primary && $overflow && $primary->{repo} && $overflow->{repo}) ||
+        ($sole && $sole->{repo} && ($last->{token} // '') eq $sole->{token}
+         && $reason eq 'none' && ($last->{at} // '') =~ /\A[0-9]+(?:\.[0-9]+)?\z/
+         && monotime() - $last->{at} >= 0 && monotime() - $last->{at} <= 5)) {
+      $effective = 2;
+    }
+  }
+  print "process_gate_slots=$n->{gate} effective_process_gate_slots=$effective last-denial=$reason\n";
+  for my $row (['primary', $primary], ['overflow', $overflow]) {
+    my ($kind, $r) = @$row;
+    my $label = "process-gate $kind";
+    if (!$r) {
+      print "$label: free\n";
+    } elsif (!defined $r->{slot}) {
+      print "$label: held (ownership unverified)\n";
+    } else {
+      my $info = read_info('heavy', $r->{slot});
+      my $borrow = $kind eq 'overflow' ? " borrowed=slot-$r->{slot}" : '';
+      my $drain = $kind eq 'overflow' && $effective == 1 ? ' (draining)' : '';
+      my $where = defined $r->{worktree} ? ' worktree=' . shell_quote($r->{worktree}) : '';
+      print "$label: held$drain$borrow", ($info ? " pid=$info->[0]" : ''), "$where\n";
+    }
+  }
+}
+
+# Bash %q-compatible quoting, so the info file's argv field round-trips through
+# `eval "set -- $field"`.
+sub shell_quote {
+  my $s = shift;
+  return "''" if $s eq '';
+  return $s if $s =~ m{^[A-Za-z0-9_@%+=:,./-]+$};
+  if ($s =~ /[\x00-\x1f\x7f]/) {
+    (my $q = $s) =~ s/([\\'])/\\$1/g;
+    $q =~ s/\t/\\t/g;
+    $q =~ s/\n/\\n/g;
+    $q =~ s/\r/\\r/g;
+    $q =~ s/([\x00-\x1f\x7f])/sprintf('\\x%02x', ord $1)/ge;
+    return "\$'$q'";
+  }
+  (my $q = $s) =~ s/'/'\\''/g;
+  return "'$q'";
+}
 #@end
 
 #@pin
@@ -4562,7 +4713,12 @@ if ($mode eq 'check') {
   fail($EX_CONFIG, $why) unless $n;
   my $problem = prepare_dir();
   fail($EX_CONFIG, $problem) if $problem;
-  print "trellis heavy: ok (heavy_slots=$n->{heavy}, heavy_light_slots=$n->{light}, slots in $dir)\n";
+  for my $p (qw(admission overflow)) {
+    my $fh = open_slot($p, 1) or fail($EX_CONFIG, "cannot open $p permit in $dir");
+  }
+  my $primary = open_slot('heavy', 0) or fail($EX_CONFIG, "cannot open primary permit in $dir");
+  print STDERR "trellis heavy: $n->{gate_warning}\n" if $n->{gate_warning};
+  print "trellis heavy: ok (heavy_slots=$n->{heavy}, heavy_light_slots=$n->{light}, process_gate_slots=$n->{gate}, process_gate_protocol=2, slots in $dir)\n";
   exit 0;
 }
 
@@ -4571,7 +4727,9 @@ if ($mode eq 'status') {
   fail($EX_CONFIG, $why) unless $n;
   my $problem = prepare_dir();
   fail($EX_CONFIG, $problem) if $problem;
+  print STDERR "trellis heavy: $n->{gate_warning}\n" if $n->{gate_warning};
   print "heavy_slots=$n->{heavy} heavy_light_slots=$n->{light} dir=$dir\n";
+  gate_status($n);
   for my $p (qw(heavy light)) {
     my $label = $POOL{$p}{prefix};
     my $max = max_slot_on_disk($p);
@@ -4740,7 +4898,8 @@ sub metadata_one {
 }
 sub metadata_valid {
   my ($v) = @_;
-  return 0 unless metadata_closed($v,[qw(schema_version source_root release_remote active_cli_release default_fleet fleets)],['$schema',qw(heavy_slots heavy_light_slots projects)]);
+  # Leave process_gate_slots for the heavy supervisor to diagnose and clamp.
+  return 0 unless metadata_closed($v,[qw(schema_version source_root release_remote active_cli_release default_fleet fleets)],['$schema',qw(heavy_slots heavy_light_slots process_gate_slots projects)]);
   return 0 if exists($v->{'$schema'}) && !(metadata_clean($v->{'$schema'}) && length($v->{'$schema'}));
   return 0 unless metadata_one($metadata_schema_literal);
   return 0 unless metadata_absolute($v->{source_root}) && metadata_clean($v->{release_remote}) && length($v->{release_remote});
@@ -4778,7 +4937,8 @@ if ($metadata_mode eq 'help') { exit 0; }
 # Exists only in this trusted program: no environment or serialized cache.
 sub launcher_metadata_config {
   return (undef,"machine config is not a JSON object: $metadata_path") unless $metadata_legacy_json;
-  return slot_counts($metadata_data);
+  # JSON::PP may round numbers; the supervisor can validate the literal.
+  return slot_counts($metadata_raw);
 }
 unshift @ARGV, $metadata_mode;
 TRELLIS_METADATA_PL

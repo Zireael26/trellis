@@ -1,4 +1,5 @@
 """Diff mapper and gate wiring contracts; all Git writes stay in a private HOME."""
+import json
 import os
 from pathlib import Path
 import re
@@ -460,6 +461,104 @@ class PushTestMapTests(unittest.TestCase):
         self.assertNotIn("--test-file=", (self.repo / "invoked").read_text())
         self.assertNotIn("Tests: narrowed", result.stdout)
         self.assertIn("Tests: full", result.stdout)
+
+    def test_kill_switch_forces_full_selection(self):
+        self.put(SOURCE, "# changed\n")
+        head = self.commit()
+        self.env["PROCESS_GATE_TEST_SELECTION"] = "full"
+        result = self.run_cmd("python3", "-I", "-B", str(MAPPER), self.base + ".." + head, check=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("process-gate: full tests — forced by PROCESS_GATE_TEST_SELECTION=full", result.stderr)
+
+    def test_python_and_js_reverse_import_reachability_and_core_pi_fallback(self):
+        py_suite = "scripts/tests/py-consumer.bats"
+        py_driver = "scripts/tests/test_py_driver.py"
+        py_leaf = "scripts/tools/leaf_util.py"
+        py_trans = "scripts/tools/deep_util.py"
+        js_suite = "scripts/tests/js-consumer.bats"
+        js_entry = "core-rules/pi/leaf-entry.ts"
+        js_dep = "core-rules/pi/shared-leaf.mjs"
+        self.put(py_suite, 'run python3 "$BATS_TEST_DIRNAME/test_py_driver.py"\n')
+        self.put(py_driver, "from tools.leaf_util import run\n")
+        self.put(py_leaf, "import deep_util\n")
+        self.put(py_trans, "VALUE = 1\n")
+        self.put(js_suite, 'run node "$ROOT/core-rules/pi/leaf-entry.ts"\n')
+        self.put(js_entry, "import { helper } from './shared-leaf.js';\n")
+        self.put(js_dep, "export const helper = () => 1;\n")
+        self.base = self.commit()
+
+        res_py = self.select([py_trans])
+        self.assertEqual(res_py.returncode, 0, res_py.stderr)
+        self.assertIn(py_suite, res_py.stdout.splitlines()[1:])
+        self.assertNotIn(js_suite, res_py.stdout.splitlines()[1:])
+
+        self.base = self.git("rev-parse", "HEAD")
+        res_js = self.select([js_dep])
+        self.assertEqual(res_js.returncode, 0, res_js.stderr)
+        self.assertIn(js_suite, res_js.stdout.splitlines()[1:])
+
+        # If a core-rules/pi/tests/*.test.mjs suite also imports js_dep, mapper must
+        # conservatively fall back to full so node --test is never skipped.
+        self.put(js_dep, "export const helper = () => 2;\n")
+        self.put("core-rules/pi/tests/leaf.test.mjs", "const m = require('../shared-leaf.mjs');\n")
+        self.base = self.commit()
+        res_core_pi = self.select([js_dep])
+        self.assertNotEqual(res_core_pi.returncode, 0)
+        self.assertIn("core suite", res_core_pi.stderr)
+
+    def test_declared_test_inputs_manifest_and_explain_flag(self):
+        owned_suite = "scripts/tests/template-owner.bats"
+        template = "core-rules/commands/templates/custom.md"
+        self.put(owned_suite, "# template suite\n")
+        self.put(template, "v1\n")
+        self.put("scripts/tests/declared-test-inputs.json", json.dumps({
+            "schema_version": 1,
+            "declared_inputs": {
+                "core-rules/commands/templates/*.md": [owned_suite],
+            },
+        }))
+        self.base = self.commit()
+        self.put(template, "v2\n")
+        self.put(SOURCE, "# changed leaf\n")
+        head = self.commit()
+
+        explain = self.run_cmd("python3", "-I", "-B", str(MAPPER), "--explain", self.base + ".." + head, check=False)
+        self.assertEqual(explain.returncode, 0, explain.stderr)
+        payload = json.loads(explain.stdout)
+        self.assertEqual(payload["status"], "narrowed")
+        self.assertEqual(payload["changed_files"], 2)
+        self.assertIn("declared-fixture", payload["suites"][owned_suite])
+        self.assertIn("explicit-owner", payload["suites"][TARGET])
+        self.assertIn("fixed-smoke", payload["suites"]["scripts/tests/suite-coverage.bats"])
+
+        # Changing declared-test-inputs.json itself forces full battery.
+        self.base = head
+        res_manifest = self.select(["scripts/tests/declared-test-inputs.json"])
+        self.assertNotEqual(res_manifest.returncode, 0)
+        self.assertIn("uncertain-full", res_manifest.stderr)
+
+    def test_run_tests_changed_flag_narrows_and_falls_back(self):
+        # Copy minimal runner dependencies into self.repo to exercise --changed --list hermetically.
+        for rel in ("scripts/run-tests.sh", "scripts/lib/push-test-map.py",
+                    "scripts/lib/test-suites.sh", "scripts/lib/bats-jobs.sh",
+                    "scripts/tests/stage-weights.tsv"):
+            self.put(rel, (ROOT / rel).read_text())
+        self.git("branch", "-M", "main")
+        self.base = self.commit()
+        self.git("checkout", "-qb", "feat/changed-test")
+        self.put(SOURCE, "# leaf edit\n")
+        head = self.commit()
+
+        narrowed = self.run_cmd("bash", "scripts/run-tests.sh", "--changed=" + self.base + ".." + head, "--list")
+        self.assertIn("bats " + TARGET, narrowed.stdout.splitlines())
+
+        # Unmapped change falls back to full stage list cleanly (exit 0 on --list).
+        self.put("unknown-root-file.txt", "unmapped\n")
+        head2 = self.commit()
+        fallback = self.run_cmd("bash", "scripts/run-tests.sh", "--changed=" + self.base + ".." + head2, "--list")
+        self.assertEqual(fallback.returncode, 0, fallback.stderr)
+        self.assertIn("python unit suites (fastpath, acl, usage-store)", fallback.stdout.splitlines())
 
 
 if __name__ == "__main__":

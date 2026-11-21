@@ -180,12 +180,16 @@ reason=${verdict_line#*$'\t'}
 
 # --- pre-push CLI mode (harness-neutral teeth) ------------------------------
 if [ "${1:-}" = "--gate" ]; then
-  # The shared core embeds the receipt in its reason (also visible in Stop JSON).
-  case "$reason" in
-    diff-base:*)
-      printf '%s\n' "${reason%%$'\n'*}"
-      reason=${reason#*$'\n'} ;;
-  esac
+  # Keep all bound count receipts on passes too, not just the diff-base line.
+  while :; do
+    case "$reason" in
+      diff-base:*|protected-imports:*|surgical-ceiling:*)
+        case "$reason" in *$'\n'*) ;; *) _sg_failure 'missing verdict after receipt' ;; esac
+        printf '%s\n' "${reason%%$'\n'*}"
+        reason=${reason#*$'\n'} ;;
+      *) break ;;
+    esac
+  done
   case "$verdict" in
     block)
       echo "[spec-gate] BLOCKED: $reason" >&2

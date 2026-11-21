@@ -486,9 +486,30 @@ PY
   done
 }
 
+@test "closed shell readers leave process_gate_slots typing to the heavy supervisor" {
+  cp "$TRELLIS_HOME/config.json" "$SANDBOX/gate-base.json"
+  local field value expected
+  for field in process_gate_slots process_gate_slot; do
+    expected=0
+    [ "$field" = process_gate_slots ] || expected=4
+    for value in 1 2 '"2"' null '{}'; do
+      jq --arg field "$field" --argjson value "$value" '.[$field]=$value' "$SANDBOX/gate-base.json" > "$TRELLIS_HOME/config.json"
+      run bash -c '. "$1/scripts/lib/trellis-home.sh"; trellis_home_validate_config "$2"' _ "$REPO_ROOT" "$TRELLIS_HOME/config.json"
+      [ "$status" -eq "$expected" ] || { echo "trellis-home $field=$value: $status: $output"; false; }
+      run bash -c 'for l in semver trellis-home local-registry attachment health-checks; do . "$1/scripts/lib/$l.sh"; done
+        hc_portable_machine_config "$2"' _ "$REPO_ROOT" "$TRELLIS_HOME"
+      if [ "$expected" -eq 0 ]; then
+        [ "$status" -eq 0 ] || { echo "health-checks $value: $status: $output"; false; }
+      else
+        [ "$status" -ne 0 ] || { echo "health-checks accepted $field: $output"; false; }
+      fi
+    done
+  done
+}
+
 @test "T59 reviewer corpus covers every verdict class on all four metadata routes" {
   run python3 -I "$REPO_ROOT/scripts/tests/helpers/metadata-parity-corpus.py" "$SANDBOX/reviewer-corpus"
-  [ "$status" -eq 0 ] && [ "$output" = 473 ] || { echo "$status: $output"; false; }
+  [ "$status" -eq 0 ] && [ "$output" = 490 ] || { echo "$status: $output"; false; }
   python3 -I - "$LAUNCHER_TEMPLATE" "$SANDBOX/reviewer-jq-validator" <<'PY'
 import pathlib,sys
 s=pathlib.Path(sys.argv[1]).read_text();start=s.index('launcher_validate_machine_config() {');end=s.index('\n}',start)+2
@@ -1048,7 +1069,7 @@ prepare_dispatcher_fixture() {
   mkdir -p "$DISPATCH_ROOT"
   cp "$DISPATCHER_TEMPLATE" "$DISPATCH_ROOT/trellis"
   chmod 755 "$DISPATCH_ROOT/trellis"
-  for script in configure.sh release.sh registry.sh show-config.sh attach-project.sh doctor.sh conformance-check.sh install-disk-janitor-launchd.sh materialize-scheduled-task.sh sync-to-template.sh worktree.sh; do
+  for script in configure.sh release.sh registry.sh show-config.sh attach-project.sh doctor.sh gc.sh conformance-check.sh install-disk-janitor-launchd.sh materialize-scheduled-task.sh sync-to-template.sh worktree.sh; do
     make_dispatch_stub "$script"
   done
 }
@@ -1205,6 +1226,81 @@ launcher_clean_prologue() {
     /^\047 trellis-launcher-bootstrap / { exit }
     body { print }
   ' "$LAUNCHER_TEMPLATE"
+}
+
+# Exercise the actual hook definition without entering launcher main or passing
+# a potentially ARG_MAX-sized environment through argv/environment transport.
+invoke_launcher_heavy_test_hook() {
+  local definition
+  definition="$(awk '/^launcher_heavy_test_hook\(\) \{/ { copy=1 } copy { print } copy && /^}/ { exit }' "$LAUNCHER_TEMPLATE")"
+  [ -n "$definition" ] || return 1
+  "$BASH" --noprofile --norc -p -c '
+    set -u
+    # Force EPIPE to be observable rather than silently killing the producer.
+    # No timing/scheduler luck is needed once grep closes the padded pipe.
+    trap "" PIPE
+    eval "$1"
+    launcher_heavy_caller_env="v1:$(<"$2")"
+    launcher_heavy_test_hook
+  ' _ "$definition" "$1" > "$2" 2> "$3"
+}
+
+@test "T60 heavy test hook consumes padded caller data without stderr" {
+  python3 -I - "$SANDBOX" <<'PY'
+import base64,os,pathlib,sys
+root=pathlib.Path(sys.argv[1]);read,write=os.pipe();os.set_blocking(write,False);capacity=0
+try:
+    while True:
+        try:capacity+=os.write(write,b'x'*65536)
+        except BlockingIOError:break
+finally:os.close(read);os.close(write)
+size=max(4*1024*1024,capacity*64)
+(root/'hook-padding-size').write_text(f'pipe_capacity={capacity}\npadding_bytes={size}\n')
+for name,extra,output in [('pause',['TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'],b'pause\n'),
+                          ('fail',['TRELLIS_HEAVY_TEST_FAIL=launcher-ready'],b'fail-ready\n'),
+                          ('none',[],b'')]:
+    rows=['TRELLIS_HEAVY_TEST=1',*extra,'PADDING='+'x'*size]
+    (root/(name+'.env')).write_bytes(base64.b64encode(('\0'.join(rows)+'\0').encode()))
+    (root/(name+'.expected')).write_bytes(output)
+PY
+  local action
+  for action in pause fail none; do
+    run invoke_launcher_heavy_test_hook "$SANDBOX/$action.env" "$SANDBOX/$action.out" "$SANDBOX/$action.err"
+    [ "$status" -eq 0 ] || { echo "$action: status=$status $output"; false; }
+    [ ! -s "$SANDBOX/$action.err" ] || {
+      printf '%s\n' "$(<"$SANDBOX/hook-padding-size")" "$(<"$SANDBOX/$action.err")"
+      false
+    }
+    cmp "$SANDBOX/$action.expected" "$SANDBOX/$action.out"
+  done
+}
+
+@test "T60 heavy test hook keeps exact-line checks and pause precedence" {
+  python3 -I - "$SANDBOX" <<'PY'
+import base64,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+cases=[([],b''),(['TRELLIS_HEAVY_TEST=0','TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'],b''),
+       (['TRELLIS_HEAVY_TEST=11','TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'],b''),
+       (['NOT_TRELLIS_HEAVY_TEST=1','TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'],b''),
+       (['TRELLIS_HEAVY_TEST=1','TRELLIS_HEAVY_TEST_PAUSE=launcher-startup-more'],b''),
+       (['TRELLIS_HEAVY_TEST=1','NOT_TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'],b''),
+       (['TRELLIS_HEAVY_TEST=1','TRELLIS_HEAVY_TEST_FAIL=launcher-ready-more'],b''),
+       (['TRELLIS_HEAVY_TEST=1','TRELLIS_HEAVY_TEST_FAIL=launcher-ready'],b'fail-ready\n'),
+       (['TRELLIS_HEAVY_TEST=1','TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'],b'pause\n'),
+       (['TRELLIS_HEAVY_TEST=1','TRELLIS_HEAVY_TEST_FAIL=launcher-ready','TRELLIS_HEAVY_TEST_PAUSE=launcher-startup'],b'pause\n'),
+       (['VALUE=x\nTRELLIS_HEAVY_TEST=1\nTRELLIS_HEAVY_TEST_PAUSE=launcher-startup\ny'],b'pause\n')]
+for i,(rows,output) in enumerate(cases):
+    (root/(f'exact-{i}.env')).write_bytes(base64.b64encode(('\0'.join(rows)+'\0').encode()))
+    (root/(f'exact-{i}.expected')).write_bytes(output)
+PY
+  local input prefix
+  for input in "$SANDBOX"/exact-*.env; do
+    prefix="${input%.env}"
+    run invoke_launcher_heavy_test_hook "$input" "$prefix.out" "$prefix.err"
+    [ "$status" -eq 0 ] || { echo "$input: status=$status $output"; false; }
+    [ ! -s "$prefix.err" ] || { printf '%s\n' "$(<"$prefix.err")"; false; }
+    cmp "$prefix.expected" "$prefix.out"
+  done
 }
 
 @test "launcher bootstrap preserves ordinary and hook stdin" {

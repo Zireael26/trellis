@@ -4,7 +4,7 @@
 >
 > This is local opt-in onboarding. It never adds a project to a tracked central registry, never assumes a common projects root, and never makes a source checkout the project's runtime. It attaches Claude Code, Codex, and Pi from a verified immutable release. A contributor who only clones the project and does not attach it remains inert.
 
-For the architecture, migration decision record, and release rollback policy, use the local-fleet documents maintained alongside this runbook: [`docs/MIGRATING-1.0.0.md`](docs/MIGRATING-1.0.0.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
+For the architecture, migration decision record, and release rollback policy, use the local-fleet documents maintained alongside this runbook: [`docs/UPGRADING.md`](docs/UPGRADING.md) and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
 
 ---
 

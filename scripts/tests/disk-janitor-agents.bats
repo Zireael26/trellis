@@ -191,7 +191,7 @@ assert_flagged() {
 }
 
 @test "apply agent with worktrees,docker scopes is refused by install and an error in doctor" {
-  assert_flagged docker-scope "ProgramArguments[15] is 'worktrees,docker', expected 'worktrees,caches,releases,pi,tmp,docker'"
+  assert_flagged docker-scope "ProgramArguments[15] is 'worktrees,docker', expected 'worktrees,caches,docker,releases,release-tmp,pi,tmp'"
 }
 
 @test "apply agent with an extra flag is refused by install and an error in doctor" {

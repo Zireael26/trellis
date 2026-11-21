@@ -80,8 +80,10 @@
     },
     "harness": {
       "enum": [
+        "antigravity",
         "claude",
         "codex",
+        "opencode",
         "pi"
       ]
     },

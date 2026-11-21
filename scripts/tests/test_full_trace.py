@@ -69,7 +69,7 @@ class TraceTests(unittest.TestCase):
         (self.run_dir / "run.json").write_text(json.dumps(self.receipt))
 
     def command(self, mode="--promote-run"):
-        return subprocess.run([sys.executable, "-I", str(ROOT / "scripts/trace-release-metadata.py"),
+        return subprocess.run([sys.executable, "-I", "-B", str(ROOT / "scripts/trace-release-metadata.py"),
                                mode, str(self.run_dir), "--root", str(self.root)], text=True, capture_output=True)
 
     def refused(self):
@@ -306,7 +306,7 @@ class TraceTests(unittest.TestCase):
         fake.mkdir()
         tracer = fake / "strace"
         events = self.base / "events"
-        tracer.write_text("#!/bin/sh\nexec " + str(Path(sys.executable)) + " -I " + str(self.base / "fake.py") + ' "$@"\n')
+        tracer.write_text("#!/bin/sh\nexec " + str(Path(sys.executable)) + " -I -B " + str(self.base / "fake.py") + ' "$@"\n')
         tracer.chmod(0o700)
         (self.base / "fake.py").write_text('''import json, os, sys, time
 from pathlib import Path

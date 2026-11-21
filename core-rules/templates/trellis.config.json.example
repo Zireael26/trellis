@@ -35,7 +35,6 @@
   "disk_janitor": {
     "enabled": true,
     "cache_ttl_days": 14,
-    "release_staging_ttl_days": 1,
     "worktree_stale_days": 30,
     "free_space_floor_gb": 30,
     "cache_ceiling_gb": 20,
@@ -51,6 +50,7 @@
     "logs_min_mb": 50,
     "logs_min_age_days": 7,
     "tmp_ttl_days": 2,
+    "active_bloat_warn_gb": 2,
     "cc_worktree_idle_days": 1,
     "apply_disabled_scopes": []
   },
@@ -58,6 +58,7 @@
   "comment_worktrees": "Optional (spec 069). root is the central worktree root; every new worktree goes to <root>/<registry project id>/<branch slug>, and repositories with no registry row go to <root>/_unregistered/<repo name>. known_parents lists the directories outside the sanctioned roots where migrate and the janitor look for repositories and their worktrees. push_owners lists the GitHub owners (or owner/repo) whose origins migrate may push preserve branches to; any other origin keeps its preserve commit local. Paths are absolute or ~-relative. TRELLIS_WORKTREE_ROOT overrides root for one process.",
   "worktrees": {
     "root": "~/projects/worktrees",
+    "cow_deps": false,
     "known_parents": [],
     "push_owners": []
   },

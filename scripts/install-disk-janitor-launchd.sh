@@ -206,16 +206,30 @@ snapshot_directory_identity() {
 }
 
 path_has_extended_acl() {
-  local path="$1" listing marker
+  local path="$1" label="${2:-}" listing marker acl_tail
   case "${INSTALLER_SYSTEM_NAME:-$("/usr/bin/uname" -s)}" in
     Darwin) listing="$(/usr/bin/env LC_ALL=C /bin/ls -lde "$path" 2>/dev/null)" ;;
     *) listing="$(/usr/bin/env LC_ALL=C /bin/ls -ld "$path" 2>/dev/null)" ;;
   esac
   [ -n "$listing" ] || return 2
   # Darwin's ls prints an xattr's "@" in place of an ACL's "+"; with -e each
-  # ACL entry is a line of its own after the first.
+  # ACL entry is a line of its own after the first. Stock macOS user homes and
+  # $HOME/Library carry a single system-default deletion guard
+  # (` 0: group:everyone deny delete`), which grants zero permissions; accept
+  # that exact single ACE on operator home and $user_home/Library only while
+  # rejecting every other ACL entry and every other child-path ACL.
   case "$listing" in *"
-"*) return 0 ;; esac
+"*)
+    acl_tail="${listing#*
+}"
+    if [ "$acl_tail" = " 0: group:everyone deny delete" ]; then
+      if [ "$label" = "operator home" ] || { [ -n "${user_home:-}" ] && [ "$path" = "$user_home/Library" ]; }; then
+        return 1
+      fi
+    fi
+    return 0
+    ;;
+  esac
   marker="${listing%% *}"
   case "$marker" in *+) return 0 ;; *) return 1 ;; esac
 }
@@ -249,7 +263,7 @@ require_path_controls() {
     printf 'trellis launchd: %s is not owned by the current operator: %s\n' "$label" "$path" >&2
     return "$owner_code"
   }
-  if path_has_extended_acl "$path"; then
+  if path_has_extended_acl "$path" "$label"; then
     printf 'trellis launchd: %s has an extended ACL: %s\n' "$label" "$path" >&2
     printf 'trellis launchd: inspect the ACL entries with:\n  /bin/ls -led %q\n' "$path" >&2
     printf 'trellis launchd: remove one entry (N = its index in that listing) with:\n  /bin/chmod -a# N %q\n' "$path" >&2
@@ -516,10 +530,10 @@ def validate_rendered_plist(rendered, label, user_home, trellis_home, logs_dir, 
         "--norc",
     ]
     if label == "org.trellis.disk-janitor":
-        expected_arguments.extend([launcher, "disk-janitor", "--report"])
+        expected_arguments.extend([launcher, "disk-janitor", "--report", "--scopes", "caches,worktrees,stores,docker,releases,release-tmp,pi,orphans,logs,tmp,transcripts"])
         expected_schedule = {"Hour": 3, "Minute": 30}
     elif label == "org.trellis.disk-janitor-apply":
-        expected_arguments.extend([launcher, "disk-janitor", "--apply", "--yes", "--safe-only", "--dehydrate", "--scopes", "worktrees,caches,releases,pi,tmp,docker"])
+        expected_arguments.extend([launcher, "disk-janitor", "--apply", "--yes", "--safe-only", "--dehydrate", "--scopes", "worktrees,caches,docker,releases,release-tmp,pi,tmp"])
         expected_schedule = {"Hour": 4, "Minute": 0}
     elif label == "org.trellis.pi-spill-watchdog":
         expected_arguments.append(os.path.join(trellis_home, "state", "disk-janitor", "pi-spill-watchdog"))
@@ -971,7 +985,7 @@ install_agent() {
     local dj_script="$SCRIPT_DIR/disk-janitor.sh"
     local dry_run_rc=0 dry_run_out=""
     if [ -x "$dj_script" ]; then
-      dry_run_out="$(TRELLIS_HOME="$trellis_home" HOME="$user_home" "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker" --dry-run 2>&1)" || dry_run_rc=$?
+      dry_run_out="$(env TRELLIS_HOME="$trellis_home" HOME="$user_home" "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,docker,releases,release-tmp,pi,tmp" --dry-run 2>&1)" || dry_run_rc=$?
     else
       dry_run_rc=126
       dry_run_out="janitor script is missing or not executable: $dj_script"
@@ -1097,14 +1111,14 @@ main() {
   dj_agent_write_tool_path "$trellis_home" "$caller_path" "$caller_tmpdir" || return "$?"
 
   install_agent "$report_label" || return "$?"
-  printf '  runs: %s disk-janitor --report (daily 03:30, report-only)\n' "$launcher"
+  printf '  runs: %s disk-janitor --report --scopes caches,worktrees,stores,docker,releases,release-tmp,pi,orphans,logs,tmp,transcripts (daily 03:30, report-only)\n' "$launcher"
   printf '  TRELLIS_HOME: %s\n' "$trellis_home"
   printf '  logs: %s/%s.log\n' "$logs_dir" "$report_label"
 
   if "$with_apply"; then
     printf '\n!! installing the NIGHTLY APPLY agent — this one DELETES worktrees.\n'
     install_agent "$apply_label" || return "$?"
-    printf '  runs: %s disk-janitor --apply --yes --safe-only --dehydrate --scopes worktrees,caches,releases,pi,tmp,docker (daily 04:00)\n' "$launcher"
+    printf '  runs: %s disk-janitor --apply --yes --safe-only --dehydrate --scopes worktrees,caches,docker,releases,release-tmp,pi,tmp (daily 04:00)\n' "$launcher"
     printf '  reaps ONLY: merged + porcelain-clean + non-detached + non-secret worktrees\n'
     printf '  NEVER reaps: pushed-but-unmerged, dirty, secret-bearing, or ephemeral /private/tmp trees\n'
     printf '  logs: %s/%s.log\n' "$logs_dir" "$apply_label"

@@ -241,7 +241,7 @@ dj_host_store_list() {
       fi
     fi
   fi
-  # uv: `uv cache dir`.
+  # uv: `uv cache dir` plus the Trellis gate-xdg uv cache (never rm).
   if command -v uv >/dev/null 2>&1; then
     store="$(uv cache dir 2>/dev/null || echo '')"
     if [ -n "$store" ] && [ -d "$store" ]; then
@@ -252,6 +252,16 @@ dj_host_store_list() {
       if ! dj_host_is_uint "$mtime"; then mtime=0; fi
       printf 'uv-cache\t%s\t%s\t%s\n' "$store" "$bytes" "$mtime"
       fi
+    fi
+  fi
+  if [ -n "${TRELLIS_HOME:-}" ] && [ -d "$TRELLIS_HOME/state/gate-xdg/cache/uv" ]; then
+    dir="$TRELLIS_HOME/state/gate-xdg/cache/uv"
+    if dj_host_has_ctrl "$dir"; then :; else
+    bytes="$(dj_dir_bytes "$dir")"
+    if ! dj_host_is_uint "$bytes"; then bytes=0; fi
+    mtime="$(dj_mtime "$dir")"
+    if ! dj_host_is_uint "$mtime"; then mtime=0; fi
+    printf 'uv-cache-gate\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime"
     fi
   fi
   # bun: conventional caches under fake HOME (report-only discovery; prune
@@ -288,7 +298,7 @@ dj_host_store_list() {
     if ! dj_host_is_uint "$mtime"; then mtime=0; fi
     printf 'playwright\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime"
   done
-  # npm cache (legacy; report-only).
+  # npm cache (pruned via `npm cache clean --force` in apply).
   if command -v npm >/dev/null 2>&1; then
     store="$(npm config get cache 2>/dev/null || echo '')"
     case "$store" in ''|undefined|null) store="${USER_HOME:-$HOME}/.npm" ;; esac
@@ -302,6 +312,22 @@ dj_host_store_list() {
       fi
     fi
   fi
+  # Report-only visibility rows: never pruned by apply.
+  for dir in "$HOME/.cache/codex-runtimes" "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/Library/Caches/dotslash" "$HOME/Library/Caches/node-gyp"; do
+    [ -d "$dir" ] || continue
+    [ ! -L "$dir" ] || continue
+    if dj_host_has_ctrl "$dir"; then continue; fi
+    bytes="$(dj_dir_bytes "$dir")"
+    if ! dj_host_is_uint "$bytes"; then bytes=0; fi
+    mtime="$(dj_mtime "$dir")"
+    if ! dj_host_is_uint "$mtime"; then mtime=0; fi
+    case "$dir" in
+      *codex-runtimes) printf 'codex-runtimes\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *claude-cli-nodejs) printf 'claude-cli-nodejs\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *dotslash) printf 'dotslash\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *node-gyp) printf 'node-gyp\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+    esac
+  done
   return 0
 }
 
@@ -356,7 +382,7 @@ dj_host_store_report() {
 $(dj_host_store_list 2>/dev/null || true)
 EOF
   [ "$fresh" -eq 1 ] || echo "  (no package stores detected)"
-  echo "  apply runs only each tool's own prune (pnpm store prune; uv cache prune; bun pm cache rm; go clean -cache), never rm."
+  echo "  apply runs only each tool's own prune (pnpm store prune; uv cache prune incl. gate-xdg; bun pm cache rm; go clean -cache; npm cache clean --force), never rm."
   echo
   return 0
 }
@@ -366,6 +392,12 @@ EOF
 # shellcheck disable=SC2034  # EXIT_STATUS assignments below accumulate into the orchestrator's exit class.
 dj_host_store_apply() {
   scope_enabled stores || return 0
+  if [ "${DJ_BUILD_ACTIVE_OVERRIDE:-}" != "0" ] && command -v pgrep >/dev/null 2>&1; then
+    if pgrep -x 'pnpm|npm|go|bun|uv' >/dev/null 2>&1; then
+      echo "  skipped stores prune: active package manager or build tool detected"
+      return 0
+    fi
+  fi
   if ! confirm_category "package store caches (each tool's own prune, never rm)"; then
     return 0
   fi
@@ -398,6 +430,22 @@ dj_host_store_apply() {
       echo "  pruned: go clean -cache"
     else
       echo "  go clean -cache failed" >&2
+      EXIT_STATUS=1
+    fi
+  fi
+  if [ -n "${TRELLIS_HOME:-}" ] && [ -d "$TRELLIS_HOME/state/gate-xdg/cache/uv" ] && command -v uv >/dev/null 2>&1; then
+    if UV_CACHE_DIR="$TRELLIS_HOME/state/gate-xdg/cache/uv" uv cache prune --force >/dev/null 2>&1 || UV_CACHE_DIR="$TRELLIS_HOME/state/gate-xdg/cache/uv" uv cache prune >/dev/null 2>&1; then
+      echo "  pruned: uv cache prune (gate-xdg)"
+    else
+      echo "  uv cache prune (gate-xdg) failed" >&2
+      EXIT_STATUS=1
+    fi
+  fi
+  if command -v npm >/dev/null 2>&1; then
+    if npm cache clean --force >/dev/null 2>&1; then
+      echo "  pruned: npm cache clean --force"
+    else
+      echo "  npm cache clean --force failed" >&2
       EXIT_STATUS=1
     fi
   fi
@@ -513,12 +561,61 @@ EOF
   done <"$TARGETS_TMP"
 }
 
+# dj_host_tmp_roots — print the canonical D5 tmp scope roots, one per line:
+# the real per-user temp dir (`getconf DARWIN_USER_TEMP_DIR`, physical
+# realpath) AND the physical realpath of /private/tmp. Test overrides
+# DJ_DARWIN_TMPDIR_OVERRIDE and DJ_SYSTEM_TMPDIR_OVERRIDE name them in tests
+# so the real temp dirs are never scanned. Never the launcher's per-run
+# TMPDIR, never $HOME, never /, never a path with $HOME as a prefix.
+# Prints zero, one, or two roots; return 1 only when NEITHER resolves.
+dj_host_tmp_roots() {
+  local base real home_real printed="" seen="" r darwin_set=0 system_set=0
+  # Hermetic rule: when a test pins one override, the other defaults to
+  # disabled (empty) unless explicitly set — so existing tests that pin
+  # only DJ_DARWIN_TMPDIR_OVERRIDE never touch the real /private/tmp.
+  # In production (neither set) both defaults apply.
+  [ -z "${DJ_DARWIN_TMPDIR_OVERRIDE+set}" ] || darwin_set=1
+  [ -z "${DJ_SYSTEM_TMPDIR_OVERRIDE+set}" ] || system_set=1
+  if [ "$darwin_set" -eq 1 ] && [ "$system_set" -eq 0 ]; then
+    set -- "${DJ_DARWIN_TMPDIR_OVERRIDE:-}" ""
+  elif [ "$system_set" -eq 1 ] && [ "$darwin_set" -eq 0 ]; then
+    set -- "" "${DJ_SYSTEM_TMPDIR_OVERRIDE:-}"
+  else
+    set -- "${DJ_DARWIN_TMPDIR_OVERRIDE:-$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo '')}" "${DJ_SYSTEM_TMPDIR_OVERRIDE:-/private/tmp}"
+  fi
+  for base in "$1" "$2"; do
+    [ -n "$base" ] || continue
+    case "$base" in /*) ;; *) continue ;; esac
+    real="$(CDPATH=''; cd -P -- "$base" 2>/dev/null && pwd -P)" || continue
+    [ -n "$real" ] && [ -d "$real" ] || continue
+    [ "$real" != / ] || continue
+    home_real="$(CDPATH=''; cd -P -- "${HOME:-/}" 2>/dev/null && pwd -P)" || home_real="/nonexistent-home"
+    [ -n "$home_real" ] || home_real="/nonexistent-home"
+    [ "$real" != "$home_real" ] || continue
+    case "$real/" in "$home_real/"*) continue ;; esac
+    case " $seen " in *" $real "*) continue ;; esac
+    seen="$seen $real "
+    printf '%s\n' "$real"
+    printed=1
+  done
+  [ -n "$printed" ] || return 1
+}
+
+# _dj_tmp_name_ok BASENAME — 0 iff BASENAME matches a tmp scratch pattern.
+_dj_tmp_name_ok() {
+  case "$1" in
+    bats-run-*|rv-*|tg-*|trellis-test-git.*|pytest-of-*|node-compile-cache|tsx-*|jiti|pi-subagents-*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # dj_host_tmp_root — print the canonical D5 tmp scope root: the real per-user
 # temp dir (`getconf DARWIN_USER_TEMP_DIR`, physical realpath so /tmp resolves
 # to /private/tmp). DJ_DARWIN_TMPDIR_OVERRIDE names it in tests so the real
 # per-user temp is never scanned. Never the launcher's per-run TMPDIR, never
 # $HOME, never /, never a path with $HOME as a prefix. Return 1 when it
 # cannot be resolved safely; the caller refuses the scope with a reason.
+# (Kept for backwards compatibility; new code prefers dj_host_tmp_roots.)
 dj_host_tmp_root() {
   local base="" real="" home_real=""
   if [ -n "${DJ_DARWIN_TMPDIR_OVERRIDE:-}" ]; then
@@ -538,20 +635,24 @@ dj_host_tmp_root() {
   printf '%s\n' "$real"
 }
 
-# dj_host_tmp_scan — D5 tmp: direct children of the per-user temp dir named bats-run-* or rv-*
-# older than tmp_ttl_days (2) with no open handle. Emits delete rows (apply)
-# and skip rows (young/in-use). Never follows symlinks, maxdepth 1. Refuses
-# with a skip reason when the root is unsafe.
+# dj_host_tmp_scan — D5 tmp: direct children (maxdepth 1) of the per-user temp
+# dir AND /private/tmp matching scratch patterns (bats-run-*, rv-*, tg-*,
+# trellis-test-git.*, pytest-of-*, node-compile-cache, tsx-*, jiti,
+# pi-subagents-*) older than tmp_ttl_days (2) with no open handle. Emits
+# delete rows (apply) and skip rows (young/in-use). Never follows symlinks.
+# Refuses with a skip reason when no root is safe.
 dj_host_tmp_scan() {
-  local tmpdir ttl entry bytes reason fresh_rc
+  local tmpdir roots ttl entry bytes reason fresh_rc base
   scope_enabled tmp || return 0
-  if ! tmpdir="$(dj_host_tmp_root 2>/dev/null)"; then
-    plan_row tmp skip tmp "-" 0 "-" "tmp scope refused: per-user temp dir unresolvable or unsafe (HOME, /, or under HOME); nothing scanned"
+  if ! roots="$(dj_host_tmp_roots 2>/dev/null)"; then
+    plan_row tmp skip tmp "-" 0 "-" "tmp scope refused: temp dirs unresolvable or unsafe (HOME, /, or under HOME); nothing scanned"
     return 0
   fi
   ttl="$(cfg_num '.disk_janitor.tmp_ttl_days' 2)"
   case "$ttl" in ''|*[!0-9]*) ttl=2 ;; esac
-  for entry in "$tmpdir"/bats-run-* "$tmpdir"/rv-*; do
+  while IFS= read -r tmpdir; do
+    [ -n "$tmpdir" ] || continue
+  for entry in "$tmpdir"/bats-run-* "$tmpdir"/rv-* "$tmpdir"/tg-* "$tmpdir"/trellis-test-git.* "$tmpdir"/pytest-of-* "$tmpdir"/node-compile-cache "$tmpdir"/tsx-* "$tmpdir"/jiti "$tmpdir"/pi-subagents-*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     if dj_host_has_ctrl "$entry"; then
       plan_row tmp candidate tmp "$entry" 0 "$tmpdir" "held: control characters in path; manual review"
@@ -559,6 +660,10 @@ dj_host_tmp_scan() {
     fi
     if [ -L "$entry" ]; then
       plan_row tmp skip tmp "$entry" 0 "$tmpdir" "symlink; never listed for deletion"
+      continue
+    fi
+    base="$(basename "$entry")"
+    if ! _dj_tmp_name_ok "$base"; then
       continue
     fi
     fresh_rc=0
@@ -575,6 +680,9 @@ dj_host_tmp_scan() {
     if ! dj_host_is_uint "$bytes"; then bytes=0; fi
     plan_row tmp delete tmp "$entry" "$bytes" "$tmpdir" "older than ${ttl}d with no open handle"
   done
+  done <<EOF
+$roots
+EOF
 }
 
 # dj_host_tmp_apply — D5 tmp apply: remove delete rows after revalidation.
@@ -585,26 +693,33 @@ dj_host_tmp_scan() {
 # never rm -rf on a re-derived absolute string without re-validation.
 # shellcheck disable=SC2034  # EXIT_STATUS assignments below accumulate into the orchestrator's exit class.
 dj_host_tmp_apply() {
-  local scope verdict kind path bytes repo detail reason tmpdir dir dir_real base ttl fresh_rc
+  local scope verdict kind path bytes repo detail reason tmpdir roots dir dir_real base ttl fresh_rc root_ok r
   scope_enabled tmp || return 0
   [ "$(awk -F'\t' '$1=="tmp" && $2=="delete" {n++} END {print n+0}' "$PLAN_TMP")" -gt 0 ] || return 0
-  if ! confirm_category "tmp scratch (bats-run-*, rv-* older than TTL with no open handle)"; then return 0; fi
+  if ! confirm_category "tmp scratch (bats-run-*, rv-*, tg-*, trellis-test-git.*, pytest-of-*, node-compile-cache, tsx-*, jiti, pi-subagents-* older than TTL with no open handle)"; then return 0; fi
   if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
   ttl="$(cfg_num '.disk_janitor.tmp_ttl_days' 2)"
   case "$ttl" in ''|*[!0-9]*) ttl=2 ;; esac
-  if ! tmpdir="$(dj_host_tmp_root 2>/dev/null)"; then
-    echo "  tmp scope refused: per-user temp dir unresolvable or unsafe; nothing removed"
+  if ! roots="$(dj_host_tmp_roots 2>/dev/null)"; then
+    echo "  tmp scope refused: temp dirs unresolvable or unsafe; nothing removed"
     return 0
   fi
   while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail _a _b _c _d _e; do
     [ "$scope" = "tmp" ] && [ "$verdict" = "delete" ] || continue
     case "$path" in *"$(printf '\t')"*|*$'\n'*) echo "  skipped (plan changed): control characters"; continue ;; esac
     base="$(basename "$path")"
-    case "$base" in bats-run-*|rv-*) ;; *) echo "  skipped (plan changed): $path is not tmp scratch"; continue ;; esac
+    if ! _dj_tmp_name_ok "$base"; then echo "  skipped (plan changed): $path is not tmp scratch"; continue; fi
     if [ -L "$path" ]; then echo "  skipped (plan changed): $path is a symlink"; continue; fi
     dir="$(dirname "$path")"
     dir_real="$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path parent unresolvable"; continue; }
-    [ "$dir_real" = "$tmpdir" ] || { echo "  skipped (plan changed): $path outside tmp root"; continue; }
+    root_ok=0; tmpdir=""
+    while IFS= read -r r; do
+      [ -n "$r" ] || continue
+      if [ "$dir_real" = "$r" ]; then root_ok=1; tmpdir="$r"; break; fi
+    done <<EOF
+$roots
+EOF
+    [ "$root_ok" -eq 1 ] || { echo "  skipped (plan changed): $path outside tmp roots"; continue; }
     if ! dj_host_is_uint "$bytes"; then echo "  skipped: malformed plan bytes for $path"; continue; fi
     fresh_rc=0
     dj_pi_entry_fresh "$tmpdir/$base" "$ttl" || fresh_rc=$?
@@ -617,7 +732,10 @@ dj_host_tmp_apply() {
       cd -P -- "$tmpdir" 2>/dev/null || exit 1
       [ -e "$base" ] || [ -L "$base" ] || exit 1
       [ ! -L "$base" ] || exit 1
-      case "$base" in bats-run-*|rv-*) ;; *) exit 1 ;; esac
+      case "$base" in bats-run-*|rv-*|tg-*|trellis-test-git.*|pytest-of-*|node-compile-cache|tsx-*|jiti|pi-subagents-*) ;; *) exit 1 ;; esac
+      # Read-only contents (e.g. Go module caches) defeat rm; grant owner
+      # write first without following symlinks.
+      chmod -RP u+w -- "$base" 2>/dev/null || chmod -R u+w -- "$base" 2>/dev/null || true
       rm -rf -- "$base" 2>/dev/null
     ); then echo "  removed: $path"; else echo "  REFUSED/failed: $path" >&2; EXIT_STATUS=1; fi
   done <"$PLAN_TMP"
@@ -638,7 +756,7 @@ dj_host_transcripts_report() {
   echo "== Session transcripts (host-global, never deleted; age histogram) =="
   now="$(date +%s)"
   case "$now" in ''|*[!0-9]*) now=0 ;; esac
-  for dir in "$HOME/.codex" "$HOME/.pi" "$HOME/.claude/projects"; do
+  for dir in "$HOME/.codex" "$HOME/.pi" "$HOME/.claude/projects" "$HOME/.gemini/antigravity-cli" "$HOME/.local/share/opencode"; do
     if [ ! -d "$dir" ] || [ -L "$dir" ]; then
       printf '  %s: missing or symlinked; not scanned\n' "$dir"
       continue
@@ -669,10 +787,32 @@ EOF
   return 0
 }
 
+# dj_host_gc_report — surface `trellis gc --dry-run` reclaimable summary
+# inside --report (never auto-running --apply). Best-effort, hermetic via
+# TRELLIS_HOME; skipped cleanly when gc.sh is absent or python3 is missing.
+dj_host_gc_report() {
+  local gc_script out last
+  scope_enabled releases || return 0
+  gc_script="$(CDPATH='' cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)/gc.sh"
+  [ -x "$gc_script" ] || [ -f "$gc_script" ] || return 0
+  command -v python3 >/dev/null 2>&1 || { echo "== trellis gc (own state; --dry-run summary) =="; echo "  skipped: python3 unavailable"; echo; return 0; }
+  echo "== trellis gc (own state; --dry-run summary; report-only) =="
+  if out="$(bash "$gc_script" --dry-run 2>/dev/null)"; then
+    last="$(printf '%s\n' "$out" | grep -E '^gc: mode=' | tail -n 1 || true)"
+    if [ -n "$last" ]; then echo "  $last"; else echo "  gc --dry-run produced no summary"; fi
+    printf '%s\n' "$out" | grep -E '^gc: (would-remove|removed)' | head -n 20 | while IFS= read -r line; do echo "  $line"; done || true
+  else
+    echo "  skipped: gc --dry-run failed (exit $?)"
+  fi
+  echo "  (never auto-applied; run \`trellis gc --apply\` by hand)"
+  echo
+}
+
 dj_host_render() {
   local scope verdict kind path bytes repo detail
   if scope_enabled stores; then
     dj_host_store_report
+    dj_host_gc_report
   fi
   if scope_enabled docker; then
     echo "== Docker fstrim (host-global, via colima; never volume/image/container removal) =="

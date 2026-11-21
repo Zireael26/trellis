@@ -239,6 +239,14 @@ surface_plan_require_source() {
       ;;
   esac
   if [ "$source_real" != "$source" ]; then
+    if [ "$relative" = "core-rules/CLAUDE.md" ] &&
+       [ "$expected_type" = "file" ] &&
+       [ -L "$source" ] &&
+       [ "$(readlink "$source" 2>/dev/null || true)" = "AGENTS.md" ] &&
+       [ "$source_real" = "$payload/core-rules/AGENTS.md" ] &&
+       [ -f "$source_real" ] && [ ! -L "$source_real" ]; then
+      return 0
+    fi
     surface_plan_err "source symlink collision inside immutable payload: $relative"
     return "$TRELLIS_EX_STATE"
   fi
@@ -482,7 +490,7 @@ surface_plan_validate_user_destination_aliases() {
 }
 
 surface_plan_add_link_record() {
-  local harness="$1" source="$2" destination="$3" executable="$4" payload="${5:-}" target
+  local harness="$1" source="$2" destination="$3" executable="$4" payload="${5:-}" deferrable="${6:-true}" target
 
   surface_plan_register_destination "$destination" || return "$?"
   if [ "$harness" = "user" ]; then
@@ -494,24 +502,24 @@ surface_plan_add_link_record() {
   else
     target="$(surface_plan_runtime_target "$destination" "$source")" || return "$TRELLIS_EX_STATE"
   fi
-  _SURFACE_PLAN_RECORDS+=(symlink "$harness" "$source" payload "$destination" "$target" "$executable" "" "" "" "" "" "")
+  _SURFACE_PLAN_RECORDS+=(symlink "$harness" "$source" payload "$destination" "$target" "$executable" "" "" "" "" "" "" "$deferrable")
   return 0
 }
 
 surface_plan_add_project_link_record() {
-  local harness="$1" source="$2" fallback_source="$3" destination="$4"
+  local harness="$1" source="$2" fallback_source="$3" destination="$4" deferrable="${5:-true}"
   local target fallback_target
 
   surface_plan_register_destination "$destination" || return "$?"
   target="$(surface_plan_project_target "$destination" "$source")" || return "$TRELLIS_EX_STATE"
   fallback_target="$(surface_plan_runtime_target "$destination" "$fallback_source")" || return "$TRELLIS_EX_STATE"
-  _SURFACE_PLAN_RECORDS+=(symlink "$harness" "$source" project "$destination" "$target" false "$fallback_source" "$fallback_target" "" "" "" "")
+  _SURFACE_PLAN_RECORDS+=(symlink "$harness" "$source" project "$destination" "$target" false "$fallback_source" "$fallback_target" "" "" "" "" "$deferrable")
   return 0
 }
 
 surface_plan_add_render_record() {
   local collection="$1" harness="$2" template="$3" destination="$4" merge="$5" mode="$6" required="$7" render_if_absent="$8"
-  local -a fields=(render "$harness" "$template" "" "$destination" "" "" "" "" "$merge" "$mode" "$required" "$render_if_absent")
+  local -a fields=(render "$harness" "$template" "" "$destination" "" "" "" "" "$merge" "$mode" "$required" "$render_if_absent" "")
 
   surface_plan_register_destination "$destination" || return "$?"
   case "$collection" in
@@ -526,7 +534,7 @@ surface_plan_add_render_record() {
 }
 
 surface_plan_emit_direct_link() {
-  local payload="$1" harness="$2" source="$3" destination="$4" executable="$5"
+  local payload="$1" harness="$2" source="$3" destination="$4" executable="$5" deferrable="${6:-true}"
   if [ "$harness" = "user" ]; then
     destination="$(surface_plan_resolve_home_destination "$destination")" || return "$?"
     if [ -d "$payload/$source" ] && [ ! -L "$payload/$source" ]; then
@@ -538,18 +546,18 @@ surface_plan_emit_direct_link() {
   else
     surface_plan_require_source "$payload" "$source" file || return "$?"
   fi
-  surface_plan_add_link_record "$harness" "$source" "$destination" "$executable" "$payload"
+  surface_plan_add_link_record "$harness" "$source" "$destination" "$executable" "$payload" "$deferrable"
 }
 
 surface_plan_emit_project_link() {
-  local payload="$1" harness="$2" source="$3" destination="$4" fallback_source="$5"
+  local payload="$1" harness="$2" source="$3" destination="$4" fallback_source="$5" deferrable="${6:-true}"
   surface_plan_require_source "$payload" "$fallback_source" file || return "$?"
-  surface_plan_add_project_link_record "$harness" "$source" "$fallback_source" "$destination"
+  surface_plan_add_project_link_record "$harness" "$source" "$fallback_source" "$destination" "$deferrable"
 }
 
 surface_plan_emit_children_link() {
   local payload="$1" harness="$2" source="$3" destination_dir="$4" executable="$5"
-  local entry_type="$6" suffix="$7" required_file="$8" recursive="$9" exclusions="${10}"
+  local entry_type="$6" suffix="$7" required_file="$8" recursive="$9" exclusions="${10}" deferrable="${11:-true}"
   local temporary candidate child_relative source_relative destination unsorted_file sorted_file
   local -a excluded_dirs=()
   local -a candidates=()
@@ -637,7 +645,7 @@ surface_plan_emit_children_link() {
     else
       surface_plan_require_source "$payload" "$source_relative" "$entry_type" || return "$?"
     fi
-    surface_plan_add_link_record "$harness" "$source_relative" "$destination" "$executable" "$payload" || return "$?"
+    surface_plan_add_link_record "$harness" "$source_relative" "$destination" "$executable" "$payload" "$deferrable" || return "$?"
   done < "$sorted_file"
 
   return 0
@@ -672,8 +680,8 @@ surface_plan_emit_render() {
 }
 
 surface_plan_emit_harness() {
-  local payload="$1" manifest="$2" harness="$3" links_file render_file
-  local kind source destination executable fallback entry_type suffix required_file recursive exclusions
+  local payload="$1" manifest="$2" harness="$3" selected_json="${4:-null}" links_file render_file
+  local kind source destination executable fallback entry_type suffix required_file recursive exclusions deferrable
   local template merge mode required render_if_absent
 
   if [ "$harness" = "user" ]; then
@@ -682,13 +690,17 @@ surface_plan_emit_harness() {
 
   surface_plan_make_tempfile || return "$?"
   links_file="$_SURFACE_PLAN_LAST_TMP"
-  if ! jq -j --arg harness "$harness" '
+  if ! jq -j --arg harness "$harness" --argjson selected "$selected_json" '
+    def consumer_match:
+      if $selected == null or (has("consumers") | not) then true
+      else any(.consumers[]; . as $c | $selected | index($c) != null) end;
     .harnesses[$harness].links[]
+    | select(consumer_match)
     | (if has("source") then "direct" elif has("project_target") then "project" else "children" end), "\u0000",
       (.source // .project_target // .source_children), "\u0000", (.destination // .destination_dir), "\u0000",
       (.executable // false), "\u0000", (.fallback_source // ""), "\u0000", (.entry_type // ""), "\u0000",
       (.suffix // ""), "\u0000", (.required_file // ""), "\u0000", (.recursive // false), "\u0000",
-      ((.exclude_dirs // []) | join("/")), "\u0000"' "$manifest" > "$links_file"; then
+      ((.exclude_dirs // []) | join("/")), "\u0000", (if has("deferrable") then .deferrable else true end), "\u0000"' "$manifest" > "$links_file"; then
     surface_plan_err "could not enumerate links for harness: $harness"
     return "$TRELLIS_EX_STATE"
   fi
@@ -696,19 +708,24 @@ surface_plan_emit_harness() {
         IFS= read -r -d '' destination && IFS= read -r -d '' executable &&
         IFS= read -r -d '' fallback && IFS= read -r -d '' entry_type &&
         IFS= read -r -d '' suffix && IFS= read -r -d '' required_file &&
-        IFS= read -r -d '' recursive && IFS= read -r -d '' exclusions; do
+        IFS= read -r -d '' recursive && IFS= read -r -d '' exclusions &&
+        IFS= read -r -d '' deferrable; do
     case "$kind" in
-      direct) surface_plan_emit_direct_link "$payload" "$harness" "$source" "$destination" "$executable" ;;
-      project) surface_plan_emit_project_link "$payload" "$harness" "$source" "$destination" "$fallback" ;;
+      direct) surface_plan_emit_direct_link "$payload" "$harness" "$source" "$destination" "$executable" "$deferrable" ;;
+      project) surface_plan_emit_project_link "$payload" "$harness" "$source" "$destination" "$fallback" "$deferrable" ;;
       children) surface_plan_emit_children_link "$payload" "$harness" "$source" "$destination" "$executable" \
-        "$entry_type" "$suffix" "$required_file" "$recursive" "$exclusions" ;;
+        "$entry_type" "$suffix" "$required_file" "$recursive" "$exclusions" "$deferrable" ;;
     esac || return "$?"
   done < "$links_file"
 
   surface_plan_make_tempfile || return "$?"
   render_file="$_SURFACE_PLAN_LAST_TMP"
-  if ! jq -j --arg harness "$harness" '
+  if ! jq -j --arg harness "$harness" --argjson selected "$selected_json" '
+    def consumer_match:
+      if $selected == null or (has("consumers") | not) then true
+      else any(.consumers[]; . as $c | $selected | index($c) != null) end;
     .harnesses[$harness].render[]
+    | select(consumer_match)
     | .template, "\u0000", .destination, "\u0000", .merge, "\u0000", .mode, "\u0000",
       .required, "\u0000", (.render_if_absent // false), "\u0000"' "$manifest" > "$render_file"; then
     surface_plan_err "could not enumerate renders for harness: $harness"
@@ -723,18 +740,20 @@ surface_plan_emit_harness() {
 }
 
 surface_plan_validate_manifest() {
-  local manifest="$1" harness require_user=false require_pi=false
+  local manifest="$1" harness require_user=false require_pi=false require_agy=false require_opencode=false
   local shared_root pi_root codex_root claude_root destinations_file destination skill
   local shared_names="" pi_names="" codex_names="" nl pi_scan codex_scan shadowed
 
   for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
-    if [ "$harness" = "user" ]; then
-      require_user=true
-    elif [ "$harness" = "pi" ]; then
-      require_pi=true
-    fi
+    case "$harness" in
+      user) require_user=true ;;
+      pi) require_pi=true ;;
+      antigravity) require_agy=true ;;
+      opencode) require_opencode=true ;;
+    esac
   done
-  if ! jq -e --argjson require_user "$require_user" --argjson require_pi "$require_pi" '
+  if ! jq -e --argjson require_user "$require_user" --argjson require_pi "$require_pi" \
+      --argjson require_agy "$require_agy" --argjson require_opencode "$require_opencode" '
     def safe_text:
       if type != "string" then false
       else length > 0
@@ -769,38 +788,62 @@ surface_plan_validate_manifest() {
       then has("destination_home") and .destination_home == true
       else (has("destination_home") | not)
       end;
-    def valid_direct_link($home):
+    def valid_consumers($shared; $ver):
+      if $ver == 3 and $shared then
+        has("consumers")
+        and (.consumers | (
+          type == "array"
+          and length > 0
+          and all(.[]; . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi")
+          and ((unique | length) == length)
+        ))
+      else (has("consumers") | not) end;
+    def valid_deferrable($home; $ver):
+      if $ver == 3 and ($home | not) then optional_boolean("deferrable")
+      else (has("deferrable") | not) end;
+    def extra_link_keys($home; $shared; $ver):
+      (if $ver == 3 and ($home | not) then ["deferrable"] else [] end)
+      + (if $ver == 3 and $shared then ["consumers"] else [] end);
+    def extra_render_keys($shared; $ver):
+      if $ver == 3 and $shared then ["consumers"] else [] end;
+    def valid_direct_link($home; $shared; $ver):
       if type == "object" and has("source") and has("destination")
          and (has("source_children") | not) and (has("project_target") | not)
       then
-        allowed(if $home
-                then ["destination", "destination_home", "executable", "source"]
-                else ["destination", "executable", "source"]
-                end)
+        allowed((if $home
+                 then ["destination", "destination_home", "executable", "source"]
+                 else ["destination", "executable", "source"]
+                 end) + extra_link_keys($home; $shared; $ver))
         and valid_home_marker($home)
+        and valid_consumers($shared; $ver)
+        and valid_deferrable($home; $ver)
         and (.source | safe_relative_path)
         and (.destination | safe_destination)
         and optional_boolean("executable")
       else false end;
-    def valid_project_link($home):
+    def valid_project_link($home; $shared; $ver):
       if $home then false
       elif type == "object" and has("project_target") and has("fallback_source") and has("destination")
            and (has("source") | not) and (has("source_children") | not)
       then
-        allowed(["destination", "fallback_source", "project_target"])
+        allowed(["destination", "fallback_source", "project_target"] + extra_link_keys($home; $shared; $ver))
+        and valid_consumers($shared; $ver)
+        and valid_deferrable($home; $ver)
         and (.project_target | safe_relative_path)
         and (.fallback_source | safe_relative_path)
         and (.destination | safe_destination)
       else false end;
-    def valid_children_link($home):
+    def valid_children_link($home; $shared; $ver):
       if type == "object" and has("source_children") and has("destination_dir") and has("entry_type")
          and (has("source") | not) and (has("project_target") | not)
       then
-        allowed(if $home
-                then ["destination_dir", "destination_home", "entry_type", "executable", "exclude_dirs", "recursive", "required_file", "source_children", "suffix"]
-                else ["destination_dir", "entry_type", "executable", "exclude_dirs", "recursive", "required_file", "source_children", "suffix"]
-                end)
+        allowed((if $home
+                 then ["destination_dir", "destination_home", "entry_type", "executable", "exclude_dirs", "recursive", "required_file", "source_children", "suffix"]
+                 else ["destination_dir", "entry_type", "executable", "exclude_dirs", "recursive", "required_file", "source_children", "suffix"]
+                 end) + extra_link_keys($home; $shared; $ver))
         and valid_home_marker($home)
+        and valid_consumers($shared; $ver)
+        and valid_deferrable($home; $ver)
         and (.source_children | safe_relative_path)
         and (.destination_dir | safe_destination)
         and ((.entry_type == "file") or (.entry_type == "directory"))
@@ -816,16 +859,17 @@ surface_plan_validate_manifest() {
                and (if has("required_file") then (.required_file | safe_relative_path) else true end)
              end)
       else false end;
-    def valid_link($home):
-      valid_direct_link($home) or valid_project_link($home) or valid_children_link($home);
-    def valid_render($home):
+    def valid_link($home; $shared; $ver):
+      valid_direct_link($home; $shared; $ver) or valid_project_link($home; $shared; $ver) or valid_children_link($home; $shared; $ver);
+    def valid_render($home; $shared; $ver):
       if type == "object" and has("template") and has("destination") and has("merge") and has("mode") and has("required")
       then
-        allowed(if $home
-                then ["destination", "destination_home", "merge", "mode", "render_if_absent", "required", "template"]
-                else ["destination", "merge", "mode", "render_if_absent", "required", "template"]
-                end)
+        allowed((if $home
+                 then ["destination", "destination_home", "merge", "mode", "render_if_absent", "required", "template"]
+                 else ["destination", "merge", "mode", "render_if_absent", "required", "template"]
+                 end) + extra_render_keys($shared; $ver))
         and valid_home_marker($home)
+        and valid_consumers($shared; $ver)
         and (.template | safe_relative_path)
         and (.destination | safe_destination)
         and ((.merge == "explicit-json") or (.merge == "replace"))
@@ -835,36 +879,48 @@ surface_plan_validate_manifest() {
              then (.render_if_absent | type == "boolean") and .merge == "replace"
              else true end)
       else false end;
-    def valid_harness($home):
+    def valid_harness($home; $shared; $ver):
       if type == "object" and has("links") and has("render")
       then
         allowed(["links", "render"])
-        and (.links | (type == "array" and all(.[]; valid_link($home))))
-        and (.render | (type == "array" and all(.[]; valid_render($home))))
+        and (.links | (type == "array" and all(.[]; valid_link($home; $shared; $ver))))
+        and (.render | (type == "array" and all(.[]; valid_render($home; $shared; $ver))))
       else false end;
     .schema_version as $manifest_schema_version
     | if type == "object"
        and ((keys | sort) == ["harnesses", "schema_version"])
-       and (.schema_version == 1 or .schema_version == 2)
+       and (.schema_version == 1 or .schema_version == 2 or .schema_version == 3)
        and (.harnesses | (
          type == "object"
          and (
            (if $manifest_schema_version == 1 then
               ((keys | sort) == ["claude", "codex"])
               or ((keys | sort) == ["claude", "codex", "user"])
-            else
+            elif $manifest_schema_version == 2 then
               ((keys | sort) == ["claude", "codex", "pi", "shared_agents"])
               or ((keys | sort) == ["claude", "codex", "pi", "shared_agents", "user"])
+            else
+              ((keys | sort) == ["antigravity", "claude", "codex", "opencode", "pi", "shared_agents"])
+              or ((keys | sort) == ["antigravity", "claude", "codex", "opencode", "pi", "shared_agents", "user"])
             end)
          )
          and (if $require_user then has("user") else true end)
          and (if $require_pi then has("pi") and has("shared_agents") else true end)
+         and (if $require_agy then $manifest_schema_version == 3 and has("antigravity") and has("shared_agents") else true end)
+         and (if $require_opencode then $manifest_schema_version == 3 and has("opencode") and has("shared_agents") else true end)
        ))
     then
-      (.harnesses.claude | valid_harness(false))
-      and (.harnesses.codex | valid_harness(false))
-      and (if .schema_version == 2 then (.harnesses.pi | valid_harness(false)) and (.harnesses.shared_agents | valid_harness(false)) else true end)
-      and (if .harnesses | has("user") then (.harnesses.user | valid_harness(true)) else true end)
+      (.harnesses.claude | valid_harness(false; false; $manifest_schema_version))
+      and (.harnesses.codex | valid_harness(false; false; $manifest_schema_version))
+      and (if $manifest_schema_version >= 2 then
+             (.harnesses.pi | valid_harness(false; false; $manifest_schema_version))
+             and (.harnesses.shared_agents | valid_harness(false; true; $manifest_schema_version))
+           else true end)
+      and (if $manifest_schema_version == 3 then
+             (.harnesses.antigravity | valid_harness(false; false; 3))
+             and (.harnesses.opencode | valid_harness(false; false; 3))
+           else true end)
+      and (if .harnesses | has("user") then (.harnesses.user | valid_harness(true; false; $manifest_schema_version)) else true end)
     else false end
   ' "$manifest" >/dev/null 2>&1; then
     surface_plan_err "inheritance manifest is malformed or unsafe: $manifest"
@@ -1052,7 +1108,7 @@ surface_plan_validate_expanded_skills() {
       surface_plan_err "could not inspect project shadow contract: $manifest"
       return "$TRELLIS_EX_STATE"
     fi
-    for harness in claude codex pi shared_agents; do
+    for harness in antigravity claude codex opencode pi shared_agents; do
       if jq -e --arg harness "$harness" '.harnesses | has($harness)' "$filtered" >/dev/null 2>&1; then
         :
       else
@@ -1105,7 +1161,7 @@ surface_plan_normalize_harnesses() {
 
   for requested in "$@"; do
     case "$requested" in
-      claude|codex|pi|user) ;;
+      antigravity|claude|codex|opencode|pi|user) ;;
       *)
         surface_plan_err "unknown harness: ${requested:-<empty>}"
         return "$TRELLIS_EX_USAGE"
@@ -1113,7 +1169,7 @@ surface_plan_normalize_harnesses() {
     esac
   done
 
-  for canonical in claude codex pi user; do
+  for canonical in antigravity claude codex opencode pi user; do
     present=false
     for requested in "$@"; do
       if [ "$requested" = "$canonical" ]; then
@@ -1134,13 +1190,14 @@ surface_plan_json_array() {
     return 0
   fi
   # Each record holds kind, harness, source, scope, destination, target,
-  # executable, fallback source/target, merge, mode, required, render-if-absent.
+  # executable, fallback source/target, merge, mode, required, render-if-absent,
+  # deferrable.
   printf '%s\0' "$@" | jq -Rsc '
     split("\u0000")[:-1]
-    | [range(0; length; 13) as $i | .[$i:$i+13]
+    | [range(0; length; 14) as $i | .[$i:$i+14]
        | {kind: .[0], harness: .[1], source: .[2], destination: .[4]}
          + (if .[0] == "symlink" then
-              {source_scope: .[3], target: .[5], executable: (.[6] | fromjson)}
+              {source_scope: .[3], target: .[5], executable: (.[6] | fromjson), deferrable: (.[13] | fromjson)}
               + (if .[3] == "project" then
                    {fallback_source: .[7], fallback_source_scope: "payload", fallback_target: .[8],
                     target_policy: "project-if-present-else-payload"}
@@ -1198,12 +1255,21 @@ surface_plan_emit() {
     surface_plan_validate_manifest "$manifest" || return "$?"
     surface_plan_validate_expanded_skills "$payload_root" "$manifest" || return "$?"
 
-    if [ "$(jq -r '.schema_version' "$manifest")" = 2 ]; then
+    manifest_schema="$(jq -r '.schema_version' "$manifest")"
+    if [ "$manifest_schema" = 2 ]; then
       for harness in "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}"; do
         case "$harness" in codex|pi) emit_shared=true ;; esac
       done
       if [ "$emit_shared" = true ]; then
         surface_plan_emit_harness "$payload_root" "$manifest" shared_agents || return "$?"
+      fi
+    elif [ "$manifest_schema" = 3 ]; then
+      selected_json="$(jq -cn --args '$ARGS.positional' "${_SURFACE_PLAN_HARNESSES[@]+"${_SURFACE_PLAN_HARNESSES[@]}"}")" || return "$TRELLIS_EX_STATE"
+      if jq -e --argjson selected "$selected_json" '
+        any(.harnesses.shared_agents.links[]?, .harnesses.shared_agents.render[]?;
+          any(.consumers[]; . as $c | $selected | index($c) != null))
+      ' "$manifest" >/dev/null 2>&1; then
+        surface_plan_emit_harness "$payload_root" "$manifest" shared_agents "$selected_json" || return "$?"
       fi
     fi
 
@@ -1217,7 +1283,7 @@ surface_plan_emit() {
 
 surface_plan_usage() {
   cat <<'EOF'
-Usage: surface-plan.sh --payload ABSOLUTE_PAYLOAD_OR_CORE_RULES_PATH [--harness claude|codex|pi|user]...
+Usage: surface-plan.sh --payload ABSOLUTE_PAYLOAD_OR_CORE_RULES_PATH [--harness antigravity|claude|codex|opencode|pi|user]...
 
 Expand the immutable inheritance payload into a deterministic, no-write JSON plan.
 The payload may be the release root or its canonical core-rules directory.
@@ -1250,7 +1316,7 @@ surface_plan_main() {
         ;;
       --harness)
         if [ "$#" -lt 2 ] || [ -z "$2" ]; then
-          surface_plan_err "--harness requires claude, codex, pi, or user"
+          surface_plan_err "--harness requires antigravity, claude, codex, opencode, pi, or user"
           return "$TRELLIS_EX_USAGE"
         fi
         harnesses+=("$2")

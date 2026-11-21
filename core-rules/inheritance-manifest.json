@@ -1,10 +1,22 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "harnesses": {
+    "antigravity": {
+      "links": [],
+      "render": [
+        {
+          "template": "core-rules/templates/agy-hooks.local.json",
+          "destination": ".agents/hooks.json",
+          "merge": "explicit-json",
+          "mode": "0600",
+          "required": false
+        }
+      ]
+    },
     "claude": {
       "links": [
         {
-          "source": "core-rules/CLAUDE.md",
+          "source": "core-rules/AGENTS.md",
           "destination": ".claude/rules/trellis.md"
         },
         {
@@ -80,12 +92,29 @@
       "links": [
         {
           "project_target": "CLAUDE.md",
-          "fallback_source": "core-rules/CLAUDE.md",
-          "destination": "AGENTS.md"
+          "fallback_source": "core-rules/AGENTS.md",
+          "destination": "AGENTS.md",
+          "consumers": [
+            "codex",
+            "pi"
+          ]
         },
         {
-          "source": "core-rules/CLAUDE.md",
-          "destination": ".agents/rules/trellis.md"
+          "source": "core-rules/AGENTS.md",
+          "destination": ".agents/AGENTS.md",
+          "deferrable": false,
+          "consumers": [
+            "antigravity",
+            "opencode"
+          ]
+        },
+        {
+          "source": "core-rules/AGENTS.md",
+          "destination": ".agents/rules/trellis.md",
+          "consumers": [
+            "codex",
+            "pi"
+          ]
         },
         {
           "source_children": "core-rules/skills",
@@ -94,33 +123,104 @@
           "required_file": "SKILL.md",
           "exclude_dirs": [
             "herdr-foreman"
+          ],
+          "consumers": [
+            "antigravity",
+            "codex",
+            "opencode",
+            "pi"
           ]
         },
         {
           "source_children": "core-rules/commands",
           "destination_dir": ".agents/commands",
           "entry_type": "file",
-          "suffix": ".md"
+          "suffix": ".md",
+          "consumers": [
+            "codex",
+            "pi"
+          ]
         },
         {
           "source": "core-rules/commands/primer.md",
-          "destination": ".agents/workflows/primer.md"
+          "destination": ".agents/workflows/primer.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
         },
         {
           "source": "core-rules/commands/primer-refresh.md",
-          "destination": ".agents/workflows/primer-refresh.md"
+          "destination": ".agents/workflows/primer-refresh.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
         },
         {
           "source": "core-rules/commands/primer-check.md",
-          "destination": ".agents/workflows/primer-check.md"
+          "destination": ".agents/workflows/primer-check.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
         },
         {
           "source": "core-rules/commands/explore.md",
-          "destination": ".agents/workflows/explore.md"
+          "destination": ".agents/workflows/explore.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
         },
         {
           "source": "core-rules/commands/surgical.md",
-          "destination": ".agents/workflows/surgical.md"
+          "destination": ".agents/workflows/surgical.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
+        },
+        {
+          "source": "core-rules/commands/lean-sweep.md",
+          "destination": ".agents/workflows/lean-sweep.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
+        },
+        {
+          "source": "core-rules/commands/red-team.md",
+          "destination": ".agents/workflows/red-team.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
+        },
+        {
+          "source": "core-rules/commands/test-cleanup.md",
+          "destination": ".agents/workflows/test-cleanup.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
+        },
+        {
+          "source": "core-rules/commands/de-slop.md",
+          "destination": ".agents/workflows/de-slop.md",
+          "consumers": [
+            "antigravity",
+            "codex",
+            "pi"
+          ]
         }
       ],
       "render": [
@@ -130,7 +230,13 @@
           "merge": "replace",
           "mode": "0644",
           "required": true,
-          "render_if_absent": true
+          "render_if_absent": true,
+          "consumers": [
+            "antigravity",
+            "codex",
+            "opencode",
+            "pi"
+          ]
         }
       ]
     },
@@ -223,6 +329,18 @@
           "merge": "explicit-json",
           "mode": "0600",
           "required": false
+        }
+      ]
+    },
+    "opencode": {
+      "links": [],
+      "render": [
+        {
+          "template": "core-rules/templates/opencode-compat.json",
+          "destination": ".opencode/opencode.json",
+          "merge": "explicit-json",
+          "mode": "0600",
+          "required": true
         }
       ]
     },

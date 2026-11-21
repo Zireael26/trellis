@@ -107,7 +107,7 @@ make_excluded_fleet_home() {
   worktree_id="$(printf '%s\n' "$identity" | jq -r .worktree_id)"
   common="$(printf '%s\n' "$identity" | jq -r .git_common_dir)"
 
-  printf '{"schema_version":2,"harnesses":["claude"]}\n' > "$base/trellis.config.json"
+  printf '{"schema_version":2,"maintainer_name":"fixture","github_user":"fixture","harnesses":["claude"]}\n' > "$base/trellis.config.json"
   cat > "$LOCAL_HOME/config.json" <<EOF
 {"schema_version":1,"source_root":"$REPO_ROOT","release_remote":"$REPO_ROOT","active_cli_release":"1.2.3","default_fleet":"personal","fleets":{"personal":{"discovery_roots":["$PROJECTS"]}}}
 EOF
@@ -118,37 +118,22 @@ EOF
   chmod 600 "$LOCAL_HOME/registry.json"
 }
 
-@test "every fleet mutator skips an excluded local registry row in dry-run mode" {
-  local script before after before_sha after_sha
-  local mutators=(
-    rollout-presets.sh
-    rollout-settings.sh
-    rollout-rebrand.sh
-    rollout-builder-skills.sh
-    rollout-debrief-skill.sh
-    rollout-feature-skills.sh
-    rollout-orchestrate-skill.sh
-    rollout-process-gate-skill.sh
-    rollout-writing-skill.sh
-  )
+@test "disk-janitor skips an excluded local registry row in dry-run mode" {
+  local before after before_sha after_sha
 
   make_excluded_fleet_home
+  mkdir -p "$EXCLUDED_PROJECT/.turbo/cache"
+  printf 'stale cache bytes\n' > "$EXCLUDED_PROJECT/.turbo/cache/entry.bin"
+  touch -t 202501010000 "$EXCLUDED_PROJECT/.turbo/cache/entry.bin" "$EXCLUDED_PROJECT/.turbo/cache"
   before="$(find "$EXCLUDED_PROJECT" -print | LC_ALL=C sort)"
   before_sha="$(shasum -a 256 "$EXCLUDED_PROJECT/unchanged.txt" | awk '{print $1}')"
 
-  for script in "${mutators[@]}"; do
-    run env TRELLIS_HOME="$LOCAL_HOME" \
-      TRELLIS_CONFIG="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/trellis.config.json" \
-      /bin/bash "$REPO_ROOT/scripts/$script" --dry-run --yes
-    # The skip line's wording varies by script ("excluded", "excluded local
-    # row", "excluded local registry row"); what every one of them must do is
-    # name the row and say it was skipped.
-    if ! grep -qE 'skip \(excluded[^)]*\): personal/temp-excluded' <<<"$output"; then
-      echo "$script did not skip the excluded row (status $status)"
-      echo "$output"
-      return 1
-    fi
-  done
+  run env TRELLIS_HOME="$LOCAL_HOME" \
+    TRELLIS_CONFIG="$(cd "$BATS_TEST_TMPDIR" && pwd -P)/trellis.config.json" \
+    /bin/bash "$REPO_ROOT/scripts/disk-janitor.sh" --dry-run --scopes caches
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"host-project plan: 0 B"* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *"$EXCLUDED_PROJECT/.turbo/cache"* ]] || { echo "$output"; return 1; }
 
   # The excluded checkout is byte-identical: a skip is a skip, not a partial run.
   after="$(find "$EXCLUDED_PROJECT" -print | LC_ALL=C sort)"
@@ -164,15 +149,8 @@ EOF
   # surviving read, and it is asserted separately below.
   local consumers=(
     disk-janitor.sh
-    rollout-presets.sh
-    rollout-settings.sh
-    rollout-rebrand.sh
-    rollout-builder-skills.sh
-    rollout-debrief-skill.sh
-    rollout-feature-skills.sh
-    rollout-orchestrate-skill.sh
-    rollout-process-gate-skill.sh
-    rollout-writing-skill.sh
+    attach-project.sh
+    release.sh
   )
 
   for script in "${consumers[@]}"; do

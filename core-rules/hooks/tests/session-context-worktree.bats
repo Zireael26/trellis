@@ -63,7 +63,22 @@ session_write_release() {
     remote: "fixture",
     tree: [{path:"core-rules/CLAUDE.md",mode:"100644",oid:$oid}]
   }' > "$RELEASE_DIR/release.json"
+  session_add_release_helpers
   chmod -R a-w "$RELEASE_DIR"
+}
+
+# A real payload carries the stamp and full-verification helpers it executes.
+session_add_release_helpers() {
+  local file oid mode
+  mkdir -p "$RUNTIME/scripts/lib"
+  for file in release-stamp.sh release-store.sh release_stamp.py release_verify.py semver.sh; do
+    cp "$HOOKS_DIR/../../scripts/lib/$file" "$RUNTIME/scripts/lib/$file"
+    oid="$(git hash-object --no-filters "$RUNTIME/scripts/lib/$file")"
+    mode="$(git -C "$HOOKS_DIR/../.." ls-files -s "scripts/lib/$file" | cut -d ' ' -f 1)"
+    jq --arg path "scripts/lib/$file" --arg mode "$mode" --arg oid "$oid" \
+      '.tree += [{path:$path,mode:$mode,oid:$oid}]' "$RELEASE_DIR/release.json" > "$SANDBOX/release.next.json"
+    mv "$SANDBOX/release.next.json" "$RELEASE_DIR/release.json"
+  done
 }
 
 session_write_owner() {
@@ -646,6 +661,240 @@ tamper_manifest() {
     [ -e "$FULL_VERIFY_MARKER" ] || { echo "$candidate trusted a changed release"; false; }
     [[ "$(extract_ctx "$out")" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$out"; false; }
   done
+}
+
+# Exercise the shipped native Pi bundle by default; an explicit build may be
+# supplied for red/green checks before the release assets are regenerated.
+# The bundle sources whose shipped digests decide whether the asset is current.
+L153_INPUTS="native/trellis-hooks/src/pi_lifecycle.rs core-rules/codex/hooks/session-context.sh
+  scripts/lib/release-stamp.sh scripts/lib/release-store.sh scripts/lib/release_stamp.py
+  scripts/lib/semver.sh scripts/lib/release_verify.py"
+
+# Prints "ok <asset>" or "skip <cause>"; a broken asset or manifest fails.
+l153_companion_state() {
+  local native="$1" repo="$2" target="$3" manifest asset path stale=""
+  manifest="$native/artifacts.json"
+  jq -e --arg t "$target" '(.inputs | type) == "object" and (.assets[$t].path | type) == "string"
+    and (.assets[$t].sha256 | type) == "string"' "$manifest" >/dev/null 2>&1 ||
+    { echo "native manifest is unreadable or malformed: $manifest"; return 1; }
+  asset="$native/$(jq -r --arg t "$target" '.assets[$t].path' "$manifest")"
+  [ -f "$asset" ] && [ -x "$asset" ] || { echo "native asset is missing or not executable: $asset"; return 1; }
+  [ "$(session_sha256_file "$asset")" = "$(jq -r --arg t "$target" '.assets[$t].sha256' "$manifest")" ] ||
+    { echo "native asset does not match its manifest digest: $asset"; return 1; }
+  for path in $L153_INPUTS; do
+    [ "$(jq -r --arg path "$path" '.inputs[$path] // ""' "$manifest")" = "$(session_sha256_file "$repo/$path")" ] ||
+      stale="$stale${stale:+, }$path"
+  done
+  if [ -n "$stale" ]; then echo "skip stale native inputs (rebuild the assets or set TRELLIS_HOOKS_TEST_BINARY): $stale"
+  else echo "ok $asset"; fi
+}
+
+l153_require_binary() {
+  local target state
+  if [ -n "${TRELLIS_HOOKS_TEST_BINARY:-}" ]; then
+    [ -x "$TRELLIS_HOOKS_TEST_BINARY" ] || { echo "TRELLIS_HOOKS_TEST_BINARY is not executable: $TRELLIS_HOOKS_TEST_BINARY"; return 1; }
+    return 0
+  fi
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) target=aarch64-apple-darwin ;;
+    Linux:x86_64) target=x86_64-unknown-linux-musl ;;
+    *) skip "unsupported host for the native companion: $(uname -s):$(uname -m)" ;;
+  esac
+  state="$(l153_companion_state "$HOOKS_DIR/../native" "$HOOKS_DIR/../.." "$target")" || { echo "$state"; return 1; }
+  case "$state" in "skip "*) skip "${state#skip }" ;; esac
+  TRELLIS_HOOKS_TEST_BINARY="${state#ok }"
+}
+
+l153_prepare_payload() {
+  local digest snapshot
+  jq -nc '{schema_version:1,source_root:"/src",release_remote:"fixture://x",active_cli_release:"1.2.3",default_fleet:"personal",fleets:{personal:{discovery_roots:["/projects"]}}}' > "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
+  digest="$(session_sha256_file "$RELEASE_DIR/release.json")"
+  snapshot="$TRELLIS_HOME/releases/.exec/1.2.3-$digest"
+  mkdir -p "$TRELLIS_HOME/state/exec-stamps"
+  chmod 700 "$TRELLIS_HOME/state/exec-stamps"
+  jq -nc --arg digest "$digest" --arg snapshot "$snapshot" --arg version "1.2.3-$digest" \
+    '{directories:[],entries:[],release_json_sha256:$digest,root:$snapshot,schema_version:2,version:$version}' \
+    > "$TRELLIS_HOME/state/exec-stamps/1.2.3-$digest.json"
+  chmod 600 "$TRELLIS_HOME/state/exec-stamps/1.2.3-$digest.json"
+  TRELLIS_HOME="$TRELLIS_HOME" bash -c '
+    . "$1/release-stamp.sh"; . "$1/release-store.sh"
+    release_stamp_check "$TRELLIS_HOME" "$2" && exit 1
+    release_store_locate 1.2.3 >/dev/null || exit 1
+    release_stamp_write "$TRELLIS_HOME" "$2"
+  ' _ "$RUNTIME/scripts/lib" "$RELEASE_DIR"
+}
+
+l153_pi_session() {
+  local request
+  request="$(jq -nc --arg cwd "$WT" '{schema_version:1,harness:"pi",phase:"session_start",cwd:$cwd,session_id:"l153-session",reason:"startup"}')"
+  printf '%s' "$request" | env -i HOME="$USER_HOME" TRELLIS_HOME="$TRELLIS_HOME" TMPDIR="$SANDBOX" \
+    PATH="$PATH" "$@" "$TRELLIS_HOOKS_TEST_BINARY" event pi session_start "$WT"
+}
+
+# The context of exactly one session-context row with a successful result.
+l153_session_ctx() {
+  printf '%s' "$1" | jq -er '[.batch.members[] | select(.member == "session-context")] |
+    if length == 1 and .[0].result.status == "advice" and .[0].result.exit_code == 0 and .[0].result.error_class == null
+    then .[0].result.context else error("session-context row: \(tojson)") end'
+}
+
+# Healthy: the session's own context, and neither attachment warning.
+l153_healthy_ctx() {
+  [[ "$1" == *"Branch: t14-session"* && "$1" != *"Trellis could not confirm the release integrity"* &&
+    "$1" != *"Trellis attachment is missing"* ]] || { echo "$1"; false; }
+}
+
+# Record a copy of a payload directory in the release inventory, so that a
+# symlink to it is the only thing wrong with the payload.
+l153_record_copy() {
+  local from="$1" to="$2" file oid
+  chmod -R u+w "$RELEASE_DIR"
+  mkdir -p "$RUNTIME/$to"
+  for file in "$RUNTIME/$from"/*; do
+    cp -p "$file" "$RUNTIME/$to/"
+    oid="$(git hash-object --no-filters "$file")"
+    jq --arg path "$to/${file##*/}" --arg from "$from/${file##*/}" --arg oid "$oid" \
+      '.tree += [.tree[] | select(.path == $from) | .path = $path | .oid = $oid]' \
+      "$RELEASE_DIR/release.json" > "$SANDBOX/release.next.json"
+    mv "$SANDBOX/release.next.json" "$RELEASE_DIR/release.json"
+  done
+  chmod -R a-w "$RELEASE_DIR"
+}
+
+# Replace a payload directory with a symlink to its recorded copy, or put
+# the directory back from that copy; nothing unrecorded is left behind.
+l153_swap_symlink() {
+  local dir="$1" copy="$2" parent
+  parent="$RUNTIME"
+  case "$dir" in */*) parent="$RUNTIME/${dir%/*}" ;; esac
+  chmod -R u+w "$parent"
+  if [ -L "$RUNTIME/$dir" ]; then
+    rm "$RUNTIME/$dir"; cp -Rp "$RUNTIME/$copy" "$RUNTIME/$dir"
+  else
+    rm -rf "${RUNTIME:?}/$dir"; ln -s "${copy##*/}" "$RUNTIME/$dir"
+  fi
+  chmod -R a-w "$parent"
+}
+
+@test "l153 companion selection fails on a broken asset or manifest and skips only on stale inputs" {
+  local repo="$BATS_TEST_TMPDIR/repo" native="$BATS_TEST_TMPDIR/native" path inputs
+  inputs='{}'
+  for path in $L153_INPUTS; do
+    mkdir -p "$repo/${path%/*}"
+    printf '%s\n' "$path" > "$repo/$path"
+    inputs="$(jq -c --arg path "$path" --arg sha "$(session_sha256_file "$repo/$path")" '.[$path] = $sha' <<<"$inputs")"
+  done
+  mkdir -p "$native/t"
+  printf '#!/bin/sh\n' > "$native/t/trellis-hooks"
+  chmod 755 "$native/t/trellis-hooks"
+  jq -n --argjson inputs "$inputs" --arg sha "$(session_sha256_file "$native/t/trellis-hooks")" \
+    '{inputs:$inputs,assets:{t:{path:"t/trellis-hooks",sha256:$sha}}}' > "$native/artifacts.json"
+
+  run l153_companion_state "$native" "$repo" t
+  [ "$status" -eq 0 ] && [ "$output" = "ok $native/t/trellis-hooks" ] || { echo "$output"; false; }
+  printf 'changed\n' >> "$repo/scripts/lib/semver.sh"
+  printf 'changed\n' >> "$repo/core-rules/codex/hooks/session-context.sh"
+  run l153_companion_state "$native" "$repo" t
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == "skip stale native inputs "*": core-rules/codex/hooks/session-context.sh, scripts/lib/semver.sh" ]] || { echo "$output"; false; }
+
+  printf 'x\n' >> "$native/t/trellis-hooks"
+  run l153_companion_state "$native" "$repo" t
+  [ "$status" -eq 1 ] && [ "$output" = "native asset does not match its manifest digest: $native/t/trellis-hooks" ] || { echo "$output"; false; }
+  chmod 644 "$native/t/trellis-hooks"
+  run l153_companion_state "$native" "$repo" t
+  [ "$status" -eq 1 ] && [ "$output" = "native asset is missing or not executable: $native/t/trellis-hooks" ] || { echo "$output"; false; }
+  mv "$native/t/trellis-hooks" "$native/t/gone"
+  run l153_companion_state "$native" "$repo" t
+  [ "$status" -eq 1 ] && [ "$output" = "native asset is missing or not executable: $native/t/trellis-hooks" ] || { echo "$output"; false; }
+  for manifest in '{' '{"inputs":{}}' ''; do
+    printf '%s' "$manifest" > "$native/artifacts.json"
+    run l153_companion_state "$native" "$repo" t
+    [ "$status" -eq 1 ] && [ "$output" = "native manifest is unreadable or malformed: $native/artifacts.json" ] || { echo "$manifest: $output"; false; }
+  done
+  chmod 000 "$native/artifacts.json"
+  run l153_companion_state "$native" "$repo" t
+  [ "$status" -eq 1 ] && [ "$output" = "native manifest is unreadable or malformed: $native/artifacts.json" ] || { echo "$output"; false; }
+}
+
+@test "l153 native Pi session uses the attached release stamp and preserves Claude status" {
+  l153_require_binary || false
+  build_attachment_fixture
+  l153_prepare_payload
+  out="$(l153_pi_session)"
+  ctx="$(l153_session_ctx "$out")" || { echo "$out"; false; }
+  l153_healthy_ctx "$ctx"
+  out="$(run_session_context "$HOOK" "$WT")"
+  l153_healthy_ctx "$(extract_ctx "$out")"
+
+  # A missing stamp falls through to the real verifier and is re-stamped.
+  rm -f "$TRELLIS_HOME/state/release-stamps/"*.json
+  out="$(l153_pi_session)"
+  ctx="$(l153_session_ctx "$out")" || { echo "$out"; false; }
+  l153_healthy_ctx "$ctx"
+  [ "$(stamp_count)" -eq 1 ]
+  # A stale stamp plus a changed release is refused, not called current.
+  tamper_release
+  out="$(l153_pi_session)"
+  ctx="$(l153_session_ctx "$out")" || { echo "$out"; false; }
+  [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$ctx"; false; }
+  out="$(run_session_context "$HOOK" "$WT")"
+  [[ "$(extract_ctx "$out")" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$out"; false; }
+}
+
+@test "l153 native Pi session refuses symlinked payload scripts and lib" {
+  local dir copy refusal
+  l153_require_binary || false
+  build_attachment_fixture
+  l153_record_copy scripts/lib scripts/lib-copy
+  l153_record_copy scripts/lib scripts-copy/lib
+  l153_record_copy scripts/lib-copy scripts-copy/lib-copy
+  l153_prepare_payload
+  # The recorded copies alone are a healthy payload.
+  ctx="$(l153_session_ctx "$(l153_pi_session)")" || false
+  l153_healthy_ctx "$ctx"
+  for pair in scripts:scripts-copy scripts/lib:scripts/lib-copy; do
+    dir="${pair%%:*}" copy="${pair#*:}"
+    l153_swap_symlink "$dir" "$copy"
+    out="$(l153_pi_session)"
+    ctx="$(l153_session_ctx "$out")" || { echo "$out"; false; }
+    [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$dir: $ctx"; false; }
+    # The embedded helpers' own refusal is the symlinked parent, nothing else.
+    refusal="$(TRELLIS_HOME="$TRELLIS_HOME" bash -c '. "$1/release-stamp.sh"; . "$1/release-store.sh"; release_store_locate 1.2.3' \
+      _ "$HOOKS_DIR/../../scripts/lib" 2>&1 >/dev/null)" && { echo "$dir: verifier accepted"; false; }
+    [[ "$refusal" == *"symlinked release payload parent for $dir/"* ]] || { echo "$dir: $refusal"; false; }
+    l153_swap_symlink "$dir" "$copy"
+  done
+}
+
+@test "l153 native Pi session does not execute a tampered payload verifier" {
+  l153_require_binary || false
+  build_attachment_fixture
+  l153_prepare_payload
+  chmod u+w "$RUNTIME/scripts/lib/release-stamp.sh"
+  printf ': > %q\nrelease_stamp_check() { return 0; }\n' "$MARKER" > "$RUNTIME/scripts/lib/release-stamp.sh"
+  chmod a-w "$RUNTIME/scripts/lib/release-stamp.sh"
+  out="$(l153_pi_session)"
+  [ ! -e "$MARKER" ] || { echo 'tampered payload helper executed'; false; }
+  ctx="$(l153_session_ctx "$out")" || { echo "$out"; false; }
+  [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$ctx"; false; }
+  out="$(run_session_context "$HOOK" "$WT")"
+  [ ! -e "$MARKER" ] || { echo 'Claude executed tampered payload helper'; false; }
+  [[ "$(extract_ctx "$out")" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$out"; false; }
+}
+
+@test "l153 native Pi session does not trust inherited release library paths" {
+  l153_require_binary || false
+  build_attachment_fixture
+  l153_prepare_payload
+  tamper_release
+  mkdir -p "$POISON_RUNTIME/lib"
+  printf ': > %q\n' "$MARKER" > "$POISON_RUNTIME/lib/release-stamp.sh"
+  out="$(l153_pi_session 'TRELLIS_LIBS_PRELOADED=1' "_RELEASE_STORE_LIB_DIR=$POISON_RUNTIME/lib")"
+  [ ! -e "$MARKER" ] || { echo 'inherited release library path executed'; false; }
+  ctx="$(l153_session_ctx "$out")" || { echo "$out"; false; }
+  [[ "$ctx" == *"Trellis attachment is missing in this opted-in worktree"* ]] || { echo "$ctx"; false; }
 }
 
 @test "no verdict, no stamp and no verify library warns, and the session still starts" {

@@ -46,6 +46,7 @@ _stop_active_raw() {
         my $data = eval { decode_json(<STDIN>) };
         exit 1 if $@ || ref($data) ne "HASH";
         my $active = $data->{stop_hook_active};
+        $active = $data->{continuationActive} unless defined $active;
         exit !(defined($active) && JSON::PP::is_bool($active) && $active);
       ' 2>/dev/null
     )
@@ -105,7 +106,10 @@ _dr_block() {
   exit 0
 }
 
-# Pi runs this Codex wrapper with the fixed TRELLIS_HARNESS=pi enum.
+# Pi and antigravity run this Codex wrapper with fixed TRELLIS_HARNESS enums.
 _DR_HARNESS=codex
-[ "${TRELLIS_HARNESS:-codex}" = pi ] && _DR_HARNESS=pi
+case "${TRELLIS_HARNESS:-codex}" in
+  pi) _DR_HARNESS=pi ;;
+  antigravity) _DR_HARNESS=antigravity ;;
+esac
 decision_receipt_run "$_DR_HARNESS" <<<"$INPUT"

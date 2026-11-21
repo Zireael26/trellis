@@ -78,7 +78,7 @@ setup() {
 @test "manifest validator accepts a boolean gate.verdict_reuse and refuses any other type" {
   local manifest="$SANDBOX/manifest.json" value
   for value in true false; do
-    printf '{"schema_version":1,"project_id":"reuse-%s","gate":{"verdict_reuse":%s,"env_passthrough":["CI"]}}\n' "$value" "$value" > "$manifest"
+    printf '{"schema_version":1,"project_id":"reuse-%s","gate":{"verdict_reuse":%s,"docs_only_tests":%s,"env_passthrough":["CI"]}}\n' "$value" "$value" "$value" > "$manifest"
     run bash -c '. "$1"; local_registry_manifest_project_id "$2"' _ "$REGISTRY_LIB" "$manifest"
     [ "$status" -eq 0 ] && [ "$output" = "reuse-$value" ] || { echo "refused verdict_reuse=$value: $output"; false; }
   done
@@ -86,5 +86,74 @@ setup() {
     printf '{"schema_version":1,"project_id":"reuse-bad","gate":{"verdict_reuse":%s}}\n' "$value" > "$manifest"
     run bash -c '. "$1"; local_registry_manifest_project_id "$2"' _ "$REGISTRY_LIB" "$manifest"
     [ "$status" -ne 0 ] || { echo "accepted verdict_reuse=$value"; false; }
+    printf '{"schema_version":1,"project_id":"docs-bad","gate":{"docs_only_tests":%s}}\n' "$value" > "$manifest"
+    run bash -c '. "$1"; local_registry_manifest_project_id "$2"' _ "$REGISTRY_LIB" "$manifest"
+    [ "$status" -ne 0 ] || { echo "accepted docs_only_tests=$value"; false; }
   done
+}
+
+# The harness union has two readers: the registry schema on disk, and the
+# preload fallback a bundled verified command needs because a bundle has no
+# payload pathname. If they can disagree, one of them eventually will — that is
+# exactly how `antigravity`/`opencode` reached the schema while two inline
+# predicates still admitted only claude/codex/pi.
+@test "the preloaded harness union fallback equals the registry schema enum" {
+  local expected
+  expected="$(jq -c '."$defs".harness.enum' "$REPO_ROOT/scripts/lib/trellis.registry.schema.json")"
+
+  run bash -c '. "$1"; local_registry_harness_union' _ "$REGISTRY_LIB"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$expected" ] || { echo "schema reader: $output"; false; }
+
+  run bash -c '. "$1" || exit 1; TRELLIS_LIBS_PRELOADED=1; . "$2" || exit 1; local_registry_harness_union' \
+    _ "$REPO_ROOT/scripts/lib/trellis-home.sh" "$REGISTRY_LIB"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "$expected" ] || { echo "preload fallback: $output"; false; }
+}
+
+@test "registry normalizer and schema validator admit canonical antigravity and opencode selectors while rejecting aliases and user scope" {
+  local registry="$SANDBOX/compat-registry.json"
+
+  run bash -c '. "$1"; local_registry_normalize_harnesses "[\"opencode\",\"claude\",\"antigravity\",\"pi\",\"codex\",\"opencode\"]"' _ "$REGISTRY_LIB"
+  [ "$status" -eq 0 ]
+  [ "$output" = '["antigravity","claude","codex","opencode","pi"]' ]
+
+  run bash -c '. "$1"; local_registry_normalize_harnesses "[\"antigravity\"]"' _ "$REGISTRY_LIB"
+  [ "$status" -eq 0 ]
+  [ "$output" = '["antigravity"]' ]
+
+  run bash -c '. "$1"; local_registry_normalize_harnesses "[\"opencode\"]"' _ "$REGISTRY_LIB"
+  [ "$status" -eq 0 ]
+  [ "$output" = '["opencode"]' ]
+
+  for bad in '["agy"]' '["user"]' '["antigravity","agy"]' '["unknown"]'; do
+    run bash -c '. "$1"; local_registry_normalize_harnesses "$2"' _ "$REGISTRY_LIB" "$bad"
+    [ "$status" -eq 2 ] || { echo "accepted $bad: status=$status output=$output"; false; }
+  done
+
+  jq -n '{
+    schema_version: 1,
+    projects: {
+      "fleet/one": {
+        fleet: "fleet",
+        project_id: "one",
+        status: "active",
+        metadata: {},
+        checkouts: {
+          (("a" * 64)): {
+            root: "/one",
+            git_common_dir: "/one/.git",
+            harnesses: ["antigravity", "opencode"],
+            worktrees: {}
+          }
+        }
+      }
+    }
+  }' > "$registry"
+  run bash -c '. "$1"; local_registry_json_is_valid "$2"' _ "$REGISTRY_LIB" "$registry"
+  [ "$status" -eq 0 ]
+
+  jq '.projects["fleet/one"].checkouts[].harnesses = ["agy"]' "$registry" > "$registry.bad"
+  run bash -c '. "$1"; local_registry_json_is_valid "$2"' _ "$REGISTRY_LIB" "$registry.bad"
+  [ "$status" -ne 0 ]
 }

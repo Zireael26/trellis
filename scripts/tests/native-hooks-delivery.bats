@@ -631,6 +631,24 @@ PY
   done
 }
 
+# v1.5.6: agy reads a decision-less PreToolUse document as a deny with an
+# empty reason, so the no-op status there is an explicit allow; every other
+# agy event keeps {} and the other harnesses stay silent.
+@test "native delivery: adapter no-op is an explicit agy PreToolUse allow" {
+  adapter_stub agy
+  local event
+  for event in PreToolUse PostToolUse SessionStart PreInvocation Stop; do
+    run bash -c 'cd "$1" && /bin/sh -c "$(grep -v "^#" "$2")" trellis-hooks "$3" antigravity "$4" "$1"' _ \
+      "$BATS_TEST_TMPDIR" "$ASSETS/hook-adapter.sh" "$COMPANION" "$event"
+    [ "$status" -eq 0 ] || { echo "$event: $output"; false; }
+    if [ "$event" = PreToolUse ]; then
+      [ "$output" = '{"decision":"allow"}' ] || { echo "$event: $output"; false; }
+    else
+      [ "$output" = '{}' ] || { echo "$event: $output"; false; }
+    fi
+  done
+}
+
 @test "native delivery: host binary runs contract but refuses measurement-only routes" {
   case "$(uname -s):$(uname -m)" in
     Darwin:arm64) target=aarch64-apple-darwin ;;
@@ -1949,12 +1967,15 @@ PY
     stub="$BATS_TEST_TMPDIR/stub-$code"
     printf '#!/bin/sh\ncat >/dev/null\nprintf %%s %s\nexit %s\n' "'{\"decision\":\"block\",\"reason\":\"stub $code\"}'" "$code" > "$stub"
     chmod 755 "$stub"
-    for harness in claude codex; do
+    for harness in claude codex antigravity; do
       run bash -c 'printf %s "{}" | HOME="$1" "$2" -c "$3" trellis-hooks "$4" "$5" PreToolUse /nonexistent' _ "$BATS_TEST_TMPDIR" "$dash" "$adapter" "$stub" "$harness"
-      case "$code" in
-        10) [ "$status" -eq 0 ] && [ -z "$output" ] ;;
-        11) [ "$status" -eq 0 ] && [[ "$output" == *'"reason":"stub 11"'* ]] ;;
-        12) [ "$status" -eq 2 ] && [[ "$output" == *'"reason":"stub 12"'* ]] ;;
+      case "$harness:$code" in
+        antigravity:10) [ "$status" -eq 0 ] && [ "$output" = '{"decision":"allow"}' ] ;;
+        antigravity:11) [ "$status" -eq 0 ] && [[ "$output" == *'"reason":"stub 11"'* ]] ;;
+        antigravity:*) [ "$status" -eq 0 ] && [[ "$output" == *'"decision":"deny"'* ]] ;;
+        *:10) [ "$status" -eq 0 ] && [ -z "$output" ] ;;
+        *:11) [ "$status" -eq 0 ] && [[ "$output" == *'"reason":"stub 11"'* ]] ;;
+        *:12) [ "$status" -eq 2 ] && [[ "$output" == *'"reason":"stub 12"'* ]] ;;
         *) [[ "$output" == *"native entry failed (status $code); refusing"* ]] &&
            if [ "$harness" = claude ]; then [ "$status" -eq 0 ] && [[ "$output" == *'"permissionDecision":"deny"'* ]];
            else [ "$status" -eq 2 ]; fi ;;

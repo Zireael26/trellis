@@ -30,6 +30,7 @@ integrity = None
 def load_integrity():
     global integrity
     if integrity is None:
+        sys.dont_write_bytecode = True
         spec = importlib.util.spec_from_file_location('release_executed', Path(__file__).with_name('release-executed.py'))
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
@@ -56,6 +57,7 @@ def load_owner_verify():
     verified payload directory, like release-executed.py above."""
     global owner_verify
     if owner_verify is None:
+        sys.dont_write_bytecode = True
         lib = Path(__file__).parent
         spec = importlib.util.spec_from_file_location('trellis_owner_verify', lib / 'owner_verify.py')
         module = importlib.util.module_from_spec(spec)
@@ -546,9 +548,11 @@ def current_inventory(donor, payload, harnesses, native=None, observed=None, fac
     """
     manifest_path = 'core-rules/inheritance-manifest.json'
     manifest = json.loads(read_regular(payload + '/' + manifest_path, sealed=True))
-    require(manifest.get('schema_version') in (1, 2), 'unknown inheritance schema')
+    require(manifest.get('schema_version') in (1, 2, 3), 'unknown inheritance schema')
     selected = list(harnesses)
     if manifest['schema_version'] == 2 and any(h in harnesses for h in ('codex', 'pi')):
+        selected.append('shared_agents')
+    elif manifest['schema_version'] == 3 and any(h in harnesses for h in ('antigravity', 'codex', 'opencode', 'pi')):
         selected.append('shared_agents')
     expected = {'.trellis/runtime': ('symlink', payload)}
     sources = [manifest_path]
@@ -556,6 +560,8 @@ def current_inventory(donor, payload, harnesses, native=None, observed=None, fac
         section = manifest['harnesses'][harness]
         require(set(section) <= {'links', 'render'}, 'unknown surface shape')
         for entry in section.get('links', []):
+            if entry.get('consumers') and not any(c in harnesses for c in entry['consumers']):
+                continue
             require(not entry.get('destination_home'), 'HOME surface in project plan')
             links = []
             if 'source_children' in entry:
@@ -590,6 +596,8 @@ def current_inventory(donor, payload, harnesses, native=None, observed=None, fac
                 require(destination not in expected, 'duplicate surface destination')
                 expected[destination] = ('symlink', '../' * destination.count('/') + '.trellis/runtime/' + source)
         for entry in section.get('render', []):
+            if entry.get('consumers') and not any(c in harnesses for c in entry['consumers']):
+                continue
             template, destination = relative(entry['template']), relative(entry['destination'])
             if not os.path.lexists(payload + '/' + template) and not entry.get('required', False):
                 continue

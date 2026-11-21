@@ -219,20 +219,9 @@ Scripts:
 
 Pattern reference: a native-hooks project's `.githooks/` directory shows the layout, exit-code conventions, and the `TRELLIS_ALLOW_MAIN_PUSH` escape hatch.
 
-## 8. PR size budget
+## 8. Cross-language refactor sizing
 
-Polyglot PRs trend large because cross-language refactors cross boundaries: a single schema change touches the Go server stub, the TS client, the Python SDK, and at least one consumer in each. Expect to bump the limits over time as the codebase grows.
-
-Representative starting defaults:
-
-```bash
-PROCESS_GATE_PR_SIZE_LIMIT=600    # warn above this
-PROCESS_GATE_PR_SIZE_HARD=1200    # fail above this
-```
-
-Generated code under `pkg/proto/`, `clients/sdk-ts/`, and `py/product_proto/` can be marked `linguist-generated` in `.gitattributes`; the mark must already be in the range base to exclude the code. Marker-only additions and binary code changes above the warn limit also need acknowledgement. The canonical [PR hygiene reference](pr-hygiene.md#pr-size) defines exclusions, base attributes, rename handling, binary detection and the receipt.
-
-When a cross-language refactor legitimately exceeds the hard cap, land an ADR under `docs/adr/` naming the change and explaining why splitting would make review or rollback less clear. The gate accepts the override only when the diff includes a new ADR.
+Polyglot PRs trend large because cross-language refactors cross boundaries: a single schema change touches the Go server stub, the TS client, the Python SDK, and at least one consumer in each. The parent `process-gate` no longer enforces a flat PR line-count cap (`docs/adr/2026-11-17-retire-pr-size-cap.md`), relying instead on subtree-routed CI, contract checks, and behavioral tests. Mark generated code under `pkg/proto/`, `clients/sdk-ts/`, and `py/product_proto/` as `linguist-generated` in `.gitattributes` so code review surfaces stay focused on hand-written diffs.
 
 ## 9. ADR location
 
@@ -244,7 +233,7 @@ ADRs live at `docs/adr/`, numbered `NNNN-<slug>.md`. Cross-language decisions al
 
 Representative `<repo>/docs/adr/0001-slice-1-bundle.md` and `<repo>/docs/adr/0002-slice-2-bundle.md` files illustrate the pattern. Each ADR has: Context, Decision, Consequences, Alternatives considered.
 
-Set in `local.config.sh` so the PR-size hard-cap override knows where to look:
+Set in `local.config.sh` so `check-docs.sh` ADR trigger checks know where to look:
 
 ```bash
 PROCESS_GATE_ADR_DIR="docs/adr"
@@ -298,7 +287,7 @@ When the second polyglot project onboards:
    - Move the validator into `$TRELLIS_ROOT/core-rules/skills/process-gate/scripts/`.
    - Add a corresponding reference under `references/`.
    - Update `references/stack-profiles.md`.
-   - Run the extended `parent-hook-drift` audit to verify byte-identity across all three adopters.
+   - Run `trellis doctor --fleet` to verify release-owned manifest integrity across all three adopters.
 4. Track candidate validators in `core-rules/deferred.md` so they are not forgotten between project onboardings.
 
 Canonical eight gates (PR hygiene, secrets, bypass, tests, docs, stack profile, security diff, analyze) apply unchanged in the meantime.

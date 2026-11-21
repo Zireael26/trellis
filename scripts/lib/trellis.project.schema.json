@@ -54,6 +54,11 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "docs_only_tests": {
+          "type": "boolean",
+          "default": true,
+          "description": "Set false to disable process-gate docs-only Tests policies (including release metadata). True or absent still requires a qualifying base-side policy."
+        },
         "verdict_reuse": {
           "type": "boolean",
           "description": "Default true: process-gate reuses a passing test verdict for the same committed tree, test command, runner, toolchain and platform. Set false when tests depend on external state."

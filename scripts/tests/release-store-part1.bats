@@ -1,6 +1,5 @@
 #!/usr/bin/env bats
-# Historical group-plan baseline and lease-serialized adoption.
-# Verbatim tests from release-store-original.txt (a2a8746e4).
+# Historical group-plan baseline, tag-tree immutability lock, and lease-serialized adoption.
 load release-store-common
 load helpers/fixture-clone
 load helpers/historical-releases
@@ -62,6 +61,23 @@ setup() {
   RELEASE_PROCESS_STATUS=""
 }
 
+
+@test "historical release tags v1.3.6 through v1.3.10 preserve their immutable tree digests" {
+  local pair ver expected actual
+  for pair in \
+    "1.3.6:591dedea62d88e4cfd6d9d43edc01d11c4f609f1" \
+    "1.3.7:1c970389e90ae1cc7a7c6bfc28cc7c4c9807c735" \
+    "1.3.8:e60c642d59add702f7071b244d70335ef7824a03" \
+    "1.3.9:a0e3f376480b903620ad05a18bcac33ea5fa42f1" \
+    "1.3.10:292a771f24687d1bf37cc5dc0ed9f8c05406f829"; do
+    ver="${pair%%:*}"
+    expected="${pair#*:}"
+    if git -C "$REPO_ROOT" rev-parse --verify --quiet "v$ver^{tree}" >/dev/null 2>&1; then
+      actual="$(git -C "$REPO_ROOT" rev-parse "v$ver^{tree}")"
+      [ "$actual" = "$expected" ] || { echo "v$ver tree drifted: $actual != $expected"; false; }
+    fi
+  done
+}
 
 @test "group plan (u): historical adoption reconciles all owners and fresh checkout add succeeds" {
   group_plan_setup_group history

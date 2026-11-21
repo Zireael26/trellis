@@ -267,8 +267,8 @@ assert_broken_generator_attach_is_recoverable() {
   managed="$(dispatcher_path)"
   launcher="$TRELLIS_HOME/releases/$T14_RELEASE/payload/scripts/trellis-launcher.sh"
   chmod u+w "$(dirname "$launcher")"
-  rm "$launcher"
-  rm "$managed/post-checkout"
+  rm -f "$launcher"
+  rm -f "$managed/post-checkout"
 
   run t14_attach
   [ "$status" -eq 4 ] || { echo "attach status=$status"; echo "$output"; false; }
@@ -285,7 +285,7 @@ assert_broken_generator_attach_is_recoverable() {
   launcher="$TRELLIS_HOME/releases/$T14_RELEASE/payload/scripts/trellis-launcher.sh"
   # Simulate corrupt state produced by the old unchecked generator path.
   chmod u+w "$(dirname "$launcher")"
-  rm "$launcher"
+  rm -f "$launcher"
   printf '\n' > "$managed/post-checkout"
   printf '\n' > "$managed/pre-push"
 
@@ -538,10 +538,9 @@ restore_payload_file() {
 # and follows every payload script or python helper a non-comment line names,
 # so a new helper on these paths fails here until it joins the list.
 # trellis-launcher.sh is read for two function bodies, never run, so it is
-# listed but not walked. health-checks.sh names two scripts that only doctor
-# runs (hc_conformance_passes runs the project's own conformance-check.sh,
-# hc_codex_plugin_surface runs check-codex-plugin-surface.sh); the walk skips
-# those two names there and fails if any walked file calls either check.
+# listed but not walked. health-checks.sh names one script that only doctor
+# runs (hc_conformance_passes runs the project's own conformance-check.sh);
+# the walk skips that name there and fails if any walked file calls it.
 executed_list() {
   sed -n '/^  local -a paths=($/,/^  )$/p' "$REPO_ROOT/scripts/lib/attachment.sh" | sed '1d;$d;s/^ *//'
 }
@@ -577,17 +576,17 @@ dispatcher_scripts() {
     esac
     [ "$file" != scripts/trellis-launcher.sh ] || continue
     if grep -v '^[[:space:]]*#' "$REPO_ROOT/$file" |
-        grep -vE '^hc_(conformance_passes|codex_plugin_surface)\(\)' |
-        grep -qE '\bhc_(conformance_passes|codex_plugin_surface)\b'; then
+        grep -vE '^hc_conformance_passes\(\)' |
+        grep -qE '\bhc_conformance_passes\b'; then
       echo "$file runs a doctor-only check"; false
     fi
     while IFS= read -r name; do
       case "$file:$name" in
-        scripts/lib/health-checks.sh:conformance-check.sh|scripts/lib/health-checks.sh:check-codex-plugin-surface.sh) continue ;;
-        # disk-janitor.sh and pi-spill-watchdog.sh are resolved with [ -f ]
+        scripts/lib/health-checks.sh:conformance-check.sh) continue ;;
+        # disk-janitor.sh, pi-spill-watchdog.sh, and gc.sh are resolved with [ -f ]
         # guards (or OID-checked) and skipped when absent, and the watchdog
-        # runs externally via launchd: neither is executed on hook paths.
-        scripts/lib/disk-janitor-agents.sh:disk-janitor.sh|scripts/lib/disk-janitor-agents.sh:pi-spill-watchdog.sh) continue ;;
+        # runs externally via launchd: none is executed on hook paths.
+        scripts/lib/disk-janitor-agents.sh:disk-janitor.sh|scripts/lib/disk-janitor-agents.sh:pi-spill-watchdog.sh|scripts/lib/disk-janitor-host.sh:gc.sh) continue ;;
         # check-process-liveness runs only inside janitor/doctor flows on
         # complete trees, never on dispatcher/attach/worktree hook paths.
         scripts/lib/disk-janitor-lib.sh:check-process-liveness.sh) continue ;;

@@ -1,6 +1,9 @@
 # Frozen test oracle: spec-gate configuration and verdict at 45b79dbf.
 # This is appended only to a private test copy of spec-gate-core.sh. The generic
 # block resolver, Git predicates and public wrappers still come from that copy.
+# Frozen optimization oracle for unchanged fixtures, not the authority for the
+# 1.5.3 merge receipts or historical-range marker semantics. Do not rewrite this
+# oracle to mirror those repairs; their expected outcomes have direct tests.
 sg_resolve_cfg() {
   local root="$1" out enabled status file floor="" ceiling=""
   local validation='
@@ -102,7 +105,7 @@ EOF
     if sg_interview_artifact_ok "$dir" "$root" "$tdir" "$branch" "$SG_OBJECT_HEAD"; then
       sg_result pass "spec-triad($tdir)+interview"; return
     fi
-    sg_result block "spec triad $tdir present but the interview artifact is missing (clarify.md / spec-waiver at L1-3, decisions-log entry at L4-5)"; return
+    sg_result block "spec triad $tdir present but the interview artifact is missing (clarify.md / spec-waiver at L1-3)"; return
   fi
   if sg_valid_marker "$dir" "$root" "$base" "$diff" "$ceiling" "$branch" "$SG_OBJECT_HEAD"; then
     sg_result pass 'surgical-marker'; return

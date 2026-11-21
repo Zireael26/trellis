@@ -118,6 +118,7 @@ _stop_active_raw() {
         my $data = eval { decode_json(<STDIN>) };
         exit 1 if $@ || ref($data) ne "HASH";
         my $active = $data->{stop_hook_active};
+        $active = $data->{continuationActive} unless defined $active;
         exit !(defined($active) && JSON::PP::is_bool($active) && $active);
       ' 2>/dev/null
     )
@@ -148,13 +149,26 @@ sys.exit(0 if isinstance(data, dict) and data.get("stop_hook_active") is True el
 _sv_infrastructure_block() {
   _stop_active_raw "$INPUT" && exit 0
   echo "stop-verify: $1" >&2
-  printf '%s\n' '{"decision":"block","reason":"stop-verify: infrastructure unavailable; install jq or re-run sync-codex-hooks"}'
+  if [ "${2:-}" = session-release-skew ]; then
+    printf '%s\n' '{"decision":"block","reason":"stop-verify: this session predates the project\u0027s Trellis release; restart the session to load the current native entry and Stop bundle (missing lib/deps-heavy.sh)"}'
+  else
+    printf '%s\n' '{"decision":"block","reason":"stop-verify: infrastructure unavailable; install jq or re-run sync-codex-hooks"}'
+  fi
   exit 0
 }
 __se_lib="$(dirname "${BASH_SOURCE[0]}")/lib/deps.sh"
 [ -r "$__se_lib" ] || _sv_infrastructure_block "missing sibling lib at $__se_lib — re-run sync-codex-hooks"
 # shellcheck source=lib/deps.sh disable=SC1090
 . "$__se_lib" || _sv_infrastructure_block "unable to load sibling lib at $__se_lib — re-run sync-codex-hooks"
+# Older native entries pin the bundle's file list, but load current policy
+# bytes. Syncing cannot add a sibling that this session's entry never bundles.
+case "$__se_lib" in
+  */state/native-stop-bundles/*/core-rules/codex/hooks/lib/deps.sh)
+    if [ ! -e "${__se_lib%/*}/deps-heavy.sh" ] && [ ! -L "${__se_lib%/*}/deps-heavy.sh" ]; then
+      _sv_infrastructure_block "this session predates the project's Trellis release; restart the session to load the current native entry and Stop bundle (missing lib/deps-heavy.sh)" session-release-skew
+    fi
+    ;;
+esac
 _se_load_heavy || _sv_infrastructure_block "unable to load sibling lib deps-heavy.sh beside $__se_lib — re-run sync-codex-hooks"
 if ! command -v jq >/dev/null 2>&1 && [ "${TRELLIS_NO_JQ_DEGRADE:-0}" != 1 ]; then
   _sv_infrastructure_block "jq required but not found — install jq (brew install jq | apt-get install -y jq)"
@@ -204,10 +218,13 @@ else
 fi
 
 # --- Guard 1: stop_hook_active ---
-STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // false')
+STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active // .continuationActive // false')
 if [ "$STOP_ACTIVE" = "true" ]; then
   __se_reentry_harness=codex
-  [ "${TRELLIS_HARNESS:-codex}" != pi ] || __se_reentry_harness=pi
+  case "${TRELLIS_HARNESS:-codex}" in
+    pi) __se_reentry_harness=pi ;;
+    antigravity) __se_reentry_harness=antigravity ;;
+  esac
   _se_turn_discard_reentrant "${CODEX_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-$PWD}}" "$__se_reentry_harness" "$INPUT" || true
   exit 0
 fi
@@ -223,7 +240,9 @@ if ! cd "$PROJECT_DIR" 2>/dev/null; then
   exit 0
 fi
 # Inspect once: unknown native wiring is an error, not legacy unarmed.
-__se_arming=$(_se_turn_baseline_arming "$PROJECT_DIR" codex) || __se_arming=unknown
+__se_arming_target=codex
+[ "${TRELLIS_HARNESS:-codex}" = antigravity ] && __se_arming_target=antigravity
+__se_arming=$(_se_turn_baseline_arming "$PROJECT_DIR" "$__se_arming_target") || __se_arming=unknown
 case "$__se_arming" in unarmed|legacy|native|unknown) ;; *) __se_arming=unknown ;; esac
 # The native proof-bound bridge supplies its independent arming result. This
 # comparison can only turn a disagreement into unknown; an inherited value
@@ -260,7 +279,9 @@ fi
 # Fail-counter state: absolute under the canonical project root (NOT a subtree —
 # emit_block fires both before and after the subtree cd). Codex path: .codex/.
 # A clean pass removes it.
-STATE_FILE="${PROJECT_DIR}/.codex/.fail-counter"
+STATE_DIR="${PROJECT_DIR}/.codex"
+[ "${TRELLIS_HARNESS:-codex}" = antigravity ] && STATE_DIR="${PROJECT_DIR}/.agents"
+STATE_FILE="${STATE_DIR}/.fail-counter"
 
 # --- Turn-entry baseline (C01). Consumed here, before anything else runs, and
 # replaced on exit by a carry of the end state (see below).
@@ -274,7 +295,10 @@ TURN_STATE=unknown
 TURN_RANGE_FILES=""
 __se_blocked=0
 __se_harness=codex
-[ "${TRELLIS_HARNESS:-codex}" = "pi" ] && __se_harness=pi
+case "${TRELLIS_HARNESS:-codex}" in
+  pi) __se_harness=pi ;;
+  antigravity) __se_harness=antigravity ;;
+esac
 # The old 1.5.0 native companion forwards this closed-envelope field to the
 # proven wrapper. The prefix can only force re-verification; it never grants a
 # pass or weakens the normal nonce/arming checks.
@@ -328,7 +352,7 @@ if [ "$__se_arming" != unknown ] && command -v git >/dev/null 2>&1; then
       __se_pi_baseline_untrusted=1
     fi
   else
-    __se_sid=$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null) || __se_sid=""
+    __se_sid=$(printf '%s' "$INPUT" | jq -r '.session_id // .conversationId // empty' 2>/dev/null) || __se_sid=""
   fi
   __se_key=""
   [ -z "$__se_sid" ] || __se_key=$(_se_state_key "" "$__se_sid") || __se_key=""
@@ -406,7 +430,7 @@ _se_changed_files() {
   untracked=$(_se_hook_state_git -C "$PROJECT_DIR" ls-files --others --exclude-standard 2>/dev/null) || return 1
   flagged=$(_se_flagged_changed_lines "$PROJECT_DIR") || return 1
   printf '%s\n%s\n%s\n' "$tracked" "$untracked" "$flagged" \
-    | awk 'NF && $0 != ".codex/.fail-counter"' | sort -u
+    | awk 'NF && $0 != ".codex/.fail-counter" && $0 != ".agents/.fail-counter"' | sort -u
 }
 
 emit_block() {
@@ -437,7 +461,7 @@ emit_block() {
   else
     count=1
   fi
-  mkdir -p "${PROJECT_DIR}/.codex" 2>/dev/null || true
+  mkdir -p "$STATE_DIR" 2>/dev/null || true
   printf '%s %s\n' "$fileset_hash" "$count" > "$STATE_FILE" 2>/dev/null || true
 
   # A blocked Stop never carries its end state forward (C01).
@@ -503,6 +527,7 @@ _se_find_subtree() {
 VERIFICATION_UNAVAILABLE=""
 VERIFICATION_NOTE=""
 ESLINT_PROBE_NOTE=""
+__se_verified_by_hook=0
 # R1 PATH ruling: a check whose project tool cannot be found is named in one
 # labelled advisory line, never skipped silently.
 TOOL_MISSING_NOTE=""
@@ -536,6 +561,26 @@ _se_receipt_gate() {
   # "unknown" (no, unreadable or uncomputable baseline) keeps the demand.
   [ "$TURN_STATE" = "same" ] && return 0
   if [ "${PROCESS_GATE_NO_RECEIPTS:-0}" != "1" ]; then
+    # P37: structural verification evidence written by stop-verify after running
+    # checks (or matched against <git-dir>/trellis-local/last-verified.json)
+    # satisfies the receipt gate when structural receipts are enabled or on AGY.
+    if [ "${__se_harness:-}" = "antigravity" ] || { [ "${__se_harness:-}" != "pi" ] && [ "${PROCESS_GATE_STRUCTURAL_RECEIPTS:-0}" = "1" ]; }; then
+      if [ "${__se_verified_by_hook:-0}" = "1" ]; then
+        rm -f "$STATE_FILE"
+        _se_verification_advisory ''
+        exit 0
+      fi
+      local __se_lv_check_fp="${__se_now:-}"
+      if [ -z "$__se_lv_check_fp" ] && command -v git >/dev/null 2>&1; then
+        __se_lv_check_fp=$(_se_tree_fingerprint "$PROJECT_DIR" "${__se_sdir:+$__se_sdir/fp-cache}" 2>/dev/null) || __se_lv_check_fp=""
+      fi
+      if [ -n "$__se_lv_check_fp" ] && [ -z "${TOOL_MISSING_NOTE:-}" ] && [ -z "${VERIFICATION_UNAVAILABLE:-}" ] \
+         && _se_last_verified_match "$PROJECT_DIR" "$__se_lv_check_fp" "${STOP_KEY:-}"; then
+        rm -f "$STATE_FILE"
+        _se_verification_advisory ''
+        exit 0
+      fi
+    fi
     # Doc-only skip: every changed file has a doc extension (.md/.mdx/.rst/.txt).
     # Reuse code-review-subagent's final-path-segment anchor + NONDOC_COUNT==0
     # logic, but over the diff-UNION-untracked set (a turn that only Writes new
@@ -554,7 +599,7 @@ _se_receipt_gate() {
       # catches a receipt emitted before the final tool call. NullableString → use
       # `// empty` so a JSON null collapses to "".
       LAST_MSG=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty')
-      TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty')
+      TRANSCRIPT=$(printf '%s' "$INPUT" | jq -r '.transcript_path // .transcriptPath // empty')
 
       # Canonical marker (must match the Claude hook's TIGHTENED form): fields IN
       # ORDER with FILLED values — `exit=[0-9]` (a digit must follow, rejecting the
@@ -592,7 +637,10 @@ _se_receipt_gate() {
         if ! TRANSCRIPT_ROLES=$(jq -rR '
           (fromjson? | (
             (if .type == "response_item" and .payload.type == "message"
-             then .payload.role else null end) // .message.role // .role
+             then .payload.role
+             elif .type == "USER_INPUT" then "user"
+             elif .type == "PLANNER_RESPONSE" then "assistant"
+             else null end) // .message.role // .role
           )) // "null"
         ' "$TRANSCRIPT" 2>&1); then
           emit_block "transcript-unusable" "could not parse transcript roles from ${TRANSCRIPT}"
@@ -785,6 +833,7 @@ fi
 # --- Subtree scoping. If every changed file shares one subtree with its own
 # manifest, run scoped checks there instead of repo-root. Opt-out:
 # PROCESS_GATE_FORCE_ROOT=1.
+_se_prepare_toolchain_shims "$PROJECT_DIR"
 if [ "${PROCESS_GATE_FORCE_ROOT:-0}" != "1" ]; then
   if ! SUBTREE="$(_se_find_subtree)"; then
     emit_block "git changed files" "could not inspect both tracked and untracked changes"
@@ -881,17 +930,18 @@ _se_mypy_pyproject_files() {
 }
 
 # --- Step 2: Typecheck ---
-# TypeScript
-if [ -f "tsconfig.json" ] && [ "$JS_AVAILABLE" -eq 0 ]; then
-  _se_js_unavailable
-elif [ -f "tsconfig.json" ] && ! command -v npx >/dev/null 2>&1; then
-  _se_tool_missing "typecheck (tsc)" npx
-elif [ -f "tsconfig.json" ]; then
-  # The node_modules/.bin copy npx --no-install would resolve, run directly
-  # (same argv, no npx startup, and a closure the reuse key can bind). With
-  # none inside the worktree, npx runs it and that Stop is never reused.
-  if __se_bin=$(_se_node_bin tsc "$PWD"); then
+# TypeScript (P45: tsrs -> tsgo -> tsc)
+if [ -f "tsconfig.json" ]; then
+  if [ "$JS_AVAILABLE" -eq 0 ]; then
+    _se_js_unavailable
+  elif __se_bin=$(_se_node_bin tsrs "$PWD"); then
+    _se_plan_check typecheck.tsrs argv "typecheck (tsrs)" head tsc "$PWD" "$__se_bin" --noEmit
+  elif __se_bin=$(_se_node_bin tsgo "$PWD"); then
+    _se_plan_check typecheck.tsgo argv "typecheck (tsgo)" head tsc "$PWD" "$__se_bin" --noEmit
+  elif __se_bin=$(_se_node_bin tsc "$PWD"); then
     _se_plan_check typecheck.tsc argv "typecheck (tsc)" head tsc "$PWD" "$__se_bin" --noEmit
+  elif ! command -v npx >/dev/null 2>&1; then
+    _se_tool_missing "typecheck (tsc)" npx
   else
     _se_plan_check typecheck.tsc argv "typecheck (tsc)" head tsc "$PWD" npx --no-install tsc --noEmit
   fi
@@ -935,10 +985,31 @@ if [ -f "go.mod" ] && command -v go >/dev/null 2>&1; then
   _se_plan_check typecheck.go-vet argv "typecheck (go vet)" head go-vet "$PWD" go vet ./...
 fi
 
-# --- Step 3: Lint (repo-wide) ---
-# ESLint. The probe's output is the eslint version the reuse key binds.
+# --- Step 3: Lint (repo-wide; P45: oxlint -> biome -> eslint) ---
 ESLINT_VERSION=""
-if [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
+if [ -f "oxlint.config.ts" ] || [ -f "oxlint.config.mts" ] || [ -f "oxlint.config.cts" ] \
+   || [ -f "oxlint.config.js" ] || [ -f "oxlint.config.mjs" ] || [ -f "oxlint.config.cjs" ] \
+   || [ -f "oxlint.config.json" ] || [ -f ".oxlintrc.json" ]; then
+  if __se_bin=$(_se_node_bin oxlint "$PWD"); then
+    _se_plan_check lint.oxlint argv "lint (oxlint)" head eslint "$PWD" "$__se_bin" . --quiet
+  elif command -v oxlint >/dev/null 2>&1; then
+    _se_plan_check lint.oxlint argv "lint (oxlint)" head eslint "$PWD" oxlint . --quiet
+  elif [ "$JS_AVAILABLE" -eq 0 ]; then
+    _se_js_unavailable
+  else
+    _se_tool_missing "lint (oxlint)" oxlint
+  fi
+elif [ -f "biome.json" ] || [ -f "biome.jsonc" ]; then
+  if __se_bin=$(_se_node_bin biome "$PWD"); then
+    _se_plan_check lint.biome argv "lint (biome)" head eslint "$PWD" "$__se_bin" check .
+  elif command -v biome >/dev/null 2>&1; then
+    _se_plan_check lint.biome argv "lint (biome)" head eslint "$PWD" biome check .
+  elif [ "$JS_AVAILABLE" -eq 0 ]; then
+    _se_js_unavailable
+  else
+    _se_tool_missing "lint (biome)" biome
+  fi
+elif [ -f ".eslintrc" ] || [ -f ".eslintrc.js" ] || [ -f ".eslintrc.cjs" ] \
    || [ -f ".eslintrc.json" ] || [ -f ".eslintrc.yml" ] || [ -f ".eslintrc.yaml" ] \
    || [ -f "eslint.config.js" ] || [ -f "eslint.config.mjs" ] || [ -f "eslint.config.cjs" ] \
    || [ -f "eslint.config.ts" ] || [ -f "eslint.config.mts" ] || [ -f "eslint.config.cts" ]; then
@@ -1276,7 +1347,7 @@ _se_run_checks() {
 }
 
 if [ "$CHECKS_RUN" -gt 0 ]; then
-  STOP_RECEIPT="" STOP_KEY="" STOP_FP=""
+  STOP_RECEIPT="" STOP_KEY="" STOP_FP="" __se_lv_ok=0 __se_lv_fp="" __se_lv_key=""
   if [ "$__se_degraded" = 0 ] && [ "$__se_force_reverify" != 1 ] && [ -z "$VERIFICATION_UNAVAILABLE" ] && [ -z "$STOP_FAST_CMD" ] \
      && STOP_RECEIPT=$(_se_stop_receipt_file "$PROJECT_DIR" "$__se_harness") \
      && { [ -n "$__se_now" ] && STOP_FP="$__se_now" \
@@ -1284,6 +1355,7 @@ if [ "$CHECKS_RUN" -gt 0 ]; then
      && STOP_KEY=$(_se_stop_key "$STOP_FP"); then
     if _se_stop_receipt_match "$STOP_RECEIPT" "$STOP_KEY"; then
       VERIFICATION_NOTE="${VERIFICATION_NOTE:+$VERIFICATION_NOTE$'\n'}stop-verify: checks reused, not re-run: pass receipt ${STOP_KEY:0:12} matches this tree, commands, tools and policy (${STOP_RECEIPT})."
+      __se_lv_ok=1 __se_lv_fp="$STOP_FP" __se_lv_key="$STOP_KEY"
     else
       _se_run_checks
       # A receipt certifies exactly what the checks consumed: every input in
@@ -1299,10 +1371,26 @@ if [ "$CHECKS_RUN" -gt 0 ]; then
           for (( __se_i = 0; __se_i < CHECKS_RUN; __se_i++ )); do
             printf 'check %s %s\n' "${__se_ck_id[$__se_i]}" "${__se_ck_cmd[$__se_i]}"
           done)"
+        __se_lv_ok=1 __se_lv_fp="$STOP_FP2" __se_lv_key="$STOP_KEY"
       fi
     fi
   else
+    __se_pre_fp=""
+    if [ "$__se_degraded" = 0 ] && [ -z "$VERIFICATION_UNAVAILABLE" ] && [ -z "$STOP_FAST_CMD" ] && command -v git >/dev/null 2>&1; then
+      __se_pre_fp="${__se_now:-}"
+      [ -n "$__se_pre_fp" ] || __se_pre_fp=$(_se_tree_fingerprint "$PROJECT_DIR" "${__se_sdir:+$__se_sdir/fp-cache}" 2>/dev/null) || __se_pre_fp=""
+    fi
     _se_run_checks
+    if [ -n "$__se_pre_fp" ] && STOP_FP2=$(_se_tree_fingerprint "$PROJECT_DIR" "${__se_sdir:+$__se_sdir/fp-cache}" 2>/dev/null) \
+       && [ "$STOP_FP2" = "$__se_pre_fp" ]; then
+      __se_lv_key=$(_se_stop_key "$STOP_FP2" 2>/dev/null) || __se_lv_key=""
+      STOP_KEY="$__se_lv_key"
+      __se_lv_ok=1 __se_lv_fp="$STOP_FP2"
+    fi
+  fi
+  if [ "$__se_lv_ok" = 1 ] && [ "$__se_degraded" = 0 ] && [ -z "$VERIFICATION_UNAVAILABLE" ] && [ -z "$TOOL_MISSING_NOTE" ] && [ -z "$STOP_FAST_CMD" ] && [ "${__se_harness:-}" != "pi" ]; then
+    _se_last_verified_write "$PROJECT_DIR" "$__se_lv_fp" "$__se_harness" "$CHECKS_RUN" "$__se_defer_dir" "$__se_lv_key" "${__se_ck_cmd[@]}"
+    __se_verified_by_hook=1
   fi
 fi
 

@@ -222,7 +222,7 @@ PY
   local project="$FIXTURE/project"
   mkdir -p "$project/native/trellis-hooks"
   cp "$FIXTURE/Cargo.lock" "$project/native/trellis-hooks/Cargo.lock"
-  run python3 -I - "$REPO_ROOT/scripts/lib/gate_verdict.py" "$project" "$CARGO_HOME" "$TOOLCHAIN" <<'PY'
+  run python3 -I -B - "$REPO_ROOT/scripts/lib/gate_verdict.py" "$project" "$CARGO_HOME" "$TOOLCHAIN" <<'PY'
 import importlib.util
 from pathlib import Path
 import sys
@@ -274,7 +274,7 @@ PY
   mv "$CARGO_HOME" "$account/.cargo"
   mv "$RUSTUP_HOME" "$account/.rustup"
   unset CARGO_HOME RUSTUP_HOME
-  run python3 -I - "$PREPARE" "$account" "$PRIVATE" "$FIXTURE/Cargo.lock" <<'PY'
+  run python3 -I -B - "$PREPARE" "$account" "$PRIVATE" "$FIXTURE/Cargo.lock" <<'PY'
 import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
@@ -292,7 +292,7 @@ PY
 }
 
 @test "explicit source homes work even without a passwd entry" {
-  run python3 -I - "$PREPARE" "$PRIVATE" "$FIXTURE/Cargo.lock" <<'PY'
+  run python3 -I -B - "$PREPARE" "$PRIVATE" "$FIXTURE/Cargo.lock" <<'PY'
 import importlib.util
 from pathlib import Path
 import sys

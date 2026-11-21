@@ -829,7 +829,7 @@ scoped_audit_case() {
   # Write a coarse-rendered stamp directly (bypassing write()'s fine-ctime
   # guard), so check()'s guard is isolated: its render matches the recorded
   # bytes, so only fine_ctime can make it miss.
-  coarse_token="$(python3 -I - "$coarse" "$STORE" "$rel" <<'PY'
+  coarse_token="$(python3 -I -B - "$coarse" "$STORE" "$rel" <<'PY'
 import hashlib, importlib.util, os, pathlib, sys
 coarse, home, rel = sys.argv[1:4]
 spec = importlib.util.spec_from_file_location("coarse", coarse)

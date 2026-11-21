@@ -126,8 +126,8 @@ Usage:
                                            refuses it).
   disk-janitor.sh --scopes orphans,logs,tmp,transcripts
                                            Opt-in spec 069 scopes (never in the
-                                           default set; not implemented in this
-                                           build).
+                                           default set; report-only except tmp
+                                           and pi spill/worktree apply).
   disk-janitor.sh --dehydrate              Delete only regenerable directories
                                            (node_modules, .venv, caches, dist/
                                            build/target beside a manifest) in
@@ -192,8 +192,12 @@ Scopes:
               content are candidates, never reaped (see /private/tmp TTL).
               reap_pushed_worktrees=false restores the legacy
               stale+clean+merged gates after the liveness gate.
-  stores      pnpm store / npm cache footprint — REPORT-ONLY (best-effort
-              estimate; --apply does not prune stores in this release).
+  stores      pnpm store / npm / uv (incl. gate-xdg) / bun / go-build
+              footprint — per-store report; --apply runs each tool's own
+              prune (pnpm store prune; uv cache prune incl. gate-xdg;
+              bun pm cache rm; go clean -cache; npm cache clean --force),
+              never rm. codex-runtimes, claude-cli-nodejs, dotslash and
+              node-gyp are report-only visibility rows.
   docker      Host-global, scanned exactly once. Every mode shows total and
               unattached (Links == 0) anonymous volumes (64-lowercase-hex names),
               their size and IDs under a report-only heading, BuildKit cache
@@ -396,6 +400,8 @@ PI_WORKTREE_TTL_DAYS="$(cfg_num '.disk_janitor.pi_worktree_ttl_days' 7)"
 case "$PI_WORKTREE_TTL_DAYS" in ''|*[!0-9]*) PI_WORKTREE_TTL_DAYS=7 ;; esac
 WORKTREE_COUNT_CEILING="$(cfg_num '.disk_janitor.worktree_count_ceiling' 25)"
 WORKTREE_TOTAL_GB_CEILING="$(cfg_num '.disk_janitor.worktree_total_gb_ceiling' 80)"
+ACTIVE_BLOAT_WARN_GB="$(cfg_num '.disk_janitor.active_bloat_warn_gb' 2)"
+case "$ACTIVE_BLOAT_WARN_GB" in ''|*[!0-9]*) ACTIVE_BLOAT_WARN_GB=2 ;; esac
 
 # disk_janitor.apply_disabled_scopes: per-scope opt-out of --apply (the spec
 # 069 D rollback switch). A listed scope is dropped from an apply run with a
@@ -1639,7 +1645,7 @@ render_report() {
   echo "date:          $(date +%F)"
   echo "fleet:         $TRELLIS_FLEET_NAME"
   echo "worktrees:     $TARGET_COUNT strict local-registry identity/identities"
-  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB docker_cache_keep_gb=$DOCKER_CACHE_KEEP_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING"
+  echo "config:        enabled=$DJ_ENABLED cache_ttl_days=$CACHE_TTL_DAYS worktree_stale_days=$WORKTREE_STALE_DAYS free_space_floor_gb=$FREE_SPACE_FLOOR_GB cache_ceiling_gb=$CACHE_CEILING_GB docker_cache_keep_gb=$DOCKER_CACHE_KEEP_GB reap_pushed_worktrees=$REAP_PUSHED_WORKTREES ephemeral_tmp_ttl_days=$EPHEMERAL_TMP_TTL_DAYS worktree_count_ceiling=$WORKTREE_COUNT_CEILING worktree_total_gb_ceiling=$WORKTREE_TOTAL_GB_CEILING active_bloat_warn_gb=$ACTIVE_BLOAT_WARN_GB"
   echo "scopes:        $SCOPES$SAFE_ONLY_TAG"
   echo
 
@@ -1705,6 +1711,48 @@ INNER
     else
       printf '  ✓ under ceiling (%s)\n' "$(dj_human_bytes "$WT_TOTAL_CEILING_BYTES")"
     fi
+  fi
+  # macOS swap ballooning (best-effort on Darwin; skipped cleanly elsewhere).
+  if command -v sysctl >/dev/null 2>&1; then
+    _swap_line="$(sysctl -n vm.swapusage 2>/dev/null || echo '')"
+    if [ -n "$_swap_line" ]; then
+      printf '  swap: %s' "$_swap_line"
+      _swap_used="$(printf '%s' "$_swap_line" | sed -n 's/.*used = *\([0-9.]*\)M.*/\1/p')"
+      _swap_total="$(printf '%s' "$_swap_line" | sed -n 's/.*total = *\([0-9.]*\)M.*/\1/p')"
+      _swap_warn=0
+      case "$_swap_used" in ''|*[!0-9.]*) ;; *) _swap_used_mb="${_swap_used%%.*}"; case "$_swap_used_mb" in ''|*[!0-9]*) ;; *) [ "$_swap_used_mb" -gt 16384 ] 2>/dev/null && _swap_warn=1 ;; esac ;; esac
+      if [ "$_swap_warn" -eq 0 ]; then
+        case "$_swap_used" in ''|*[!0-9.]*) ;; *) case "$_swap_total" in ''|*[!0-9.]*) ;; *) _swap_pct="$(awk -v u="$_swap_used" -v t="$_swap_total" 'BEGIN { if (t > 0) printf "%d", (u / t * 100); }')"; case "$_swap_pct" in ''|*[!0-9]*) ;; *) [ "$_swap_pct" -gt 75 ] 2>/dev/null && _swap_warn=1 ;; esac ;; esac ;; esac
+      fi
+      if [ "$_swap_warn" -eq 1 ]; then printf '  ⚠ swap pressure (>75%% or >16 GiB used)\n'; else printf '\n'; fi
+    fi
+  fi
+  # Active-worktree bloat anomaly: warn when any single gitignored directory
+  # inside a scanned worktree exceeds active_bloat_warn_gb (default 2 GiB),
+  # even when the worktree is active/recent. Report-only, best-effort.
+  if scope_enabled worktrees && [ -n "${TARGETS_TMP:-}" ] && [ -f "$TARGETS_TMP" ]; then
+    _bloat_floor=$(( ACTIVE_BLOAT_WARN_GB * 1024 * 1024 * 1024 ))
+    _bloat_found=0
+    while IFS="$(printf '\t')" read -r _fleet _pid _co _wid _root _common; do
+      [ -d "$_root" ] && [ ! -L "$_root" ] || continue
+      git -C "$_root" rev-parse --show-toplevel >/dev/null 2>&1 || continue
+      _worst=""; _worst_bytes=0
+      while IFS= read -r _cand; do
+        [ -n "$_cand" ] || continue
+        [ -d "$_cand" ] && [ ! -L "$_cand" ] || continue
+        git -C "$_root" check-ignore -q "$_cand" 2>/dev/null || continue
+        _cb="$(dj_dir_bytes "$_cand")"
+        case "$_cb" in ''|*[!0-9]*) continue ;; esac
+        if [ "$_cb" -gt "$_worst_bytes" ] 2>/dev/null; then _worst_bytes="$_cb"; _worst="$_cand"; fi
+      done <<EOF_INNER
+$(find -P "$_root" -mindepth 1 -maxdepth 2 -type d -name .git -prune -o -type d -print 2>/dev/null | head -n 120 || true)
+EOF_INNER
+      if [ "$_worst_bytes" -gt "$_bloat_floor" ] 2>/dev/null; then
+        printf '  ⚠ bloat: %s holds ignored %s (%s > %s GiB)\n' "$_root" "$_worst" "$(dj_human_bytes "$_worst_bytes")" "$ACTIVE_BLOAT_WARN_GB"
+        _bloat_found=1
+      fi
+    done <"$TARGETS_TMP"
+    [ "$_bloat_found" -eq 1 ] || echo "  active-tree bloat: none over ${ACTIVE_BLOAT_WARN_GB} GiB ignored in one dir"
   fi
   echo
 

@@ -12,6 +12,7 @@ import unittest
 from unittest.mock import patch
 
 
+sys.dont_write_bytecode = True
 LIB = Path(__file__).resolve().parents[1] / 'lib' / 'release_verify.py'
 SPEC = importlib.util.spec_from_file_location('release_verify_acl_tests', LIB)
 release_verify = importlib.util.module_from_spec(SPEC)
@@ -29,7 +30,7 @@ class LinuxAclClasses(unittest.TestCase):
             root = Path(tmp)
             (root / 'file').write_text('fixture\n')
             (root / 'link').symlink_to('file')
-            proc = subprocess.run([sys.executable, '-I', str(LIB), str(root), 'acl'],
+            proc = subprocess.run([sys.executable, '-I', '-B', str(LIB), str(root), 'acl'],
                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
             self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors='replace'))
             self.assertEqual(proc.stdout, b'ok\n')
@@ -84,7 +85,7 @@ class LinuxAclClasses(unittest.TestCase):
 
     def test_whole_acl_walk_does_not_classify_a_regular_file_as_a_symlink(self):
         with tempfile.TemporaryDirectory(prefix='release-acl-type-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / 'file').write_text('fixture\n')
             (root / 'link').symlink_to('file')
             def getxattr(target, _name, **_kwargs):
@@ -98,7 +99,7 @@ class LinuxAclClasses(unittest.TestCase):
 
     def test_whole_acl_walk_marks_only_symlinks_and_rechecks_identity(self):
         with tempfile.TemporaryDirectory(prefix='release-acl-test-') as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             (root / 'file').write_text('fixture\n')
             (root / 'link').symlink_to('file')
             original_stat = os.stat

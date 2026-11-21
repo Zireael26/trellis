@@ -1066,7 +1066,7 @@ PY
 }
 
 @test "mark-stale reports rollback and temporary cleanup failures" {
-  run python3 - "$WIKI_VALIDATOR" "$PROJECT" <<'PY'
+  run python3 -B - "$WIKI_VALIDATOR" "$PROJECT" <<'PY'
 import importlib.util
 import pathlib
 import sys
@@ -1111,7 +1111,7 @@ PY
 }
 
 @test "unexpected RuntimeError is not relabelled as malformed input" {
-  run python3 - "$WIKI_VALIDATOR" "$PROJECT" <<'PY'
+  run python3 -B - "$WIKI_VALIDATOR" "$PROJECT" <<'PY'
 import importlib.util
 import sys
 

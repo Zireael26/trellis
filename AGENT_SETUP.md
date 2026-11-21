@@ -2,7 +2,7 @@
 
 This runbook sets up **one machine's local Trellis state**. It is deliberately safe to rehearse in a temporary home, supports personal and work fleets from one policy source clone, and accepts project Git worktrees at arbitrary absolute paths.
 
-It does not create tracked machine configuration, infer paths from project names, make an attached project run from a mutable source checkout, or configure credentials, providers, or harness trust stores. For the architecture and migration rationale, link to—not duplicate—the T23 documents: [`docs/MIGRATING-1.0.0.md`](docs/MIGRATING-1.0.0.md), [`docs/UPGRADING.md`](docs/UPGRADING.md), and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
+It does not create tracked machine configuration, infer paths from project names, make an attached project run from a mutable source checkout, or configure credentials, providers, or harness trust stores. For the architecture and release upgrade rationale, link to—not duplicate—[`docs/UPGRADING.md`](docs/UPGRADING.md) and [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
 
 Once a machine is set up, moving it and its attached projects to a later release is a separate runbook: [AGENT_UPGRADE.md](AGENT_UPGRADE.md), executable end to end by an agent on any harness. Section 9 below is the single-project adoption command it wraps.
 
@@ -142,7 +142,7 @@ A historical registry usually records a portable shorthand path such as `/person
 "$TRELLIS" registry list --home "$TRELLIS_HOME" --fleet "$FLEET"
 ```
 
-The complete import, parity-review, and cutover procedure — including the blacklist pair, the seven-cell row contract, and how a literal `|` is written `\|` in a cell — is [`docs/MIGRATING-1.0.0.md`](docs/MIGRATING-1.0.0.md) §2.
+The historical `registry import` contract accepts the seven-cell legacy table format (`|` escaped as `\|` in cells) and maps tracked exclusions onto `metadata.legacy.blacklisted`; see [`docs/adr/2026-08-12-local-fleets-immutable-releases.md`](docs/adr/2026-08-12-local-fleets-immutable-releases.md).
 
 ## 7. Verify local state and the attached project
 

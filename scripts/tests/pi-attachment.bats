@@ -75,14 +75,17 @@ for record in Path(home, "state/attachment-status").glob("*/*.job/pid"):
         pass  # The job finished while its lock was being inspected.
 # Spawn returns before the child necessarily publishes its lock. The detached
 # Perl child already exists then, and its argv includes these same exact paths.
-for line in subprocess.check_output(["ps", "-axww", "-o", "pid=,command="], text=True).splitlines():
+# Host argv is arbitrary bytes; preserve undecodable bytes without losing the
+# exact private postjob/project identity or bypassing the process-exit join.
+for line in subprocess.check_output(["ps", "-axww", "-o", "pid=,command="],
+                                    text=True, errors="surrogateescape").splitlines():
     fields = line.strip().split(None, 1)
     if len(fields) == 2 and postjob in fields[1] and project in fields[1]:
         pids.add(int(fields[0]))
 
 def still_our_job(pid):
     command = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
-                             stdout=subprocess.PIPE, text=True).stdout
+                             stdout=subprocess.PIPE, text=True, errors="surrogateescape").stdout
     return postjob in command and project in command
 
 for pid in pids - {os.getpid()}:
@@ -127,6 +130,48 @@ owner_file() {
 
 registry_harnesses() {
   jq -c '.projects["personal/pi-fixture"].checkouts | to_entries[0].value.harnesses' "$TRELLIS_HOME/registry.json"
+}
+
+@test "postjob join tolerates non-UTF-8 argv without skipping its owned child" {
+  local shim="$SANDBOX/ps-shim" child_status=0 joined=0
+  mkdir -p "$shim"
+  export FIXTURE_PS_CHECKED="$SANDBOX/identity-checked"
+  export FIXTURE_PS_DONE="$SANDBOX/child-exited"
+  export FIXTURE_PS_POSTJOB="$PAYLOAD/scripts/lib/attach-postjob.sh"
+  export FIXTURE_PS_PROJECT="$PROJECT"
+  python3 - "$FIXTURE_PS_CHECKED" "$FIXTURE_PS_DONE" "$FIXTURE_PS_POSTJOB" "$PROJECT" <<'PY' &
+from pathlib import Path
+import sys
+import time
+checked, done = map(Path, sys.argv[1:3])
+deadline = time.monotonic() + 5
+while not checked.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+done.write_text("identity checked" if checked.exists() else "identity never checked")
+PY
+  FIXTURE_PS_PID=$!
+  export FIXTURE_PS_PID
+  cat > "$shim/ps" <<'SH'
+#!/bin/sh
+if [ "$1" = -axww ]; then
+  printf '999999 foreign-argv-\377\n'
+  printf '%s %s %s owned-argv-\377\n' "$FIXTURE_PS_PID" "$FIXTURE_PS_POSTJOB" "$FIXTURE_PS_PROJECT"
+elif [ "$1" = -p ] && [ "$2" = "$FIXTURE_PS_PID" ]; then
+  printf '%s %s owned-argv-\377\n' "$FIXTURE_PS_POSTJOB" "$FIXTURE_PS_PROJECT"
+  : > "$FIXTURE_PS_CHECKED"
+else
+  exit 1
+fi
+SH
+  chmod +x "$shim/ps"
+  PATH="$shim:$PATH" run wait_for_attach_postjobs
+  [ ! -f "$FIXTURE_PS_DONE" ] || joined=1
+  # Reap only the child this case spawned, even when the join assertion fails.
+  wait "$FIXTURE_PS_PID" || child_status=$?
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
+  [ "$child_status" -eq 0 ]
+  [ "$joined" -eq 1 ]
+  [ "$(cat "$FIXTURE_PS_DONE")" = 'identity checked' ]
 }
 
 @test "release prototype copies isolate every regular inode and rebind each machine path" {
@@ -197,7 +242,10 @@ PY
   # Pi reserves .pi/hooks: attach renders nothing there.
   [ ! -e "$PROJECT/.pi/hooks" ]
   [ ! -L "$PROJECT/.pi/hooks" ]
-  [ -L "$PROJECT/.agents/agents/sol-rw.md" ]
+  [ -L "$PROJECT/.pi/agents/sol-rw.md" ]
+  [ ! -e "$PROJECT/.agents/agents" ]
+  [ ! -L "$PROJECT/.agents/agents" ]
+  [ -L "$PROJECT/AGENTS.md" ]
 
   local leaf
   jq -r '.artifacts[] | select(.kind != "parent" and .kind != "directory") | .path' \
@@ -274,15 +322,17 @@ PY
     | .release == $owner[0].release
       and .worktrees[$owner[0].worktree_id].attachment_id == $owner[0].attachment_id
   ' "$TRELLIS_HOME/registry.json" >/dev/null
+  jq -e '.schema_version == 1 and (has("harnesses") | not)' "$owner" >/dev/null
   jq -e 'all(.artifacts[], .pre_existing[]?; (.path | startswith(".codex/")) | not)' "$owner" >/dev/null
   jq -e '[.artifacts[].path]
-    | any(startswith(".claude/")) and any(startswith(".pi/")) and any(. == "AGENTS.md")' "$owner" >/dev/null
+    | any(startswith(".claude/")) and any(startswith(".pi/")) and any(startswith(".agents/")) and any(. == "AGENTS.md")' "$owner" >/dev/null
   [ -L "$PROJECT/.claude/rules/trellis.md" ]
   [ -L "$PROJECT/.pi/extensions/trellis.ts" ]
+  [ -L "$PROJECT/.pi/agents/sol-rw.md" ]
   [ ! -e "$PROJECT/.pi/hooks" ]
   [ ! -L "$PROJECT/.pi/hooks" ]
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
-  [ -L "$PROJECT/.agents/agents/sol-rw.md" ]
+  [ ! -e "$PROJECT/.agents/agents" ]
   [ -L "$PROJECT/AGENTS.md" ]
   [ -L "$PROJECT/.trellis/runtime" ]
   [ ! -e "$PROJECT/.codex/hooks/lib/action-normalize.sh" ]
@@ -305,6 +355,7 @@ PY
   jq -e 'all(.artifacts[], .pre_existing[]?; (.path | startswith(".pi/")) | not)' "$owner" >/dev/null
   [ -L "$PROJECT/.codex/hooks/lib/action-normalize.sh" ]
   [ ! -L "$PROJECT/.pi/extensions/trellis.ts" ]
+  [ ! -L "$PROJECT/.pi/agents/sol-rw.md" ]
   [ -L "$PROJECT/.agents/rules/trellis.md" ]
   [ -L "$PROJECT/.trellis/runtime" ]
 }

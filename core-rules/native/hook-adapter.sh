@@ -6,17 +6,30 @@ if [ "${1#*=}" = "$1" ] && [ -f "$1" ] && [ ! -L "$1" ] && [ -x "$1" ]; then
   r=$?
 fi
 case $r in
-  10) exit 0 ;;
+  10) if [ "$2" = antigravity ]; then if [ "$3" = PreToolUse ]; then printf "%s\n" "{\"decision\":\"allow\"}"; else printf "%s\n" "{}"; fi; fi; exit 0 ;;
   11) printf "%s\n" "$o"; exit 0 ;;
-  12) printf "%s\n" "$o"; exit 2 ;;
+  12) if [ "$2" != antigravity ]; then printf "%s\n" "$o"; exit 2; fi ;;
 esac
 w="trellis-hooks: native entry failed (status $r); refusing"
 if [ "$2" = claude ]; then
   if [ "$3" = PreToolUse ]; then
     printf "%s\n" "{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"$w\"}}"
+  elif [ "$3" = UserPromptSubmit ]; then
+    printf "%s\n" "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$w\"}}"
   else
     printf "%s\n" "{\"decision\":\"block\",\"reason\":\"$w\"}"
   fi
+  exit 0
+elif [ "$2" = antigravity ]; then
+  case "$3" in
+    PreToolUse) printf "%s\n" "{\"decision\":\"deny\",\"reason\":\"$w\"}" ;;
+    Stop) printf "%s\n" "{\"decision\":\"continue\",\"reason\":\"$w\"}" ;;
+    PreInvocation) printf "%s\n" "{\"injectSteps\":[{\"errorMessage\":{\"userMessage\":\"$w\"}}],\"systemMessage\":\"$w\"}" ;;
+    *) printf "%s\n" "{}"; printf "%s\n" "$w" >&2 ;;
+  esac
+  exit 0
+elif [ "$3" = UserPromptSubmit ]; then
+  printf "%s\n" "{\"hookSpecificOutput\":{\"hookEventName\":\"UserPromptSubmit\",\"additionalContext\":\"$w\"}}"
   exit 0
 fi
 printf "%s\n" "{\"decision\":\"block\",\"reason\":\"$w\"}"

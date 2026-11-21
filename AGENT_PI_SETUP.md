@@ -1,7 +1,7 @@
 # Trellis pi harness setup
 
-This recipe supports pi **1.1.0 and above**, and installs 1.1.0, the version the reference
-setup runs. Earlier pi versions are not supported: `trellis doctor` warns below 1.1.0. It
+This recipe supports pi **1.5.2 and above**, and installs 1.5.2, the version the reference
+setup runs. Earlier pi versions are not supported: `trellis doctor` warns below 1.5.2. It
 installs no computer-use tools: pi has none in this setup. Route a unit that needs a browser page or
 a native desktop app to Codex CLI as an hc sub-agent or to Claude Code, as
 [Computer use with Pi](docs/PI-COMPUTER-USE.md) describes; that page also covers removing an
@@ -20,9 +20,9 @@ The boundary is a **subset**, not the whole pi tree. The public publisher withho
 
 | Published | What it is |
 |---|---|
-| `core-rules/pi/patches/` | the version-pinned patch bundles, their installers, their regression tests and `COMPACTION.md` |
 | `core-rules/pi/extensions/trellis.ts` | the pi extension |
 | `core-rules/pi/extensions/trellis-web-search.ts` | the always-loaded web-search extension step 2 installs |
+| `core-rules/pi/extensions/trellis-bash-guard.ts` | the bash timeout and output-cap guard step 2 installs |
 | `core-rules/pi/hooks/dispatch.sh` | the hook dispatcher |
 | `core-rules/pi/statusline/omp-statusline/` | the `omp-statusline` footer fork source (the upstream `pi-statusline` footer plus OMP-parity segments); install with `npm install --omit=dev --legacy-peer-deps` inside the copied directory |
 | `core-rules/pi/tests/` | the boundary and transport tests |
@@ -57,16 +57,16 @@ bash scripts/lib/surface-plan.sh --payload "$PWD/core-rules" --harness pi
 
 | Step | Action | Passing checkpoint |
 |---:|---|---|
-| 0 | Enter the Trellis checkout | Darwin host, git checkout, and required patch bundle found |
-| 1 | Install pi 1.1.0 | `pi --version` prints `1.1.0` or later |
-| 2 | Install active add-ons and `settings.json` | three npm packages at checked versions, local `opencode-go-2.ts` and `trellis-web-search.ts`, `omp-statusline` fork, exact `settings.json` with the built-in MCP off |
+| 0 | Enter the Trellis checkout | Darwin host and git checkout found |
+| 1 | Install pi 1.5.2 | `pi --version` prints `1.5.2` or later |
+| 2 | Install active add-ons and `settings.json` | three npm packages at checked versions, local `trellis-web-search.ts` and `trellis-bash-guard.ts`, `omp-statusline` fork, exact `settings.json` with the built-in MCP off |
 | 3 | Put API keys in macOS Keychain | all three Keychain lookups succeed without printing a key |
-| 4 | Configure command-backed API-key auth | mode `0600`; four API-provider commands match |
+| 4 | Configure command-backed API-key auth | mode `0600`; API-provider commands match |
 | 5 | Perform subscription OAuth logins | Codex, xAI, `antigravity`, and GitHub Copilot credentials are ready |
 | 6 | Write `subagents.json` | exact five settings print, workflows off by default and on per project |
 | 7 | Write `pi-statusline.json` | exact 19-segment OMP-parity ordered list prints |
-| 8 | Configure account 2 and durable pi temp root | account-2 env loads; `os.tmpdir()` resolves under `~/.trellis` |
-| 9 | Author and materialize your agent roster | every agent you wrote resolves from `.agents/agents/`; boundaries pass |
+| 8 | Configure account 2 and durable pi temp root | account-2 env loads; `os.tmpdir()` resolves under `~/projects/worktrees/_pi` |
+| 9 | Author and materialize your agent roster | every agent you wrote resolves from `.pi/agents/`; boundaries pass |
 | 10 | Launch agents as hc sub-agents | one `hc run --bg`, briefed at launch; no pane placement |
 | 11 | Understand remote compaction | six reason codes understood; not installed by step 2 |
 | 12 | Fire pi and enumerate active tools | the 9-name tool list prints, including `trellis_web_search` |
@@ -87,49 +87,40 @@ export TRELLIS_REPO_ROOT="$PWD"
 ```bash
 test "$(uname -s)" = "Darwin"
 test -d "$TRELLIS_REPO_ROOT/.git"
-# The patch bundle is part of the published subset, so this check is a
-# corrupted-checkout guard rather than a "go find it elsewhere" gate.
-if [ ! -f "$TRELLIS_REPO_ROOT/core-rules/pi/patches/apply-pi-subagents-patches.sh" ] || \
-   [ ! -f "$TRELLIS_REPO_ROOT/core-rules/pi/patches/pi-subagents-0.19.0-preserve-cleanup-worktree.patch" ]; then
-  printf '%s\n' 'Required pi-subagents 0.19.0 cleanup-preservation patch bundle is missing; check out the full tree before continuing.' >&2
-  exit 1
-fi
-
+test -f "$TRELLIS_REPO_ROOT/core-rules/pi/extensions/trellis-bash-guard.ts"
 printf 'repo=%s\nos=%s\n' "$TRELLIS_REPO_ROOT" "$(uname -s)"
 ```
 
 Expected: two lines ending in the checkout path and `os=Darwin`.
 
-This guide is macOS-only by construction: step 3 stores keys in the macOS Keychain and step 8 pins a temp root below `~/.trellis`. On Linux, substitute your own secret store in step 3 and keep every other step.
+This guide is macOS-only by construction: step 3 stores keys in the macOS Keychain and step 8 pins a temp root below `~/projects/worktrees/_pi`. On Linux, substitute your own secret store in step 3 and keep every other step.
 
-## 1. Install pi 1.1.0
+## 1. Install pi 1.5.2
 
-**The supported floor is pi 1.1.0; any later version is supported.** The install pins 1.1.0 exactly, the version the reference setup runs, so a fresh install is reproducible: do not use `latest` or omit `@1.1.0`. A machine that already runs a later pi keeps it; the Verify below accepts it, and step 12 is the check to re-run after any pi upgrade. `trellis doctor` warns when pi is below 1.1.0, or missing while a registered checkout selects the pi harness.
+**The supported floor is pi 1.5.2; any later version is supported.** The install pins 1.5.2 exactly, the version the reference setup runs, so a fresh install is reproducible: do not use `latest` or omit `@1.5.2`. A machine that already runs a later pi keeps it; the Verify below accepts it, and step 12 is the check to re-run after any pi upgrade. `trellis doctor` warns when pi is below 1.5.2, or missing while a registered checkout selects the pi harness.
 
-The setup relies on two pi behaviours it has verified only on 1.1.0. Pi 1.x ships a built-in MCP client, which step 2's `settings.json` switches off with `"extensions": ["-builtin:mcp"]`. And with `pi-subagents` 0.19.0, a project `<cwd>/.pi/subagents.json` merges over the global one (verified on pi 1.1.0, step 12), which is how step 6 keeps workflows off everywhere except a foreman's worktree. Instructions that existed only for pi 0.99 and 1.0 (the MCP adapter's built-in allowlist and `autoEnableCodemode` keys) are gone with the adapter. The pi launch forms Herdr uses (fullscreen TUI; one-shot reviewers as interactive `--no-tools` sessions briefed at launch) are unchanged on 1.1.0.
-
-Where a step's evidence came from an earlier version, it says so. The compaction patch bundle in step 11 is **legacy**: it pins pi 0.85.0 / 0.85.1 bundle identities (`chunk-WZB2R5YO.js` / `chunk-JVUZSMYM.js`), refuses every other version, and does not apply to this setup.
+The setup relies on pi 1.5.2 and `@tintinweb/pi-subagents@0.26.0`. Pi 1.x ships a built-in MCP client, which step 2's `settings.json` switches off with `"extensions": ["-builtin:mcp"]`. And with `pi-subagents` 0.26.0, a project `<cwd>/.pi/subagents.json` merges over the global one, which is how step 6 keeps workflows off everywhere except a foreman's worktree. The pi launch forms Herdr uses (fullscreen TUI; one-shot reviewers as interactive `--no-tools` sessions briefed at launch) are unchanged on 1.5.2.
 
 **Command**
 
 ```bash
-npm install --global @earendil-works/pi-coding-agent@1.1.0
+npm install --global @earendil-works/pi-coding-agent@1.5.2
 ```
 
 **Verify**
 
 ```bash
 pi --version </dev/null | awk -F. '
-  /^[0-9]+\.[0-9]+\.[0-9]+$/ && ($1 > 1 || ($1 == 1 && $2 >= 1)) { print "pi=" $0 " floor=1.1.0"; ok = 1 }
-  END { if (!ok) { print "pi is below the 1.1.0 floor, or its version is unreadable" > "/dev/stderr"; exit 1 } }'
+  /^[0-9]+\.[0-9]+\.[0-9]+$/ && ($1 > 1 || ($1 == 1 && ($2 > 5 || ($2 == 5 && $3 >= 2)))) { print "pi=" $0 " floor=1.5.2"; ok = 1 }
+  END { if (!ok) { print "pi is below the 1.5.2 floor, or its version is unreadable" > "/dev/stderr"; exit 1 } }'
 npm list --global --depth=0 @earendil-works/pi-coding-agent
 ```
 
-Expected: `pi=1.1.0 floor=1.1.0` (or a later version), `@earendil-works/pi-coding-agent@1.1.0` (or the same later version), and exit 0.
+Expected: `pi=1.5.2 floor=1.5.2` (or a later version), `@earendil-works/pi-coding-agent@1.5.2` (or the same later version), and exit 0.
 
 ## 2. Install the active add-ons
 
-There are **three npm packages and four local extensions**: `@tintinweb/pi-subagents`, `@narumitw/pi-codex-compact`, `pi-antigravity`; and the local files `opencode-go-2.ts` (account-2 provider), `trellis-web-search.ts` (the `trellis_web_search` tool), `trellis-bash-guard.ts` (a timeout and output cap for bash calls), and the `omp-statusline` fork. The step also writes the whole `settings.json`. This is the trimmed package set the reference setup runs: no MCP adapter, no computer-use server and no session-messaging package, so pi runs no MCP server, and `settings.json` switches pi 1.x's built-in MCP client off. `pi install` performs initial npm package registration. The final `npm ci --legacy-peer-deps` replays the generated lockfile and verifies its integrity without trying to lock pi's globally supplied peer packages. After this first installation, **every reinstall is `npm ci --legacy-peer-deps` in `~/.pi/agent/npm`; never run `npm install` there.**
+There are **three npm packages and three local extensions**: `@tintinweb/pi-subagents`, `@narumitw/pi-codex-compact`, `pi-antigravity`; and the local files `trellis-web-search.ts` (the `trellis_web_search` tool), `trellis-bash-guard.ts` (a timeout and output cap for bash calls), and the `omp-statusline` fork. The step also writes the whole `settings.json`. This is the trimmed package set the reference setup runs: no MCP adapter, no computer-use server and no session-messaging package, so pi runs no MCP server, and `settings.json` switches pi 1.x's built-in MCP client off. `pi install` performs initial npm package registration. The final `npm ci --legacy-peer-deps` replays the generated lockfile and verifies its integrity without trying to lock pi's globally supplied peer packages. After this first installation, **every reinstall is `npm ci --legacy-peer-deps` in `~/.pi/agent/npm`; never run `npm install` there.**
 
 `trellis-remote-compact` is a separate customization; it is not in the active package set and no implementation ships here. Step 11 records the contract it must satisfy.
 
@@ -137,12 +128,12 @@ The footer itself is the `omp-statusline` fork at `core-rules/pi/statusline/omp-
 
 **Command**
 
-Run these blocks in order. Each block tagged `<!-- pi-guide:file <path> -->` writes exactly that file; `scripts/pi-guide-parity.sh` replays only those tagged blocks, into a temporary HOME, to prove what they write. The guide has seven: `settings.json`, the two extensions and the statusline fork here, then `subagents.json`, `pi-statusline.json` and the `~/.zshenv` snippet. Step 4's `auth.json` merge is deliberately untagged (see step 4).
+Run these blocks in order. Each block tagged `<!-- pi-guide:file <path> -->` writes exactly that file; `scripts/pi-guide-parity.sh` replays only those tagged blocks, into a temporary HOME, to prove what they write. The guide has seven: `settings.json`, the two `.ts` extensions and the statusline fork here, then `subagents.json`, `pi-statusline.json` and the `~/.zshenv` snippet. Step 4's `auth.json` merge is deliberately untagged (see step 4).
 
 Register the npm add-ons.
 
 ```bash
-pi install npm:@tintinweb/pi-subagents@0.19.0
+pi install npm:@tintinweb/pi-subagents@0.26.0
 pi install npm:@narumitw/pi-codex-compact@0.54.0
 pi install npm:pi-antigravity@0.9.0
 ```
@@ -154,10 +145,10 @@ Write the whole `settings.json`, in the reference setup's key order, after the `
 mkdir -p "$HOME/.pi/agent"
 cat > "$HOME/.pi/agent/settings.json" <<'JSON'
 {
-  "lastChangelogVersion": "1.1.0",
+  "lastChangelogVersion": "1.5.2",
   "theme": "dark",
   "defaultProvider": "openai-codex",
-  "defaultModel": "gpt-6.1-sol",
+  "defaultModel": "gpt-6.2-sol",
   "packages": [
     "npm:@tintinweb/pi-subagents",
     "npm:@narumitw/pi-codex-compact@0.54.0",
@@ -177,12 +168,11 @@ cat > "$HOME/.pi/agent/settings.json" <<'JSON'
   "shellCommandPrefix": "if [ -d \"${TRELLIS_PI_TMPDIR:-}\" ]; then export TMPDIR=\"$TRELLIS_PI_TMPDIR\"; fi",
   "modelThinkingLevels": {
     "openai-codex/gpt-6.1-terra": "medium",
-    "openai-codex/gpt-6.1-sol": "high",
-    "openai-codex/gpt-6-astra": "high",
+    "openai-codex/gpt-6.2-sol": "high",
+    "openai-codex/gpt-6.2-astra": "high",
     "openai-codex/gpt-5.3-codex-spark": "xhigh",
     "openrouter/minimax/minimax-m3:free": "high",
-    "opencode-go/muse-spark-1.3-contributor": "xhigh",
-    "opencode-go-2/muse-spark-1.3-contributor": "xhigh",
+    "antigravity/gemini-4-carbon": "medium",
     "antigravity/gemini-3.8-flash": "high"
   },
   "tuiMode": "fullscreen",
@@ -191,24 +181,13 @@ cat > "$HOME/.pi/agent/settings.json" <<'JSON'
 JSON
 ```
 
-Replay the npm lockfile, then re-apply the subagents patch: `npm ci` restores upstream files, including the 0.19.0 cleanup-on-error defect.
+Replay the npm lockfile to verify exact package installation.
 
 ```bash
 (
   cd "$HOME/.pi/agent/npm"
   npm ci --legacy-peer-deps
 )
-bash "$TRELLIS_REPO_ROOT/core-rules/pi/patches/apply-pi-subagents-patches.sh" \
-  "$HOME/.pi/agent/npm/node_modules/@tintinweb/pi-subagents"
-```
-
-Install the second OpenCode Go account's provider: a single-model Muse Spark 1.3 Contributor lane on the openai-responses wire (the Go chat/completions wire 500s Muse; `/responses` answers). The file's header comment explains why it is a second provider rather than key rotation.
-
-<!-- pi-guide:file ~/.pi/agent/extensions/opencode-go-2.ts -->
-```bash
-mkdir -p "$HOME/.pi/agent/extensions"
-install -m 0644 "$TRELLIS_REPO_ROOT/core-rules/pi/extensions/opencode-go-2.ts" \
-  "$HOME/.pi/agent/extensions/opencode-go-2.ts"
 ```
 
 Install web search. The extension registers `trellis_web_search`. It asks Google Search grounding with the `antigravity` credential, which it gets from pi's model registry at call time (step 5), and has no fallback provider. It allows 20 calls per pi process by default.
@@ -261,7 +240,7 @@ const expectedSources = [
 if (JSON.stringify(configured) !== JSON.stringify(expectedSources)) throw new Error("settings packages differ");
 console.log(`settings-packages=${configured.length}`);
 const expected = new Map([
-  ["@tintinweb/pi-subagents", "0.19.0"],
+  ["@tintinweb/pi-subagents", "0.26.0"],
   ["@narumitw/pi-codex-compact", "0.54.0"],
   ["pi-antigravity", "0.9.0"],
 ]);
@@ -271,15 +250,14 @@ for (const [name, want] of expected) {
   if (got !== want) throw new Error(`${name}: expected ${want}, got ${got}`);
   console.log(`${name}@${got}`);
 }
-const local = fs.readFileSync(path.join(process.env.HOME, ".pi", "agent", "extensions", "opencode-go-2.ts"));
-const localSource = fs.readFileSync(path.join(process.env.TRELLIS_REPO_ROOT, "core-rules", "pi", "extensions", "opencode-go-2.ts"));
-if (!local.equals(localSource)) throw new Error("opencode-go-2.ts differs from core-rules/pi/extensions");
-if (!local.toString("utf8").includes('registerProvider("opencode-go-2"')) throw new Error("opencode-go-2 provider registration missing");
-console.log("local:opencode-go-2.ts=ready");
 const search = fs.readFileSync(path.join(process.env.HOME, ".pi", "agent", "extensions", "trellis-web-search.ts"));
 const searchSource = fs.readFileSync(path.join(process.env.TRELLIS_REPO_ROOT, "core-rules", "pi", "extensions", "trellis-web-search.ts"));
 if (!search.equals(searchSource)) throw new Error("trellis-web-search.ts differs from core-rules/pi/extensions");
 console.log("local:trellis-web-search.ts=ready");
+const guard = fs.readFileSync(path.join(process.env.HOME, ".pi", "agent", "extensions", "trellis-bash-guard.ts"));
+const guardSource = fs.readFileSync(path.join(process.env.TRELLIS_REPO_ROOT, "core-rules", "pi", "extensions", "trellis-bash-guard.ts"));
+if (!guard.equals(guardSource)) throw new Error("trellis-bash-guard.ts differs from core-rules/pi/extensions");
+console.log("local:trellis-bash-guard.ts=ready");
 const forkPkg = JSON.parse(fs.readFileSync(path.join(process.env.HOME, ".pi", "agent", "extensions", "omp-statusline", "package.json"), "utf8"));
 if (forkPkg.name !== "omp-statusline") throw new Error("omp-statusline fork missing");
 console.log(`local:omp-statusline=${forkPkg.version}`);
@@ -293,14 +271,14 @@ assert raw == (json.dumps(json.loads(raw), indent=2) + "\n").encode(), "settings
 settings = json.loads((agent / "settings.json").read_text(encoding="utf-8"))
 assert settings["modelThinkingLevels"]["openai-codex/gpt-6.1-terra"] == "medium", settings
 assert settings["defaultProvider"] == "openai-codex", settings
-assert settings["defaultModel"] == "gpt-6.1-sol", settings
+assert settings["defaultModel"] == "gpt-6.2-sol", settings
 assert settings["extensions"] == ["-builtin:mcp"], settings
 print(f"settings.json keys={len(settings)} thinking_levels={len(settings['modelThinkingLevels'])}")
 PY
 pi list
 ```
 
-Expected: `settings-packages=3`, three exact npm `name@version` lines, `local:opencode-go-2.ts=ready`, `local:trellis-web-search.ts=ready`, `local:omp-statusline=0.50.0-omp.1`, `settings.json keys=17 thinking_levels=8`, and the three npm packages under `User packages`. Local `.ts` files are auto-discovered and therefore do not appear in `pi list`; the forked statusline directory is auto-discovered via its `package.json` `pi.extensions` entry. Runtime registration is verified in step 8 after its Keychain-backed environment variable exists.
+Expected: `settings-packages=3`, three exact npm `name@version` lines, `local:trellis-web-search.ts=ready`, `local:trellis-bash-guard.ts=ready`, `local:omp-statusline=0.50.0-omp.1`, `settings.json keys=17 thinking_levels=7`, and the three npm packages under `User packages`. Local `.ts` files are auto-discovered and therefore do not appear in `pi list`; the forked statusline directory is auto-discovered via its `package.json` `pi.extensions` entry.
 
 `trellis-web-search.ts` is not the opt-in grounding adapter under `core-rules/pi/web-search/` ([Web search in Pi](docs/pi-web-search.md)); both register the tool name `trellis_web_search`. This one is always loaded and asks pi's model registry for the `antigravity` credential at call time, so it works after step 5. It allows 20 calls per pi process by default (`TRELLIS_WEB_SEARCH_MAX_CALLS`, 1-100), one at a time, each under a 90 s deadline. Load the opt-in adapter with `-e` only in a profile that does not carry this file.
 
@@ -629,16 +607,15 @@ zsh -lc '
   functions pi | grep -F '\''TMPDIR="$pi_root" /usr/bin/env -u PI_CODING_AGENT_DIR pi "$@"'\'' >/dev/null
   printf "OPENCODE_GO_2_API_KEY=loaded tmpdir=%s pi_function=ready\n" "$HOME/projects/worktrees/_pi"
 '
-zsh -lc 'pi --offline --no-session --list-models opencode-go-2' | awk '$1 == "opencode-go-2" { found=1 } END { if (!found) exit 1; print "provider:opencode-go-2=ready" }'
 ```
 
-Expected: one line with `OPENCODE_GO_2_API_KEY=loaded`, the durable path, and `pi_function=ready`, followed by `provider:opencode-go-2=ready`; the key itself is never printed.
+Expected: one line with `OPENCODE_GO_2_API_KEY=loaded`, the durable path, and `pi_function=ready`; the key itself is never printed.
 
 ## 9. Author and materialize your agent roster
 
 Pi discovers agent files **only** under `<cwd>/.pi/agents/`, `<cwd>/.agents/agents/`, or `$PI_CODING_AGENT_DIR/agents/`. It never reads a repository source directory directly. So the roster needs two things: a source of truth you edit, and a launcher that copies it into pi's discovery root immediately before pi starts.
 
-Keep the source at `core-rules/pi/agents/*.md` in your Trellis checkout, and copy it to `<worktree>/.agents/agents/` at launch time, as Trellis's foreman launcher does. Launch-time materialization is the authority, not inheritance seeding: a worktree created after seeding would otherwise start with no roster, and named dispatch would silently fall back. The launcher's project check (step 8) accepts these copies only while they are byte-identical to the release roster, in `.agents/agents/` or `.pi/agents/`; an edited or extra agent file must be tracked and unchanged at the protected base.
+Keep the source at `core-rules/pi/agents/*.md` in your Trellis checkout, and copy it to `<worktree>/.pi/agents/` at launch time, as Trellis's foreman launcher does (isolating Pi's worker definitions from shared `.agents/agents/`). Launch-time materialization is the authority, not inheritance seeding: a worktree created after seeding would otherwise start with no roster, and named dispatch would silently fall back. The launcher's project check (step 8) accepts these copies only while they are byte-identical to the release roster in `.pi/agents/`; an edited or extra agent file (or any `.agents/agents/` file) must be tracked and unchanged at the protected base.
 
 **The roster files themselves are not shipped in this repository.** Each one pins a `model:`, so a published roster is a statement of which provider accounts its author holds. Write your own against the schema below.
 
@@ -695,8 +672,8 @@ Your launcher must do this fail-closed — if the copy fails, do not start pi.
 ```bash
 TRELLIS_REPO_ROOT="$(git rev-parse --show-toplevel)"
 WORKTREE="${WORKTREE:-$TRELLIS_REPO_ROOT}"
-mkdir -p "$WORKTREE/.agents/agents"
-cp "$TRELLIS_REPO_ROOT"/core-rules/pi/agents/*.md "$WORKTREE/.agents/agents/"
+mkdir -p "$WORKTREE/.pi/agents"
+cp "$TRELLIS_REPO_ROOT"/core-rules/pi/agents/*.md "$WORKTREE/.pi/agents/"
 ```
 
 **Verify**
@@ -711,7 +688,7 @@ import sys
 
 root = Path(sys.argv[1])
 source = root / "core-rules" / "pi" / "agents"
-destination = root / ".agents" / "agents"
+destination = root / ".pi" / "agents"
 source_files = sorted(source.glob("*.md"))
 assert source_files, f"no agent files under {source}"
 for src in source_files:
@@ -732,7 +709,7 @@ for src in source_files:
         assert not any(line.startswith("isolation:") for line in text.splitlines()), (
             f"mutating isolation must remain caller-owned: {src.name}"
         )
-print(f"discovery=.agents/agents source={len(source_files)} materialized={len(source_files)} boundaries=pass")
+print(f"discovery=.pi/agents source={len(source_files)} materialized={len(source_files)} boundaries=pass")
 PY
 ```
 
@@ -757,8 +734,6 @@ Against your own launcher: start five panes with the same `--tab` label and asse
 `trellis-remote-compact` is provider-side compaction for Codex Responses sessions. Pi's built-in local compaction asks a model for a prose summary and discards the prior transcript, including encrypted GPT reasoning blocks. The remote extension captures pi's already-assembled native request and headers, posts them to OpenAI's `/responses/compact`, persists the returned opaque compaction item, and replays it with turns after the compaction boundary. GPT sessions need this to preserve reasoning state instead of paying to reconstruct it after every local summary.
 
 **It is not installed by step 2 and no implementation ships here.** The design is settled; implementation and live runtime acceptance are pending. This section is the contract to build against, not a component you can install today.
-
-**Do not confuse it with the native compaction patches.** `core-rules/pi/patches/COMPACTION.md` describes repairs to pi's own local compactor, and they are legacy: they apply only to a pi 0.85.x install, below this recipe's 1.1.0 floor. The installer selects exact package/bundle pairs: **0.85.0 / `chunk-WZB2R5YO.js`** or **0.85.1 / `chunk-JVUZSMYM.js`**; other identities are refused. The 0.85.1 repair passed copied-package SDK/bundle tests and subsequent installed SDK/bundle checks with synthetic responses, not a native provider call. Local application was backed up and verified; existing Pi processes retain their loaded code until restarted. The original 0.85.0 patch bytes are preserved, but its fixture was unavailable for this qualification and its tests were not rerun. Read `COMPACTION.md` before applying either patch; do not force it onto a different version.
 
 After landing, it is working only when all three are true:
 
@@ -880,13 +855,13 @@ Getting there required fixing three canonical files whose frontmatter was not va
 
 Each line below names the measured failure, not a preference.
 
-### Pi 1.1.0 is the floor
+### Pi 1.5.2 is the floor
 
-**Customization:** install pi 1.1.0 (step 1); keep any later version; never run an earlier one.
+**Customization:** install pi 1.5.2 (step 1); keep any later version; never run an earlier one.
 
-**What breaks without it:** the setup depends on two behaviours the reference setup has verified only on pi 1.1.0. Its `settings.json` switches off pi's built-in MCP client with the pi 1.x `extensions` key; an earlier pi either has no such client to switch off or (0.99, 1.0) needed a separate MCP configuration to keep codemode and a server's tools out of sessions. And workflows are scoped to a foreman's worktree by the project `.pi/subagents.json` merge; where that merge does not hold, turning workflows on for a foreman means turning them on for every pi session. The step-2 packages run on 1.1.0 in the reference setup; earlier hosts are not re-checked.
+**What breaks without it:** the setup depends on pi 1.5.2 and `@tintinweb/pi-subagents@0.26.0`. Its `settings.json` switches off pi's built-in MCP client with the pi 1.x `extensions` key, and workflows are scoped to a foreman's worktree by the project `.pi/subagents.json` merge. Earlier hosts are not re-checked.
 
-**Demonstration:** step 1's Verify refuses a version below 1.1.0; `trellis doctor` warns on one, and on a missing pi while a registered checkout selects the pi harness; step 2 checks `"extensions": ["-builtin:mcp"]`; step 12 records a 1.1.0 session with `SubagentWorkflow` absent under a project `workflowsEnabled: false` and present under `true`.
+**Demonstration:** step 1's Verify refuses a version below 1.5.2; `trellis doctor` warns on one, and on a missing pi while a registered checkout selects the pi harness; step 2 checks `"extensions": ["-builtin:mcp"]`; step 12 verifies `SubagentWorkflow` absent under a project `workflowsEnabled: false` and present under `true`.
 
 ### `PI_CODING_AGENT_DIR` stays unset
 
@@ -894,15 +869,7 @@ Each line below names the measured failure, not a preference.
 
 **What breaks without it:** pi stops using the canonical `~/.pi/agent` profile, so local extensions, auth, sessions, and OpenUsage accounting can resolve from different roots. The roster's global discovery fallback also moves to the wrong `$PI_CODING_AGENT_DIR/agents` directory.
 
-**Demonstration:** step 8 requires the variable to be absent while loading the local account-2 provider; step 12 unsets it explicitly while loading the full tool surface; step 9 documents the three actual discovery roots.
-
-### The second OpenCode Go account is a second provider
-
-**Customization:** retrieve `opencode-go-key-2` from Keychain into `OPENCODE_GO_2_API_KEY`, then let `opencode-go-2.ts` register the independent `opencode-go-2` provider.
-
-**What breaks without it:** key rotation is invisible to the quota resolver. It can report account A's headroom while a rotating credential command actually selects account B, so dispatch appears healthy while using the wrong quota. Without the named second provider, `cheap-2-ro` and `cheap-2-rw` cannot route on account 2's real headroom.
-
-**Demonstration:** step 3 checks the second Keychain entry without printing it; step 8 proves both that the env value loads and that the runtime provider catalogue registers.
+**Demonstration:** step 8 requires the variable to be absent; step 12 unsets it explicitly while loading the full tool surface; step 9 documents the actual discovery roots.
 
 ### Interactive pi pins a durable `TMPDIR`
 
@@ -966,7 +933,7 @@ Expected on the measured host: `cpus=14 workflowConcurrency=12`. Step 6 separate
 
 ### Reinstall npm extensions with `npm ci --legacy-peer-deps`, never `npm install`
 
-**Customization:** preserve `~/.pi/agent/npm/package-lock.json` and run `npm ci --legacy-peer-deps` from that directory. The flag is required because these extensions declare pi peer packages that are supplied by the global pi installation and intentionally absent from this local lockfile. After every reinstall, run `core-rules/pi/patches/apply-pi-subagents-patches.sh` from the selected Trellis source with the installed package root as its argument, as in step 2. It accepts only the pinned version and expected source; a refusal requires investigation before mutating worker runs. Restart pi at an attended boundary to load updated extension code.
+**Customization:** preserve `~/.pi/agent/npm/package-lock.json` and run `npm ci --legacy-peer-deps` from that directory. The flag is required because these extensions declare pi peer packages that are supplied by the global pi installation and intentionally absent from this local lockfile. Restart pi at an attended boundary to load updated extension code.
 
 **What breaks without it:** `npm install` may float the caret-ranged declarations to newer extension versions; plain npm 12 `npm ci` instead fails by trying to add the globally supplied pi peers to the local lock. Either path prevents a reproducible reinstall.
 
@@ -974,11 +941,11 @@ Expected on the measured host: `cpus=14 workflowConcurrency=12`. Step 6 separate
 
 ### The active add-ons
 
-**Customization:** install `@tintinweb/pi-subagents@0.19.0`, `@narumitw/pi-codex-compact@0.54.0`, `pi-antigravity@0.9.0`, local `opencode-go-2.ts` (openai-responses, Muse Spark 1.3), local `trellis-web-search.ts`, and the `omp-statusline@0.50.0-omp.1` fork from `core-rules/pi/statusline/omp-statusline/`.
+**Customization:** install `@tintinweb/pi-subagents@0.26.0`, `@narumitw/pi-codex-compact@0.54.0`, `pi-antigravity@0.9.0`, local `trellis-web-search.ts`, local `trellis-bash-guard.ts`, and the `omp-statusline@0.50.0-omp.1` fork from `core-rules/pi/statusline/omp-statusline/`.
 
-**What breaks without it:** omitting subagents removes three active tools and makes the roster undispatchable; omitting the forked statusline removes the provider/model/tool/context/usage footer (upstream alone renders the old 11-segment footer, which is why a mirror checkout shows a different status line); omitting `pi-codex-compact` removes Codex compaction support; omitting `pi-antigravity` makes an `antigravity/`-routed read-only agent unavailable; omitting the local provider removes the separate account-2 lanes; omitting `trellis-web-search.ts` removes `trellis_web_search`.
+**What breaks without it:** omitting subagents removes three active tools and makes the roster undispatchable; omitting the forked statusline removes the provider/model/tool/context/usage footer (upstream alone renders the old 11-segment footer, which is why a mirror checkout shows a different status line); omitting `pi-codex-compact` removes Codex compaction support; omitting `pi-antigravity` makes an `antigravity/`-routed read-only agent unavailable; omitting `trellis-web-search.ts` removes `trellis_web_search`.
 
-**Demonstration:** step 2 checks all three npm versions, the local account-2 registration source, the web-search bytes and the fork version; step 8 checks its runtime catalogue; step 5 checks the `antigravity` catalogue; step 12 proves the tool-producing registrations remain active.
+**Demonstration:** step 2 checks all three npm versions, the web-search and bash-guard bytes and the fork version; step 5 checks the `antigravity` catalogue; step 12 proves the tool-producing registrations remain active.
 
 ### The forked statusline renders the 19-segment footer
 
@@ -998,11 +965,11 @@ Expected on the measured host: `cpus=14 workflowConcurrency=12`. Step 6 separate
 
 ### The launcher materializes the agent roster
 
-**Customization:** own definitions under `core-rules/pi/agents/`, then have the launcher copy them into each target worktree's `.agents/agents/` before pi starts.
+**Customization:** own definitions under `core-rules/pi/agents/`, then have the launcher copy them into each target worktree's `.pi/agents/` before pi starts.
 
-**What breaks without it:** pi never reads `core-rules/pi/agents/`. If the launcher does not copy the files into one of pi's three discovery roots, named dispatch refuses or falls back despite the roster existing on disk.
+**What breaks without it:** pi never reads `core-rules/pi/agents/`. If the launcher does not copy the files into `.pi/agents/`, named dispatch refuses or falls back despite the roster existing on disk (and writing into `.agents/agents/` leaks Pi's roster into agy).
 
-**Demonstration:** step 9 checks the copy hook and compares every `.agents/agents` file byte-for-byte with its release source.
+**Demonstration:** step 9 checks the copy hook and compares every `.pi/agents` file byte-for-byte with its release source.
 
 ### Agents start as hc sub-agents
 

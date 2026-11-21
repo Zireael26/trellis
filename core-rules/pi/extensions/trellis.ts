@@ -459,17 +459,20 @@ function readBinding(cwd: string): string {
   }
 }
 
-function policyPath(cwd: string) {
-  return resolve(cwd, ".agents/rules/trellis.md");
+function policyPaths(cwd: string) {
+  return [resolve(cwd, ".agents/AGENTS.md"), resolve(cwd, ".agents/rules/trellis.md")];
 }
 
 function readPolicy(cwd: string): string | undefined {
-  try {
-    const policy = readFileSync(policyPath(cwd), "utf8").trim();
-    return policy || undefined;
-  } catch {
-    return undefined;
+  for (const path of policyPaths(cwd)) {
+    try {
+      const policy = readFileSync(path, "utf8").trim();
+      if (policy) return policy;
+    } catch {
+      // try legacy fallback path
+    }
   }
+  return undefined;
 }
 
 const runtimeUnavailable = "Trellis runtime capability is unknown: .trellis/runtime is missing or invalid; the nearest declared anchor must resolve to a directory containing a regular trellis.config.json. Actions are blocked.";
@@ -981,6 +984,8 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   // this turn. The native verifier treats false as unknown, not as an opt-out.
   let allowTurnBaseline = false;
   let baselineAttempt = 0;
+  let attemptedAction = false;
+  let providerFailedBeforeTools = false;
   let shutdownTask: { identity: string; task: Promise<void> } | undefined;
   const deliveredReasons = new Set<string>();
 
@@ -1011,6 +1016,8 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     lifecycleEpoch++;
     baselineAttempt++;
     allowTurnBaseline = false;
+    attemptedAction = false;
+    providerFailedBeforeTools = false;
     shutdownTask = undefined;
     pending.clear();
     resetReads();
@@ -1129,6 +1136,14 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     const ctx = snapshot(nativeContext);
     completion = { ...completion, status: completion.status === "blocked" ? "blocked" : "needs_check", binding: readBinding(ctx.cwd) };
     persistCompletion(); // needs_check (or the standing block) before fallible work
+    // A failed provider request before any tool action has nothing to certify.
+    // Keep needs_check (or the standing block), never accept or stamp it. Once
+    // tools were attempted, the full gate still owns any unfinished work.
+    providerFailedBeforeTools = event.outcome === "error" && !attemptedAction;
+    if (providerFailedBeforeTools) {
+      allowTurnBaseline = false;
+      return undefined;
+    }
     // The unknown fence also blocks repair edits, so settling re-runs the
     // verifier on the latched targets; only a clean rerun clears them.
     if (completion.unknown && Object.keys(completion.postFailures).length) await recheckPost(ctx);
@@ -1171,6 +1186,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   });
 
   async function toolCall(event: ToolCallEvent, context: ExtensionContext) {
+    attemptedAction = true;
     const ctx = snapshot(context), epoch = generation, policy = guardRules();
     const action = actionFor(pi, ctx.cwd, event.toolCallId, event.toolName, event.input as Record<string, unknown>);
     const blockedCompletion = completionGate(action.family === "file_mutation" || action.family === "shell" || ["Agent", "SubagentWorkflow", "steer_subagent"].includes(event.toolName));
@@ -1185,7 +1201,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     }
     const root = attachedRoot(ctx.cwd);
     if ((action.family === "file_mutation" || action.family === "shell" || ["Agent", "SubagentWorkflow", "steer_subagent"].includes(event.toolName)) && (!root || !readPolicy(root))) {
-      return { block: true, reason: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md" };
+      return { block: true, reason: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/AGENTS.md or .agents/rules/trellis.md" };
     }
     if (!root) return { block: true, reason: runtimeUnavailable };
     try {
@@ -1257,12 +1273,13 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   });
 
   async function userBash(event: UserBashEvent, context: ExtensionContext) {
+    attemptedAction = true;
     const ctx = snapshot(context), policy = guardRules();
     const blockedCompletion = completionGate(true);
     if (blockedCompletion) return { result: { output: blockedCompletion, exitCode: 1, cancelled: false, truncated: false } };
     const root = attachedRoot(event.cwd);
     if (!root || !readPolicy(root)) {
-      return { result: { output: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md", exitCode: 1, cancelled: false, truncated: false } };
+      return { result: { output: !root ? runtimeUnavailable : "Trellis parent policy is missing or unreadable at .agents/AGENTS.md or .agents/rules/trellis.md", exitCode: 1, cancelled: false, truncated: false } };
     }
     const action = actionFor(pi, event.cwd, `user-bash:${++userBashSequence}`, "bash", { command: event.command });
     const envelope: NormalizedAction = { schema_version: 1, harness: "pi", phase: "pre_action", native_event: "user_bash", ...session(ctx), cwd: event.cwd, action, result: null };
@@ -1341,6 +1358,8 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   pi.on("before_agent_start", (event, ctx) => {
     if (event.messageType !== "user") return;
     const cwd = ctx.cwd;
+    attemptedAction = false;
+    providerFailedBeforeTools = false;
     // A new prompt needs a fresh completion check; a standing block survives.
     completion = { ...completion, status: completion.status === "blocked" ? "blocked" : "needs_check",
       continuations: 0, noProgress: 0, turn: completion.turn + 1 };
@@ -1349,7 +1368,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     const root = attachedRoot(cwd);
     const policy = root ? readPolicy(root) : undefined;
     const policyBlock = policy ? `<trellis_parent_policy>\n${policy}\n</trellis_parent_policy>` : undefined;
-    const systemPrompt = policyBlock && !event.systemPrompt.includes(policyBlock)
+    const systemPrompt = policyBlock && !event.systemPrompt.includes(policyBlock) && !event.systemPrompt.includes(policy!)
       ? `${event.systemPrompt}\n\n${policyBlock}`
       : event.systemPrompt;
     let identity: string | undefined, identityError: string | undefined;
@@ -1359,7 +1378,7 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
     pendingContext = undefined;
     const policyContext = !root ? runtimeUnavailable : policy
       ? undefined
-      : "Trellis parent policy is missing or unreadable at .agents/rules/trellis.md; shell, file mutation, Agent, SubagentWorkflow, and steer_subagent tools are blocked.";
+      : "Trellis parent policy is missing or unreadable at .agents/AGENTS.md or .agents/rules/trellis.md; shell, file mutation, Agent, SubagentWorkflow, and steer_subagent tools are blocked.";
     return {
       systemPrompt,
       ...((context || policyContext || identityError) ? { message: { customType: "trellis-context", content: [policyContext, identityError, context].filter(Boolean).join("\n\n"), display: false } } : {}),
@@ -1396,6 +1415,10 @@ export default function trellisPiExtension(pi: ExtensionAPI) {
   pi.on("agent_settled", async (_event, nativeContext) => {
     const ctx = snapshot(nativeContext);
     resetReads();
+    const skipSettled = providerFailedBeforeTools;
+    providerFailedBeforeTools = false;
+    if (completion.status === "accepted") attemptedAction = false;
+    if (skipSettled) return;
     const epoch = lifecycleEpoch, identity = lifecycleIdentity(ctx);
     const decision = await lifecycle("agent_settled", ctx);
     if (!currentLifecycle(ctx, identity, epoch)) return;

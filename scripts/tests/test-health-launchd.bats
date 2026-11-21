@@ -42,7 +42,7 @@ EOF
   cat > "$TRELLIS_LAUNCHER" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$LAUNCHER_CALLS"
-[ "$*" = "task materialize --fleet $TRELLIS_FLEET test-health --home $TRELLIS_HOME" ] || exit 44
+[ "$*" = "task materialize --home $TRELLIS_HOME --fleet $TRELLIS_FLEET test-health" ] || exit 44
 [ "${MATERIALIZE_FAIL:-0}" != 1 ] || exit 42
 [ -f "$TEST_HEALTH_LOCK_FILE" ] || exit 43
 mkdir -p "$TASK_ROOT"
@@ -97,11 +97,15 @@ assert_refusal() {
   [ -x "$HOME/Library/LaunchAgents/com.trellis.test-health.runner.sh" ]
   run /usr/bin/plutil -lint "$plist"
   [ "$status" -eq 0 ]
-  for entry in "TRELLIS_HOME:$TRELLIS_HOME" "TRELLIS_FLEET:personal" "TRELLIS_ROOT:$TRELLIS_ROOT" "TRELLIS_LAUNCHER:$TRELLIS_LAUNCHER"; do
+  for entry in "TRELLIS_HOME:$TRELLIS_HOME" "TRELLIS_FLEET:personal" "TRELLIS_ROOT:$TRELLIS_ROOT" "TRELLIS_LAUNCHER:$TRELLIS_LAUNCHER" "MAX_BUDGET_USD:5"; do
     key="${entry%%:*}" value="${entry#*:}"
     run /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist"
     [ "$status" -eq 0 ] && [ "$output" = "$value" ]
   done
+  # Logs belong in mutable private state, never in an immutable payload.
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :StandardOutPath' "$plist")" = "$TRELLIS_HOME/logs/test-health.out.log" ]
+  [ "$(/usr/libexec/PlistBuddy -c 'Print :StandardErrorPath' "$plist")" = "$TRELLIS_HOME/logs/test-health.err.log" ]
+  [ -d "$TRELLIS_HOME/logs" ]
   run /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:Weekday' "$plist"
   [ "$output" = 1 ]
   run /usr/libexec/PlistBuddy -c 'Print :StartCalendarInterval:Hour' "$plist"
@@ -168,11 +172,11 @@ PY
   export PROMPT_BODY=$'Materialized body, not raw.\n\n'
   run /bin/bash "$RUNNER"
   [ "$status" -eq 0 ]
-  [ "$(cat "$LAUNCHER_CALLS")" = "task materialize --fleet personal test-health --home $TRELLIS_HOME" ]
+  [ "$(cat "$LAUNCHER_CALLS")" = "task materialize --home $TRELLIS_HOME --fleet personal test-health" ]
   [ "$(cat "$TEST_HEALTH_FAKE_CWD")" = "$TRELLIS_ROOT" ]
   cmp -s "$PROMPT" "$TEST_HEALTH_FAKE_PROMPT"
   ! cmp -s "$RAW_PROMPT" "$TEST_HEALTH_FAKE_PROMPT"
-  expected_args=$'-p\n--permission-mode\nbypassPermissions\n--max-turns\n100\n--max-budget-usd\n25'
+  expected_args=$'-p\n--permission-mode\nbypassPermissions\n--max-turns\n100\n--max-budget-usd\n5'
   actual_args="$(/usr/bin/tr '\0' '\n' < "$TEST_HEALTH_FAKE_ARGS" | /usr/bin/head -n 7)"
   [ "$actual_args" = "$expected_args" ]
   [ ! -e "$TEST_HEALTH_LOCK_FILE" ]
@@ -182,6 +186,30 @@ PY
   [ "$status" -eq 0 ] && [[ "$output" == info:* ]]
   [ ! -e "$LAUNCHER_CALLS" ] && [ ! -e "$TEST_HEALTH_FAKE_ARGS" ]
   rm -f "$TEST_HEALTH_LOCK_FILE"
+}
+
+@test "the budget ceiling is a small default and is overridable from the environment" {
+  run env MAX_BUDGET_USD=250 /bin/bash "$RUNNER"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  actual_args="$(/usr/bin/tr '\0' '\n' < "$TEST_HEALTH_FAKE_ARGS" | /usr/bin/head -n 7)"
+  [ "$actual_args" = $'-p\n--permission-mode\nbypassPermissions\n--max-turns\n100\n--max-budget-usd\n250' ] ||
+    { echo "$actual_args"; false; }
+  rm -f "$TEST_HEALTH_FAKE_ARGS" "$TEST_HEALTH_LOCK_FILE"
+}
+
+@test "an invalid budget ceiling refuses before materialize or Claude" {
+  for bad in 0 -3 twenty; do
+    run env MAX_BUDGET_USD="$bad" /bin/bash "$RUNNER"
+    assert_refusal budget
+    [ ! -e "$LAUNCHER_CALLS" ] && [ ! -e "$TEST_HEALTH_LOCK_FILE" ]
+  done
+}
+
+@test "installer refuses an invalid budget override without publishing" {
+  run env TEST_HEALTH_MAX_BUDGET_USD=0 /bin/bash "$INSTALLER"
+  [ "$status" -ne 0 ]
+  [ ! -e "$HOME/Library/LaunchAgents/com.trellis.test-health.plist" ]
+  [ ! -e "$LAUNCHCTL_CALLS" ]
 }
 
 @test "materialize failure refuses before Claude" {

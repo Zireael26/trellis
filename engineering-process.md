@@ -11,9 +11,8 @@ an ordinary repository, even when it tracks a portable `.trellis.json` manifest.
 
 This document explains the human operating model. The executable local-setup
 and onboarding recipes live in [AGENT_SETUP.md](AGENT_SETUP.md) and
-[AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md). The release and migration
-procedures are [docs/UPGRADING.md](docs/UPGRADING.md) and
-[docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md).
+[AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md). The release and upgrade
+procedure is [docs/UPGRADING.md](docs/UPGRADING.md).
 
 ---
 
@@ -201,8 +200,7 @@ it, and `trellis registry rebuild --fleet NAME ROOT...` reconstructs it from
 `trellis registry import --fleet NAME --registry FILE [--blacklist FILE]` is
 retained for a machine that has not imported yet. It reads a Markdown roster the
 operator supplies — from Git history (`git show <pre-cutover-sha>:registry.md`)
-or a backup — and never from a tracked path. See
-`docs/MIGRATING-LOCAL-FLEETS.md`.
+or a backup — and never from a tracked path. See `AGENT_SETUP.md`.
 
 ---
 
@@ -456,8 +454,8 @@ The portable architecture ships through two releases:
    the next immutable release, and explicitly adopt it.
 
 This is a compatibility window, not a permanent mixed layout. The full sequence
-and rollback branches are in [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md)
-and [docs/UPGRADING.md](docs/UPGRADING.md).
+and rollback branches are in [AGENT_SETUP.md](AGENT_SETUP.md) and
+[docs/UPGRADING.md](docs/UPGRADING.md).
 
 ### 6.5 Launcher-only command execution
 
@@ -1088,10 +1086,9 @@ by listing names in its portable `.trellis.json`:
 
 Preset delivery is a separate operator step, not part of attachment: the
 inheritance manifest declares no preset leaf group and `attach` expands none.
-`scripts/rollout-presets.sh` reads each row's declared array and installs
-release-pinned `preset-<name>.md` links into `.claude/rules/` for rows selecting
-`claude`, and `.agents/rules/` for rows selecting `codex` or `pi`, pruning links
-for presets a project no longer declares.
+Operators link release-pinned `preset-<name>.md` leaves into `.claude/rules/`
+for rows selecting `claude` and `.agents/rules/` for rows selecting `codex` or
+`pi`, pruning links for presets a project no longer declares.
 
 The policy is **additive, not last-wins**: enabled preset content adds to the
 prompt and there is no engine-level override. What is *delivered* to a surface
@@ -1214,9 +1211,8 @@ clone/common-dir owner; common Git state persists until its final owner detaches
 | Install, verify, and adopt in one step | `trellis upgrade VERSION [--remote URL]` with exactly one selector; launcher-only, forward-only (§14.6). |
 | Measure the latency Trellis adds (hooks, lifecycle, gate) | `trellis bench [--suite hooks\|lifecycle\|gate] [--n N] [--out DIR]` in a sandbox; writes a redacted `bench-<date>-<label>.{json,md}` receipt (§6.5). |
 | Run a heavy test battery without starving other lanes | `trellis heavy --lane NAME -- <cmd...>` (add `--light` for a single-file run under 2 minutes); `trellis heavy --status` shows who holds the slots (§6.5). |
-| Import or rebuild local inventory | Follow [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md). |
+| Import or rebuild local inventory | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |
 | Attach, move, recover, or detach a checkout | Follow [AGENT_SETUP.md](AGENT_SETUP.md). |
-| Migrate a legacy project | Follow [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md). |
 | Roll back an adopted release | Verify the prior release, then explicitly adopt it; see [docs/UPGRADING.md](docs/UPGRADING.md). |
 | Change parent policy | Make a reviewed source change, publish an immutable release, then explicitly adopt it. |
 | Publish Trellis safely | Keep private-source push and public-mirror publication roles separate; pass the release gate first. |
@@ -1229,5 +1225,4 @@ clone/common-dir owner; common Git state persists until its final owner detaches
 - [AGENT_SETUP.md](AGENT_SETUP.md) — executable local machine setup and lifecycle recipes.
 - [AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md) — portable project onboarding recipe.
 - [docs/UPGRADING.md](docs/UPGRADING.md) — install, verify, adoption, compatibility, and rollback procedure.
-- [docs/MIGRATING-LOCAL-FLEETS.md](docs/MIGRATING-LOCAL-FLEETS.md) — local registry import/rebuild and legacy project migration procedure.
 - [docs/adr/2026-08-12-local-fleets-immutable-releases.md](docs/adr/2026-08-12-local-fleets-immutable-releases.md) — architectural decision and supersession record.

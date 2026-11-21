@@ -8,6 +8,16 @@ in that substitution (or an enclosing substitution), or on the containing
 outer simple command. A redirect on an unrelated pipeline member still counts:
 this deliberately conservative rule also covers redirected compound commands.
 `env NAME=value command` is not a shell assignment prefix.
+Locale declarations (local/declare/typeset/readonly, including bare names but not
+-p/-f/-F queries) are rejected everywhere, even outside
+substitutions. The migrated helpers below reject ALL in-shell locale assignments:
+Bash 5.3 can crash on runtime locale changes after fork, including save/restore.
+Use locale-independent byte tests or `env LC_ALL=C command` instead. The only
+declaration exception is the exact native-pinned semver.sh digest and command;
+that native input awaits a rebuild. The exact _gr_with_rules bodies also retain
+C-locale regex/nocasematch semantics pending native-path work, without adding a
+subprocess on every tool call. Other legacy assignments retain the existing
+redirected-substitution rule (see docs/evidence/153-locale-local.md).
 
 This is a bounded lexical scanner, NOT a Bash parser or an execution proof.
 It handles ordinary quoting/escapes/comments, multiline and nested expansions,
@@ -57,6 +67,20 @@ SHELL_CONSUMER = re.compile(r"(?:^|[\s;|&])(?:[^\s;|&]*/)?(?:ba|da|k)?sh(?:\s|$)
 SHELL_OUTPUT = re.compile(r"(?:^|[\s>'\"])[^\s]*\.(?:bash|sh)(?:[\s'\"]|$)")
 SHELL_SHEBANG = re.compile(r"^#![^\n]*\b(?:bash|dash|ksh|sh)(?:\s|$)")
 PREFIX_KEYWORDS = {"if", "elif", "while", "until", "then", "do", "else", "!", "time"}
+MIGRATED_LOCALE_HELPERS = {
+    "trellis_home_has_unsafe_chars", "trellis_home_native_entry_path_is_safe",
+    "_attachment_visible", "_attachment_hooks_expected_passthrough_names",
+    "shared_infra_safe_line", "_gr_json_str",
+    "_gr_reread_override_active", "pg_audit_dir_values", "resolve_analyze_report",
+    "sg_parse_local_config", "parse_config_data",
+}
+PINNED_SEMVER_SHA256 = "94c8ae45918a99490575014c7930b8bb22196c1ab6c839e229c7d2222eab2f82"
+# C-locale regex/nocasematch semantics; native follow-up, not per-tool forks.
+PINNED_RULE_MATCHER_SHA256 = "d17f5213dc807baf6494c6e9abfef048dec8cfb23af128cc282a72fa868d0468"
+RULE_MATCHER_PATHS = {
+    "scripts/lib/guard-rules-runtime.bash", "core-rules/hooks/lib/guard-rules.sh",
+    "core-rules/codex/hooks/lib/guard-rules.sh",
+}
 
 
 class Token:
@@ -97,6 +121,42 @@ class Command:
             return prefixes
         return []  # assignment-only statements are not temporary commands
 
+    def locale_assignments(self, declarations_only=False):
+        words = []
+        skip_operand = False
+        for token in self.tokens:
+            if token.kind == "redirect":
+                skip_operand = True
+            elif skip_operand:
+                skip_operand = False
+            else:
+                words.append(Scanner.delimiter(token.text)[0])
+        while words and (words[0] in PREFIX_KEYWORDS or words[0] in {"builtin", "command"}
+                         or words[0] in {"--", "-p"}):
+            words.pop(0)
+        prefixes = []
+        while words and ASSIGNMENT.match(words[0]):
+            prefixes.append(words.pop(0))
+        declaration = words and words[0] in {"local", "declare", "typeset", "readonly"}
+        if declaration:
+            # Queries do not create a local or mutate its value/attributes.
+            for word in words[1:]:
+                if word == "--" or not word.startswith(("-", "+")):
+                    break
+                if set(word[1:]) & {"p", "f", "F"}:
+                    return []
+        if declarations_only:
+            candidates = words[1:] if declaration else []
+        else:
+            candidates = prefixes + (words[1:] if declaration or (words and words[0] in {"export", "readonly"}) else [])
+        names = []
+        for word in candidates:
+            match = ASSIGNMENT.match(word)
+            name = match[1] if match else (word if declaration and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", word) else "")
+            if name in {"LANG", "LANGUAGE"} or name.startswith("LC_"):
+                names.append(name)
+        return names
+
 
 class Frame:
     def __init__(self, start, parent=None, parent_token=None, substitution=False):
@@ -112,6 +172,18 @@ class Scanner:
     def __init__(self, text):
         self.text = text
         self.frames = []
+        # These production helpers use column-zero function boundaries, not
+        # nested definitions. This remains a bounded lexical guard, not a parser.
+        self.locale_regions = []
+        self.locale_helper_names = set()
+        header = r"(?m)^([a-zA-Z_][a-zA-Z0-9_]*)[ \t]*\([ \t]*\)[ \t]*([({])[ \t]*(?:#[^\n]*)?\n"
+        for match in re.finditer(header, text):
+            if match[1] in MIGRATED_LOCALE_HELPERS:
+                closing = "}" if match[2] == "{" else ")"
+                end = re.search(r"(?m)^" + re.escape(closing) + r"(?=[ \t]*(?:$|#))", text[match.end():])
+                if end:
+                    self.locale_regions.append((match.start(), match.end() + end.end()))
+                    self.locale_helper_names.add(match[1])
 
     def nested(self, start, limit, parent, token, kind):
         frame = Frame(start, parent, token, True)
@@ -389,6 +461,16 @@ class Scanner:
         root.end = len(self.text)
         found = {}
         for frame in self.frames:
+            for command in frame.commands:
+                protected = any(start <= command.start < end for start, end in self.locale_regions)
+                names = command.locale_assignments(declarations_only=not protected)
+                if names:
+                    evidence = self.text[command.start:command.end]
+                    found[(command.start, command.end)] = {
+                        "line": self.text.count("\n", 0, command.start) + 1,
+                        "command": evidence, "context": evidence,
+                        "assignments": names, "locale": True,
+                    }
             # A process substitution within $(...) remains in that substitution;
             # one outside does not itself qualify as command substitution.
             ancestors = []
@@ -417,6 +499,8 @@ class Scanner:
                 if not names:
                     continue
                 key = (command.start, command.end)
+                prior = found.get(key)
+                names = list(dict.fromkeys(names + (prior["assignments"] if prior else [])))
                 found[key] = {
                     "line": self.text.count("\n", 0, command.start) + 1,
                     "command": self.text[command.start:command.end],
@@ -439,8 +523,25 @@ def inventory(paths):
         path = Path(name)
         if path.is_absolute() or ".." in path.parts or str(path) != name:
             raise ValueError(f"not a normalized relative path: {name!r}")
-        text = path.read_bytes().decode("utf-8", "surrogateescape")
+        raw = path.read_bytes()
+        text = raw.decode("utf-8", "surrogateescape")
         for hit in Scanner(text).findings():
+            # Two exact declarations in a native include_bytes! input. No new
+            # bytes, command, path or general locale baseline inherits this slot.
+            if (name == "scripts/lib/semver.sh"
+                    and hashlib.sha256(raw).hexdigest() == PINNED_SEMVER_SHA256
+                    and hit["command"] == 'local left="$1" right="$2" LC_ALL=C'
+                    and hit["assignments"] == ["LC_ALL"]):
+                continue
+            if (name in RULE_MATCHER_PATHS
+                    and hit["command"] == "local LC_ALL=C _gr_text='' nocase=0 rc"
+                    and hit["assignments"] == ["LC_ALL"]):
+                matcher = re.search(r"(?ms)^_gr_with_rules\(\) \{\n.*?^\}", text)
+                if (matcher and text.count("\n", 0, matcher.start()) + 1 <= hit["line"]
+                        < text.count("\n", 0, matcher.end()) + 1
+                        and hashlib.sha256(matcher[0].encode("utf-8", "surrogateescape")).hexdigest()
+                        == PINNED_RULE_MATCHER_SHA256):
+                    continue
             key = (name, fingerprint(hit["command"], hit["context"]))
             if key not in entries:
                 entries[key] = {"path": name, "sha256": key[1], "count": 0,

@@ -131,7 +131,7 @@ edit() {
 }
 
 @test "the gate's own store path is the guarded one" {
-  run env -u TRELLIS_GATE_STATE_DIR python3 -I -c '
+  run env -u TRELLIS_GATE_STATE_DIR python3 -I -B -c '
 import sys; sys.path.insert(0, sys.argv[1])
 import gate_verdict; print(gate_verdict.command_store())' "$REPO/scripts/lib"
   [ "$status" -eq 0 ] && [ "$output" = "$STORE" ] || { echo "$output"; false; }

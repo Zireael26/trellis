@@ -81,7 +81,7 @@ Never write "so X wins" as a conclusion of your own — only restate the §14.8 
 - **No verdict line.** This command emits no PASS / NEEDS-REVISION / BLOCKED — that is the `analyze` skill's advisory verdict, a different surface. constitution just prints the stack.
 - **Reach the parent by symlink, never by path.** The parent layer is whatever `.claude/rules/trellis.md` resolves to on this machine; do not hardcode a control-plane path.
 - **Don't recursively expand `@`-imports.** Render each layer's own file text; leave its internal pointers (`@…/engineering-process.md`, etc.) as text.
-- **Render loaded, not declared.** Read `.claude/rules/`; do not reconcile against `.trellis.config.json`. Declared-vs-present drift belongs to `preset-drift`.
+- **Render loaded, not declared.** Read `.claude/rules/`; do not reconcile against `.trellis.json`. Declared-vs-present drift belongs to `trellis doctor --fleet`.
 
 <!--
 Canonical-root lineage: `git rev-parse --git-common-dir` → parent, same as

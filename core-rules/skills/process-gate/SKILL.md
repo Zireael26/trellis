@@ -28,7 +28,7 @@ Nine canonical gates, all harness-agnostic. Each has a reference file, a validat
 
 | # | Gate | Reference | Validator |
 |---|---|---|---|
-| 1 | PR hygiene (commit format, size, branch name, description) | [`references/pr-hygiene.md`](references/pr-hygiene.md) | [`scripts/check-pr.sh`](scripts/check-pr.sh) |
+| 1 | PR hygiene (commit format, branch name, description) | [`references/pr-hygiene.md`](references/pr-hygiene.md) | [`scripts/check-pr.sh`](scripts/check-pr.sh) |
 | 2 | Secrets in diff | [`references/secrets.md`](references/secrets.md) | [`scripts/check-secrets.sh`](scripts/check-secrets.sh) |
 | 3 | Bypass markers (hook registration, persistent config drift, override markers) | [`references/bypass.md`](references/bypass.md) | [`scripts/check-bypass.sh`](scripts/check-bypass.sh) |
 | 4 | Tests & coverage | [`references/tests.md`](references/tests.md) | [`scripts/check-tests.sh`](scripts/check-tests.sh) |
@@ -76,8 +76,6 @@ Minimal `local.config.sh`:
 PROCESS_GATE_TEST_CMD="pnpm test"             # used by check-tests.sh
 PROCESS_GATE_TYPECHECK_CMD="pnpm typecheck"   # used by check-tests.sh
 PROCESS_GATE_LINT_CMD="pnpm lint"             # used by check-tests.sh
-PROCESS_GATE_PR_SIZE_LIMIT=600                # warn above 600 (default)
-PROCESS_GATE_PR_SIZE_HARD=1200                # fail above 1200 (default)
 
 # Stack-profile validators (run after the canonical nine).
 PROCESS_GATE_STACK_VALIDATORS=(
@@ -88,8 +86,6 @@ PROCESS_GATE_STACK_VALIDATORS=(
 # Optional: stack profile name (web-next, web-vite, monorepo-pnpm, unity, native-other, n-a)
 PROCESS_GATE_STACK_PROFILE="web-next"
 ```
-
-PR size counts additions and deletions outside the documented test, fixture, generated and lockfile classes; the receipt reports each excluded class, marker-only additions and binary files. Marker-only additions and binary code lines above the warning limit also require reviewer acknowledgement. See [`references/pr-hygiene.md`](references/pr-hygiene.md#pr-size) for exact paths, base attributes, markers and rename handling.
 
 If `local.config.sh` is missing the canonical scripts use sensible defaults and warn that no stack profile is declared.
 
@@ -309,7 +305,7 @@ The canonical nine gates apply regardless of stack profile.
 
 The skill and `engineering-process.md` change together. Adding a process in the manual: add an enforcement here. Retiring one: retire here.
 
-Every change to canonical (`$TRELLIS_ROOT/core-rules/skills/process-gate/`) is a PR against the Trellis canonical repo. The skill cannot relax its own rules silently — that's what `parent-hook-drift` (extended to skills) detects.
+Every change to canonical (`$TRELLIS_ROOT/core-rules/skills/process-gate/`) is a PR against the Trellis canonical repo. The skill cannot relax its own rules silently — that's what `trellis doctor --fleet` detects.
 
 ## Multi-harness support
 

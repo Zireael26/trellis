@@ -529,7 +529,7 @@ owner_matches_row() {
       elif (($has_pi | not) and ($path == "AGENTS.md" or ($path | startswith(".agents/")))) then "codex"
       else empty end;
     {fleet,project_id,root:.worktree_root,checkout_id,worktree_id,attachment_id,release,
-     harnesses:([$owned[] | harness(.path)] | unique | sort)}
+     harnesses:(if .schema_version == 2 then (.harnesses | unique | sort) else ([$owned[] | harness(.path)] | unique | sort) end)}
   ' "$owner" 2>/dev/null)" || return "$TRELLIS_EX_STATE"
   [ "$actual" = "$expected" ] || return "$TRELLIS_EX_CONFLICT"
   owner_root="$(jq -r '.project_root' "$owner")" || return "$TRELLIS_EX_STATE"
@@ -618,14 +618,19 @@ resolve_verified_adoption_target() {
 
 owner_replacement() {
   local original="$1" replacement="$2" version="$3" payload="$4" retired="$5" pruned="${6:-[]}"
-  local render_plans="${7:-[]}" context="${8:-null}" introduced="${9:-}"
+  local render_plans="${7:-[]}" context="${8:-null}" introduced="${9:-}" retargeted="${10:-[]}"
   [ -n "$introduced" ] || introduced='{"link":[],"parents":[],"deferred":[]}'
   jq --arg version "$version" --arg payload "$payload" --argjson retired "$retired" --argjson pruned "$pruned" \
-    --argjson render_plans "$render_plans" --argjson context "$context" --argjson introduced "$introduced" '
+    --argjson render_plans "$render_plans" --argjson context "$context" --argjson introduced "$introduced" \
+    --argjson retargeted "$retargeted" '
     if ([.artifacts[] | select(.path == ".trellis/runtime" and .kind == "symlink")] | length) != 1
     then error("missing owned runtime anchor")
     else .release = $version
-      | .artifacts |= map(if .path == ".trellis/runtime" then .target = $payload else . end)
+      | (reduce $retargeted[] as $rt ({}; .[$rt.path] = $rt.new_target)) as $retarget_map
+      | .artifacts |= map(
+          if .path == ".trellis/runtime" then .target = $payload
+          elif (.kind == "symlink" and ($retarget_map[.path] // null) != null) then .target = $retarget_map[.path]
+          else . end)
       | .artifacts |= map(.path as $path | select(any($retired[]; .path == $path) | not))
       | .artifacts = ([.artifacts[] | select(.kind == "parent")] + $introduced.parents
           + [.artifacts[] | select(.kind != "parent")] + [$introduced.link[] | {kind: "symlink", path, target}])
@@ -808,6 +813,64 @@ adoption_retire_leaf() (
       ;;
     *) return "$TRELLIS_EX_STATE" ;;
   esac
+)
+
+# Owned symlink leaves whose destination stays in the new surface plan with a
+# changed effective target (for example 1.5.3 retargeting .claude/rules/trellis.md
+# and .agents/rules/trellis.md from core-rules/CLAUDE.md to core-rules/AGENTS.md).
+adoption_retargeted_leaves() {
+  local owner="$1" payload="$2" selection="$3" root surfaces harness project_claude
+  local -a harnesses=()
+  command -v surface_plan_emit >/dev/null 2>&1 || { printf '[]\n'; return 0; }
+  while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$selection" | jq -r '.[]')
+  surfaces="$(surface_plan_emit "$payload" "${harnesses[@]}")" || return "$?"
+  root="$(jq -r '.worktree_root' "$owner")" || return "$TRELLIS_EX_STATE"
+  project_claude=false
+  if command -v attach_project_claude_present >/dev/null 2>&1 && attach_project_claude_present "$root"; then
+    project_claude=true
+  fi
+  jq -c --argjson surfaces "$surfaces" --argjson project_claude "$project_claude" '
+    (reduce ($surfaces.artifacts[] | select(.kind == "symlink")) as $s ({};
+      .[$s.destination] = (if $s.source_scope == "project"
+                           then (if $project_claude then $s.target else $s.fallback_target end)
+                           else $s.target end))) as $planned
+    | [.artifacts[] | select(.kind == "symlink" and .path != ".trellis/runtime")
+       | . as $cur
+       | ($planned[$cur.path] // null) as $new_target
+       | select($new_target != null and $new_target != $cur.target)
+       | {path: $cur.path, old_target: $cur.target, new_target: $new_target}]
+  ' "$owner" || return "$TRELLIS_EX_STATE"
+}
+
+adoption_retarget_leaf() (
+  local root="$1" leaf="$2" direction="$3" path old_target new_target expected desired parent base held
+  path="$(printf '%s\n' "$leaf" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+  old_target="$(printf '%s\n' "$leaf" | jq -r '.old_target')" || return "$TRELLIS_EX_STATE"
+  new_target="$(printf '%s\n' "$leaf" | jq -r '.new_target')" || return "$TRELLIS_EX_STATE"
+  case "$direction" in
+    forward) expected="$old_target"; desired="$new_target" ;;
+    rollback) expected="$new_target"; desired="$old_target" ;;
+    *) return "$TRELLIS_EX_STATE" ;;
+  esac
+  _attachment_parent_safe "$root" "$path" || return "$TRELLIS_EX_CONFLICT"
+  parent="$(dirname "$root/$path")" || return "$TRELLIS_EX_STATE"
+  base="$(basename "$path")" || return "$TRELLIS_EX_STATE"
+  CDPATH='' cd "$parent" || return "$TRELLIS_EX_CONFLICT"
+  [ "$(pwd -P)" = "$parent" ] || return "$TRELLIS_EX_CONFLICT"
+  _attachment_symlink_matches "./$base" "$desired" && return 0
+  _attachment_symlink_matches "./$base" "$expected" || return "$TRELLIS_EX_CONFLICT"
+  held="./.${base}.release-retarget.$$"
+  [ ! -e "$held" ] && [ ! -L "$held" ] || return "$TRELLIS_EX_CONFLICT"
+  mv -- "./$base" "$held" || return "$TRELLIS_EX_UNAVAILABLE"
+  if ! { [ -L "$held" ] && _attachment_symlink_matches "$held" "$expected"; }; then
+    mv -- "$held" "./$base"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+  if ! ln -s -- "$desired" "./$base"; then
+    mv -- "$held" "./$base"
+    return "$TRELLIS_EX_UNAVAILABLE"
+  fi
+  rm -- "$held" || return "$TRELLIS_EX_UNAVAILABLE"
 )
 
 # 1.3.18 stops rendering .pi/hooks: pi treats that directory as a deprecated
@@ -1513,6 +1576,10 @@ adoption_snapshot_render() {
   after_mode="$(printf '%s\n' "$render" | jq -r '.after_mode')" || return "$TRELLIS_EX_STATE"
   keys="$(printf '%s\n' "$render" | jq -c '.owned_keys')" || return "$TRELLIS_EX_STATE"
   _attachment_parent_safe "$root" "$relative" || return "$TRELLIS_EX_CONFLICT"
+  if [ "$relative" = .opencode/opencode.json ] && { [ -e "$root/.opencode/opencode.jsonc" ] || [ -L "$root/.opencode/opencode.jsonc" ]; }; then
+    release_err 'OpenCode sibling .opencode/opencode.jsonc conflicts with .opencode/opencode.json; merge or remove .opencode/opencode.jsonc before adopting'
+    return "$TRELLIS_EX_CONFLICT"
+  fi
   destination="$(_attachment_destination "$root" "$relative")" || return "$TRELLIS_EX_STATE"
   if [ ! -e "$destination" ] && [ ! -L "$destination" ]; then
     release_err "explicit-json render target is absent: $relative"
@@ -1681,6 +1748,10 @@ adoption_render_plan_matches_source() {
   local candidate candidate_identity candidate_hash candidate_mode keys
   relative="$(printf '%s\n' "$planned" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
   _attachment_parent_safe "$root" "$relative" || return "$TRELLIS_EX_CONFLICT"
+  if [ "$relative" = .opencode/opencode.json ] && { [ -e "$root/.opencode/opencode.jsonc" ] || [ -L "$root/.opencode/opencode.jsonc" ]; }; then
+    release_err 'OpenCode sibling .opencode/opencode.jsonc conflicts with .opencode/opencode.json; merge or remove .opencode/opencode.jsonc before adopting'
+    return "$TRELLIS_EX_CONFLICT"
+  fi
   destination="$(_attachment_destination "$root" "$relative")" || return "$TRELLIS_EX_STATE"
   expected="$(printf '%s\n' "$planned" | jq -r '.destination')" || return "$TRELLIS_EX_STATE"
   [ "$destination" = "$expected" ] || return "$TRELLIS_EX_CONFLICT"
@@ -1827,7 +1898,7 @@ preflight_target() {
   # trellis-release-capability: native-render-migration
   local home="$1" new_version="$2" new_payload="$3" row="$4" work="$5" number="$6"
   local target binding identity root root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier hook_authority
-  local renders='[]' render render_plan index=0 retired introduced leaf pruned='[]' migrate=false context='null'
+  local renders='[]' render render_plan index=0 retired introduced retargeted='[]' leaf pruned='[]' migrate=false context='null'
   local pi_hooks_required pi_hooks_owned checkout_root fleet recovery_roots recovery_root recovery_harnesses
 
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
@@ -1872,10 +1943,31 @@ preflight_target() {
     fi
   fi
 
+  local pi_agents_relocated
+  pi_agents_relocated="$(jq -r '
+    any(.harnesses.pi.links[]?; (.destination_dir // "") == ".pi/agents")
+  ' "$new_payload/core-rules/inheritance-manifest.json")" || return "$TRELLIS_EX_STATE"
+  if printf '%s\n' "$binding" | jq -e '.harnesses | index("pi") != null' >/dev/null &&
+     [ "$pi_agents_relocated" = true ] &&
+     jq -e 'any(.artifacts[]; .kind == "symlink" and (.path | startswith(".agents/agents/")))' "$owner" >/dev/null; then
+    checkout_root="$(printf '%s\n' "$binding" | jq -r '.checkout_root')" || return "$TRELLIS_EX_STATE"
+    fleet="$(printf '%s\n' "$binding" | jq -r '.fleet')" || return "$TRELLIS_EX_STATE"
+    recovery_harnesses="$(printf '%s\n' "$binding" | jq -r '.harnesses | map("--harness " + .) | join(" ")')" || return "$TRELLIS_EX_STATE"
+    recovery_roots="$(jq -r '.worktree_root' "${owner%/*}"/*.json)" || return "$TRELLIS_EX_STATE"
+    release_err "cannot adopt $new_version for checkout $checkout_root: target release relocates the Pi roster from .agents/agents to .pi/agents at $root; detach the whole checkout and reattach every worktree at the target release:"
+    printf '  trellis detach --home %q --all-worktrees %q\n' "$home" "$checkout_root" >&2
+    while IFS= read -r recovery_root; do
+      printf '  trellis attach --home %q --fleet %q --release %q %s %q\n' \
+        "$home" "$fleet" "$new_version" "$recovery_harnesses" "$recovery_root" >&2
+    done <<< "$recovery_roots"
+    return "$TRELLIS_EX_CONFLICT"
+  fi
+
   old_owner="$work/$number.old.json"
   new_owner="$work/$number.new.json"
   cp "$owner" "$old_owner" && chmod 600 "$old_owner" || return "$TRELLIS_EX_UNAVAILABLE"
   retired="$(adoption_retired_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
+  retargeted="$(adoption_retargeted_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
   introduced="$(adoption_introduced_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
   while IFS= read -r leaf; do
     adoption_introduced_leaf_ready "$root" "$leaf" || return "$?"
@@ -1886,7 +1978,7 @@ preflight_target() {
   fi
   if [ -f "$old_payload/core-rules/native/artifacts.json" ] || [ -f "$new_payload/core-rules/native/artifacts.json" ]; then
     migrate=true
-    if [ "$(jq '(.renders // []) | length' "$old_owner")" -gt 0 ]; then
+    if jq -e 'any((.renders // [])[]; .path == ".claude/settings.local.json" or .path == ".codex/hooks.json" or .path == ".agents/hooks.json" or .path == ".gemini/hooks/trellis.json")' "$old_owner" >/dev/null; then
       context="$(attachment_contextual_render_context "$home")" || return "$?"
     fi
   fi
@@ -1897,9 +1989,9 @@ preflight_target() {
       return "$TRELLIS_EX_STATE"
   done < <(jq -c '(.renders // [])[]' "$old_owner")
   if [ "$migrate" = true ]; then
-    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" "$renders" "$context" "$introduced" || return "$?"
+    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" "$renders" "$context" "$introduced" "$retargeted" || return "$?"
   else
-    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" '[]' null "$introduced" || return "$?"
+    owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" '[]' null "$introduced" "$retargeted" || return "$?"
   fi
 
   hooks="$(jq -r '.git_hooks.enabled // false' "$owner")" || return "$TRELLIS_EX_STATE"
@@ -1928,11 +2020,12 @@ preflight_target() {
     --arg hooks "$hooks" --arg managed "$managed" --arg hook_authority "$hook_authority" \
     --argjson renders "$renders" --argjson retired "$retired" --argjson pruned "$pruned" \
     --argjson introduced "$(printf '%s\n' "$introduced" | jq -c '{link, parents}')" \
+    --argjson retargeted "$retargeted" \
     '{row:$row,binding:$binding,identity:$identity,owner:$owner,old_owner:$old_owner,new_owner:$new_owner,
       old_version:$old_version,old_payload:$old_payload,new_version:$new_version,new_payload:$new_payload,
       root_identity:$root_identity,trellis_identity:$trellis_identity,hooks:$hooks,managed:$managed,
       hook_authority:$hook_authority,renders:$renders,retired:$retired,pruned:$pruned,
-      introduced:$introduced}'
+      introduced:$introduced,retargeted:$retargeted}'
 }
 
 plan_matches_old() {
@@ -2017,6 +2110,9 @@ apply_plan() {
     "$new_version" "$root" "$root_identity" "$trellis_identity" "$old_payload" >/dev/null || return "$?"
   replace_owned_file "$owner" "$old_owner" "$new_owner" || return "$?"
   while IFS= read -r leaf; do
+    adoption_retarget_leaf "$root" "$leaf" forward || return "$?"
+  done < <(printf '%s\n' "$plan" | jq -c '(.retargeted // [])[]')
+  while IFS= read -r leaf; do
     adoption_retire_leaf "$root" "$leaf" forward || return "$?"
   done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
   while IFS= read -r leaf; do
@@ -2086,6 +2182,11 @@ rollback_plan() {
     one=$?
     [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
   done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
+  while IFS= read -r leaf; do
+    adoption_retarget_leaf "$root" "$leaf" rollback
+    one=$?
+    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+  done < <(printf '%s\n' "$plan" | jq -c '(.retargeted // []) | reverse[]')
 
   while IFS= read -r planned_render; do
     [ -n "$planned_render" ] && render_lines+=("$planned_render")

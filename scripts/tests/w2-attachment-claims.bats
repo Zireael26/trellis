@@ -19,7 +19,7 @@ shell_check() {
 python_check() {
   # The one Python implementation, shared by the attach publisher and the
   # native detach program.
-  python3 -I - "$FS_MODULE" "$SANDBOX/parent/artifact" <<'PY'
+  python3 -I -B - "$FS_MODULE" "$SANDBOX/parent/artifact" <<'PY'
 import importlib.util
 import sys
 

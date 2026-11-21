@@ -142,7 +142,9 @@ class TagReuseTests(FIXTURE.VerdictTests):
     def assert_full(self, result):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("reused verdict", result.stdout)
-        self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "full", "coverage"])
+        lines = self.log.read_text().splitlines()
+        self.assertEqual(set(lines[:2]), {"typecheck", "lint"})
+        self.assertEqual(lines[2:], ["full", "coverage"])
 
     def test_exact_tree_hit_reuses_runner_verdict_and_runs_tag_suite(self):
         with self.environment():
@@ -152,7 +154,9 @@ class TagReuseTests(FIXTURE.VerdictTests):
             self.assertIn("reused verdict " + self.id, result.stdout)
             self.assertIn(self.inputs["tree"], result.stdout)
             self.assertIn("tag-reading suites executed", result.stdout)
-            self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
+            lines = self.log.read_text().splitlines()
+            self.assertEqual(set(lines[:2]), {"typecheck", "lint"})
+            self.assertEqual(lines[2:], ["tag", "coverage"])
 
     def test_one_byte_tree_change_runs_full(self):
         with self.environment():
@@ -203,7 +207,9 @@ class TagReuseTests(FIXTURE.VerdictTests):
             result = self.row()
             self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
             self.assertIn("exited 1", result.stdout)
-            self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
+            lines = self.log.read_text().splitlines()
+            self.assertEqual(set(lines[:2]), {"typecheck", "lint"})
+            self.assertEqual(lines[2:], ["tag", "coverage"])
 
     def test_slow_version_probe_runs_full(self):
         # A probe timeout costs only reuse: the tag path falls back to the full
@@ -228,7 +234,9 @@ class TagReuseTests(FIXTURE.VerdictTests):
             result = self.row()
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("reused verdict " + self.id, result.stdout)
-            self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
+            lines = self.log.read_text().splitlines()
+            self.assertEqual(set(lines[:2]), {"typecheck", "lint"})
+            self.assertEqual(lines[2:], ["tag", "coverage"])
             self.git("branch", "-D", "unrelated")
             self.log.unlink()
             original = self.path.read_bytes()
@@ -279,7 +287,9 @@ class TagReuseTests(FIXTURE.VerdictTests):
             self.assertIn("Tests: reused: configured command", result.stdout)
             self.assertNotIn("Tests: full", result.stdout)
             self.assertNotIn("Tests: narrowed", result.stdout)
-            self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
+            lines = self.log.read_text().splitlines()
+            self.assertEqual(set(lines[:2]), {"typecheck", "lint"})
+            self.assertEqual(lines[2:], ["tag", "coverage"])
             self.log.unlink()
             self.git("checkout", "--detach", self.tag + "^{commit}")
             self.assert_full(self.row(identity=False, push_scope="branch"))
@@ -297,7 +307,9 @@ class TagReuseTests(FIXTURE.VerdictTests):
                     self.assertIn("release-payload-commit: tag v1.4.0 verified", result.stdout)
                     self.assertIn("reused verdict " + self.id, result.stdout)
                     self.assertIn("tag-reading suites executed", result.stdout)
-                    self.assertEqual(self.log.read_text().splitlines(), ["typecheck", "lint", "tag", "coverage"])
+                    lines = self.log.read_text().splitlines()
+                    self.assertEqual(set(lines[:2]), {"typecheck", "lint"})
+                    self.assertEqual(lines[2:], ["tag", "coverage"])
 
 
 if __name__ == "__main__":

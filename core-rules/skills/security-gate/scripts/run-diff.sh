@@ -212,32 +212,50 @@ fi
 # assignment overrides the environment, as sourcing did.
 CONFIG_BAD_LINE=0
 parse_config_data() {
-  # Byte semantics: `[A-Z]` is ASCII only, and a non-ASCII key never matches.
-  local LC_ALL=C
-  local line key val n=0
-  local re_assign='^(SECURITY_GATE_[A-Z0-9_]+|LLM_[A-Z0-9_]+)=(.*)$'
-  # [[:space:]] includes CR, so a CRLF file parses the same as an LF one.
-  local re_tail='([[:space:]]+(#.*)?)?$'
-  local re_dq='^"([^"$`\\]*)"'"$re_tail"
-  local re_sq="^'([^']*)'$re_tail"
-  local re_bare='^([A-Za-z0-9_./:,@+%=-]*)'"$re_tail"
-  local re_def='^"[$][{]([A-Z0-9_]+):-([^"$`\\}]*)[}]"'"$re_tail"
+  # Literal patterns preserve C byte semantics, including invalid UTF-8.
+  local line key val raw tail default n=0 whitespace=$' \t\r\n\v\f'
   while IFS= builtin read -r line || [ -n "$line" ]; do
     n=$((n + 1))
-    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line#"${line%%[!$whitespace]*}"}"
     case "$line" in ''|'#'*) continue ;; esac
     CONFIG_BAD_LINE="$n"
-    [[ "$line" =~ $re_assign ]] || return 1
-    key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
-    # A repeated key is last-wins, as it was when the file was sourced.
-    if [[ "$val" =~ $re_def ]]; then
-      [ "${BASH_REMATCH[1]}" = "$key" ] || return 1
-      case "$key" in SECURITY_GATE_*) [ -n "${!key:-}" ] || builtin printf -v "$key" '%s' "${BASH_REMATCH[2]}" ;; esac
-    elif [[ "$val" =~ $re_dq ]] || [[ "$val" =~ $re_sq ]] || [[ "$val" =~ $re_bare ]]; then
-      case "$key" in SECURITY_GATE_*) builtin printf -v "$key" '%s' "${BASH_REMATCH[1]}" ;; esac
-    else
-      return 1
-    fi
+    case "$line" in *=*) ;; *) return 1 ;; esac
+    key=${line%%=*} val=${line#*=}
+    case "$key" in SECURITY_GATE_?*) raw=${key#SECURITY_GATE_} ;; LLM_?*) raw=${key#LLM_} ;; *) return 1 ;; esac
+    case "$raw" in *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) return 1 ;; esac
+    default=false
+    case "$val" in
+      '"'*)
+        val=${val#'"'}
+        case "$val" in *'"'*) tail=${val#*'"'}; val=${val%%'"'*} ;; *) return 1 ;; esac
+        case "$val" in
+          '${'*':-'*'}')
+            raw=${val#'${'}; raw=${raw%%':-'*}
+            [ "$raw" = "$key" ] || return 1
+            val=${val#*':-'}; val=${val%'}'}
+            case "$val" in *'}'*) return 1 ;; esac
+            default=true ;;
+        esac
+        case "$val" in *'$'*|*'`'*|*'\'*|*'"'*) return 1 ;; esac ;;
+      "'"*)
+        val=${val#"'"}
+        case "$val" in *"'"*) tail=${val#*"'"}; val=${val%%"'"*} ;; *) return 1 ;; esac ;;
+      *)
+        raw=$val; val=${val%%[$whitespace]*}; tail=${raw#"$val"}
+        case "$val" in *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:,@+%=-]*) return 1 ;; esac ;;
+    esac
+    case "$tail" in
+      '') ;;
+      [$whitespace]*) tail=${tail#"${tail%%[!$whitespace]*}"}; case "$tail" in ''|'#'*) ;; *) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+    # A repeated key is last-wins; a self-default preserves a nonempty value.
+    case "$key" in
+      SECURITY_GATE_*)
+        if [ "$default" = false ] || [ -z "${!key:-}" ]; then
+          builtin printf -v "$key" '%s' "$val"
+        fi ;;
+    esac
   done < "$1"
   CONFIG_BAD_LINE=0
 }
@@ -981,7 +999,7 @@ if [ "${#SCOPE_FILES[@]}" -gt 0 ]; then
       printf '%s\0' "$f" >> "$WORK/semgrep.shell-scope"
     done
   fi
-  SG_SHELL_SCOPE="$WORK/semgrep.shell-scope" SG_SHELL_PARSE_NOTICE="$WORK/semgrep.shell-parse-notice" \
+  SG_SHELL_SCOPE="$WORK/semgrep.shell-scope" SG_PARSE_NOTICE="$WORK/semgrep.parse-notice" \
     SG_PARSE_DONE="$WORK/semgrep.done" "$PYTHON3_BIN" -I - "$RAW" "$PROJECT_DIR" "$WORK/semgrep.scanned" "$COVERED_EXTENSIONS" "$WORK/semgrep.reason" "${SCOPE_FILES[@]}" >"$SEMGREP_OUT" 2>/dev/null <<'PY'
 import json, sys, os
 raw, root = sys.argv[1], os.path.abspath(sys.argv[2])
@@ -1003,6 +1021,23 @@ covered = set(sys.argv[4].split())
 scanned = {os.path.abspath(os.path.join(root, path)) for path in paths["scanned"]}
 missing = [os.path.relpath(path, root) for path in sys.argv[6:]
            if path.endswith(tuple(covered)) and os.path.abspath(path) not in scanned]
+targets = {os.path.abspath(path) for path in sys.argv[6:]}
+
+# Keep scanning these targets: partial results may still yield findings. Only
+# waive the known parser diagnostic, not a missing scan receipt or other error.
+# dist/ and build/ must be actual directory components of a JS/CSS asset path.
+def is_bundle(relpath):
+    return (relpath.endswith((".min.js", ".min.mjs", ".min.cjs", ".umd.js", ".bundle.js", ".min.css"))
+            or (relpath.endswith((".js", ".mjs", ".cjs", ".css"))
+                and {"dist", "build"}.intersection(relpath.split(os.sep)[:-1])))
+
+bundle_paths = {}
+for target in targets & scanned:
+    rel = os.path.relpath(target, root)
+    if is_bundle(rel):
+        for spelling in (target, rel, "./" + rel):
+            bundle_paths[spelling] = target
+
 for i, r in enumerate(data["results"], 1):
     sev = sev_map.get((r.get("extra", {}).get("severity") or "").upper(), "low")
     path = r.get("path") or ""
@@ -1022,23 +1057,35 @@ with open(os.environ["SG_SHELL_SCOPE"], "rb") as fh:
                    for path in fh.read().split(b'\0') if path}
 parse_types = {"Syntax error", "PartialParsing", "Lexical error"}
 shell_parse_errors = 0
+bundle_parse_paths = set()
 types = set()
 for error in data.get("errors", []):
-    kind = error.get("type") if isinstance(error, dict) else None
-    # Semgrep uses a string for Syntax/Lexical errors and a tagged list for
-    # PartialParsing. Unknown/malformed types stay fatal, never become parse.
-    if isinstance(kind, list) and kind:
-        kind = kind[0]
-    kind = " ".join(kind.split()) if isinstance(kind, str) else "unknown"
+    raw_kind = error.get("type") if isinstance(error, dict) else None
     path = error.get("path") if isinstance(error, dict) else None
+    # Semgrep can encode PartialParsing as a string or [tag, spans]. Do not
+    # infer it from the message or waive an error with inconsistent scope.
+    bundle = bundle_paths.get(path) if isinstance(path, str) else None
+    if bundle and (raw_kind == "PartialParsing" or (
+        isinstance(raw_kind, list) and len(raw_kind) == 2
+        and raw_kind[0] == "PartialParsing" and isinstance(raw_kind[1], list)
+        and all(isinstance(span, dict) and isinstance(span.get("path"), str)
+                and bundle_paths.get(span["path"]) == bundle for span in raw_kind[1])
+    )):
+        bundle_parse_paths.add(bundle)
+        continue
+    kind = raw_kind[0] if isinstance(raw_kind, list) and raw_kind else raw_kind
+    kind = " ".join(kind.split()) if isinstance(kind, str) else "unknown"
     if (kind in parse_types and isinstance(path, str) and path
             and os.path.abspath(os.path.join(root, path)) in shell_scope):
         shell_parse_errors += 1
     else:
         types.add(kind[:64] or "unknown")
-if shell_parse_errors:
-    with open(os.environ["SG_SHELL_PARSE_NOTICE"], "w") as fh:
-        fh.write(f"semgrep: {shell_parse_errors} shell parse errors not counted (shellcheck is the shell SAST)\n")
+if shell_parse_errors or bundle_parse_paths:
+    with open(os.environ["SG_PARSE_NOTICE"], "w") as fh:
+        if shell_parse_errors:
+            fh.write(f"semgrep: {shell_parse_errors} shell parse errors not counted (shellcheck is the shell SAST)\n")
+        if bundle_parse_paths:
+            fh.write(f"semgrep: PartialParsing skipped (minified/generated bundle): {len(bundle_parse_paths)} target(s)\n")
 if types:
     reasons.append("JSON errors non-empty (" + ", ".join(sorted(types)) + ")")
 for path in missing:
@@ -1049,8 +1096,8 @@ if reasons:
     sys.exit(3)
 PY
   PARSE_RC=$?
-  if [ -f "$WORK/semgrep.shell-parse-notice" ]; then
-    while IFS= read -r line; do printf '%s\n' "$line"; done < "$WORK/semgrep.shell-parse-notice"
+  if [ -f "$WORK/semgrep.done" ] && [ -f "$WORK/semgrep.parse-notice" ]; then
+    while IFS= read -r line; do printf '%s\n' "$line"; done < "$WORK/semgrep.parse-notice"
   fi
   [ -f "$WORK/semgrep.done" ] || PARSE_RC=2
   case "$PARSE_RC" in

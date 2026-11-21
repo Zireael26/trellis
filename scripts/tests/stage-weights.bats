@@ -9,7 +9,7 @@ setup() {
 teardown() { rm -rf "$SANDBOX"; }
 
 check_weights() {
-  run python3 -I "$BATS_TEST_DIRNAME/test_stage_weights.py" "WeightTests.$1"
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_stage_weights.py" "WeightTests.$1"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 

@@ -20,13 +20,13 @@ check_case() {
   run "$BASH" "$BATS_TEST_DIRNAME/helpers/doctor-owner-token-compat.bash" "$REPO_ROOT" "$BATS_TEST_TMPDIR"
   if [ "$status" -eq 77 ]; then skip "$output"; fi
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *'ACL, masked ACL and malformed listings refused'* ]]
-  [[ "$output" == *'home token matches pre-change format'* ]]
-  [[ "$output" == *'root token proves the complete ancestor chain'* ]]
-  [[ "$output" == *'coarse user-owned ancestor refused'* ]]
-  [[ "$output" == *'coarse root-owned ancestor accepted for non-root user'* ]]
-  [[ "$output" == *'coarse group-writable root-owned node refused'* ]]
-  [[ "$output" == *'unavailable ACL probe refused'* ]]
+  [[ "$output" == *'ACL, masked ACL and malformed listings refused'* ]] || false
+  [[ "$output" == *'home token matches pre-change format'* ]] || false
+  [[ "$output" == *'root token proves the complete ancestor chain'* ]] || false
+  [[ "$output" == *'coarse user-owned ancestor refused'* ]] || false
+  [[ "$output" == *'coarse root-owned ancestor accepted for non-root user'* ]] || false
+  [[ "$output" == *'coarse group-writable root-owned node refused'* ]] || false
+  [[ "$output" == *'unavailable ACL probe refused'* ]] || false
 }
 
 @test "doctor uses both certified batch verdicts instead of scalar checks" {
@@ -146,7 +146,7 @@ check_case() {
 
 @test "read-only batch does not create an unrelated missing locks directory" {
   check_case missing_state 2 0
-  [[ "$output" == *'locks absent'* ]]
+  [[ "$output" == *'locks absent'* ]] || false
 }
 
 @test "unsafe attachment state permissions force the scalar path without chmod" {

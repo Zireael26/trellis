@@ -18,7 +18,7 @@ For automatic worker selection, use the finite task shapes and compatible chains
 
 The July 2026 Claude/GPT-5.x benchmark table is superseded as routing guidance. D7 closed with a shortfall on 2026-08-23 after its 2026-08-15 expiry; there was no fresh consensus sweep. That history is retained in Git and the Spec 013 records, and is not evidence that Fable beats Astra at planning or that Astra is cheaper on Trellis's tasks. Re-evaluate representative work with fixed acceptance checks, actual usage, elapsed time, and review outcomes before changing automatic routes.
 
-OpenAI's [Astra guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6-astra), checked 2026-09-05, establishes model capabilities and prompting advice; it does not establish a Trellis cross-model ranking.
+OpenAI's [Astra guide](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-6.2-astra), checked 2026-09-05 (refreshed 2026-11-18 for GPT-6.2 Astra), establishes model capabilities and prompting advice; it does not establish a Trellis cross-model ranking.
 
 ## 3. Effort — set per unit at dispatch
 

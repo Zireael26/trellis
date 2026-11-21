@@ -28,7 +28,7 @@
     <string>--safe-only</string>
     <string>--dehydrate</string>
     <string>--scopes</string>
-    <string>worktrees,caches,releases,pi,tmp,docker</string>
+    <string>worktrees,caches,docker,releases,release-tmp,pi,tmp</string>
   </array>
 
   <key>RunAtLoad</key>

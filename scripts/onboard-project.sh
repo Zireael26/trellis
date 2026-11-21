@@ -34,7 +34,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 portable_usage() {
   cat <<'EOF'
 usage: onboard-project.sh --fleet NAME [--home PATH] [--release VERSION]
-       [--harness claude|codex|pi]... [--project-id ID] <project-path>
+       [--harness antigravity|claude|codex|opencode|pi]... [--project-id ID] <project-path>
 EOF
 }
 
@@ -88,7 +88,6 @@ portable_legacy_surface() {
     ".agents/commands/explore.md"
     ".agents/commands/autonomy.md"
     ".agents/commands/surgical.md"
-    "AGENTS.md"
   )
 
   for path in "${legacy_paths[@]}"; do
@@ -97,13 +96,15 @@ portable_legacy_surface() {
       return 0
     fi
   done
-  if [ -e "$root/CLAUDE.md" ] || [ -L "$root/CLAUDE.md" ]; then
-    if [ ! -f "$root/CLAUDE.md" ] || [ -L "$root/CLAUDE.md" ] || [ ! -r "$root/CLAUDE.md" ] ||
-      /usr/bin/env LC_ALL=C grep -Eq '^@/.*/core-rules/CLAUDE\.md$' "$root/CLAUDE.md"; then
-      printf '%s\n' "CLAUDE.md"
-      return 0
+  for path in CLAUDE.md AGENTS.md; do
+    if [ -e "$root/$path" ] || [ -L "$root/$path" ]; then
+      if [ ! -f "$root/$path" ] || [ -L "$root/$path" ] || [ ! -r "$root/$path" ] ||
+        /usr/bin/env LC_ALL=C grep -Eq '^@/.*/core-rules/(CLAUDE|AGENTS)\.md$' "$root/$path"; then
+        printf '%s\n' "$path"
+        return 0
+      fi
     fi
-  fi
+  done
   for path in "$root"/.claude/rules/preset-*.md "$root"/.agents/rules/preset-*.md; do
     [ -e "$path" ] || [ -L "$path" ] || continue
     printf '%s\n' "${path#"$root"/}"
@@ -199,7 +200,7 @@ portable_onboard() (
         release="$2"; shift 2 ;;
       --harness)
         [ "$#" -ge 2 ] || { printf 'onboard-project: --harness requires NAME\n' >&2; portable_usage >&2; return 2; }
-        case "$2" in claude|codex|pi) ;; *) printf 'onboard-project: unsupported harness: %s\n' "$2" >&2; return 2 ;; esac
+        case "$2" in antigravity|claude|codex|opencode|pi) ;; *) printf 'onboard-project: unsupported harness: %s\n' "$2" >&2; return 2 ;; esac
         harnesses+=("$2"); shift 2 ;;
       --project-id)
         [ "$#" -ge 2 ] || { printf 'onboard-project: --project-id requires ID\n' >&2; portable_usage >&2; return 2; }

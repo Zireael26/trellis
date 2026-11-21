@@ -91,7 +91,6 @@ failures = []
 # Paths the guide must write. A tag that disappears is a failure, not a skip.
 EXPECTED = [
     "~/.pi/agent/settings.json",
-    "~/.pi/agent/extensions/opencode-go-2.ts",
     "~/.pi/agent/extensions/trellis-web-search.ts",
     "~/.pi/agent/extensions/trellis-bash-guard.ts",
     "~/.pi/agent/extensions/omp-statusline/",
@@ -101,7 +100,6 @@ EXPECTED = [
 ]
 # Files the guide copies from this repository, with their tracked source.
 COPIES = {
-    "~/.pi/agent/extensions/opencode-go-2.ts": "core-rules/pi/extensions/opencode-go-2.ts",
     "~/.pi/agent/extensions/trellis-web-search.ts": "core-rules/pi/extensions/trellis-web-search.ts",
     "~/.pi/agent/extensions/trellis-bash-guard.ts": "core-rules/pi/extensions/trellis-bash-guard.ts",
     "~/.pi/agent/extensions/omp-statusline/": "core-rules/pi/statusline/omp-statusline",
@@ -111,7 +109,6 @@ LIVE_FILES = [
     ".pi/agent/settings.json",
     ".pi/agent/subagents.json",
     ".pi/agent/pi-statusline.json",
-    ".pi/agent/extensions/opencode-go-2.ts",
     ".pi/agent/extensions/trellis-web-search.ts",
     ".pi/agent/extensions/trellis-bash-guard.ts",
 ]

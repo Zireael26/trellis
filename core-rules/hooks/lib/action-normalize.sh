@@ -88,7 +88,7 @@ def ta_patch:
   | .coverage = (if .targets == [] then "none" elif .complete then "complete" else "partial" end);
 
 def ta_path:
-  (.file_path // .filePath // .path // "")
+  (.file_path // .filePath // .path // .Path // "")
   | select(type == "string" and (test("[\u0000-\u001f\u007f]") | not));
 
 def ta_action($tool_name):
@@ -102,25 +102,25 @@ def ta_action($tool_name):
       then "*** Invalid Path Directive"
       else . end
     ) | join("\n")) | ta_patch
-  elif $tool_name == "Edit" or $tool_name == "Write" then
+  elif $tool_name == "Edit" or $tool_name == "Write" or $tool_name == "edit_file" or $tool_name == "write_file" then
     # A legacy Write can create or overwrite. Treat it conservatively as an
     # update; reread-guard exempts the target after confirming it is absent.
     ta_one("file_mutation"; "update"; ta_r(ta_path))
-  elif $tool_name == "MultiEdit" then
+  elif $tool_name == "MultiEdit" or $tool_name == "multi_edit" then
     {family: "file_mutation", diagnostics: [], targets: (
-      (.file_path // .filePath // .path // null) as $outer
+      (.file_path // .filePath // .path // .Path // null) as $outer
       | [
           (if ($outer | type) == "string" and ($outer | length) > 0 and
               ($outer | test("[\u0000-\u001f\u007f]") | not)
            then $outer else empty end),
-          ((.edits // [])[] | (.file_path // .filePath // .path // empty)
+          ((.edits // [])[] | (.file_path // .filePath // .path // .Path // empty)
             | select(type == "string" and length > 0 and
                      (test("[\u0000-\u001f\u007f]") | not)))
         ] | unique | map({operation: "update", path: .}))}
     | ta_complete_if_any
-  elif $tool_name == "Read" then
+  elif $tool_name == "Read" or $tool_name == "read_file" or $tool_name == "view_file" then
     ta_one("file_read"; "read"; ta_r(ta_path))
-  elif $tool_name == "Bash" or $tool_name == "exec_command" then
+  elif $tool_name == "Bash" or $tool_name == "exec_command" or $tool_name == "run_command" then
     {family: "shell", coverage: "none", targets: [], diagnostics: []}
   elif $tool_name | startswith("mcp__") then
     {family: "mcp", coverage: "none", targets: [], diagnostics: []}
@@ -158,16 +158,16 @@ def ta_result($phase; $response; $tool_name; $markers; $flags):
   end;
 
 def ta_normalize($harness; $phase; $markers; $flags):
-  ta_r(.tool_name // .toolName // "") as $tool_name
-  | (.tool_input // .input // {}) as $tool_input
+  ta_r(.tool_name // .toolName // .toolCall.name // "") as $tool_name
+  | (.tool_input // .input // .toolCall.args // {}) as $tool_input
   | ($tool_input | ta_action($tool_name)) as $action
   | {schema_version: 1, harness: $harness, phase: $phase,
-     native_event: ta_r(.hook_event_name // .type // ""),
-     cwd: ta_r(.cwd // ""), session_id: (.session_id // null), turn_id: (.turn_id // null),
-     action: {id: (.tool_use_id // .toolCallId // null), tool_name: $tool_name, family: $action.family,
+     native_event: ta_r(.hook_event_name // .hookEventName // .type // ""),
+     cwd: ta_r(.cwd // ""), session_id: (.session_id // .conversationId // null), turn_id: (.turn_id // null),
+     action: {id: (.tool_use_id // .toolCallId // .toolCall.id // null), tool_name: $tool_name, family: $action.family,
        target_coverage: $action.coverage, targets: $action.targets, input: $tool_input,
        diagnostics: $action.diagnostics},
-     result: ta_result($phase; (.tool_response // .result // null); $tool_name; $markers; $flags)};
+     result: ta_result($phase; (.tool_response // .result // (if (.error? // "") != "" then {error: .error, is_error: true} else null end)); $tool_name; $markers; $flags)};
 
 def ta_one_object:
   if length == 1 and (.[0] | type == "object") then .[0] else error("not exactly one object") end;
@@ -217,8 +217,8 @@ _ta_guard_fields() {
       ta_one_object | . as $in | ta_normalize("codex"; $phase; $markers; $flags) as $n
       | [$n.action.family, $n.action.target_coverage,
          ta_r($n.action.diagnostics[0] // "mutation targets are unavailable"),
-         $n.cwd, ta_r($n.result.status), ($in | ta_r(.transcript_path // empty)),
-         ($in | ta_r(.session_id // empty))]
+         $n.cwd, ta_r($n.result.status), ($in | ta_r(.transcript_path // .transcriptPath // empty)),
+         ($in | ta_r(.session_id // .conversationId // empty))]
         + [$n.action.targets[] | .operation, .path, (.destination // "")]
       | [length | tostring] + . | map(ta_nonul + "\u0000") | add' 2>/dev/null)
 }

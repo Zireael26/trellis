@@ -159,6 +159,71 @@ PY
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
 }
 
+@test "SC13 postjob join survives a transient identity probe failure" {
+  run python3 -I - "$BENCH" "$BATS_TEST_TMPDIR" <<'PY'
+import json, runpy, sys
+from pathlib import Path
+from types import SimpleNamespace
+G = runpy.run_path(sys.argv[1])['main'].__globals__
+home = Path(sys.argv[2]) / 'trellis'
+status_dir = home / 'state' / 'attachment-status' / 'checkout'
+status_dir.mkdir(parents=True)
+lock = status_dir / 'worktree.job'; lock.mkdir()
+status = status_dir / 'worktree.json'
+owner = home / 'owner.json'
+owner.write_text(json.dumps({'attachment_id': 'fixture'}))
+status.write_text(json.dumps({'state': 'running', 'attachment_id': 'fixture'}))
+clock = SimpleNamespace(now=0, probes=0)
+def probe(_lock):
+    clock.probes += 1
+    return 123 if clock.probes == 1 else None
+def sleep(seconds):
+    clock.now += seconds
+    if clock.probes == 2:
+        status.write_text(json.dumps({'state': 'ok', 'attachment_id': 'fixture'}))
+        lock.rmdir()
+G['_job_lock_pid'] = probe
+G['time'] = SimpleNamespace(monotonic=lambda: clock.now, sleep=sleep)
+G['COMMAND_TIMEOUT'] = 1.0
+G['JOB_START_GRACE_S'] = 0.2
+sb = SimpleNamespace(trellis_home=str(home))
+join = lambda: G['join_postjob'](sb, '/fixture', 'checkout', 'worktree', str(owner))
+join()
+assert clock.probes == 2 and not lock.exists(), clock
+# Even a settled status is not proof that a still-locked job has exited.
+lock.mkdir()
+clock = SimpleNamespace(now=0, probes=0)
+join()
+assert clock.probes == 2 and not lock.exists(), clock
+# An unverifiable lock cannot certify success; the actual join deadline applies.
+G['_job_lock_pid'] = lambda _lock: None
+for state in ('running', 'ok'):
+    lock.mkdir()
+    status.write_text(json.dumps({'state': state, 'attachment_id': 'fixture'}))
+    clock = SimpleNamespace(now=0, probes=0)
+    try:
+        join()
+    except G['TeardownError'] as error:
+        assert 'still running after 1 s' in str(error), error
+    else:
+        raise AssertionError('accepted unverifiable lock with state ' + state)
+    assert 1.0 < clock.now < 1.1, clock.now
+    lock.rmdir()
+# A real failure or mismatched owner is still refused.
+for record in ({'state': 'failed', 'attachment_id': 'fixture'},
+               {'state': 'ok', 'attachment_id': 'other'}):
+    status.write_text(json.dumps(record))
+    try:
+        join()
+    except G['TeardownError']:
+        pass
+    else:
+        raise AssertionError('accepted invalid verdict ' + repr(record))
+print('postjob join retries uncertain identities and refuses unsafe verdicts')
+PY
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
+}
+
 @test "SC13 sealed fixture refuses any change outside the four pinned gate stubs" {
   run python3 -I - "$BENCH" <<'PY'
 import copy, hashlib, runpy, sys

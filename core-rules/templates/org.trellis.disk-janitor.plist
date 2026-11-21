@@ -24,6 +24,8 @@
     <string>__USER_HOME__/.local/bin/trellis</string>
     <string>disk-janitor</string>
     <string>--report</string>
+    <string>--scopes</string>
+    <string>caches,worktrees,stores,docker,releases,release-tmp,pi,orphans,logs,tmp,transcripts</string>
   </array>
 
   <key>RunAtLoad</key>

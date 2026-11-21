@@ -37,7 +37,7 @@ QUIET=false
 # live doctrine surfaces below are the ones an agent actually loads and acts on.
 # If you widen this list, add a path-shape and placeholder heuristic first.
 SPEC_DOCS=(
-  "$ROOT/core-rules/CLAUDE.md"
+  "$ROOT/core-rules/AGENTS.md"
   "$ROOT/core-rules/hooks.md"
   "$ROOT/core-rules/inheritance.md"
   "$ROOT/core-rules/skills/process-gate/SKILL.md"
@@ -48,8 +48,10 @@ SPEC_DOCS=(
   "$ROOT/AGENT_SETUP.md"
   "$ROOT/AGENT_ONBOARD_PROJECT.md"
   "$ROOT/README.md"
-  "$ROOT/docs/MIGRATING-LOCAL-FLEETS.md"
 )
+if [ -f "$ROOT/docs/MIGRATING-LOCAL-FLEETS.md" ]; then
+  SPEC_DOCS+=("$ROOT/docs/MIGRATING-LOCAL-FLEETS.md")
+fi
 
 # The compatibility boundary that kept `registry.md`/`blacklist.md` in this
 # scan closed at v1.0.0-rc.25: the tracked inventory was removed, so neither is
@@ -62,7 +64,7 @@ SPEC_DOCS=(
 if [ -d "$ROOT/scheduled-tasks" ]; then
   SPEC_DOCS+=(
     "$ROOT/scheduled-tasks/README.md"
-    "$ROOT/scheduled-tasks/cross-project-process-audit/prompt.md"
+    "$ROOT/scheduled-tasks/fleet-process-audit/prompt.md"
   )
 fi
 

@@ -94,7 +94,7 @@ inprocess_verify() {
       [exact_inputs | .path as \$path | .record | {path: \$path, record: null, data: null,
         valid: (try ($_attachment_owner_schema_filter) catch false),
         canonical: (try (\$path == (\$home + \"/state/attachments/\" + .checkout_id + \"/\" + .worktree_id + \".json\")) catch false)}]
-    " "$@" | /usr/bin/env TRELLIS_SETTINGS_OWNED_JSON_PROGRAM="$(_settings_owned_json_program)" LC_ALL=C python3 -I -c "
+    " "$@" | /usr/bin/env TRELLIS_SETTINGS_OWNED_JSON_PROGRAM="$(_settings_owned_json_program)" LC_ALL=C python3 -I -B -c "
 import importlib.util, json, os, sys
 lib, home = sys.argv[1:3]
 spec = importlib.util.spec_from_file_location(\"owner_verify\", lib + \"/owner_verify.py\")
@@ -580,7 +580,7 @@ PY
 # verify_siblings shares the end-of-pass check: an owner file changed after it
 # was read (here its ctime, by a same-mode chmod) is undecided, never a pass.
 @test "sibling identity makes an owner changed while the pass ran undecided" {
-  run python3 -I - "$PAYLOAD/scripts/lib" "$MAIN_OWNER" "$LINKED_OWNER" <<'PY'
+  run python3 -I -B - "$PAYLOAD/scripts/lib" "$MAIN_OWNER" "$LINKED_OWNER" <<'PY'
 import importlib.util, json, os, sys
 lib, main_owner, linked_owner = sys.argv[1:4]
 spec = importlib.util.spec_from_file_location("owner_verify", lib + "/owner_verify.py")

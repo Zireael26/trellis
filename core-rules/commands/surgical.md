@@ -13,8 +13,9 @@ the three ways past it (spec triad, surgical, emergency).
 
 This is a **deliberate, size-capped** exemption, not a bypass. It writes a
 branch-bound marker that the deterministic gate honors only while the binding
-holds (same branch, same worktree, same merge-base). Grow the diff past the
-surgical ceiling and the marker stops working — the gate re-blocks and audit-logs
+holds (same branch, same worktree, same canonical branch base, with the declaring
+HEAD still ancestral). An update push's remote-old base may differ. Grow either
+the push or cumulative branch gated diff past the surgical ceiling and the marker stops working — the gate re-blocks and audit-logs
 the oversized claim. That cap is the whole point: surgical is for genuinely small
 changes, and the size limit keeps it honest without asking the model to judge.
 
@@ -74,8 +75,14 @@ hand-written one will silently fail to bind. Let the mechanism write it:
   bash "$SPECGATE" --mark-emergency "<reason>"
   ```
 
-The writer computes the branch/worktree/merge-base binding from live git state,
-so run it from inside the branch's worktree (any subdirectory is fine).
+The writer computes the branch/worktree/canonical-base binding from live git state,
+so run it from inside the branch's worktree (any subdirectory is fine). Descendant
+commits retain the declaration; it is not tied to one remote-old..local update.
+The pushed range must fit inside the declared branch scope: an unpublished parent
+is not implicitly covered. Both the current push and cumulative branch counts
+must fit the surgical ceiling. Proven whole-path protected imports are discounted
+from both; mixed files and uncertain ancestry keep the full count. Receipts name
+the raw count, discounted count and protected anchor SHA when discounted.
 
 ### 4. Acknowledge
 
@@ -94,14 +101,17 @@ Print exactly one line to the user:
   audit-logged as `oversized-surgical`; use `--emergency` for genuine over-cap
   urgency, and expect the follow-up spec obligation.
 - It does not touch `trellis.config.json`, the spec triad, or any other branch.
-- It does not survive a rebase onto a new merge-base or a move to another
-  worktree — the binding intentionally breaks, so re-run it if you rebase.
+- It does not survive a canonical-base change, a rewrite that drops the declaring
+  HEAD, or a move to another worktree — the binding intentionally breaks, so
+  re-run it after such a rebase. A declaration cannot authorize a pushed range
+  extending outside that canonical branch scope.
 
 ## Boundaries
 
-- **Branch-scoped + bound.** The marker lives at `<canonical-root>/.claude/session-surgical`
-  (gitignored) and is honored only on a full bind match. A stale marker from a
-  different branch/worktree/base is ignored, not trusted.
+- **Branch-scoped + bound.** The marker lives at `<worktree-root>/.claude/session-surgical`
+  (gitignored) and is honored only on a full bind match. Linked worktrees do not
+  read declarations from the main checkout; if yours was recorded there by an
+  older release, rerun `/surgical` from your worktree.
 - **Emergency is logged, not free.** Every emergency override appends a line to
   `<canonical-root>/.claude/spec-gate-audit.log` and every oversized surgical
   claim appends an `oversized-surgical` line. The cross-project process audit

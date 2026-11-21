@@ -1209,7 +1209,7 @@ SH
   # A public checkout already has a projected manifest and must close as-is.
   # Select the expectation from the input, never from the planner's result.
   local private_agents private_skill
-  private_agents="$(jq '[.harnesses.shared_agents.links[]? | select(.source_children == "core-rules/pi/agents")] | length' \
+  private_agents="$(jq '[(.harnesses.shared_agents.links[]?, .harnesses.pi.links[]?) | select(.source_children == "core-rules/pi/agents")] | length' \
     "$export_root/core-rules/inheritance-manifest.json")"
   private_skill="$(jq '[.harnesses.user.links[]? | select(.source == "core-rules/skills/herdr-foreman")] | length' \
     "$export_root/core-rules/inheritance-manifest.json")"
@@ -1233,7 +1233,7 @@ SH
   run project_manifest_with_publisher_program "$export_root/core-rules/inheritance-manifest.json"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 
-  for selection in "--harness pi" "--harness codex" "--harness user"; do
+  for selection in "--harness pi" "--harness codex" "--harness antigravity" "--harness opencode" "--harness user"; do
     # shellcheck disable=SC2086  # deliberate word splitting of the selection
     run bash "$REPO_ROOT/scripts/lib/surface-plan.sh" --payload "$export_root" $selection
     [ "$status" -eq 0 ] || { echo "$selection"; echo "$output"; false; }

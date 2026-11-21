@@ -6,12 +6,140 @@ of project runtime. Attached projects run only from verified immutable payloads
 under `TRELLIS_HOME` (default `~/.trellis`).
 
 For first-machine configuration, launcher installation, fleet creation, and
-attachment recipes, use [AGENT_SETUP.md](../AGENT_SETUP.md). For importing
-legacy inventory and preparing project migrations, use
-[MIGRATING-LOCAL-FLEETS.md](MIGRATING-LOCAL-FLEETS.md). For an agent executing an
-upgrade end to end — any harness, with per-step verification, stop conditions,
-and a rollback path — use [AGENT_UPGRADE.md](../AGENT_UPGRADE.md); this document
-is the reference it cites.
+attachment recipes, use [AGENT_SETUP.md](../AGENT_SETUP.md). For an agent
+executing an upgrade end to end — any harness, with per-step verification, stop
+conditions, and a rollback path — use [AGENT_UPGRADE.md](../AGENT_UPGRADE.md);
+this document is the reference it cites.
+
+## `1.5.4` → `1.5.6` (Neon roster, `/de-slop`, `antigravity` hooks, concurrent gates, scheduled tasks & disk hygiene)
+
+`1.5.6` folds the Gemini 4 Neon roster promotion + `/de-slop` workflow + `$HOME/Library` LaunchAgent ACL fix together with `antigravity` / `agy` `PreInvocation` 20s-timeout and `PreToolUse` empty-reason-deny fixes, pressure-gated 2-slot `process-gate` concurrency, worktree-isolated `spec-gate` markers and `decisions-log.md`, Semgrep minified-bundle carve-out, 5-harness schema-derived scheduled-task materialization + `cadence.json` + `org.trellis.lane-freshness.plist` (23 → 16 tasks), and expanded `disk-janitor` / `trellis gc` / `trellis worktree add --cow-deps`:
+
+```sh
+TRELLIS="$HOME/.local/bin/trellis"
+: "${TRELLIS_HOME:=$HOME/.trellis}"; export TRELLIS_HOME
+: "${RELEASE_REMOTE:?Set the remote containing annotated tag v1.5.6}"
+: "${FLEET:?Set the fleet (e.g. personal)}"
+TARGET_RELEASE=1.5.6
+
+"$TRELLIS" registry list --fleet "$FLEET" &&
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE" &&
+"$TRELLIS" release verify "$TARGET_RELEASE" &&
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE" \
+  --launcher-template "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh" &&
+"$TRELLIS" relink --home "$TRELLIS_HOME" --user &&
+"$TRELLIS" roster discover --fleet "$FLEET" --write &&
+"$TRELLIS" release adopt "$TARGET_RELEASE" --fleet "$FLEET" &&
+"$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET"
+```
+
+After adopting `1.5.6`:
+
+1. Run `"$TRELLIS" gc --apply` to sweep legacy `state/scratch/.cmd.*` and `tasks/<fleet>/.*.tmp.*` orphans.
+2. Re-run `"$TRELLIS" launchd --with-pi-watchdog` on macOS to refresh disk-janitor LaunchAgent templates.
+3. Update host scheduled tasks: unschedule the 9 retired tasks (`autonomy-drift`, `cross-project-process-audit`, `lane-freshness`, `large-file-watch`, `lint-debt-trend`, `parent-hook-drift`, `preset-drift`, `registry-blacklist-health`, `version-drift`), register `fleet-process-audit` and `lean-trend`, and (on macOS) copy `scripts/lane-freshness.py` from the verified `1.5.6` payload into `$TRELLIS_HOME/state/lane-freshness/lane-freshness.py` and render/bootstrap `core-rules/templates/org.trellis.lane-freshness.plist`.
+
+## `1.5.3` → `1.5.4` (direct upgrade & machine roster setup)
+
+`1.5.4` adds the private machine-local model roster (`$TRELLIS_HOME/roster.json`, `trellis roster discover --write`, stateless `hrw-v1` OpenCode Go pool balancing, and `not-on-machine` / `topology` diagnostics), `trellis lean-audit` + `/lean-sweep` + `/red-team`, 5-harness `trellis worktree launch`, `~/.gemini/config/skills/herdr-foreman` user linking, and the macOS default home ACL fix in `trellis launchd`. No harness templates changed between `1.5.3` and `1.5.4`, so `release adopt` upgrades attached projects without requiring detach/attach:
+
+```sh
+TRELLIS="$HOME/.local/bin/trellis"
+: "${TRELLIS_HOME:=$HOME/.trellis}"; export TRELLIS_HOME
+: "${RELEASE_REMOTE:?Set the remote containing annotated tag v1.5.4}"
+: "${FLEET:?Set the fleet (e.g. personal)}"
+TARGET_RELEASE=1.5.4
+
+"$TRELLIS" registry list --fleet "$FLEET" &&
+"$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE" &&
+"$TRELLIS" release verify "$TARGET_RELEASE" &&
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE" \
+  --launcher-template "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh" &&
+"$TRELLIS" relink --home "$TRELLIS_HOME" --user &&
+"$TRELLIS" roster discover --fleet "$FLEET" --write &&
+"$TRELLIS" release adopt "$TARGET_RELEASE" --fleet "$FLEET" &&
+"$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET"
+```
+
+*(Machines upgrading directly from `< 1.5.0` to `1.5.4` follow the two-step native companion bootstrap below with `TARGET_RELEASE=1.5.4`.)*
+
+## `1.5.2` / `1.5.0` / `1.4.x` / `1.3.x` → `1.5.3` (direct upgrade & fleet rollout)
+
+`1.5.3` adds full 5-harness compatibility (`claude`, `codex`, `pi`, `antigravity`, `opencode`), switches the canonical rules file from `core-rules/CLAUDE.md` to `core-rules/AGENTS.md` (preserving `core-rules/CLAUDE.md -> AGENTS.md` as a compatibility symlink and atomically retargeting `CLAUDE.md` symlinks during `release adopt`), ships `trellis gc` for safe cleanup of superseded releases and stale worktrees, and introduces `P37`–`P51` verification modernization (`<git-dir>/trellis-local/last-verified.json` structural Stop receipts, parallel typecheck/lint/test execution, reverse import-graph `--changed` test selection, Node `26.13.1` LTS baseline, and project-pinned toolchain shims). See [`CHANGELOG.md`](../CHANGELOG.md) (`## [1.5.3] - 2026-11-18`) for the complete change list.
+
+### 1. Choose the bootstrap path by current machine version
+
+Check `"$HOME/.local/bin/trellis" --version` (or inspect [AGENT_SETUP.md](../AGENT_SETUP.md) if `~/.local/bin/trellis` is not installed yet — for a brand-new machine, run `AGENT_SETUP.md` directly with `RELEASE_VERSION=1.5.3`).
+
+- **Already on `1.5.0` or `1.5.2` (single-step install + configure):**
+  ```sh
+  TRELLIS="$HOME/.local/bin/trellis"
+  : "${TRELLIS_HOME:=$HOME/.trellis}"; export TRELLIS_HOME
+  : "${RELEASE_REMOTE:?Set the remote containing annotated tag v1.5.3}"
+  : "${FLEET:?Set the fleet (e.g. personal)}"
+  TARGET_RELEASE=1.5.3
+
+  "$TRELLIS" registry list --fleet "$FLEET" &&
+  "$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE" &&
+  "$TRELLIS" release verify "$TARGET_RELEASE" &&
+  "$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE" \
+    --launcher-template "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh" &&
+  "$TRELLIS" relink --home "$TRELLIS_HOME" --user
+  ```
+
+- **Upgrading from `1.3.x` or `1.4.x` (two-step native companion bootstrap):**
+  Machines below `1.5.0` do not yet have the native `trellis-hooks` companion staged. Install `1.5.3` through the existing launcher, update the launcher from the verified `1.5.3` payload, and run `configure` a second time through the new `1.5.3` launcher so the native companion binary is staged and digest-pinned before adopting projects:
+  ```sh
+  TRELLIS="$HOME/.local/bin/trellis"
+  : "${TRELLIS_HOME:=$HOME/.trellis}"; export TRELLIS_HOME
+  : "${RELEASE_REMOTE:?Set the remote containing annotated tag v1.5.3}"
+  : "${FLEET:?Set the fleet (e.g. personal)}"
+  TARGET_RELEASE=1.5.3
+
+  "$TRELLIS" registry list --fleet "$FLEET" &&
+  "$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE" &&
+  "$TRELLIS" release verify "$TARGET_RELEASE" &&
+  "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/configure.sh" configure \
+    --home "$TRELLIS_HOME" --release "$TARGET_RELEASE" \
+    --launcher-template "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh" &&
+  "$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE" \
+    --launcher-template "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh" &&
+  "$TRELLIS" relink --home "$TRELLIS_HOME" --user
+  ```
+
+### 2. Roll out `1.5.3` across all attached projects
+
+Choose **Option A** if each project is keeping its existing harness set unchanged, or **Option B** if you are re-rendering templates (recommended when upgrading from `< 1.5.2` or refreshing managed `pre-push` Docker forwarding) or adding harnesses (`--harness antigravity`, `--harness opencode`, `--harness pi`).
+
+- **Harness selection rule:** Pass `--harness <name>` **only** for harnesses actually installed and used on this machine (for example `--harness claude --harness codex` on a Claude Code + Codex machine; add `--harness pi`, `--harness antigravity`, or `--harness opencode` only when installed).
+
+- **Option A — Keep existing harnesses on every registered project in `$FLEET`:**
+  ```sh
+  "$TRELLIS" release adopt 1.5.3 --fleet "$FLEET" &&
+  "$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET"
+  ```
+  If a repo has a tracked regular `AGENTS.md` where Trellis previously owned a native symlink, adopt reports it; run `"$TRELLIS" attach --refresh-artifacts --home "$TRELLIS_HOME" "$PROJECT_ROOT"` to record the tracked file as project-owned.
+
+- **Option B — Re-render templates or update the harness set across a project (and any linked worktrees):**
+  Ensure no git hook or active agent turn is mid-flight in `$PROJECT_ROOT`, then detach and reattach with your machine's exact harness flags (reattaching any linked worktrees afterward):
+  ```sh
+  : "${PROJECT_ROOT:?Set the attached project Git worktree top level}"
+  "$TRELLIS" detach --home "$TRELLIS_HOME" --all-worktrees "$PROJECT_ROOT" &&
+  "$TRELLIS" attach --home "$TRELLIS_HOME" --fleet "$FLEET" --release 1.5.3 \
+    --harness claude --harness codex \
+    "$PROJECT_ROOT"
+  ```
+  *(Append `--harness pi`, `--harness antigravity`, and/or `--harness opencode` as installed on the machine, and run the same `attach` command for each active linked worktree of that repo.)*
+
+### 3. Re-materialize scheduled tasks, verify, and garbage-collect old releases
+
+```sh
+"$TRELLIS" registry list --fleet "$FLEET" &&
+"$TRELLIS" doctor --home "$TRELLIS_HOME" --fleet "$FLEET" &&
+"$TRELLIS" gc --home "$TRELLIS_HOME"
+```
+
+Once `doctor` reports `0 error(s)` across your fleet and you no longer need the previous release for rollback, reclaim superseded releases and native companions with `"$TRELLIS" gc --home "$TRELLIS_HOME" --apply`, then restart open `claude` / `codex` / `antigravity` / `opencode` / `pi` sessions so live hooks bind to `1.5.3`.
 
 ## `1.5.0` → `1.5.2` (direct upgrade)
 
@@ -876,7 +1004,7 @@ way to delete one is `release remove`, below, once nothing references it.
 A release rollback changes local runtime state only. If the release required a
 tracked project migration, revert that project change independently through its
 normal reviewed PR, or restore the exact migration snapshot as documented in
-[MIGRATING-LOCAL-FLEETS.md](MIGRATING-LOCAL-FLEETS.md).
+[AGENT_SETUP.md](../AGENT_SETUP.md).
 
 ## Remove an installed release
 
@@ -2517,7 +2645,16 @@ in the shell profile before pushing:
 export DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}')"
 ```
 
-`doctor` now WARNs while the export is missing or unreachable: host-level
+From 1.5.3, newly rendered managed pre-push dispatchers resolve the caller's
+current Docker context endpoint once, before HOME isolation, when both `DOCKER_HOST`
+and `DOCKER_CONTEXT` are unset. An explicit `DOCKER_CONTEXT` keeps its named
+lookup; an explicit `DOCKER_HOST`, even empty, wins. Only the endpoint is
+forwarded as `DOCKER_HOST`, never `DOCKER_CONTEXT` or `DOCKER_CONFIG`. Failed
+or empty lookups warn once and leave the host unset; an absent Docker CLI
+skips the automatic lookup. Re-adopt on 1.5.3+ to update existing hooks; the
+export above remains the workaround for older rendered hooks.
+
+`doctor` retains a legacy-hook reminder while the export is missing: host-level
 `docker-host-unset-for-hooks` when a docker CLI is on `PATH`, `DOCKER_HOST`
 is unset, and the active context is not `default` (sits alongside the
 colima-fleet `docker-context-not-colima` row, which is unchanged; overlap on

@@ -5,6 +5,7 @@ import importlib.util
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -12,6 +13,8 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+
+sys.dont_write_bytecode = True
 
 LIB = Path(__file__).resolve().parents[1] / 'lib'
 # Unpatched, for tests that must start a real child under a mocked preflight.
@@ -318,7 +321,7 @@ class FastInventoryTests(unittest.TestCase):
             self.check()
 
     def test_unknown_manifest_version_is_a_miss(self):
-        self.manifest['schema_version'] = 3
+        self.manifest['schema_version'] = 4
         self.save_manifest()
         with self.assertRaises(ValueError):
             self.check()
@@ -1420,7 +1423,7 @@ for fd in (31, 32, 33):
     os.fstat(fd)
 '''
         script = ('exec 3<"$1" 4<"$1" 31<"$2" 32<"$3" 33<"$4"; '
-                  'exec /usr/bin/python3 -I -c "$6" "$5"')
+                  'exec /usr/bin/python3 -I -B -c "$6" "$5"')
         result = subprocess.run(['/bin/bash', '-c', script, 't13', str(self.registry_holder / 'pid'),
                                  str(self.checkout_holder), str(self.attachment_holder),
                                  str(self.registry_holder), str(LIB / 'attach-fastpath.py'), program],
@@ -1475,7 +1478,7 @@ for fd in (31, 32, 33):
                  'fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW)\n'
                  'try:\n    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n'
                  'except BlockingIOError:\n    sys.exit(3)\n')
-        result = subprocess.run([sys.executable, '-I', '-c', probe, str(self.attachment_holder / 'publisher.lock')])
+        result = subprocess.run([sys.executable, '-I', '-B', '-c', probe, str(self.attachment_holder / 'publisher.lock')])
         return result.returncode == 3
 
     def test_publisher_lock_keeps_recovery_out_and_precedes_the_holder_capture(self):
@@ -1493,7 +1496,7 @@ for fd in (31, 32, 33):
     def test_publisher_lock_held_elsewhere_refuses(self):
         fd = self.module.hold_publisher_lock(self.fds[1], self.pid)
         try:
-            child = subprocess.run([sys.executable, '-I', '-c', (
+            child = subprocess.run([sys.executable, '-I', '-B', '-c', (
                 'import importlib.util, os, sys\n'
                 'spec = importlib.util.spec_from_file_location("fp", sys.argv[1])\n'
                 'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
@@ -1526,7 +1529,7 @@ for fd in (31, 32, 33):
         # F4: a FIFO with no reader must not block the open; the type check
         # refuses it, in a bounded child so a hang fails instead of stalling.
         os.mkfifo(self.attachment_holder / 'publisher.lock', 0o600)
-        child = subprocess.run([sys.executable, '-I', '-c', (
+        child = subprocess.run([sys.executable, '-I', '-B', '-c', (
             'import importlib.util, os, sys\n'
             'spec = importlib.util.spec_from_file_location("fp", sys.argv[1])\n'
             'm = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)\n'
@@ -1718,10 +1721,10 @@ class LockPinBenchTests(unittest.TestCase):
     def test_probe_refuses_a_missing_requested_pin(self):
         common = [str(LIB / 'attach-fastpath.py'), '/fixture', '/fixture', 'a' * 64, 'b' * 64,
                   '12345678-1234-4123-8123-123456789abc', str(os.getpid()), str(os.getpid()), str(os.getpid())]
-        baseline = subprocess.run([sys.executable, '-I', '-c', self.module.PROBE, 'baseline', *common],
+        baseline = subprocess.run([sys.executable, '-I', '-B', '-c', self.module.PROBE, 'baseline', *common],
                                   capture_output=True, text=True)
         self.assertEqual(baseline.returncode, 0, baseline.stderr)
-        missing = subprocess.run([sys.executable, '-I', '-c', self.module.PROBE, 'checkout-pin', *common],
+        missing = subprocess.run([sys.executable, '-I', '-B', '-c', self.module.PROBE, 'checkout-pin', *common],
                                  capture_output=True, text=True)
         self.assertNotEqual(missing.returncode, 0, 'probe accepted a missing checkout pin')
 
@@ -1734,17 +1737,17 @@ class LockPinBenchTests(unittest.TestCase):
                 ['--samples', '30', '--candidate', 'short', '--liveness-clear'],
                 ['--samples', '30', '--candidate', 'a' * 40, '--warmups', '1', '--liveness-clear'],
             )):
-                output = Path(temp) / ('run-' + str(index))
-                result = subprocess.run([sys.executable, '-I', str(self.script), '--repo', str(repo),
+                output = Path(temp).resolve() / ('run-' + str(index))
+                result = subprocess.run([sys.executable, '-I', '-B', str(self.script), '--repo', str(repo),
                                          '--output', str(output), '--measure', *options], capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0, options)
                 self.assertFalse(output.exists(), 'a refused measurement started a fixture')
 
     def test_functional_cli_checks_real_lock_protocol_without_timing(self):
         with tempfile.TemporaryDirectory(prefix='t13.lockbench.') as temp:
-            output = Path(temp) / 'run'
+            output = Path(temp).resolve() / 'run'
             repo = Path(__file__).resolve().parents[2]
-            result = subprocess.run([sys.executable, '-I', str(self.script), '--repo', str(repo),
+            result = subprocess.run([sys.executable, '-I', '-B', str(self.script), '--repo', str(repo),
                                      '--output', str(output), '--functional'], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             summary = json.loads((output / 'summary.json').read_text())
@@ -1850,13 +1853,13 @@ class PriorHooksStateTests(unittest.TestCase):
         os.mkdir(self.prior, 0o700)
         self.hook = os.path.join(self.prior, 'pre-commit')
         Path(self.hook).write_text('#!/bin/sh\nexit 0\n')
-        os.chmod(self.hook, 0o700)
+        os.chmod(self.hook, stat.S_IRWXU)
 
     def test_mode_and_new_entries_change_the_state(self):
         before = self.module.prior_hooks_state(self.prior)
         os.chmod(self.hook, 0o600)
         self.assertNotEqual(before, self.module.prior_hooks_state(self.prior))
-        os.chmod(self.hook, 0o700)
+        os.chmod(self.hook, stat.S_IRWXU)
         self.assertEqual(before, self.module.prior_hooks_state(self.prior))
         Path(self.prior, 'commit-msg').write_text('')
         self.assertNotEqual(before, self.module.prior_hooks_state(self.prior))

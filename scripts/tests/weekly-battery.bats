@@ -9,12 +9,12 @@ setup() {
 teardown() { rm -rf "$SANDBOX"; }
 
 check_weekly() {
-  run python3 -I "$BATS_TEST_DIRNAME/test_weekly_battery.py" "WeeklyTests.$1"
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_weekly_battery.py" "WeeklyTests.$1"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 
 check_weekly_integration() {
-  run python3 -I "$BATS_TEST_DIRNAME/test_weekly_battery.py" "WeeklyIntegrationTests.$1"
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_weekly_battery.py" "WeeklyIntegrationTests.$1"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 

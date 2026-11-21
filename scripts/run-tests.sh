@@ -17,11 +17,15 @@
 # `scripts/tests/suite-coverage.bats` fails when a suite is neither globbed nor
 # excluded there.
 #
-# Usage: scripts/run-tests.sh [--quick] [--scope=local|ci] [--shard=I/N] [--list] [--plan]
-#                              [--base=REV] [--native-stages=auto|always] [--native-cargo-only]
+# Usage: scripts/run-tests.sh [--quick] [--changed[=RANGE]] [--scope=local|ci]
+#                              [--shard=I/N] [--list] [--plan] [--base=REV]
+#                              [--native-stages=auto|always] [--native-cargo-only]
 #   --quick        run only the fast deterministic slice (shellcheck, AEO static
 #                  + python, conformance, bootstrap prologues). Intended for a
 #                  tight local loop, never for a gate run.
+#   --changed[=R]  narrow local suite selection via scripts/lib/push-test-map.py
+#                  over merge-base(origin/main, HEAD)..HEAD (or explicit RANGE),
+#                  falling back to the full battery on uncertain-full paths.
 #   --scope=ci     apply the CI exclusions as well as the global ones. Local
 #                  runs off Darwin also apply the Darwin-only CI exclusions.
 #   --shard=I/N    assign stages with deterministic longest-processing-time (LPT)
@@ -65,7 +69,7 @@
 #                  It also forces --native-stages=always.
 #
 # Every stage runs even if an earlier one fails; the exit code is the number of
-# failed stages, so one red suite cannot hide behind another.
+# failed stages (capped at 255), so one red suite cannot hide behind another.
 # START and fenced provenance are JSON lines on stderr and in a timing receipt's
 # .provenance.jsonl sidecar. --list/--plan never capture or write a receipt.
 # Capture failures never stop the runner.
@@ -88,6 +92,7 @@ cd "$ROOT" || exit 1
 # those boundaries. Fixtures invoking them must wait for their own postjobs
 # before teardown. attach-postjob.bats unsets the switch to exercise spawning.
 export TRELLIS_ATTACH_POSTJOB=off
+export PYTHONDONTWRITEBYTECODE=1
 
 # START precedes ordinary argument validation, fence setup and any planner/test.
 # Inventory interfaces and refused native-only admission never probe tools or
@@ -132,7 +137,7 @@ if [ "$NATIVE_CARGO_ONLY" -eq 1 ]; then
   _native_plan=0
   for arg in "$@"; do
     case "$arg" in
-      --quick|--scope|--scope=*|--shard|--shard=*|--test-file|--test-file=*|--base|--base=*|--native-stages|--native-stages=*)
+      --quick|--changed|--changed=*|--scope|--scope=*|--shard|--shard=*|--test-file|--test-file=*|--base|--base=*|--native-stages|--native-stages=*)
         printf 'run-tests: --native-cargo-only refuses %s\n' "$arg" >&2; exit 64 ;;
       --list) _native_list=1 ;;
       --plan) _native_plan=1 ;;
@@ -161,6 +166,8 @@ fi
 . "$ROOT/scripts/lib/bats-jobs.sh"
 
 QUICK=0
+CHANGED=0
+CHANGED_RANGE=''
 LIST=0
 PLAN=0
 SCOPE=local
@@ -172,6 +179,14 @@ NATIVE_STAGES=auto
 for arg in "$@"; do
   case "$arg" in
     --quick) QUICK=1 ;;
+    --changed) CHANGED=1 ;;
+    --changed=*)
+      if [ -z "${arg#--changed=}" ]; then
+        printf 'run-tests: --changed= requires a range\n' >&2; exit 64
+      fi
+      CHANGED=1
+      CHANGED_RANGE="${arg#--changed=}"
+      ;;
     --list) LIST=1 ;;
     --plan) PLAN=1 ;;
     --native-cargo-only) ;;
@@ -187,6 +202,11 @@ for arg in "$@"; do
     *) printf 'run-tests: unknown argument: %s\n' "$arg" >&2; exit 64 ;;
   esac
 done
+
+if [ "$CHANGED" -eq 1 ] && [ "$QUICK" -eq 1 ]; then
+  printf 'run-tests: --changed cannot be combined with --quick\n' >&2
+  exit 64
+fi
 
 case "$SCOPE" in
   local|ci) ;;
@@ -218,6 +238,63 @@ if [ "$SCOPE" = local ] && [ "$QUICK" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ];
   done
   [ -n "$HOST_OS" ] || { printf 'run-tests: unable to identify host OS\n' >&2; exit 1; }
   [ "$HOST_OS" = Darwin ] || SUITE_SCOPE=ci
+fi
+
+if [ "$CHANGED" -eq 1 ]; then
+  _changed_spec="$CHANGED_RANGE"
+  if [ -z "$_changed_spec" ]; then
+    _changed_base_ref=''
+    for _cand_ref in origin/main main master; do
+      if git rev-parse --verify --quiet "${_cand_ref}^{commit}" >/dev/null 2>&1; then
+        _changed_base_ref="$_cand_ref"
+        break
+      fi
+    done
+    if [ -n "$_changed_base_ref" ]; then
+      _changed_mb="$(git merge-base "$_changed_base_ref" HEAD 2>/dev/null || printf '')"
+      [ -z "$_changed_mb" ] || _changed_spec="$_changed_mb..HEAD"
+    fi
+  elif [[ "$_changed_spec" == *...* ]]; then
+    _left_ref="${_changed_spec%%...*}"
+    _right_ref="${_changed_spec#*...}"
+    _changed_mb="$(git merge-base "${_left_ref:-HEAD}" "${_right_ref:-HEAD}" 2>/dev/null || printf '')"
+    [ -z "$_changed_mb" ] || _changed_spec="$_changed_mb..${_right_ref:-HEAD}"
+  fi
+  _changed_out=''
+  _changed_rc=1
+  if [ -n "$_changed_spec" ]; then
+    _changed_out="$(python3 -I -B "$ROOT/scripts/lib/push-test-map.py" "$_changed_spec" 2>&1)"
+    _changed_rc=$?
+  else
+    _changed_out="process-gate: full tests — uncertain-full: no base ref resolvable for --changed"
+  fi
+  if [ "$_changed_rc" -eq 0 ] && [ -n "$_changed_out" ]; then
+    _changed_header="${_changed_out%%$'\n'*}"
+    _changed_body="${_changed_out#*$'\n'}"
+    if [ "$_changed_body" != "$_changed_out" ]; then
+      while IFS= read -r _mapped_file; do
+        [ -n "$_mapped_file" ] || continue
+        if [[ "$_mapped_file" == scripts/tests/* ]]; then
+          _mapped_stem="${_mapped_file##*/}"
+          _mapped_stem="${_mapped_stem%.bats}"
+          _mapped_excl="$(test_suites_exclusion_scope "$_mapped_stem")"
+          if [ "$_mapped_excl" = all ] || { [ "$SUITE_SCOPE" = ci ] && [ "$_mapped_excl" = ci ]; }; then
+            continue
+          fi
+        fi
+        _already_selected=0
+        for _existing_sel in ${SELECTED_TESTS[@]+"${SELECTED_TESTS[@]}"}; do
+          [ "$_existing_sel" != "$_mapped_file" ] || { _already_selected=1; break; }
+        done
+        [ "$_already_selected" -eq 1 ] || SELECTED_TESTS+=( "$_mapped_file" )
+      done <<< "$_changed_body"
+    fi
+    [ "$LIST" -eq 1 ] || [ "$PLAN" -eq 1 ] ||
+      printf 'run-tests: --changed %s\n' "$_changed_header" >&2
+  else
+    [ "$LIST" -eq 1 ] || [ "$PLAN" -eq 1 ] ||
+      printf 'run-tests: --changed falling back to full battery (%s)\n' "${_changed_out#process-gate: full tests — }" >&2
+  fi
 fi
 
 # Decide the cargo stages once, before the Git fence, so every shard of one run
@@ -721,7 +798,7 @@ aeo_static_and_python() {
   ruff format --isolated --check core-rules/skills/aeo-gate/scripts core-rules/skills/aeo-gate/tests &&
     ruff check --isolated --select E4,E7,E9,F core-rules/skills/aeo-gate/scripts core-rules/skills/aeo-gate/tests &&
     mypy core-rules/skills/aeo-gate/scripts/lib/aeo_gate &&
-    python3 -m unittest discover -s core-rules/skills/aeo-gate/tests -p 'test_*.py' &&
+    python3 -B -m unittest discover -s core-rules/skills/aeo-gate/tests -p 'test_*.py' &&
     bash scripts/tests/aeo-gate.test.sh
 }
 
@@ -796,6 +873,17 @@ if [ "$QUICK" -eq 0 ] && [ "${#SELECTED_TESTS[@]}" -eq 0 ] && [ "$NATIVE_CARGO_O
     stage "node --test $suite" node --test --test-reporter=tap "$suite"
   done < <(test_suites_pi)
 
+  python_core_units() {
+    python3 -B -m unittest scripts.tests.test_attach_fastpath scripts.tests.test_release_verify_acl || return 1
+    if [ -d "$ROOT/scripts/lib/usage_federation" ]; then
+      python3 -B -m unittest scripts.tests.test_receipt_diagnostics || return 1
+      if python3 -B -c 'import pytest' >/dev/null 2>&1; then
+        python3 -B -m pytest -q -o "cache_dir=${TMPDIR:-/tmp}/pytest-cache-trellis" scripts/tests/test_usage_store_open.py || return 1
+      fi
+    fi
+  }
+  stage "python unit suites (fastpath, acl, usage-store)" python_core_units
+
 fi
 
 if [ "$QUICK" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ]; then
@@ -818,7 +906,7 @@ if [ "$QUICK" -eq 0 ] && [ "$NATIVE_CARGO_ONLY" -eq 0 ]; then
     [ "$suite" = "posix-bootstrap-prologue" ] && continue
     suite_selected "scripts/tests/$suite.bats" || continue
     case "$suite" in
-      rollout-hooks-part*|sync-hooks-settings-part*|doctor-part*|t6-phase-a-integration|detach-project-part*|pi-attachment|release-store-part*|setup-runbooks|attach-project|disk-janitor-apply)
+      sync-hooks-settings-part*|doctor-part*|detach-project-part*|pi-attachment|release-store-part*|setup-runbooks|attach-project|disk-janitor-apply)
         # These suites allocate all mutable fixtures per test. Keep the outer
         # four-shard bound; Bats uses two internal semaphore slots per file.
         # Disabling cross-file parallelism avoids a GNU parallel dependency.
@@ -880,6 +968,20 @@ if [ "$LIST" -eq 1 ]; then
   exit 0
 fi
 
+# Test helpers sometimes import repository modules even under python -I.
+# Do not clean up their evidence or hide it behind gitignored status: -I ignores
+# PYTHONDONTWRITEBYTECODE, so those invocations must explicitly use -B.
+bytecode_paths=''
+if ! bytecode_paths="$(find "$ROOT" -name .git -prune -o -name __pycache__ -print)"; then
+  printf 'run-tests: unable to check repository for Python bytecode\n' >&2
+  FAILED=$((FAILED + 1))
+  FAILED_STAGES+=("Python bytecode cleanliness (scan failed)")
+elif [ -n "$bytecode_paths" ]; then
+  printf 'run-tests: Python bytecode left in repository:\n%s\n' "$bytecode_paths" >&2
+  FAILED=$((FAILED + 1))
+  FAILED_STAGES+=("Python bytecode cleanliness")
+fi
+
 printf '\n===============================\n'
 printf 'run-tests: receipt=%s\n' "$TRELLIS_TEST_TSV"
 printf 'run-tests: scope=%s shard=%s/%s stages ran=%s skipped=%s\n' \
@@ -899,4 +1001,6 @@ else
   printf 'run-tests: %s stage(s) failed:\n' "$FAILED"
   printf '  - %s\n' ${FAILED_STAGES[@]+"${FAILED_STAGES[@]}"}
 fi
+# Shell exit statuses wrap modulo 256: never turn many failures into success.
+[ "$FAILED" -le 255 ] || exit 255
 exit "$FAILED"

@@ -104,7 +104,7 @@ _se_turn_directory_inspectable() {
 # requires the exact contextual prompt route and digest-pinned companion.
 # Unknown never becomes unarmed. This is deliberately identical in both twins.
 _se_turn_baseline_arming() {
-  local dir="$1" harness="$2" file template runtime native=0 template_native=0 legacy=0 f user home
+  local dir="$1" harness="$2" hdir="" prompt_event=UserPromptSubmit file template runtime native=0 template_native=0 legacy=0 f user home
   local target version digest companion adapter adapter_digest shell command platform
   local root common ids checkout worktree owner relative owner_present=0 owner_harness=0 owner_render=0 owner_evidence anchor_target rc
   local harness_attached=0 managed settings_flags legacy_hit native_hit IFS=$' \t\n'
@@ -114,16 +114,17 @@ _se_turn_baseline_arming() {
     code-review-subagent decision-receipt env-echo inject-primer-index post-compact-context post-edit-verify
     pr-gate-shiftleft save-context-log session-context session-start slop-tripwire spec-gate stamp-turn track-read ui-verify)
   case "$harness" in
-    claude) file="$dir/.claude/settings.local.json"; template=claude-settings.local.json ;;
-    codex) file="$dir/.codex/hooks.json"; template=codex-hooks.local.json ;;
+    claude) hdir=.claude; file="$dir/.claude/settings.local.json"; template=claude-settings.local.json ;;
+    codex) hdir=.codex; file="$dir/.codex/hooks.json"; template=codex-hooks.local.json ;;
     # Pi's compatibility Stop historically inspects the Codex registration.
-    pi) harness=codex; file="$dir/.codex/hooks.json"; template=codex-hooks.local.json ;;
+    pi) harness=codex; hdir=.codex; file="$dir/.codex/hooks.json"; template=codex-hooks.local.json ;;
+    antigravity) hdir=.agents; prompt_event=PreInvocation; file="$dir/.agents/hooks.json"; template=agy-hooks.local.json ;;
     *) printf 'unknown\n'; return 0 ;;
   esac
   runtime="$dir/.trellis/runtime"
   home="${TRELLIS_HOME:-${HOME:-}/.trellis}"
-  _se_turn_directory_inspectable "$dir/.$harness" &&
-    _se_turn_directory_inspectable "$dir/.$harness/hooks" &&
+  _se_turn_directory_inspectable "$dir/$hdir" &&
+    _se_turn_directory_inspectable "$dir/$hdir/hooks" &&
     _se_turn_directory_inspectable "$home/state" &&
     _se_turn_directory_inspectable "$home/state/attachments" || { printf 'unknown\n'; return 0; }
   for f in "$file" "$dir/.claude/settings.json"; do
@@ -134,9 +135,10 @@ _se_turn_baseline_arming() {
     [ -f "$f" ] && [ -r "$f" ] || { printf 'unknown\n'; return 0; }
     command -v jq >/dev/null 2>&1 || { printf 'unknown\n'; return 0; }
     # One read: exactly one object, then its legacy and native evidence.
-    settings_flags=$(jq -ser '
+    settings_flags=$(jq -ser --arg h "$harness" '
       if length == 1 and (.[0] | type == "object") then .[0] |
-      [(any(.hooks.UserPromptSubmit[]?.hooks[]?; (.type == "command" or .type == null) and
+      (if $h == "antigravity" then [.trellis.PreInvocation[]?] else [.hooks.UserPromptSubmit[]?.hooks[]?] end) as $ph |
+      [(any($ph[]; (.type == "command" or .type == null) and
          (([.command // ""] + (.args // [])) | any(.[]; type == "string" and contains("turn-baseline.sh")))) | if . then "1" else "0" end),
        (any(.. | strings; contains("/bin/native/")) | if . then "1" else "0" end)] | @tsv
       else error("not one object") end' "$f" 2>/dev/null) || { printf 'unknown\n'; return 0; }
@@ -150,10 +152,10 @@ _se_turn_baseline_arming() {
       rc=$?; [ "$rc" -eq 1 ] || { printf 'unknown\n'; return 0; }
     fi
     if [ "$harness_attached" = 0 ]; then
-      if jq -e --arg h "$harness" --arg names "${managed_names[*]}" '
-        [.hooks? // {} | .. | objects | (.command? // empty), (.args[]? // empty) | strings]
+      if jq -e --arg h "$harness" --arg hd "$hdir" --arg names "${managed_names[*]}" '
+        [(if $h == "antigravity" then .trellis? // {} else .hooks? // {} end) | .. | objects | (.command? // empty), (.args[]? // empty) | strings]
         | any(.[]; contains("/.trellis/runtime/") or
-            test("\\." + $h + "/hooks/(" + ($names | split(" ") | join("|")) + ")\\.sh($|[^A-Za-z0-9_.-])"))' "$f" >/dev/null 2>&1; then
+            test("\\" + $hd + "/hooks/(" + ($names | split(" ") | join("|")) + ")\\.sh($|[^A-Za-z0-9_.-])"))' "$f" >/dev/null 2>&1; then
         harness_attached=1
       else
         rc=$?; [ "$rc" -eq 1 ] || { printf 'unknown\n'; return 0; }
@@ -163,7 +165,7 @@ _se_turn_baseline_arming() {
   # The harness directory itself is not evidence: an unrelated harness may
   # be attached. A known managed hook or a matching owner path is evidence.
   for managed in "${managed_names[@]}"; do
-    f="$dir/.$harness/hooks/$managed.sh"
+    f="$dir/$hdir/hooks/$managed.sh"
     if [ -e "$f" ] || [ -L "$f" ]; then harness_attached=1; break; fi
   done
   # The attachment owner retains the expected render if settings and even
@@ -200,7 +202,7 @@ _se_turn_baseline_arming() {
       [ "${strict:0:1}" = 1 ] || { printf 'unknown\n'; return 0; }
       # One read: the committed binding, then harness, render and native-key
       # evidence (a key that cannot be read is no evidence) and the release.
-      owner_evidence=$(jq -er --arg root "$root" --arg co "$checkout" --arg wt "$worktree" --arg prefix ".$harness/" --arg p "$relative" '
+      owner_evidence=$(jq -er --arg root "$root" --arg co "$checkout" --arg wt "$worktree" --arg prefix "$hdir/" --arg p "$relative" '
         if type == "object" and .status == "committed" and .project_root == $root and .worktree_root == $root
           and .checkout_id == $co and .worktree_id == $wt and (.renders | type == "array") then
         [(any((.renders[]?, .artifacts[]?, .pre_existing[]?);
@@ -223,10 +225,10 @@ _se_turn_baseline_arming() {
       # One read: exactly one object, then its launcher entries; "e" marks a
       # template that could not be inspected.
       { [ -r "$template" ] && command -v jq >/dev/null 2>&1 &&
-        template_flags=$(jq -ser --arg h "$harness" '
+        template_flags=$(jq -ser --arg h "$harness" --arg ev "$prompt_event" '
           if length == 1 and (.[0] | type == "object") then .[0] |
-          [(try (any(.. | objects; .command? == "__TRELLIS_LAUNCHER__") | if . then "1" else "0" end) catch "e"),
-           (try (any(.. | objects; .command? == "__TRELLIS_LAUNCHER__" and .args? == ["hook","event",$h,"UserPromptSubmit"])
+          [(try (any(.. | objects; .command? == "__TRELLIS_LAUNCHER__" or .command? == "__TRELLIS_PRE_INVOCATION__") | if . then "1" else "0" end) catch "e"),
+           (try (any(.. | objects; (.command? == "__TRELLIS_LAUNCHER__" and .args? == ["hook","event",$h,$ev]) or ($h == "antigravity" and .command? == "__TRELLIS_PRE_INVOCATION__"))
              | if . then "1" else "0" end) catch "e")] | @tsv
           else error("not one object") end' "$template" 2>/dev/null); } || { printf 'unknown\n'; return 0; }
       read -r launcher_hit prompt_hit <<< "$template_flags"
@@ -320,8 +322,14 @@ _se_turn_baseline_arming() {
   [ -n "$adapter_digest" ] && [ "$adapter_sum" = "$adapter_digest" ] || { printf 'unknown\n'; return 0; }
   adapter=$(grep -vE '^[[:space:]]*#' "$runtime/core-rules/native/hook-adapter.sh") || { printf 'unknown\n'; return 0; }
   shell=/bin/sh; [ ! -x /bin/dash ] || shell=/bin/dash
-  command="HOME=$(_se_turn_quote "$user") TRELLIS_HOME=$(_se_turn_quote "$home") $(_se_turn_quote "$shell") -c $(_se_turn_quote "$adapter") trellis-hooks $(_se_turn_quote "$companion") $(_se_turn_quote "$harness") $(_se_turn_quote UserPromptSubmit) $(_se_turn_quote "$dir")" || { printf 'unknown\n'; return 0; }
-  if jq -e --arg c "$command" '
+  command="HOME=$(_se_turn_quote "$user") TRELLIS_HOME=$(_se_turn_quote "$home") $(_se_turn_quote "$shell") -c $(_se_turn_quote "$adapter") trellis-hooks $(_se_turn_quote "$companion") $(_se_turn_quote "$harness") $(_se_turn_quote "$prompt_event") $(_se_turn_quote "$dir")" || { printf 'unknown\n'; return 0; }
+  if [ "$harness" = antigravity ]; then
+    if jq -e --arg c "$command" '
+      [.trellis.PreInvocation[]? | select(.type == "command" and .command == $c
+        and (.timeout | type == "number" and . >= 30 and floor == .) and (has("onFailure") | not))] | length == 1' "$file" >/dev/null 2>&1; then
+      printf 'native\n'; return 0
+    fi
+  elif jq -e --arg c "$command" '
     [.hooks.UserPromptSubmit[]?.hooks[]? | select(.type == "command" and .command == $c
       and (.timeout | type == "number" and . >= 30 and floor == .) and (has("onFailure") | not))] | length == 1' "$file" >/dev/null 2>&1; then
     printf 'native\n'; return 0
@@ -375,7 +383,10 @@ __se_hook_state_pathspec=(':/'
   ':(exclude,top).claude/session-surgical'
   ':(exclude,top).claude/spec-gate-audit.log'
   ':(exclude,top).pi/.reread-state'
-  ':(exclude,top).pi/subagent-schedules')
+  ':(exclude,top).pi/subagent-schedules'
+  ':(exclude,top).agents/.fail-counter'
+  ':(exclude,top).agents/.reread-state'
+  ':(exclude,top,glob).agents/.review-done-*')
 _se_hook_state_git() {
   git "$@" -- "${__se_hook_state_pathspec[@]}"
 }
@@ -829,7 +840,7 @@ _se_turn_start_append() {
 _se_turn_baseline_publish() {
   local dir="$1" harness="$2" sid="$3" state key="" file tstart nonce="" fp="" id good=0 rc=0 unobservable=0 gen name marker
   local -a markers=()
-  case "$harness" in claude|codex|pi) ;; *) return 1 ;; esac
+  case "$harness" in claude|codex|pi|antigravity) ;; *) return 1 ;; esac
   state=$(_se_turn_state_dir "$dir") || { _se_turn_confirm_non_git "$dir" && return 0; return 1; }
   [ -z "$sid" ] || key=$(_se_state_key "" "$sid") || key=""
   if [ -z "$key" ]; then
@@ -1218,10 +1229,10 @@ _se_find_eslint_config() {
   local file="$1" dir root bin_dir parent
   SE_ESLINT_DIR="" SE_ESLINT_BIN="" SE_ESLINT_FILE=""
   case "$file" in /*) ;; *) file="$PWD/$file" ;; esac
-  dir=$(CDPATH='' cd -P -- "$(dirname -- "$file")" 2>/dev/null && pwd -P) || return 1
+  dir=$(unset CDPATH; cd -P -- "$(dirname -- "$file")" 2>/dev/null && pwd -P) || return 1
   SE_ESLINT_FILE="$dir/$(basename -- "$file")"
   root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || root=$(_se_project_dir)
-  root=$(CDPATH='' cd -P -- "$root" 2>/dev/null && pwd -P) || return 1
+  root=$(unset CDPATH; cd -P -- "$root" 2>/dev/null && pwd -P) || return 1
   if [ "$root" != / ]; then
     case "$dir" in "$root"|"$root/"*) ;; *) return 1 ;; esac
   fi
@@ -2258,6 +2269,466 @@ _se_env_moves_code() {
     }
     exit 1;' "$1"
   [ "$?" -ne 1 ]
+}
+
+# _se_find_js_linter <file> — find the nearest oxlint, biome, or eslint config
+# between <file> and its worktree root (P45: oxlint -> biome -> eslint).
+# Populates SE_LINTER_KIND, SE_LINTER_DIR, SE_LINTER_BIN, SE_LINTER_FILE (and
+# SE_ESLINT_* when eslint wins).
+# shellcheck disable=SC2034 # SE_LINTER_* are outputs consumed by hook callers.
+_se_find_js_linter() {
+  local file="$1" dir root bin_dir parent kind=""
+  SE_LINTER_KIND="" SE_LINTER_DIR="" SE_LINTER_BIN="" SE_LINTER_FILE=""
+  case "$file" in /*) ;; *) file="$PWD/$file" ;; esac
+  dir=$(CDPATH='' cd -P -- "$(dirname -- "$file")" 2>/dev/null && pwd -P) || return 1
+  SE_LINTER_FILE="$dir/$(basename -- "$file")"
+  root=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || root=$(_se_project_dir)
+  root=$(CDPATH='' cd -P -- "$root" 2>/dev/null && pwd -P) || return 1
+  if [ "$root" != / ]; then
+    case "$dir" in "$root"|"$root/"*) ;; *) return 1 ;; esac
+  fi
+  while :; do
+    if [ -f "$dir/oxlint.config.ts" ] || [ -f "$dir/oxlint.config.mts" ] || [ -f "$dir/oxlint.config.cts" ] \
+       || [ -f "$dir/oxlint.config.js" ] || [ -f "$dir/oxlint.config.mjs" ] || [ -f "$dir/oxlint.config.cjs" ] \
+       || [ -f "$dir/oxlint.config.json" ] || [ -f "$dir/.oxlintrc.json" ]; then
+      kind="oxlint"; SE_LINTER_DIR="$dir"; break
+    fi
+    if [ -f "$dir/biome.json" ] || [ -f "$dir/biome.jsonc" ]; then
+      kind="biome"; SE_LINTER_DIR="$dir"; break
+    fi
+    if [ -f "$dir/.eslintrc" ] || [ -f "$dir/.eslintrc.js" ] || [ -f "$dir/.eslintrc.cjs" ] \
+       || [ -f "$dir/.eslintrc.json" ] || [ -f "$dir/.eslintrc.yml" ] || [ -f "$dir/.eslintrc.yaml" ] \
+       || [ -f "$dir/eslint.config.js" ] || [ -f "$dir/eslint.config.mjs" ] || [ -f "$dir/eslint.config.cjs" ] \
+       || [ -f "$dir/eslint.config.ts" ] || [ -f "$dir/eslint.config.mts" ] || [ -f "$dir/eslint.config.cts" ]; then
+      kind="eslint"; break
+    fi
+    [ "$dir" != "$root" ] && [ "$dir" != / ] || return 1
+    parent=${dir%/*}; dir=${parent:-/}
+  done
+  if [ "$kind" = "eslint" ]; then
+    _se_find_eslint_config "$file" || return 1
+    SE_LINTER_KIND="eslint"
+    SE_LINTER_DIR="$SE_ESLINT_DIR"
+    SE_LINTER_BIN="$SE_ESLINT_BIN"
+    SE_LINTER_FILE="$SE_ESLINT_FILE"
+    return 0
+  fi
+  SE_LINTER_KIND="$kind"
+  bin_dir="$SE_LINTER_DIR"
+  while :; do
+    if [ -f "$bin_dir/node_modules/.bin/$kind" ] && [ -x "$bin_dir/node_modules/.bin/$kind" ]; then
+      SE_LINTER_BIN="$bin_dir/node_modules/.bin/$kind"
+      break
+    fi
+    [ "$bin_dir" != "$root" ] && [ "$bin_dir" != / ] || break
+    parent=${bin_dir%/*}; bin_dir=${parent:-/}
+  done
+  if [ -z "$SE_LINTER_BIN" ] && command -v "$kind" >/dev/null 2>&1; then
+    SE_LINTER_BIN=$(command -v "$kind")
+  fi
+  return 0
+}
+
+# _se_prepare_toolchain_shims <dir>
+#   - Resolves the project's pinned Node (.nvmrc / .node-version / engines.node)
+#     and Python (>=3.10 / .python-version), plus validated owner.json
+#     toolchain_path entries, into a deterministic private directory
+#     <TRELLIS_HOME>/state/toolchain-shims/<worktree-key> outside the worktree.
+#   - Preserves R1 PATH ruling (/usr/bin:/bin system binaries remain first for
+#     git/curl/sh/perl/jq) and spec 072 U8 Stop pass-reuse (deterministic PATH).
+_se_prepare_toolchain_shims() {
+  local dir="${1:-$PWD}" home top plan tag a b shim_dir="" existing
+  [ "${__se_toolchain_shims_ready:-}" != "$dir" ] || return 0
+  __se_toolchain_shims_ready="$dir"
+  [ -x /usr/bin/perl ] || return 0
+  if [ -n "${TRELLIS_HOME:-}" ]; then
+    home="$TRELLIS_HOME"
+  elif [ -n "${HOME:-}" ]; then
+    home="$HOME/.trellis"
+  else
+    return 0
+  fi
+  top=$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null) || top="$dir"
+  top=$(unset CDPATH; cd -P -- "$top" 2>/dev/null && pwd -P) || return 0
+  plan=$(/usr/bin/env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB /usr/bin/perl -MDigest::SHA=sha256_hex -MJSON::PP -MCwd=abs_path -e '
+    use strict;
+    my ($home, $top) = @ARGV;
+    my $u = $ENV{HOME} // "";
+    sub safe_dir {
+      my ($d) = @_;
+      return 0 unless defined $d && $d =~ m{^/[A-Za-z0-9_\@%+=,./-]+$} && $d ne "/";
+      return 0 if $d =~ m{//} || $d =~ m{(?:^|/)\.\.?(?:/|$)} || $d =~ m{/$};
+      return -d $d ? 1 : 0;
+    }
+    sub trim_first_line {
+      my ($f) = @_;
+      open(my $fh, "<", $f) or return "";
+      while (my $l = <$fh>) {
+        $l =~ s/^\s+|\s+$//g;
+        next if $l eq "" || $l =~ /^#/;
+        close $fh;
+        return $l;
+      }
+      close $fh;
+      return "";
+    }
+    sub parse_ver {
+      my ($v) = @_;
+      $v =~ s/^v//i;
+      my ($maj, $min, $pat) = $v =~ /^(\d+)(?:\.(\d+))?(?:\.(\d+))?/;
+      return defined $maj ? ($maj + 0, ($min // 0) + 0, ($pat // 0) + 0) : ();
+    }
+    sub cmp_ver {
+      my ($a, $b) = @_;
+      return ($a->[0] <=> $b->[0]) || ($a->[1] <=> $b->[1]) || ($a->[2] <=> $b->[2]);
+    }
+    sub clause_ok {
+      my ($v, $c) = @_;
+      $c =~ s/^\s+|\s+$//g;
+      return 1 if $c eq "" || $c eq "*" || lc($c) eq "x" || lc($c) eq "node" || lc($c) eq "stable" || lc($c) eq "current";
+      if (lc($c) =~ /^lts\/(\*|[a-z0-9_-]+)$/) {
+        my %lts = ("*" => 26, "lithium" => 26, "jod" => 24, "iron" => 20, "hydrogen" => 18);
+        return exists($lts{lc($1)}) ? ($v->[0] == $lts{lc($1)}) : 0;
+      }
+      if ($c =~ /^(>=|<=|>|<|=)\s*v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($op, $rM, $rm, $rp) = ($1, int($2), $3, $4);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $hp = defined($rp) && $rp =~ /^\d+$/;
+        my $m = $hm ? int($rm) : 0;
+        my $p = $hp ? int($rp) : 0;
+        return ($v->[0] == $rM && (!$hm || $v->[1] == $m) && (!$hp || $v->[2] == $p)) if $op eq "=";
+        return ($op eq "<=" ? ($v->[0] <= $rM) : ($v->[0] > $rM)) if !$hm && ($op eq "<=" || $op eq ">");
+        return ($op eq "<=" ? (cmp_ver($v, [$rM, $m + 1, 0]) < 0) : (cmp_ver($v, [$rM, $m + 1, 0]) >= 0)) if $hm && !$hp && ($op eq "<=" || $op eq ">");
+        my $c2 = cmp_ver($v, [$rM, $m, $p]);
+        return $c2 >= 0 if $op eq ">=";
+        return $c2 <= 0 if $op eq "<=";
+        return $c2 > 0  if $op eq ">";
+        return $c2 < 0  if $op eq "<";
+      }
+      if ($c =~ /^\^\s*v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($M, $rm, $rp) = (int($1), $2, $3);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $hp = defined($rp) && $rp =~ /^\d+$/;
+        my $m = $hm ? int($rm) : 0;
+        my $p = $hp ? int($rp) : 0;
+        my $lo = [$M, $m, $p];
+        my $hi = $M > 0 ? [$M + 1, 0, 0] : ($hm && $m > 0 ? [0, $m + 1, 0] : ($hp ? [0, 0, $p + 1] : [1, 0, 0]));
+        return cmp_ver($v, $lo) >= 0 && cmp_ver($v, $hi) < 0;
+      }
+      if ($c =~ /^~\s*v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($M, $rm, $rp) = (int($1), $2, $3);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $p = (defined($rp) && $rp =~ /^\d+$/) ? int($rp) : 0;
+        my $lo = [$M, $hm ? int($rm) : 0, $p];
+        my $hi = $hm ? [$M, int($rm) + 1, 0] : [$M + 1, 0, 0];
+        return cmp_ver($v, $lo) >= 0 && cmp_ver($v, $hi) < 0;
+      }
+      if ($c =~ /^v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($M, $rm, $rp) = (int($1), $2, $3);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $hp = defined($rp) && $rp =~ /^\d+$/;
+        return $v->[0] == $M && (!$hm || $v->[1] == int($rm)) && (!$hp || $v->[2] == int($rp));
+      }
+      return 0;
+    }
+    sub constraint_ok {
+      my ($ver_str, $want) = @_;
+      my @v = parse_ver($ver_str);
+      return 0 unless @v;
+      for my $alt (split /\|\|/, $want) {
+        $alt =~ s/,/ /g;
+        $alt =~ s/v?(\d+(?:\.\d+){0,2})\s+-\s+v?(\d+(?:\.\d+){0,2})/>=$1 <=$2/ig;
+        $alt =~ s/([><=~^])\s+/$1/g;
+        my @parts = grep { length } split /\s+/, $alt;
+        next unless @parts;
+        my $ok = 1;
+        for my $p (@parts) { $ok = 0 unless clause_ok(\@v, $p); }
+        return 1 if $ok;
+      }
+      return 0;
+    }
+    sub cmd_out {
+      my @argv = @_;
+      open(my $fh, "-|", @argv) or return "";
+      my $out = do { local $/; <$fh> } // "";
+      close $fh or return "";
+      $out =~ s/^\s+|\s+$//g;
+      return $out;
+    }
+    sub which_in {
+      my ($name, $dirs) = @_;
+      for my $d (@$dirs) {
+        next unless length $d;
+        my $p = "$d/$name";
+        return $p if -f $p && -x $p && !-d _;
+      }
+      return "";
+    }
+    sub outside_tree {
+      my ($p) = @_;
+      my $r = abs_path($p) // return 0;
+      return index("$r/", "$top/") != 0;
+    }
+
+    my $wt_short = substr(sha256_hex($top), 0, 16);
+    my $sdir = "$home/state/toolchain-shims/$wt_short";
+    my @cur_path = grep { length && $_ ne $sdir && index($_, "$home/state/toolchain-shims/") != 0 } split /:/, ($ENV{PATH} // "");
+    my %in_path = map { $_ => 1 } @cur_path;
+    my @owner_dirs;
+    my $owner_ok = 0;
+
+    my $common = cmd_out("/usr/bin/git", "-C", $top, "rev-parse", "--git-common-dir");
+    if (length $common) {
+      $common = "$top/$common" unless $common =~ m{^/};
+      my $common_real = abs_path($common);
+      if (defined $common_real && -d $common_real) {
+        my $co = sha256_hex($common_real);
+        my $wt = sha256_hex($top);
+        my $owner_file = "$home/state/attachments/$co/$wt.json";
+        my @st = lstat($owner_file);
+        if (@st && ($st[2] & 0170000) == 0100000 && $st[4] == $< && ($st[2] & 07777) == 0600) {
+          if (open(my $fh, "<", $owner_file)) {
+            my $raw = do { local $/; <$fh> } // "";
+            close $fh;
+            my $doc = eval { decode_json($raw) };
+            if (ref $doc eq "HASH" && ($doc->{status} // "") eq "committed" && ref $doc->{toolchain_path} eq "ARRAY") {
+              $owner_ok = 1;
+              for my $d (@{$doc->{toolchain_path}}) {
+                push @owner_dirs, $d if !ref($d) && safe_dir($d);
+              }
+            }
+          }
+        }
+      }
+    }
+
+    my @append;
+    for my $d (@owner_dirs) {
+      next if $in_path{$d}++;
+      push @cur_path, $d;
+      push @append, $d;
+    }
+
+    # --- Node pin resolution ---
+    my $want_node = "";
+    if (-f "$top/.nvmrc" && !-l "$top/.nvmrc") {
+      $want_node = trim_first_line("$top/.nvmrc");
+    } elsif (-f "$top/.node-version" && !-l "$top/.node-version") {
+      $want_node = trim_first_line("$top/.node-version");
+    } elsif (-f "$top/package.json") {
+      if (open(my $fh, "<", "$top/package.json")) {
+        my $j = eval { local $/; decode_json(<$fh> // "") };
+        close $fh;
+        if (ref $j eq "HASH" && ref $j->{engines} eq "HASH" && defined $j->{engines}{node} && !ref $j->{engines}{node}) {
+          $want_node = $j->{engines}{node};
+          $want_node =~ s/^\s+|\s+$//g;
+        }
+      }
+    }
+    $want_node = "26" if $want_node =~ m{^lts/(?:\*|lithium)$}i;
+    if ($want_node eq "" && $owner_ok && length($u) && -f "$u/.nvm/alias/default") {
+      my $def = trim_first_line("$u/.nvm/alias/default");
+      $def = "26" if $def =~ m{^lts/(?:\*|lithium)$}i;
+      $want_node = $def if $def =~ /^v?\d+/;
+    }
+
+    my %shims;
+    if (length $want_node) {
+      my $cur_node = which_in("node", \@cur_path);
+      my $cur_ver = length($cur_node) && outside_tree($cur_node) ? cmd_out($cur_node, "-p", "process.versions.node") : "";
+      if (!length($cur_ver) || !constraint_ok($cur_ver, $want_node)) {
+        my @cand_dirs;
+        my $nvm = $ENV{NVM_DIR} // (length($u) ? "$u/.nvm" : "");
+        if (length $nvm && -d "$nvm/versions/node") {
+          my @vers = glob("$nvm/versions/node/*/bin");
+          @vers = map { $_->[0] } sort { cmp_ver($b->[1], $a->[1]) }
+                  map { my ($v) = m{/versions/node/([^/]+)/bin$}; [$_, [parse_ver($v // "0")]] } @vers;
+          push @cand_dirs, grep { safe_dir($_) } @vers;
+        }
+        if (length $u) {
+          for my $pat ("$u/.volta/tools/image/node/*/bin", "$u/.fnm/node-versions/*/installation/bin") {
+            push @cand_dirs, grep { safe_dir($_) } reverse sort glob($pat);
+          }
+        }
+        push @cand_dirs, grep { safe_dir($_) } ("/opt/homebrew/bin", glob("/opt/homebrew/opt/node\@*/bin"), "/usr/local/bin", @owner_dirs);
+        my $picked = "";
+        for my $d (@cand_dirs) {
+          next unless -f "$d/node" && -x "$d/node" && outside_tree("$d/node");
+          my $v = cmd_out("$d/node", "-p", "process.versions.node");
+          if (length($v) && constraint_ok($v, $want_node)) { $picked = $d; last; }
+        }
+        # Fallback: if exact minor/patch pin is not installed locally, accept same major >= pin.
+        if (!length($picked) && $want_node =~ /^v?(\d+)\.(\d+)/) {
+          my ($maj, $min) = ($1 + 0, $2 + 0);
+          my $relaxed = ">=$maj.$min.0 <" . ($maj + 1) . ".0.0";
+          for my $d (@cand_dirs) {
+            next unless -f "$d/node" && -x "$d/node" && outside_tree("$d/node");
+            my $v = cmd_out("$d/node", "-p", "process.versions.node");
+            if (length($v) && constraint_ok($v, $relaxed)) { $picked = $d; last; }
+          }
+        }
+        if (length $picked) {
+          for my $tool (qw(node npm npx corepack)) {
+            $shims{$tool} = "$picked/$tool" if -f "$picked/$tool" && -x "$picked/$tool" && outside_tree("$picked/$tool");
+          }
+          if (-f "$picked/pnpm" && -x "$picked/pnpm" && outside_tree("$picked/pnpm")) {
+            $shims{pnpm} = "$picked/pnpm";
+          } else {
+            my $p = which_in("pnpm", [@cur_path, "/opt/homebrew/bin", "/usr/local/bin"]);
+            $shims{pnpm} = $p if length($p) && outside_tree($p);
+          }
+        }
+      }
+    }
+
+    # --- Python >=3.10 / .python-version resolution ---
+    my $want_py = (-f "$top/.python-version" && !-l "$top/.python-version") ? trim_first_line("$top/.python-version") : "";
+    my $cur_py = which_in("python3", \@cur_path);
+    my $cur_py_ver = (length($cur_py) && outside_tree($cur_py))
+      ? cmd_out($cur_py, "-I", "-c", "import sys; print(\"%d.%d.%d\" % sys.version_info[:3])")
+      : "";
+    my $need_py = 0;
+    if (length $want_py) {
+      $need_py = (!length($cur_py_ver) || !constraint_ok($cur_py_ver, $want_py)) ? 1 : 0;
+    } elsif (!length($cur_py) || $cur_py eq "/usr/bin/python3") {
+      $need_py = (!length($cur_py_ver) || !constraint_ok($cur_py_ver, ">=3.10.0")) ? 1 : 0;
+    }
+    if ($need_py) {
+      my $target_constraint = length($want_py) ? $want_py : ">=3.10.0";
+      my @py_dirs = grep { $_ ne "/usr/bin" && $_ ne "/bin" } @cur_path;
+      if (length($u) && -d "$u/.pyenv/versions") {
+        my @pv = glob("$u/.pyenv/versions/*/bin");
+        @pv = map { $_->[0] } sort { cmp_ver($b->[1], $a->[1]) }
+              map { my ($v) = m{/versions/([^/]+)/bin$}; [$_, [parse_ver($v // "0")]] } @pv;
+        push @py_dirs, grep { safe_dir($_) } @pv;
+      }
+      if ($owner_ok || length($want_py) || length($want_node)) {
+        push @py_dirs, grep { safe_dir($_) } ("/opt/homebrew/bin", "/usr/local/bin");
+      }
+      for my $d (@py_dirs) {
+        next unless -f "$d/python3" && -x "$d/python3" && outside_tree("$d/python3");
+        my $v = cmd_out("$d/python3", "-I", "-c", "import sys; print(\"%d.%d.%d\" % sys.version_info[:3])");
+        if (length($v) && constraint_ok($v, $target_constraint)) {
+          $shims{python3} = "$d/python3";
+          $shims{python} = (-f "$d/python" && -x "$d/python" && outside_tree("$d/python")) ? "$d/python" : "$d/python3";
+          last;
+        }
+      }
+    }
+
+    print "APPEND\t$_\n" for @append;
+    if (keys %shims) {
+      if ($sdir =~ m{^/[A-Za-z0-9_\@%+=,./-]+$} && $sdir !~ m{//} && $sdir !~ m{(?:^|/)\.\.?(?:/|$)}) {
+        print "SHIMDIR\t$sdir\n";
+        for my $k (sort keys %shims) { print "SHIM\t$k\t$shims{$k}\n"; }
+      }
+    }
+  ' "$home" "$top" 2>/dev/null) || return 0
+
+  [ -n "$plan" ] || return 0
+  local -a wanted_names=()
+  while IFS=$'\t' read -r tag a b; do
+    case "$tag" in
+      APPEND)
+        case ":${PATH:-}:" in
+          *":$a:"*) ;;
+          *) PATH="${PATH:+$PATH:}$a"; export PATH ;;
+        esac
+        ;;
+      SHIMDIR)
+        shim_dir="$a"
+        ( umask 077 && mkdir -p "$shim_dir" ) 2>/dev/null || { shim_dir=""; break; }
+        chmod 700 "$shim_dir" 2>/dev/null || true
+        ;;
+      SHIM)
+        [ -n "$shim_dir" ] || continue
+        wanted_names[${#wanted_names[@]}]="$a"
+        if [ "$(readlink "$shim_dir/$a" 2>/dev/null || true)" != "$b" ]; then
+          ln -snf "$b" "$shim_dir/$a" 2>/dev/null || true
+        fi
+        ;;
+    esac
+  done <<< "$plan"
+
+  if [ -n "$shim_dir" ] && [ "${#wanted_names[@]}" -gt 0 ]; then
+    for existing in "$shim_dir"/*; do
+      [ -e "$existing" ] || [ -L "$existing" ] || continue
+      local base="${existing##*/}" keep=0 w
+      for w in "${wanted_names[@]}"; do
+        [ "$w" = "$base" ] && { keep=1; break; }
+      done
+      [ "$keep" -eq 1 ] || rm -f "$existing" 2>/dev/null || true
+    done
+    case ":${PATH:-}:" in
+      *":$shim_dir:"*) ;;
+      *) PATH="$shim_dir${PATH:+:$PATH}"; export PATH ;;
+    esac
+  fi
+  return 0
+}
+
+# --- Hook-written structural verification state (P37) -------------------------
+# <git-dir>/trellis-local/last-verified.json (mode 0600 in 0700 dir) records
+# authoritative check execution by stop-verify. pre-push never reads this file.
+_se_last_verified_file() {
+  local gdir
+  gdir=$(git -C "$1" rev-parse --git-dir 2>/dev/null) && [ -n "$gdir" ] || return 1
+  case "$gdir" in /*) ;; *) gdir="$1/$gdir" ;; esac
+  gdir=$(unset CDPATH; cd -P -- "$gdir" 2>/dev/null && pwd -P) || return 1
+  printf '%s/trellis-local/last-verified.json' "$gdir"
+}
+
+_se_last_verified_match() {
+  local lv_file fp="$2" sk="${3:-}"
+  [ -n "$fp" ] || return 1
+  lv_file=$(_se_last_verified_file "$1") || return 1
+  /usr/bin/env -u PERL5OPT -u PERL5LIB -u PERLLIB -u PERL5DB /usr/bin/perl -MFcntl -MJSON::PP -e '
+    my ($f, $fp, $sk) = @ARGV;
+    (my $d = $f) =~ s{/[^/]*$}{};
+    my @d = lstat $d;
+    exit 1 unless @d && ($d[2] & 0170000) == 0040000 && $d[4] == $< && ($d[2] & 07777) == 0700;
+    sysopen(my $h, $f, O_RDONLY | O_NOFOLLOW) or exit 1;
+    my @s = stat $h;
+    exit 1 unless @s && ($s[2] & 0170000) == 0100000 && $s[4] == $< && ($s[2] & 07777) == 0600 && $s[3] == 1;
+    my $raw = do { local $/; <$h> } // "";
+    close $h;
+    my $doc = eval { decode_json($raw) };
+    exit 1 unless ref $doc eq "HASH"
+      && ($doc->{schema_version} // 0) == 1
+      && ($doc->{checks_run} // 0) > 0
+      && ($doc->{tree_fingerprint} // "") eq $fp
+      && (!length($sk) || ($doc->{stop_key} // "") eq $sk);
+    exit 0;
+  ' "$lv_file" "$fp" "$sk" 2>/dev/null
+}
+
+_se_last_verified_write() {
+  local project="$1" fp="$2" harness="$3" checks_run="$4" defer_dir="${5:-}" stop_key="${6:-}" target dir tmp head ts payload
+  shift 6
+  [ -n "$fp" ] || return 0
+  if [ -n "$defer_dir" ]; then
+    target="$defer_dir/last-verified.json"
+  else
+    target=$(_se_last_verified_file "$project") || return 0
+  fi
+  dir="${target%/*}"
+  [ ! -L "$dir" ] || return 0
+  ( umask 077 && mkdir -p "$dir" ) 2>/dev/null || return 0
+  [ -d "$dir" ] && [ ! -L "$dir" ] || return 0
+  chmod 700 "$dir" 2>/dev/null || return 0
+  [ ! -L "$target" ] || return 0
+  head="${fp%% *}"
+  ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) || ts=""
+  payload=$(printf '%s\0' "$@" | jq -Rsc --arg head "$head" --arg fp "$fp" --arg sk "$stop_key" --arg h "$harness" --arg ts "$ts" --argjson n "$checks_run" '
+    (split("\u0000") | if length > 0 and .[-1] == "" then .[:-1] else . end) as $cmds |
+    {schema_version: 1, head: $head, tree_fingerprint: $fp, stop_key: $sk, checks_run: $n, commands: $cmds, harness: $h, verified_at: $ts}
+  ' 2>/dev/null) || return 0
+  tmp=$(umask 077; mktemp "$dir/.lv.XXXXXX" 2>/dev/null) || return 0
+  if [ ! -L "$tmp" ] && [ ! -L "$target" ] && printf '%s\n' "$payload" > "$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$target"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 0
 }
 
 __se_heavy_loaded=1

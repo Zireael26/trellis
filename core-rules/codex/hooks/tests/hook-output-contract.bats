@@ -449,7 +449,7 @@ no_jq_path() {
 
 @test "decision-receipt shared-core block is remapped by Codex wrapper" {
   printf '{"autonomy":4}\n' > "$PROJECT_DIR/.trellis.config.json"
-  run_stop decision-receipt.sh "$(stop_payload)"
+  run_stop decision-receipt.sh "$(stop_payload $'Done.\n\n## Decisions made (L5)\n\n- bad\n')"
   assert_run_block
   [[ "$output" == *'decision-receipt:'* ]] || false
 }

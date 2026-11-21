@@ -59,7 +59,7 @@ __se_autonomy_lib="$(dirname "${BASH_SOURCE[0]}")/lib/autonomy.sh"
 # shellcheck source=lib/autonomy.sh disable=SC1090,SC1091
 . "$__se_autonomy_lib"
 
-STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '.stop_hook_active == true')
+STOP_ACTIVE=$(printf '%s' "$INPUT" | jq -r '(.stop_hook_active == true) or (.continuationActive == true)')
 if [ "$STOP_ACTIVE" = "true" ]; then
   exit 0
 fi
@@ -114,7 +114,7 @@ REPO_ROOT=$(_se_repo_root "$PROJECT_DIR")
 # them self-poisons idempotency (the marker written this turn would reappear as
 # untracked content next turn, changing the diff hash).
 _cr_untracked() {
-  git ls-files --others --exclude-standard -z -- ':/' ':(exclude,top).claude' ':(exclude,top).codex' 2>/dev/null
+  git ls-files --others --exclude-standard -z -- ':/' ':(exclude,top).claude' ':(exclude,top).codex' ':(exclude,top).agents' 2>/dev/null
 }
 _cr_tracked_diff() {
   if [ "$CR_HAS_HEAD" -eq 1 ]; then
@@ -214,7 +214,7 @@ try:
         pending += chunk
         while b'\0' in pending:
             raw, pending = pending.split(b'\0', 1)
-            if raw in (b'.claude', b'.codex') or raw.startswith((b'.claude/', b'.codex/')):
+            if raw in (b'.claude', b'.codex', b'.agents') or raw.startswith((b'.claude/', b'.codex/', b'.agents/')):
                 continue
             count += 1
             identity.update(raw + b'\0')
@@ -261,7 +261,10 @@ CR_METADATA_PY
 
 _cr_capture_unmet() {
   local meta="$1" ns=codex state='' notice='' key old='' tmp='' message
-  [ "${TRELLIS_HARNESS:-codex}" != pi ] || ns=pi
+  case "${TRELLIS_HARNESS:-codex}" in
+    pi) ns=pi ;;
+    antigravity) ns=antigravity ;;
+  esac
   if [ "${CR_LOST_NOTICE:-0}" -eq 1 ]; then
     meta=$(printf '%s' "$meta" | jq --arg note "$(_cr_reset_note)" --arg lost_key "$CR_LOST_KEY" \
       '.loss_context = $note | .notice_key = ((.notice_key // "unavailable") + ":coverage-loss:" + $lost_key)')
@@ -402,7 +405,11 @@ CR_TRUNCATED=0
 # is unreviewed until the diff changes. A failure never reads as reviewed.
 CR_MAX_ATTEMPTS=3
 CR_HARNESS=codex
-[ "${TRELLIS_HARNESS:-codex}" = "pi" ] && CR_HARNESS=pi
+CR_MARKER_DIR="$REPO_ROOT/.codex"
+case "${TRELLIS_HARNESS:-codex}" in
+  pi) CR_HARNESS=pi ;;
+  antigravity) CR_HARNESS=antigravity; CR_MARKER_DIR="$REPO_ROOT/.agents" ;;
+esac
 CR_STATE="" CR_TREE="" CR_HEAD="unborn" CR_FAILS=0
 _cr_tree() {
   local idx real out
@@ -1029,7 +1036,7 @@ fi
 CR_DISPLAY_EXCLUDED=$(jq -c 'map(.[0:256]) | .[:8]' "$CR_EXCLUDED_FILE")
 FULL_BYTES=$(wc -c < "$CR_DIFF_FILE" | tr -d ' ')
 DIFF_HASH=$(git hash-object "$CR_DIFF_FILE") || exit 0
-MARKER="$REPO_ROOT/.codex/.review-done-${DIFF_HASH}"
+MARKER="$CR_MARKER_DIR/.review-done-${DIFF_HASH}"
 # The exact tree lookup is authoritative; a marker alone cannot cover a delta
 # relative to a different reviewed base. If state storage is unavailable, only
 # this full-capture Git hash can retain the legacy marker fallback.
@@ -1050,9 +1057,19 @@ if [ "$AUTONOMY_LEVEL" -ge 4 ] && [ -f "$DECISIONS_LOG_PATH" ]; then
 else
   DECISIONS_PAYLOAD=""
 fi
+# P40: load REVIEW.md ONLY from the committed merge-base (never working tree),
+# bounded to 16 KiB so untrusted in-turn edits cannot self-exempt review rules.
+CR_REVIEW_GUIDELINES=""
+if [ "$CR_HAS_HEAD" -eq 1 ]; then
+  CR_MERGE_BASE=$(_se_review_merge_base "$REPO_ROOT")
+  if [ -n "$CR_MERGE_BASE" ] && [ "$(git cat-file -t "${CR_MERGE_BASE}:REVIEW.md" 2>/dev/null)" = "blob" ]; then
+    CR_REVIEW_GUIDELINES=$(git cat-file blob "${CR_MERGE_BASE}:REVIEW.md" 2>/dev/null | head -c 16384)
+  fi
+fi
 jq -nc --rawfile diff "$CR_DIFF_FILE" \
-  --arg level "$AUTONOMY_LEVEL" --arg decisions "$DECISIONS_PAYLOAD" --slurpfile excluded "$CR_EXCLUDED_FILE" \
-  '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions, excluded_paths: $excluded[0]}' \
+  --arg level "$AUTONOMY_LEVEL" --arg decisions "$DECISIONS_PAYLOAD" \
+  --arg guidelines "$CR_REVIEW_GUIDELINES" --slurpfile excluded "$CR_EXCLUDED_FILE" \
+  '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions, excluded_paths: $excluded[0]} + (if ($guidelines | length) > 0 then {review_guidelines: $guidelines} else {} end)' \
   > "$CR_CAPTURE_DIR/request.json" || _cr_failed 'code-review-subagent: review envelope unavailable'
 
 # --- Invoke the reviewer ladder (sibling lib) ---
@@ -1140,6 +1157,18 @@ CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "
 if [ -n "$CRITICAL" ]; then
   REASON="Code review flagged critical issues — resolve or explicitly defer:
 ${CRITICAL}"
+  CR_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-3}"
+  case "$CR_MAX_ROUNDS" in ''|*[!0-9]*) CR_MAX_ROUNDS=3 ;; esac
+  if [ -n "$CR_STATE" ]; then
+    CR_CRIT_ROUND=$(cat "$CR_STATE/critical-rounds.$CR_HARNESS" 2>/dev/null) || CR_CRIT_ROUND=0
+    case "$CR_CRIT_ROUND" in ''|*[!0-9]*) CR_CRIT_ROUND=0 ;; esac
+    CR_CRIT_ROUND=$((CR_CRIT_ROUND + 1))
+    ( umask 077 && printf '%s\n' "$CR_CRIT_ROUND" > "$CR_STATE/critical-rounds.$CR_HARNESS" ) 2>/dev/null || true
+    if [ "$CR_CRIT_ROUND" -ge "$CR_MAX_ROUNDS" ]; then
+      REASON="${REASON}
+ESCALATE: automated critical-review repair cap (${CR_MAX_ROUNDS} rounds) reached — stop retrying blind fixes and surface this unresolved critical finding to the operator."
+    fi
+  fi
   if [ "$CR_INCOMPLETE" -eq 1 ]; then
     _cr_exclusion_notice "$CR_EXCLUDED_FILE"
     REASON="$REASON
@@ -1153,6 +1182,7 @@ Coverage remains UNREVIEWED; excluded (up to 8 paths): $CR_DISPLAY_EXCLUDED$(_cr
   # stdout block decision on exit 0; exit 2 would require a stderr prompt.
   exit 0
 fi
+[ -z "$CR_STATE" ] || rm -f "$CR_STATE/critical-rounds.$CR_HARNESS" 2>/dev/null || true
 
 # Never mark an unrecognised severity as reviewed. A known critical in the
 # same envelope was handled first, before rejecting the malformed remainder.
@@ -1200,7 +1230,7 @@ if [ "$CR_INCOMPLETE" -eq 1 ]; then
   printf 'code-review-subagent: review incomplete: eligible text reviewed, excluded (up to 8 paths): %s; coverage remains UNREVIEWED, no completed marker or tree written\n' "$CR_DISPLAY_EXCLUDED" >&2
   exit 0
 fi
-if ! mkdir -p "$REPO_ROOT/.codex"; then
+if ! mkdir -p "$CR_MARKER_DIR"; then
   exit 0
 fi
 # Save coverage before advancing completion. It remains bound to the previous
@@ -1225,6 +1255,6 @@ if [ -n "$CR_STATE" ]; then
 fi
 if ! : > "$MARKER"; then exit 0; fi
 [ -z "$CR_STATE" ] || rm -f -- "$CR_STATE/unmet.capture.$CR_HARNESS"
-find "$REPO_ROOT/.codex" -maxdepth 1 -type f -name '.review-done-*' -mtime +7 -exec rm -f {} + 2>/dev/null
+find "$CR_MARKER_DIR" -maxdepth 1 -type f -name '.review-done-*' -mtime +7 -exec rm -f {} + 2>/dev/null
 
 exit 0

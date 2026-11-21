@@ -1,0 +1,255 @@
+# Original C-locale oracle functions from ef6efc6bb.
+# Test data, sourced ONLY by a shell started with LC_ALL=C.
+
+_gr_json_str() {
+  local LC_ALL=C s=$1 out='' c i
+  s=${s//\\/\\\\}
+  s=${s//\"/\\\"}
+  case $s in
+    *[$'\001'-$'\037'$'\177']*)
+      for ((i = 0; i < ${#s}; i++)); do
+        c=${s:i:1}
+        case $c in
+          $'\b') out="$out\\b" ;;
+          $'\t') out="$out\\t" ;;
+          $'\n') out="$out\\n" ;;
+          $'\f') out="$out\\f" ;;
+          $'\r') out="$out\\r" ;;
+          [$'\001'-$'\037'$'\177']) printf -v c '\\u%04x' "'$c"; out="$out$c" ;;
+          *) out="$out$c" ;;
+        esac
+      done
+      s=$out
+      ;;
+  esac
+  GR_JSON="\"$s\""
+}
+
+_gr_trellis_home() {
+  GR_TRELLIS_HOME=${TRELLIS_HOME:-}
+  [ -n "$GR_TRELLIS_HOME" ] || { [ -z "${HOME:-}" ] || GR_TRELLIS_HOME=${HOME%/}/.trellis; }
+}
+
+_gr_reread_override_active() {
+  local key=$1 file line extra="" expires created reason rest field LC_ALL=C
+  case $key in ''|*[!0-9a-f]*) return 1 ;; esac
+  [ "${#key}" -eq 16 ] || return 1
+  _gr_trellis_home
+  [ -n "$GR_TRELLIS_HOME" ] || return 1
+  file=$GR_TRELLIS_HOME/state/reread-overrides/$key
+  [ -f "$file" ] && [ ! -L "$file" ] || return 1
+  { IFS= read -r line && ! IFS= read -r extra; } < "$file" 2>/dev/null || return 1
+  [ -z "$extra" ] && [ "${#line}" -le 4095 ] || return 1
+  case $line in *$'\t'*$'\t'*) ;; *) return 1 ;; esac
+  expires=${line%%$'\t'*} rest=${line#*$'\t'}
+  created=${rest%%$'\t'*} reason=${rest#*$'\t'}
+  for field in "$expires" "$created"; do
+    case $field in ''|0*|*[!0-9]*) return 1 ;; esac
+    [ "${#field}" -le 12 ] || return 1
+  done
+  case $reason in ''|*[[:cntrl:]]*) return 1 ;; esac
+  [ "${#reason}" -le 2000 ] || return 1
+  [ $((created + GR_REREAD_OVERRIDE_TTL)) -eq "$expires" ] || return 1
+  _gr_now
+  case $GR_NOW in ''|*[!0-9]*) return 1 ;; esac
+  [ "$expires" -gt "$GR_NOW" ] && [ $((expires - GR_NOW)) -le "$GR_REREAD_OVERRIDE_TTL" ]
+}
+
+_attachment_visible() {
+  local LC_ALL=C value=$1 out='' char i
+  case "$value" in
+    *[[:cntrl:]]*) ;;
+    *) printf '%s' "$value"; return 0 ;;
+  esac
+  for ((i = 0; i < ${#value}; i++)); do
+    char=${value:i:1}
+    case "$char" in
+      $'\n') out+='\n' ;;
+      $'\r') out+='\r' ;;
+      $'\t') out+='\t' ;;
+      [[:cntrl:]]) out+=$(printf '\\x%02x' "'$char") ;;
+      *) out+=$char ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+_attachment_hooks_expected_passthrough_names() {
+  local root=${1:-} previous=${2:-} payload=${3:-} dir="" entry base regular=false seen=false
+  local LC_ALL=C
+  case "$previous" in
+    "")
+      [ -n "$root" ] || return 0
+      [ -z "$payload" ] || _attachment_hooks_payload_shims_default "$payload" || return 0
+      dir=$(_attachment_hooks_default_hooks_dir "$root") || return 1
+      [ ! -L "$dir" ] || return 0
+      regular=true
+      ;;
+    /*) dir="$previous" ;;
+    *)
+      [ -n "$root" ] || return 0
+      dir="$root/$previous"
+      ;;
+  esac
+  # A readable, searchable, nonempty directory is the normal case. Bash's C
+  # locale glob is already sorted, and hook names never begin with a dot. If
+  # the glob finds no entries, it may be empty or a failed enumeration: ask
+  # the slow scanner rather than treating that ambiguity as proof of absence.
+  if [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ]; then
+    for entry in "$dir"/?* "$dir"/.[!.]* "$dir"/..?*; do
+      [ -e "$entry" ] || [ -L "$entry" ] || continue
+      seen=true
+      base=${entry##*/}
+      _attachment_hooks_is_passthrough_name "$base" || continue
+      if [ "$regular" = true ] && [ -L "$entry" ]; then
+        continue
+      fi
+      if { [ -f "$entry" ] || [ -L "$entry" ]; } && [ -x "$entry" ]; then
+        printf '%s\n' "$base"
+      fi
+    done
+    [ "$seen" = false ] || return 0
+  fi
+  _attachment_hooks_expected_passthrough_names_slow "$dir" "$regular"
+}
+
+shared_infra_safe_line() {
+  local LC_ALL=C value="${1:-}"
+  case "$value" in
+    *[$'\001'-$'\037'$'\177']*|*$'\302'[$'\200'-$'\237']*)
+      printf '<unsafe tool diagnostic>' ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+pg_audit_dir_values() {
+  local LC_ALL=C line key val
+  local re_assign='^(SECURITY_GATE_[A-Z0-9_]+|LLM_[A-Z0-9_]+)=(.*)$'
+  local re_tail='([[:space:]]+(#.*)?)?$'
+  local re_dq='^"([^"$`\\]*)"'"$re_tail"
+  local re_sq="^'([^']*)'$re_tail"
+  local re_bare='^([A-Za-z0-9_./:,@+%=-]*)'"$re_tail"
+  local re_def='^"[$][{]([A-Z0-9_]+):-([^"$`\\}]*)[}]"'"$re_tail"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    [[ "$line" =~ $re_assign ]] || return 1
+    key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
+    if [[ "$val" =~ $re_def ]]; then
+      [ "${BASH_REMATCH[1]}" = "$key" ] || return 1
+      val="${BASH_REMATCH[2]}"
+    elif [[ "$val" =~ $re_dq ]] || [[ "$val" =~ $re_sq ]] || [[ "$val" =~ $re_bare ]]; then
+      val="${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
+    [ "$key" != SECURITY_GATE_AUDIT_DIR ] || printf '%s\n' "$val"
+  done
+}
+
+resolve_analyze_report() {
+  local spec_dir="$1"
+  local selected=""
+  local highest_round="0"
+  local candidate name suffix round
+  local LC_ALL=C
+
+  if [ -f "$spec_dir/analyze.md" ]; then
+    selected="$spec_dir/analyze.md"
+    highest_round="1"
+  fi
+
+  for candidate in "$spec_dir"/analyze-*.md; do
+    [ -f "$candidate" ] || continue
+    name="${candidate##*/}"
+    suffix="${name#analyze-}"
+    suffix="${suffix%.md}"
+    case "$suffix" in
+      ''|*[!0-9]*) continue ;;
+    esac
+
+    round="$suffix"
+    while [ "${round#0}" != "$round" ]; do
+      round="${round#0}"
+    done
+    [ -n "$round" ] || round="0"
+
+    # Equal-length normalized digit strings compare lexically without integer overflow.
+    # shellcheck disable=SC2071
+    if [ "${#round}" -gt "${#highest_round}" ] \
+      || { [ "${#round}" -eq "${#highest_round}" ] && [[ "$round" > "$highest_round" ]]; }; then
+      selected="$candidate"
+      highest_round="$round"
+    fi
+  done
+
+  [ -n "$selected" ] && printf '%s\n' "$selected"
+}
+
+sg_parse_local_config() {
+  local LC_ALL=C line key val n=0
+  local re_assign='^([A-Z][A-Z0-9_]*)=(.*)$'
+  local re_tail='([[:space:]]+(#.*)?)?$'
+  local re_dq='^"([^"$`\\]*)"'"$re_tail"
+  local re_sq="^'([^']*)'$re_tail"
+  local re_bare='^([A-Za-z0-9_./:,@+%=-]*)'"$re_tail"
+  local re_def='^"[$][{]([A-Z0-9_]+):-([^"$`\\}]*)[}]"'"$re_tail"
+  SG_CONFIG_BAD_LINE=0
+  while IFS= builtin read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    SG_CONFIG_BAD_LINE="$n"
+    [[ "$line" =~ $re_assign ]] || return 1
+    key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+    case "$key" in
+      SECURITY_GATE_STACK_PROFILE|SECURITY_GATE_PROJECT_NAME|SECURITY_GATE_AUDIT_DIR|\
+      SECURITY_GATE_SEMGREP_TIMEOUT|SECURITY_GATE_SHELLCHECK|SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS|\
+      SECURITY_GATE_GARAK_TARGET|SECURITY_GATE_GARAK_PROBES|SECURITY_GATE_GARAK_TIMEOUT|\
+      SECURITY_GATE_LLM_TIMEOUT_S|SECURITY_GATE_STACK_VALIDATORS|LLM_PROVIDER|LLM_MODEL) ;;
+      *) return 1 ;;
+    esac
+    if [[ "$val" =~ $re_def ]]; then
+      [ "${BASH_REMATCH[1]}" = "$key" ] || return 1
+      [ -n "${!key:-}" ] || builtin printf -v "$key" '%s' "${BASH_REMATCH[2]}"
+    elif [[ "$val" =~ $re_dq ]] || [[ "$val" =~ $re_sq ]] || [[ "$val" =~ $re_bare ]]; then
+      builtin printf -v "$key" '%s' "${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
+    builtin export "${key?}"
+  done < "$1"
+  # shellcheck disable=SC2034  # consumed by the calling baseline
+  SG_CONFIG_BAD_LINE=0
+}
+
+parse_config_data() {
+  # Byte semantics: `[A-Z]` is ASCII only, and a non-ASCII key never matches.
+  local LC_ALL=C
+  local line key val n=0
+  local re_assign='^(SECURITY_GATE_[A-Z0-9_]+|LLM_[A-Z0-9_]+)=(.*)$'
+  # [[:space:]] includes CR, so a CRLF file parses the same as an LF one.
+  local re_tail='([[:space:]]+(#.*)?)?$'
+  local re_dq='^"([^"$`\\]*)"'"$re_tail"
+  local re_sq="^'([^']*)'$re_tail"
+  local re_bare='^([A-Za-z0-9_./:,@+%=-]*)'"$re_tail"
+  local re_def='^"[$][{]([A-Z0-9_]+):-([^"$`\\}]*)[}]"'"$re_tail"
+  while IFS= builtin read -r line || [ -n "$line" ]; do
+    n=$((n + 1))
+    line="${line#"${line%%[![:space:]]*}"}"
+    case "$line" in ''|'#'*) continue ;; esac
+    CONFIG_BAD_LINE="$n"
+    [[ "$line" =~ $re_assign ]] || return 1
+    key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+    # A repeated key is last-wins, as it was when the file was sourced.
+    if [[ "$val" =~ $re_def ]]; then
+      [ "${BASH_REMATCH[1]}" = "$key" ] || return 1
+      case "$key" in SECURITY_GATE_*) [ -n "${!key:-}" ] || builtin printf -v "$key" '%s' "${BASH_REMATCH[2]}" ;; esac
+    elif [[ "$val" =~ $re_dq ]] || [[ "$val" =~ $re_sq ]] || [[ "$val" =~ $re_bare ]]; then
+      case "$key" in SECURITY_GATE_*) builtin printf -v "$key" '%s' "${BASH_REMATCH[1]}" ;; esac
+    else
+      return 1
+    fi
+  done < "$1"
+  CONFIG_BAD_LINE=0
+}

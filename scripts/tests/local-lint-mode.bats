@@ -10,6 +10,8 @@ setup() {
   export TRELLIS_GATE_STATE_DIR="$SANDBOX/gate-state"
   export GIT_CONFIG_GLOBAL="$HOME/.gitconfig" GIT_CONFIG_NOSYSTEM=1
   mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR" "$SANDBOX/bin" "$SANDBOX/project"
+  chmod 700 "$TRELLIS_HOME"
+  (umask 077; printf '{}\n' > "$TRELLIS_HOME/config.json")
   PROJECT="$SANDBOX/project"
   export CLAUDE_PROJECT_DIR="$PROJECT"
   unset CODEX_PROJECT_DIR TRELLIS_ROOT
@@ -29,6 +31,8 @@ setup() {
   # executing run-tests.sh or its planner, fence, or any test suite.
   awk '/^shellcheck_tree\(\) \{$/,/^\}$/; /^aeo_static_and_python\(\) \{$/,/^\}$/' \
     "$ROOT/scripts/run-tests.sh" > "$STATIC_BATTERY_FUNCTIONS"
+  export REAL_PYTHON3
+  REAL_PYTHON3="$(command -v python3)"
   cat > "$SANDBOX/bin/python3" <<'SH'
 #!/usr/bin/env bash
 if [ "$*" = scripts/run-tests-local.py ]; then
@@ -39,7 +43,10 @@ if [ "$*" = scripts/run-tests-local.py ]; then
   shellcheck_tree || rc=1
   exit "$rc"
 fi
-[ "$*" = '-m unittest discover -s core-rules/skills/aeo-gate/tests -p test_*.py' ]
+if [ "${1:-}" = -I ] && [ "${2:-}" = -B ] && [ "${3##*/}" = docs-policy.py ]; then
+  exec "$REAL_PYTHON3" "$@"
+fi
+[ "$*" = '-B -m unittest discover -s core-rules/skills/aeo-gate/tests -p test_*.py' ]
 SH
   cat > "$SANDBOX/bin/ruff" <<'SH'
 #!/usr/bin/env bash

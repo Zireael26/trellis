@@ -57,7 +57,11 @@ setup() {
   PROJECTS="$SANDBOX/projects"
   SHARED="$SANDBOX/shared-infra"
   CFG="$SANDBOX/trellis.config.json"
-  mkdir -p "$CANON" "$PROJECTS"
+  # A legacy config isolates policy paths, not process HOME or Codex plugins.
+  # Never let a healthy fixture inspect the operator's installed plugin cache.
+  export HOME="$SANDBOX/account-home"
+  export CODEX_HOME="$HOME/.codex"
+  mkdir -p "$CANON" "$PROJECTS" "$CODEX_HOME"
   DOCTOR_SHARED_OVERRIDE=""
   export TRELLIS_CONFIG="$CFG"
   unset PORTABLE_STRICT_PRESET_CONTENT
@@ -267,10 +271,11 @@ autonomy_ceiling: 2
 Fixture preset
 EOF
   fi
+  printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/AGENTS.md"
   printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/CLAUDE.md"
   printf -- '---\nname: fixture\ndescription: fixture\n---\n' \
     > "$PORTABLE_RELEASE_PAYLOAD/core-rules/skills/fixture/SKILL.md"
-  for command_name in fixture primer primer-refresh primer-check explore surgical; do
+  for command_name in fixture primer primer-refresh primer-check explore surgical lean-sweep red-team test-cleanup de-slop; do
     printf '# fixture command %s\n' "$command_name" \
       > "$PORTABLE_RELEASE_PAYLOAD/core-rules/commands/$command_name.md"
   done
@@ -686,6 +691,8 @@ PY
 }
 
 @test "isolation: doctor reports the FIXTURE canonical path, never the live clone" {
+  [ "$HOME" = "$SANDBOX/account-home" ]
+  [ "$CODEX_HOME" = "$HOME/.codex" ]
   build_canonical_tree
   git_init_canonical_main
   build_healthy_project

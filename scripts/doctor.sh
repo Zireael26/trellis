@@ -395,9 +395,9 @@ SHARED_INFRA_DETAIL_LINES=3
 # helper lives in the portable libraries, which legacy mode does not source, so
 # the check is inlined rather than reached for across the mode boundary.
 shared_infra_safe_line() {
-  local LC_ALL=C value="${1:-}"
+  local value="${1:-}"
   case "$value" in
-    *[$'\001'-$'\037'$'\177']*|*$'\302'[$'\200'-$'\237']*)
+    *[$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']*|*$'\302'[$'\200\201\202\203\204\205\206\207\210\211\212\213\214\215\216\217\220\221\222\223\224\225\226\227\230\231\232\233\234\235\236\237']*)
       printf '<unsafe tool diagnostic>' ;;
     *) printf '%s' "$value" ;;
   esac
@@ -531,8 +531,6 @@ run_tier0 hc_claudemd_budget "$CANON"
 # teeth — silently no-op unless the runtime has [features] hooks = true. Global,
 # no project arg; WARN-class when Codex is enabled but its runtime hooks are off.
 run_tier0 hc_codex_hooks_enabled
-# Codex plugin hook health: read-only node shim + manifest compatibility check.
-run_tier0 hc_codex_plugin_surface
 
 # Capture only canonical-clone precondition errors for the repair gate. Shared
 # manifest/runtime errors still count toward the final exit, but they must not
@@ -2104,6 +2102,12 @@ fi
 # pi floor of the recommended setup: WARN/INFO, silent when healthy.
 if pi_row="$(hc_pi_version "$REGISTRY_PATH")"; then :; else
   report '  ' "$?" "$pi_row"
+fi
+if agy_row="$(hc_agy_version "$REGISTRY_PATH")"; then :; else
+  report '  ' "$?" "$agy_row"
+fi
+if opencode_row="$(hc_opencode_version "$REGISTRY_PATH")"; then :; else
+  report '  ' "$?" "$opencode_row"
 fi
 if perl_row="$(hc_guard_supervisor_perl)"; then :; else
   report '  ' "$?" "$perl_row"

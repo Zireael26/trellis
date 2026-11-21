@@ -44,6 +44,7 @@ locks
 local
 registry.json
 releases
+roster.json
 scheduled-tasks
 state
 tasks
@@ -1168,4 +1169,21 @@ HARNESS_ADR=docs/adr/2026-05-20-antigravity-third-harness.md
 
   [ "$status" -eq 1 ]
   [[ "$output" == *"$AUDIT: stale 'antigravity'"* ]] || false
+}
+
+@test "077: roster.json and wrk_ workspace IDs are rejected while generic opencode-go-2 docs publish" {
+  printf '{"schema_version": 1}\n' > "$MIRROR/roster.json"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'roster.json'* ]] || { echo "$output"; false; }
+  rm -f "$MIRROR/roster.json"
+
+  printf 'account: %s_%s\n' 'wrk' '01J9EXAMPLEWORKSPACEID1234' > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'README.md: operator account or workspace token must not publish'* ]] || { echo "$output"; false; }
+
+  printf 'Configure generic provider slot opencode-go-2 in AGENT_PI_SETUP.md\n' > "$MIRROR/README.md"
+  run lint_mirror "$MIRROR"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

@@ -44,7 +44,7 @@ teardown() {
 }
 
 refresh() {
-  run python3 "$SANDBOX/fetch.py" "$POLLER" "$FIXTURE" "$TRELLIS_HOME" "$1"
+  run python3 -B "$SANDBOX/fetch.py" "$POLLER" "$FIXTURE" "$TRELLIS_HOME" "$1"
   [ "$status" -eq 0 ]
 }
 

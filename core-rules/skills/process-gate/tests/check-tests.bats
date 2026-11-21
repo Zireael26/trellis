@@ -42,8 +42,10 @@ setup() {
   unset PROCESS_GATE_MUTATION_SPOTCHECK PROCESS_GATE_MUTATION_TIMEOUT
   unset MUTATION_BEHAVIOR MUTATION_LOG
   # Keep the heavy-slot preflight off the operator's real launcher and
-  # ~/.trellis: every test takes the fallback path unless it builds a sandboxed
-  # gate with heavy_gate_setup (spec 054, H8).
+  # ~/.trellis: use a genuinely unmanaged home unless a test sets up a gate.
+  export HOME="$BATS_TEST_TMPDIR/home"
+  mkdir -p "$HOME"
+  unset TRELLIS_HOME
   export PROCESS_GATE_HEAVY_LAUNCHER="$BATS_TEST_TMPDIR/no-trellis-launcher"
   export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
   unset TRELLIS_HEAVY_FD TRELLIS_HEAVY_SLOT TRELLIS_HEAVY_DIR_ID HEAVY_HOLDER_PID
@@ -65,7 +67,7 @@ run_gate() {
   run bash -c "cd '$PROJECT_DIR' && '$SCRIPT' --range=HEAD~1..HEAD"
 }
 
-@test "database-lock budget leaves 900 seconds of wait plus 600 seconds of tests" {
+@test "default test timeout allows a full suite plus database-lock wait" {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/timeout" <<'SH'
 #!/bin/sh
@@ -78,7 +80,7 @@ SH
   PATH="$BATS_TEST_TMPDIR/bin:$PATH" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true \
     PROCESS_GATE_TEST_CMD=true run_gate
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-  grep -qx '1500' "$PG_TIMEOUT_LOG"
+  grep -qx '5400' "$PG_TIMEOUT_LOG"
 }
 
 @test "test-database lock wait timeout is an infrastructure failure, not a failed test" {
@@ -969,8 +971,9 @@ JSON
 }
 
 @test "failed output pins the default state root independently of XDG_STATE_HOME" {
-  export HOME="$BATS_TEST_TMPDIR/home" TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis" TMPDIR="$BATS_TEST_TMPDIR/tmp"
-  mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR"
+  heavy_gate_setup 1
+  export TMPDIR="$BATS_TEST_TMPDIR/tmp"
+  mkdir -p "$TMPDIR"
   unset TRELLIS_GATE_STATE_DIR
   export XDG_STATE_HOME="$BATS_TEST_TMPDIR/agent-state"
   export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD='printf "pinned output\\n"; exit 1'
@@ -1309,21 +1312,22 @@ SH
 }
 
 # ---------------------------------------------------------------------------
-# Spec 054 H8: the test battery runs through `trellis heavy` when its --check
-# preflight passes, and otherwise falls back to run_with_timeout with a notice.
+# Spec 054 H8: only legacy cap 1 can fall back to the timer. A cap-2 setup
+# requires a v2 launcher reporting the configured cap and never falls back.
 # The launcher stand-in execs this checkout's dispatcher against a sandboxed
 # TRELLIS_HOME and slot directory; no real slot is ever touched.
 
 HEAVY_REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../../../.." && pwd -P)"
 
-# heavy_gate_setup SLOTS_JSON
+# heavy_gate_setup SLOTS_JSON [PROCESS_GATE_SLOTS_JSON]
 heavy_gate_setup() {
   local sandbox
   sandbox="$(cd "$(mktemp -d "$BATS_TEST_TMPDIR/heavy.XXXXXX")" && pwd -P)"
   export TRELLIS_HOME="$sandbox/trellis-home"
   export TRELLIS_HEAVY_TEST=1 TRELLIS_HEAVY_DIR="$sandbox/slots" TRELLIS_HEAVY_TEST_POLL=0.1
   mkdir -m 700 "$TRELLIS_HOME"
-  printf '{"heavy_slots": %s}\n' "$1" > "$TRELLIS_HOME/config.json"
+  local gate_slots="${2:+, \"process_gate_slots\": $2}"
+  printf '{"heavy_slots": %s%s}\n' "$1" "$gate_slots" > "$TRELLIS_HOME/config.json"
   chmod 600 "$TRELLIS_HOME/config.json"
   printf '#!/bin/bash\nexec %q "$@"\n' "$HEAVY_REPO_ROOT/scripts/trellis" > "$sandbox/trellis"
   chmod 755 "$sandbox/trellis"
@@ -1378,6 +1382,137 @@ heavy_gate_setup() {
   [ "$(wc -l < "$HEAVY_SANDBOX/count")" -eq 1 ] || { cat "$HEAVY_SANDBOX/count"; false; }
 }
 
+heavy_gate_stub() {
+  export CHECK_RC="$1" CHECK_LINE="$2" ADMISSION_LOG="$HEAVY_SANDBOX/admission"
+  cat > "$PROCESS_GATE_HEAVY_LAUNCHER" <<'SH'
+#!/bin/bash
+if [ "$2" = --check ]; then
+  printf '%s\n' "$CHECK_LINE"
+  exit "$CHECK_RC"
+fi
+printf '%s\n' "$*" >> "$ADMISSION_LOG"
+exit 78
+SH
+}
+
+heavy_gate_expect_block() {
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"heavy-gate-incompatible:"* && "$output" == *"Tests: not run"* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"trellis configure"* && "$output" != *"heavy-gate-unavailable"* ]] || { echo "$output"; return 1; }
+  [ ! -e "$HEAVY_SANDBOX/count" ] && [ ! -e "$HEAVY_SANDBOX/admission" ]
+}
+
+@test "H8: cap 2 blocks a missing, old, failing, or mismatched --check launcher" {
+  heavy_gate_setup 1 2
+  export PROCESS_GATE_TEST_CMD="echo run >> '$HEAVY_SANDBOX/count'" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  local correct="trellis heavy: ok (heavy_slots=1, heavy_light_slots=4, process_gate_slots=2, process_gate_protocol=2, slots in $TRELLIS_HEAVY_DIR)"
+  local legacy="trellis heavy: ok (heavy_slots=1, heavy_light_slots=4, slots in $TRELLIS_HEAVY_DIR)"
+  local cases=("$legacy" "${correct/process_gate_slots=2/process_gate_slots=1}" "${correct/process_gate_protocol=2/process_gate_protocol=3}" "${correct}"$'\n'"${correct}") result
+  for result in "${cases[@]}"; do
+    heavy_gate_stub 0 "$result"
+    heavy_gate_expect_block
+  done
+  heavy_gate_stub 78 'lock setup failed'
+  heavy_gate_expect_block
+  [[ "$output" == *'lock setup failed'* ]] || { echo "$output"; false; }
+  rm "$PROCESS_GATE_HEAVY_LAUNCHER"
+  heavy_gate_expect_block
+}
+
+@test "H8: cap 2 uses one gated attempt and never retries a run refusal outside heavy" {
+  heavy_gate_setup 1 2
+  export PROCESS_GATE_TEST_CMD="echo run >> '$HEAVY_SANDBOX/count'" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  heavy_gate_stub 0 "trellis heavy: ok (heavy_slots=1, heavy_light_slots=4, process_gate_slots=2, process_gate_protocol=2, slots in $TRELLIS_HEAVY_DIR)"
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *'exited 78'* && "$output" != *'heavy-gate-unavailable'* ]] || { echo "$output"; false; }
+  [ "$(wc -l < "$ADMISSION_LOG")" -eq 1 ]
+  [[ "$(< "$ADMISSION_LOG")" == 'heavy --require-gate-protocol=2 --lane process-gate --timeout '* ]] || false
+  [ ! -e "$HEAVY_SANDBOX/count" ]
+}
+
+@test "H8: v2 installed check cannot start the battery through an old payload" {
+  heavy_gate_setup 1 2
+  export PROCESS_GATE_TEST_CMD="echo run >> '$HEAVY_SANDBOX/count'" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  export CHECK_LINE="trellis heavy: ok (heavy_slots=1, heavy_light_slots=4, process_gate_slots=2, process_gate_protocol=2, slots in $TRELLIS_HEAVY_DIR)"
+  cat > "$PROCESS_GATE_HEAVY_LAUNCHER" <<'SH'
+#!/bin/bash
+shift # heavy
+if [ "$1" = --check ]; then
+  printf '%s\n' "$CHECK_LINE"
+  exit 0
+fi
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --lane|--timeout) shift 2 ;;
+    --) shift; exec "$@" ;;
+    *)
+      printf 'trellis heavy: unexpected argument: %s (put the command after --)\n' "$1" >&2
+      printf 'trellis heavy: run: trellis heavy --help\n' >&2
+      exit 2 ;;
+  esac
+done
+SH
+  heavy_gate_expect_block
+  [[ "$output" == *'the heavy payload does not support process_gate_protocol=2'* ]] || { echo "$output"; false; }
+}
+
+@test "H8: cap 2 uses launcher home precedence and runs only in the heavy slot" {
+  heavy_gate_setup 1 1
+  export PROCESS_GATE_TEST_CMD="printf '%s\\n' \"\${TRELLIS_HEAVY_SLOT:-ungated}\" >> '$HEAVY_SANDBOX/count'"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  mv "$TRELLIS_HOME" "$HOME/.trellis"
+  printf '{"process_gate_slots":2}\n' > "$HOME/.trellis/config.json"
+  mkdir -m 700 "$TRELLIS_HOME"
+  (umask 077; printf '{"process_gate_slots":1}\n' > "$TRELLIS_HOME/config.json")
+
+  # Explicit cap 1 wins even when the default is cap 2. A legacy launcher
+  # can fail and use the timer, but without the override that must block.
+  export PROCESS_GATE_HEAVY_LAUNCHER="$HEAVY_SANDBOX/missing"
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$HEAVY_SANDBOX/count")" = ungated ]
+  rm "$HEAVY_SANDBOX/count"
+  unset TRELLIS_HOME
+  heavy_gate_expect_block
+
+  export PROCESS_GATE_HEAVY_LAUNCHER="$HEAVY_SANDBOX/trellis"
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$HEAVY_SANDBOX/count")" = 0 ]
+}
+
+@test "H8: an unreadable explicitly managed cap 2 is not legacy cap 1" {
+  heavy_gate_setup 1 2
+  export PROCESS_GATE_TEST_CMD="echo run >> '$HEAVY_SANDBOX/count'" PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  heavy_gate_stub 0 'trellis heavy: successful legacy check'
+  mkdir -m 700 "$HOME/.trellis"
+  (umask 077; printf '{}\n' > "$HOME/.trellis/config.json")
+  chmod 000 "$TRELLIS_HOME/config.json"
+  heavy_gate_expect_block
+  [[ "$output" == *"cannot establish process_gate_slots from $TRELLIS_HOME/config.json"* ]] || false
+  rm -f "$TRELLIS_HOME/config.json"
+  heavy_gate_expect_block
+  ln -s "$HOME/.trellis/config.json" "$TRELLIS_HOME/config.json"
+  heavy_gate_expect_block
+  rm -f "$TRELLIS_HOME/config.json"
+  (umask 077; printf '{"process_gate_slots":2' > "$TRELLIS_HOME/config.json")
+  heavy_gate_expect_block
+}
+
+@test "H8: invalid process_gate_slots normalizes to 1 but cannot select the timer" {
+  heavy_gate_setup 1 '"2"'
+  export PROCESS_GATE_TEST_CMD="printf '%s\\n' \"\${TRELLIS_HEAVY_SLOT:-ungated}\" >> '$HEAVY_SANDBOX/count'"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
+  export PROCESS_GATE_HEAVY_LAUNCHER="$HEAVY_SANDBOX/missing"
+  heavy_gate_expect_block
+  export PROCESS_GATE_HEAVY_LAUNCHER="$HEAVY_SANDBOX/trellis"
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(< "$HEAVY_SANDBOX/count")" = 0 ]
+}
+
 @test "H8: argv with spaces and a nonzero exit survive both paths" {
   export PROCESS_GATE_TEST_CMD='echo "slot=${TRELLIS_HEAVY_SLOT-none}"; printf "<%s>" "a b" c; echo; exit 3'
   export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true
@@ -1389,4 +1524,98 @@ heavy_gate_setup() {
   run_gate
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"exited 3"* && "$output" == *"<a b><c>"* && "$output" == *"slot=0"* ]] || { echo "heavy: $output"; false; }
+}
+
+# ---------------------------------------------------------------------------
+# P45: Fast JS/TS binary auto-detection + concurrent typecheck/lint/tests
+# P49: Net test-LOC growth ratchet (+400 default budget)
+
+@test "P45: fast JS/TS binary fallback prioritizes tsrs -> tsgo -> tsc and oxlint -> biome -> eslint" {
+  local log="$PROJECT_DIR/invocations.log"
+  mkdir -p "$PROJECT_DIR/node_modules/.bin"
+  printf '%s\n' '{"name":"fixture","scripts":{"test":"true"}}' > "$PROJECT_DIR/package.json"
+  printf '%s\n' '{}' > "$PROJECT_DIR/package-lock.json"
+  printf '%s\n' '{}' > "$PROJECT_DIR/tsconfig.json"
+  printf '%s\n' '{}' > "$PROJECT_DIR/.oxlintrc.json"
+  printf '%s\n' '{}' > "$PROJECT_DIR/biome.json"
+  printf '%s\n' '{}' > "$PROJECT_DIR/eslint.config.js"
+
+  local tool
+  for tool in tsrs tsgo tsc oxlint biome eslint; do
+    printf '#!/usr/bin/env bash\nprintf "%s:%%s\\n" "$*" >> %q\n' "$tool" "$log" > "$PROJECT_DIR/node_modules/.bin/$tool"
+    chmod +x "$PROJECT_DIR/node_modules/.bin/$tool"
+  done
+
+  : > "$log"
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -Fxq 'tsrs:--noEmit' "$log"
+  grep -Fxq 'oxlint:' "$log"
+
+  rm -f "$PROJECT_DIR/node_modules/.bin/tsrs" "$PROJECT_DIR/node_modules/.bin/oxlint"
+  : > "$log"
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -Fxq 'tsgo:--noEmit' "$log"
+  grep -Fxq 'biome:check .' "$log"
+
+  rm -f "$PROJECT_DIR/node_modules/.bin/tsgo" "$PROJECT_DIR/node_modules/.bin/biome"
+  : > "$log"
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -Fxq 'tsc:--noEmit' "$log"
+  grep -Fxq 'eslint:. --quiet' "$log"
+
+  # Configured without local binaries WARNs, never false-BLOCKs.
+  rm -rf "$PROJECT_DIR/node_modules"
+  run_gate
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+}
+
+@test "P45: typecheck, lint, and tests run concurrently while preserving deterministic finding order" {
+  local barrier="$BATS_TEST_TMPDIR/p45-barrier"
+  mkdir -p "$barrier"
+  # 3-way rendezvous barrier: if any stage waited for an earlier stage to finish before
+  # starting, none could observe all three markers simultaneously. Have tests exit first,
+  # lint second, and typecheck last to verify output order is independent of completion order.
+  export PROCESS_GATE_TYPECHECK_CMD=": > '$barrier/tc'; i=0; until [ -f '$barrier/lint' ] && [ -f '$barrier/test' ]; do i=\$((i+1)); [ \"\$i\" -lt 200 ] || exit 99; perl -e 'select(undef,undef,undef,0.05)'; done; perl -e 'select(undef,undef,undef,0.10)'; echo tc-fail; exit 2"
+  export PROCESS_GATE_LINT_CMD=": > '$barrier/lint'; i=0; until [ -f '$barrier/tc' ] && [ -f '$barrier/test' ]; do i=\$((i+1)); [ \"\$i\" -lt 200 ] || exit 99; perl -e 'select(undef,undef,undef,0.05)'; done; perl -e 'select(undef,undef,undef,0.05)'; echo lint-fail; exit 3"
+  export PROCESS_GATE_TEST_CMD=": > '$barrier/test'; i=0; until [ -f '$barrier/tc' ] && [ -f '$barrier/lint' ]; do i=\$((i+1)); [ \"\$i\" -lt 200 ] || exit 99; perl -e 'select(undef,undef,undef,0.05)'; done; echo test-fail; exit 4"
+  run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" != *'exited 99'* ]] || { echo "stages did not overlap concurrently: $output"; false; }
+  local order
+  order="$(printf '%s\n' "$output" | grep -E '^  (typecheck|lint|tests): `.*` exited ' | awk -F: '{print $1}' | tr -d ' ' | paste -sd',' -)"
+  [ "$order" = "typecheck,lint,tests" ] || { echo "order=$order; $output"; false; }
+}
+
+@test "P49: net test-LOC growth ratchet warns over +400, honors block/off modes, and ignores non-test files" {
+  mkdir -p "$PROJECT_DIR/src" "$PROJECT_DIR/tests"
+  # 500 lines in non-test src file must NOT trigger the test ratchet.
+  perl -e 'print "const x$_ = $_;\n" for 1..500' > "$PROJECT_DIR/src/app.ts"
+  git -C "$PROJECT_DIR" add src/app.ts
+  git -C "$PROJECT_DIR" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit -qm "feat: large src file"
+  export PROCESS_GATE_TYPECHECK_CMD=true PROCESS_GATE_LINT_CMD=true PROCESS_GATE_TEST_CMD=true
+  run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" != *"net test LOC"* ]] || { echo "$output"; false; }
+
+  # +405 net lines in tests/big.test.ts exceeds default +400 budget -> WARN (exit 2).
+  perl -e 'print "it(\"case $_\", () => {});\n" for 1..405' > "$PROJECT_DIR/tests/big.test.ts"
+  git -C "$PROJECT_DIR" add tests/big.test.ts
+  git -C "$PROJECT_DIR" -c user.name=fixture -c user.email=fixture@example.invalid \
+    -c commit.gpgsign=false commit -qm "test: bloated suite"
+  run_gate
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"net test LOC +405 exceeds budget +400; consolidate redundant cases or set PROCESS_GATE_TEST_NET_BUDGET"* ]] || { echo "$output"; false; }
+
+  # PROCESS_GATE_TEST_NET_BUDGET_MODE=block turns over-budget into FAIL (exit 1).
+  PROCESS_GATE_TEST_NET_BUDGET_MODE=block run_gate
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"net test LOC +405 exceeds budget +400"* ]] || { echo "$output"; false; }
+
+  # PROCESS_GATE_TEST_NET_BUDGET_MODE=off disables the ratchet -> PASS (exit 0).
+  PROCESS_GATE_TEST_NET_BUDGET_MODE=off run_gate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

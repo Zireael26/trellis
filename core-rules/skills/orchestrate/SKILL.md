@@ -335,7 +335,7 @@ hand; the structured verdict is the contract either way.
    progress signal, set only to override the resolved baseline and otherwise left
    to inherit. A one-shot fan-out (single barrier, no rounds) declares
    `no_progress_iterations: null`. **A recipe with no `safety` declaration is
-   non-compliant** — the `cross-project-process-audit` flags it and it is a
+   non-compliant** — `fleet-process-audit` flags it and it is a
    `process-gate` / review finding.
 6. Add a row to `recipes/MANIFEST.md`.
 

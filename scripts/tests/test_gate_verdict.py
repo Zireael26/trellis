@@ -62,8 +62,13 @@ class VerdictTests(unittest.TestCase):
                                            if not _bats_internal(part))
         home = self.base / "home"
         home.mkdir()
+        trellis_home = self.base / "trellis"
+        trellis_home.mkdir(mode=0o700)
+        trellis_config = trellis_home / "config.json"
+        trellis_config.write_text("{}\n")
+        trellis_config.chmod(0o600)
         self.env = mock.patch.dict(os.environ, kept | {"TRELLIS_GATE_STATE_DIR": str(self.state),
-            "HOME": str(home), "TRELLIS_HOME": str(self.base / "trellis"),
+            "HOME": str(home), "TRELLIS_HOME": str(trellis_home),
             "TRELLIS_TEST_SHARDS": "1", "GIT_OPTIONAL_LOCKS": "0", "TRELLIS_LOCAL_GATE_QUEUE_WAIT": ".3"}, clear=True)
         self.env.start()
         for name in VERDICT.RUNNER_FILES:
@@ -321,13 +326,13 @@ class VerdictTests(unittest.TestCase):
         home = self.base / "linux-home"
         home.mkdir()
         shutil.copytree(old / ".cargo", home / ".cargo")
-        for host, delay in (("x86_64-unknown-linux-gnu", 3), ("x86_64-unknown-linux-musl", 0)):
+        for host, delay in (("x86_64-unknown-linux-gnu", 6), ("x86_64-unknown-linux-musl", 0)):
             toolchain = home / ".rustup/toolchains" / ("1.97.1-" + host)
             (toolchain / "bin").mkdir(parents=True)
             for tool in ("cargo", "rustdoc"):
                 (toolchain / "bin" / tool).write_text("#!/bin/sh\nexit 0\n")
                 (toolchain / "bin" / tool).chmod(0o755)
-            (toolchain / "bin/rustc").write_text("#!/bin/sh\n" + ("sleep 3\n" if delay else "") +
+            (toolchain / "bin/rustc").write_text("#!/bin/sh\n" + ("sleep 6\n" if delay else "") +
                                                  'printf "rustc 1.97.1 (fixture)\\nhost: %s\\nrelease: 1.97.1\\n"\n' % host)
             (toolchain / "bin/rustc").chmod(0o755)
             rustlib = toolchain / "lib/rustlib"
@@ -523,9 +528,28 @@ class VerdictTests(unittest.TestCase):
 
     def test_narrowed_and_test_seam_inputs_never_qualify(self):
         for name in ("PG_PUSH_TEST_SCOPE", "BATS_TEST_FILTER", "TRELLIS_TEST_TSV",
-                     "TRELLIS_LOCAL_GATE_RUNNER", "TRELLIS_LOCAL_GATE_DEADLINE", "AGGREGATE_SCRIPT", "PACKER"):
+                     "TRELLIS_LOCAL_GATE_RUNNER", "TRELLIS_LOCAL_GATE_RESERVE", "TRELLIS_LOCAL_GATE_TERM_GRACE",
+                     "TRELLIS_LOCAL_GATE_UNKNOWN", "AGGREGATE_SCRIPT", "PACKER"):
             with self.subTest(name=name), mock.patch.dict(os.environ, {name: "test"}):
                 self.assertIsNone(VERDICT.safe_inputs(self.root))
+            # The deadline exemption never masks another seam set beside it.
+            with self.subTest(name=name, deadline="10800"), \
+                    mock.patch.dict(os.environ, {name: "test", "TRELLIS_LOCAL_GATE_DEADLINE": "10800"}):
+                self.assertIsNone(VERDICT.safe_inputs(self.root))
+
+    def test_deadline_override_records_and_reuses_but_a_deadline_cut_never_passes(self):
+        # Inversion: under the TRELLIS_LOCAL_GATE_* refuse row, a T45 battery run
+        # with the 10,800 s override is reuse-ineligible, so the next gate reruns
+        # the whole battery at the 7,200 s default.
+        self.assertEqual(VERDICT.env_rule("TRELLIS_LOCAL_GATE_DEADLINE", "10800"), ("ignore", "trellis"))
+        plain = VERDICT.safe_inputs(self.root)
+        self.assertIsNotNone(plain)
+        with mock.patch.dict(os.environ, {"TRELLIS_LOCAL_GATE_DEADLINE": "10800"}):
+            # It bounds runtime only: the same inputs, so the same verdict key.
+            self.assertEqual(VERDICT.safe_inputs(self.root), plain)
+            # A run cut by the deadline exits 124 and leaves no verdict; a
+            # passing run under the override records one the plain key reuses.
+            self.run_runner_cases(("timeout", "pass"))
 
     def test_active_or_quarantined_run_never_reuses_an_older_pass(self):
         runs = self.state / "runs"
@@ -584,7 +608,9 @@ class VerdictTests(unittest.TestCase):
                 # A reuse claims the configured command's verdict, not full coverage.
                 self.assertIn("Tests: reused: configured command", result.stdout)
                 self.assertNotIn("Tests: full", result.stdout)
-                self.assertEqual(log.read_text().splitlines(), ["typecheck", "lint", "coverage"])
+                first_lines = log.read_text().splitlines()
+                self.assertEqual(set(first_lines[:2]), {"typecheck", "lint"})
+                self.assertEqual(first_lines[2:], ["coverage"])
                 # A session environment change still hits.
                 os.environ["A_SESSION_VALUE"] = "changed"
                 result = subprocess.run(command, cwd=self.root, text=True, capture_output=True, timeout=30)
@@ -595,7 +621,9 @@ class VerdictTests(unittest.TestCase):
                 result = subprocess.run(command, cwd=self.root, text=True, capture_output=True, timeout=30)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertNotIn("reused verdict", result.stdout)
-                self.assertEqual(log.read_text().splitlines()[-4:], ["typecheck", "lint", "tests", "coverage"])
+                miss_lines = log.read_text().splitlines()[-4:]
+                self.assertEqual(set(miss_lines[:2]), {"typecheck", "lint"})
+                self.assertEqual(miss_lines[2:], ["tests", "coverage"])
         finally:
             self.tools.start()
 
@@ -2226,7 +2254,7 @@ class VerdictTests(unittest.TestCase):
                 binary.write_text("#!/bin/sh\necho '%s %s'\n" % (name, toolchain))
                 binary.chmod(0o755)
         (fake / "proxy").write_text(
-            '#!/bin/bash\nif [ "${RUSTUP_FORCE_ARG0:-}" = rustup ]; then\n  sleep 3\n  echo "rustup 1.28 fixture"\n'
+            '#!/bin/bash\nif [ "${RUSTUP_FORCE_ARG0:-}" = rustup ]; then\n  sleep 6\n  echo "rustup 1.28 fixture"\n'
             '  exit 0\nfi\ntc="$(cat %s)"\nexec %s/toolchains/"$tc"/bin/"${0##*/}" "$@"\n'
             % (shlex.quote(str(selection)), shlex.quote(str(home))))
         (fake / "proxy").chmod(0o755)
@@ -2430,7 +2458,7 @@ class VerdictTests(unittest.TestCase):
                        PYTEST_ADDOPTS="-k nothing", NODE_OPTIONS="--require /nonexistent", BATS_TEST_FILTER="x",
                        PG_PUSH_TEST_SCOPE="full", RUSTUP_HOME=str(self.base / "ambient-rustup"),
                        RUSTUP_TOOLCHAIN="ambient")
-        result = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "VerdictTests.test_mutation_tree",
+        result = subprocess.run([sys.executable, "-I", "-B", str(Path(__file__).resolve()), "VerdictTests.test_mutation_tree",
                                  "VerdictTests.test_native_cargo_inputs_and_test_seams_bind_full_battery_reuse"],
                                 env=ambient, capture_output=True, text=True, timeout=120)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

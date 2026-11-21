@@ -550,6 +550,8 @@ def verify_siblings(entries, owner, opener=None):
 def load_modules(fs_path):
     """attachment_fs.py, loaded from its absolute payload path."""
     import importlib.util
+    import sys as _sys
+    _sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location("trellis_attachment_fs", fs_path)
     fs_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fs_module)

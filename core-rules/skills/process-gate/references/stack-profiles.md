@@ -158,7 +158,7 @@ When three independent projects adopt a close variant of the same validator, pro
 1. Move the validator into `$TRELLIS_ROOT/core-rules/skills/process-gate/scripts/`.
 2. Add a corresponding reference under `references/`.
 3. Update this `stack-profiles.md` to reflect the new canonical profile.
-4. Run the extended `parent-hook-drift` audit to verify byte-identity across projects.
+4. Run `trellis doctor --fleet` to verify release-owned manifest integrity across projects.
 
 Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
@@ -166,7 +166,7 @@ Profiles waiting for a third witness queue in `core-rules/deferred.md`.
 
 the Unity project (Unity, 3D) is the sole `unity`-profile project. Stack-specific validators are project-local until n=2. The canonical eight gates still apply.
 
-the Unity project's local registry row documents the carve-out in its `metadata`. The extended `parent-hook-drift` audit treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
+the Unity project's local registry row documents the carve-out in its `metadata`. `trellis doctor --fleet` treats `PROCESS_GATE_STACK_PROFILE="unity"` with no canonical scripts as expected, not drift.
 
 ## Public web surface — cross-profile note
 

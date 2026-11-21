@@ -9,7 +9,7 @@ setup() {
 teardown() { rm -rf "$SANDBOX"; }
 
 check_trace() {
-  run python3 -I "$BATS_TEST_DIRNAME/test_full_trace.py" "TraceTests.$1"
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_full_trace.py" "TraceTests.$1"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 

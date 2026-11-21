@@ -60,12 +60,12 @@ class QueueTests(unittest.TestCase):
             time.sleep(.02)
         self.fail("queue did not reach expected state")
 
-    def start(self, name, no_wait=False, **environment):
+    def start(self, name, no_wait=False, head=None, cwd=None, **environment):
         log = (self.root / (name + ".log")).open("w")
-        child = subprocess.Popen([sys.executable, "-I", __file__, "worker", name,
+        child = subprocess.Popen([sys.executable, "-I", "-B", __file__, "worker", head or name,
                                   "no-wait" if no_wait else "wait", str(self.root / name),
                                   str(self.root / (name + ".release"))],
-                                 stdout=log, stderr=log, env=os.environ | environment)
+                                 cwd=cwd, stdout=log, stderr=log, env=os.environ | environment)
         self.children.append((child, log))
         return child
 
@@ -328,6 +328,136 @@ class QueueTests(unittest.TestCase):
         finally:
             state.path = None
             state.close()
+
+    def test_supersede_queued_waiter_same_worktree_and_branch(self):
+        wt_other = str(self.root / "wt-other")
+        wt_same = str(self.root / "wt-same")
+        holder = self.start("holder", head="0" * 40,
+                            TRELLIS_GATE_WORKTREE=wt_other, TRELLIS_GATE_BRANCH="feat/other")
+        self.wait_for(lambda: (self.root / "holder").exists())
+        older = self.start("older-waiter", head="1" * 40,
+                           TRELLIS_GATE_WORKTREE=wt_same, TRELLIS_GATE_BRANCH="feat/same")
+        self.wait_for(lambda: len(self.tickets()) == 1)
+        newer = self.start("newer-waiter", head="2" * 40,
+                           TRELLIS_GATE_WORKTREE=wt_same, TRELLIS_GATE_BRANCH="feat/same")
+        self.assertEqual(older.wait(timeout=5), 70)
+        self.assertFalse((self.root / "older-waiter").exists())
+        older_log = (self.root / "older-waiter.log").read_text()
+        self.assertIn("superseded by newer run on feat/same", older_log)
+        self.wait_for(lambda: len(self.tickets()) == 1)
+        self.release("holder", holder)
+        self.wait_for(lambda: (self.root / "newer-waiter").exists())
+        entry = json.loads((self.root / "newer-waiter").read_text())
+        self.assertEqual(entry["branch"], "feat/same")
+        self.assertEqual(entry["worktree"], os.path.realpath(wt_same))
+        self.release("newer-waiter", newer)
+        self.assertFalse((self.root / "state/gate-supersede.json").exists())
+
+    def test_supersede_active_holder_on_new_head_and_keep_same_head(self):
+        wt = str(self.root / "wt-active")
+        first = self.start("holder-v1", head="1" * 40,
+                           TRELLIS_GATE_WORKTREE=wt, TRELLIS_GATE_BRANCH="feat/cancel")
+        self.wait_for(lambda: (self.root / "holder-v1").exists())
+        # Same head does NOT cancel the active holder, though it queues cleanly.
+        same_head = self.start("waiter-same-head", head="1" * 40,
+                               TRELLIS_GATE_WORKTREE=wt, TRELLIS_GATE_BRANCH="feat/cancel")
+        self.wait_for(lambda: len(self.tickets()) == 1)
+        time.sleep(.12)
+        self.assertIsNone(first.poll(), "same-head waiter must not cancel active holder")
+        # Newer head supersedes BOTH the queued waiter and the active holder.
+        newer = self.start("holder-v2", head="2" * 40,
+                           TRELLIS_GATE_WORKTREE=wt, TRELLIS_GATE_BRANCH="feat/cancel")
+        self.assertEqual(same_head.wait(timeout=5), 70)
+        self.assertEqual(first.wait(timeout=5), 70)
+        self.assertIn("superseded by newer run on feat/cancel (" + "2" * 40 + ")",
+                      (self.root / "holder-v1.log").read_text())
+        self.wait_for(lambda: (self.root / "holder-v2").exists())
+        self.release("holder-v2", newer)
+        self.assertFalse((self.root / "state/gate-holder.json").exists())
+        self.assertFalse((self.root / "state/gate-supersede.json").exists())
+
+    def test_parallel_worktrees_branches_main_and_killswitch_never_cancel(self):
+        wt_a = str(self.root / "wt-lane-a")
+        wt_b = str(self.root / "wt-lane-b")
+        holder = self.start("lane-a-holder", head="1" * 40,
+                            TRELLIS_GATE_WORKTREE=wt_a, TRELLIS_GATE_BRANCH="feat/shared")
+        self.wait_for(lambda: (self.root / "lane-a-holder").exists())
+        # Separate worktree (even same branch string) must NEVER cancel Lane A.
+        lane_b = self.start("lane-b", head="2" * 40,
+                            TRELLIS_GATE_WORKTREE=wt_b, TRELLIS_GATE_BRANCH="feat/shared")
+        self.wait_for(lambda: len(self.tickets()) == 1)
+        # Same worktree, different branch must NEVER cancel.
+        other_branch = self.start("other-branch", head="3" * 40,
+                                  TRELLIS_GATE_WORKTREE=wt_a, TRELLIS_GATE_BRANCH="feat/other")
+        self.wait_for(lambda: len(self.tickets()) == 2)
+        # Protected trunk branch (main) must NEVER cancel even on same worktree/main.
+        main_one = self.start("main-1", head="4" * 40,
+                              TRELLIS_GATE_WORKTREE=wt_a, TRELLIS_GATE_BRANCH="main")
+        self.wait_for(lambda: len(self.tickets()) == 3)
+        main_two = self.start("main-2", head="5" * 40,
+                              TRELLIS_GATE_WORKTREE=wt_a, TRELLIS_GATE_BRANCH="main")
+        self.wait_for(lambda: len(self.tickets()) == 4)
+        # Kill-switch TRELLIS_GATE_SUPERSEDE=0 disables superseding on same (wt, branch).
+        disabled = self.start("supersede-off", head="6" * 40,
+                              TRELLIS_GATE_WORKTREE=wt_a, TRELLIS_GATE_BRANCH="feat/shared",
+                              TRELLIS_GATE_SUPERSEDE="0")
+        self.wait_for(lambda: len(self.tickets()) == 5)
+        time.sleep(.12)
+        self.assertIsNone(holder.poll())
+        for name, proc in (("lane-a-holder", holder), ("lane-b", lane_b),
+                           ("other-branch", other_branch), ("main-1", main_one),
+                           ("main-2", main_two), ("supersede-off", disabled)):
+            self.wait_for(lambda n=name: (self.root / n).exists())
+            self.release(name, proc)
+
+    def test_git_worktree_autodetect_and_detached_head(self):
+        repo_a = self.root / "git-wt-a"
+        repo_b = self.root / "git-wt-b"
+        repo_a.mkdir()
+        git_env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+        def git(cwd, *args):
+            return subprocess.check_output(
+                ["git", "-c", "user.name=T", "-c", "user.email=t@t.invalid",
+                 "-c", "commit.gpgsign=false", *args],
+                cwd=cwd, env=git_env, text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+        git(repo_a, "init", "-q", "-b", "feat/auto-a")
+        sha1 = git(repo_a, "commit", "--allow-empty", "-m", "c1") and git(repo_a, "rev-parse", "HEAD")
+        sha1 = git(repo_a, "rev-parse", "HEAD")
+        git(repo_a, "worktree", "add", "-q", "-b", "feat/auto-b", str(repo_b))
+        sha_b = git(repo_b, "commit", "--allow-empty", "-m", "b1") or git(repo_b, "rev-parse", "HEAD")
+        sha_b = git(repo_b, "rev-parse", "HEAD")
+
+        a1 = self.start("auto-a1", head=sha1, cwd=repo_a)
+        self.wait_for(lambda: (self.root / "auto-a1").exists())
+        entry_a1 = json.loads((self.root / "auto-a1").read_text())
+        self.assertEqual(entry_a1["worktree"], os.path.realpath(repo_a))
+        self.assertEqual(entry_a1["branch"], "feat/auto-a")
+
+        # Linked worktree B does not cancel worktree A.
+        b1 = self.start("auto-b1", head=sha_b, cwd=repo_b)
+        self.wait_for(lambda: len(self.tickets()) == 1)
+        time.sleep(.1)
+        self.assertIsNone(a1.poll())
+
+        # New commit on worktree A supersedes auto-a1 while preserving auto-b1 ahead of auto-a2.
+        git(repo_a, "commit", "--allow-empty", "-m", "c2")
+        sha2 = git(repo_a, "rev-parse", "HEAD")
+        a2 = self.start("auto-a2", head=sha2, cwd=repo_a)
+        self.assertEqual(a1.wait(timeout=5), 70)
+        self.wait_for(lambda: (self.root / "auto-b1").exists())
+        self.release("auto-b1", b1)
+        self.wait_for(lambda: (self.root / "auto-a2").exists())
+        self.release("auto-a2", a2)
+
+        # Detached HEAD omits branch.
+        git(repo_a, "checkout", "-q", "--detach", sha2)
+        det = self.start("auto-detached", head=sha2, cwd=repo_a)
+        self.wait_for(lambda: (self.root / "auto-detached").exists())
+        entry_det = json.loads((self.root / "auto-detached").read_text())
+        self.assertEqual(entry_det["worktree"], os.path.realpath(repo_a))
+        self.assertNotIn("branch", entry_det)
+        self.release("auto-detached", det)
 
 
 if __name__ == "__main__":

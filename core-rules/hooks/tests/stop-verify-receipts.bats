@@ -567,3 +567,71 @@ INNER
   printf '%s' "$output" | jq -e 'has("additionalContext")' >/dev/null
   printf '%s' "$output" | jq -e 'has("decision") | not' >/dev/null
 }
+
+@test "P37: hook-executed checks write last-verified.json and satisfy Stop without HTML comments" {
+  seed_todos_none
+  make_dirty_code
+  mkdir -p "$PROJECT_DIR/node_modules"
+  printf '{"name":"p37-fx","scripts":{"test":"node -e \\"process.exit(0)\\""}}\n' > "$PROJECT_DIR/package.json"
+  local candidate lv
+  for candidate in "$HOOKS_DIR/stop-verify.sh" "$CODEX_HOOKS_DIR/stop-verify.sh"; do
+    rm -rf "$PROJECT_DIR/.git/trellis-local"
+    run env CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR" \
+      PROCESS_GATE_STRUCTURAL_RECEIPTS=1 TRELLIS_HOME="$BATS_TEST_TMPDIR/th-p37" \
+      bash "$candidate" <<<'{"last_assistant_message":"All checks green and ready."}'
+    [ "$status" -eq 0 ] || { echo "$candidate: $status $output"; return 1; }
+    [ -z "$output" ] || { echo "$candidate unexpected output: $output"; return 1; }
+    lv="$PROJECT_DIR/.git/trellis-local/last-verified.json"
+    [ -f "$lv" ]
+    jq -e '.schema_version == 1 and .checks_run >= 1 and (.tree_fingerprint | length > 10)' "$lv" >/dev/null
+  done
+  rm -rf "$PROJECT_DIR/.git/trellis-local"
+  run env CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR" \
+    TRELLIS_HARNESS=antigravity TRELLIS_HOME="$BATS_TEST_TMPDIR/th-p37" \
+    bash "$CODEX_HOOKS_DIR/stop-verify.sh" <<<'{}'
+  [ "$status" -eq 0 ] || { echo "antigravity: $status $output"; return 1; }
+}
+
+@test "pinned-app toolchain shim: .nvmrc Node 26 and Python >=3.10 resolve under empty system PATH" {
+  seed_todos_none
+  make_dirty_code
+  local fake_home="$BATS_TEST_TMPDIR/fake-home" th="$BATS_TEST_TMPDIR/th-shim"
+  local nvm_bin="$fake_home/.nvm/versions/node/v26.13.1/bin"
+  local py_bin="$fake_home/.pyenv/versions/3.12.8/bin"
+  mkdir -p "$nvm_bin" "$py_bin" "$PROJECT_DIR/node_modules"
+  cat > "$nvm_bin/node" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-p" ]; then printf '26.13.1\n'; exit 0; fi
+printf 'v26.13.1\n'
+exit 0
+EOF
+  cat > "$nvm_bin/npm" <<'EOF'
+#!/bin/sh
+[ "$(node -v)" = "v26.13.1" ] || { echo "wrong node: $(node -v)" >&2; exit 1; }
+[ "$(python3 -c 'import sys; print("ok")')" = "3.12.8" ] || { echo "wrong py" >&2; exit 1; }
+[ "$(command -v git)" = "/usr/bin/git" ] || { echo "git shadowed: $(command -v git)" >&2; exit 1; }
+exit 0
+EOF
+  cat > "$py_bin/python3" <<'EOF'
+#!/bin/sh
+printf '3.12.8\n'
+exit 0
+EOF
+  # Also expose jq on a fallback dir only if /usr/bin/jq is absent on host
+  local sys_path="/usr/bin:/bin:/usr/sbin:/sbin"
+  if [ ! -x /usr/bin/jq ] && command -v jq >/dev/null 2>&1; then
+    mkdir -p "$BATS_TEST_TMPDIR/jqbin"
+    ln -s "$(command -v jq)" "$BATS_TEST_TMPDIR/jqbin/jq"
+    sys_path="$sys_path:$BATS_TEST_TMPDIR/jqbin"
+  fi
+  chmod +x "$nvm_bin/node" "$nvm_bin/npm" "$py_bin/python3"
+  printf '26.13.1\n' > "$PROJECT_DIR/.nvmrc"
+  printf '3.12\n' > "$PROJECT_DIR/.python-version"
+  printf '{"name":"sample-fx","scripts":{"test":"echo ok"}}\n' > "$PROJECT_DIR/package.json"
+
+  run env -i HOME="$fake_home" TRELLIS_HOME="$th" PATH="$sys_path" \
+    CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR" \
+    /bin/bash "$HOOKS_DIR/stop-verify.sh" <<<'{"last_assistant_message":"Done. <!-- dod-receipt cmd=\"npm test\" exit=0 diff=\"+1/-0 (1 files)\" --> <!-- follow-ups: none -->"}'
+  [ "$status" -eq 0 ] || { echo "status=$status output=$output"; return 1; }
+  [ -f "$PROJECT_DIR/.git/trellis-local/last-verified.json" ]
+}

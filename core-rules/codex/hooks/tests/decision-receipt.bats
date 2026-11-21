@@ -97,7 +97,7 @@ assert_block() {
   printf '{}\n' > "$PROJECT_DIR/.trellis.config.json"
   make_dirty_code
   export TRELLIS_ROOT="$runtime"
-  run_preserving_log "$(make_envelope 'Done without a block.')"
+  run_preserving_log "$(make_envelope "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test preset. Alternatives considered: L4.")")"
   assert_block
   [[ "$output" == *L4* ]] || false
 }
@@ -137,6 +137,9 @@ assert_block() {
   for number in 4.0 4e0 40e-1 0.4e1; do
     printf '{"autonomy":%s}\n' "$number" > "$PROJECT_DIR/.trellis.json"
     run_preserving_log "$(make_envelope 'Done without a block.')"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    run_preserving_log "$(make_envelope "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test int. Alternatives considered: L4.")")"
     assert_block
     [[ "$output" == *L4* ]] || false
     run_preserving_log "$(make_envelope "$(message_with_entry 4 "$VALID_ENTRY")")"
@@ -180,11 +183,11 @@ assert_block() {
   done
 }
 
-@test "missing decision block blocks without changing the log" {
+@test "voluntary L4 turn without decision block passes without changing the log" {
   make_dirty_code
   run_preserving_log "$(make_envelope "Done without a decision block.")"
-  assert_block
-  [[ "$output" == *"requires exactly one"* ]] || false
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "receipt absent from canonical log blocks without changing the log" {
@@ -228,13 +231,13 @@ assert_block() {
   [ "$status" -eq 0 ]
 }
 
-@test "prior-turn receipt does not satisfy a receiptless current transcript turn" {
+@test "prior-turn receipt does not contaminate a receiptless current transcript turn" {
   make_dirty_code
   local transcript
-  transcript="$(write_transcript "Current answer without a decision block." "$(message_with_entry 4 "$VALID_ENTRY")")"
+  transcript="$(write_transcript "Current answer without a decision block." "$(message_with_entry 5 "- ${TODAY}T11:00:00Z [L5] [scope] Prior wrong level. Reasoning: Test scoping. Alternatives considered: L4.")")"
   run_preserving_log "$(make_envelope "" "$transcript")"
-  assert_block
-  [[ "$output" == *"requires exactly one"* ]] || false
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 @test "prior conflicting block does not contaminate a valid current transcript turn" {
@@ -282,11 +285,11 @@ assert_block() {
   [ -z "$output" ]
 }
 
-@test "clean turn with a DoD marker blocks when the decision block is missing" {
+@test "clean turn with a DoD marker passes when no decision block is emitted" {
   local message='Done. <!-- dod-receipt cmd="bats decision-receipt.bats" exit=0 diff="+1/-0 (1 files)" -->'
   run_preserving_log "$(make_envelope "$message")"
-  assert_block
-  [[ "$output" == *"requires exactly one"* ]] || false
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
 }
 
 make_envelope_sid() {
@@ -335,14 +338,14 @@ assert_codex_block() {
   local sid="sweep-fx1-commit-codex-1"
   publish_baseline_codex "$sid"
   git -C "$PROJECT_DIR" commit --allow-empty -q -m "work committed this turn"
-  run bash "$HOOK" <<<"$(make_envelope_sid 'Done without a decision block.' "$sid")"
+  run bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test commit. Alternatives considered: L4.")" "$sid")"
   assert_codex_block
 }
 
 @test "sweep-fx1: truly idle turn with matching baseline skips" {
   local sid="sweep-fx1-idle-codex-1"
   publish_baseline_codex "$sid"
-  run bash "$HOOK" <<<"$(make_envelope_sid 'Read-only answer.' "$sid")"
+  run bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test idle. Alternatives considered: L4.")" "$sid")"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
@@ -355,7 +358,7 @@ assert_codex_block() {
   printf '/.claude/settings.local.json\n' >> "$PROJECT_DIR/.git/info/exclude"
   printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"turn-baseline.sh"}]}]}}\n' > "$PROJECT_DIR/.codex/hooks.json"
   printf '/.codex/hooks.json\n' >> "$PROJECT_DIR/.git/info/exclude"
-  run bash "$HOOK" <<<"$(make_envelope_sid 'Read-only answer.' "$sid")"
+  run bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test missing. Alternatives considered: L4.")" "$sid")"
   assert_codex_block
 }
 
@@ -367,7 +370,7 @@ assert_codex_block() {
   sdir=$(_se_turn_state_dir "$PROJECT_DIR")
   printf 'trellis-turn-baseline v2 unknown\n' >> "$sdir/turn-start.claude.$key"
   printf 'trellis-turn-baseline v2 unknown\n' >> "$sdir/turn-start.codex.$key"
-  run bash "$HOOK" <<<"$(make_envelope_sid 'Read-only answer.' "$sid")"
+  run bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test poison. Alternatives considered: L4.")" "$sid")"
   assert_codex_block
 }
 
@@ -496,9 +499,9 @@ resume_stop_verify() {
   prompt_turn "$sid"
   # The turn moves HEAD back to where the first turn started; the tree is clean.
   git -C "$PROJECT_DIR" reset -q --hard HEAD~1
-  run bash "$HOOK" <<<"$(make_envelope_sid 'Done without a decision block.' "$sid")"
+  run bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test reset. Alternatives considered: L4.")" "$sid")"
   assert_codex_block
-  [[ "$output" == *"requires exactly one"* ]] || false
+  [[ "$output" == *"does not match resolved L4"* ]] || false
 }
 
 @test "sweep-fx1-R2-L6: pi is not armed by a Claude- or Codex-armed project" {
@@ -509,12 +512,12 @@ resume_stop_verify() {
   printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"turn-baseline.sh"}]}]}}\n' > "$PROJECT_DIR/.codex/hooks.json"
   printf '/.claude/settings.local.json\n/.codex/hooks.json\n' >> "$PROJECT_DIR/.git/info/exclude"
   # Pi runs no turn-baseline; a clean pi turn keeps the unarmed trigger.
-  run env TRELLIS_HARNESS=pi bash "$HOOK" <<<"$(make_envelope_sid 'Read-only answer.' "$sid")"
+  run env TRELLIS_HARNESS=pi bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test pi. Alternatives considered: L4.")" "$sid")"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
-  # Pi still validates a dirty turn.
+  # Pi still validates a dirty turn when a decision block is emitted.
   make_dirty_code
-  run env TRELLIS_HARNESS=pi bash "$HOOK" <<<"$(make_envelope_sid 'Read-only answer.' "$sid")"
+  run env TRELLIS_HARNESS=pi bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test pi. Alternatives considered: L4.")" "$sid")"
   assert_codex_block
 }
 
@@ -524,7 +527,7 @@ resume_stop_verify() {
   mkdir -p "$TRELLIS_HOME" "$PROJECT_DIR/.claude"
   printf '{"hooks":{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"turn-baseline.sh"}]}]}}\n' > "$PROJECT_DIR/.claude/settings.local.json"
   printf '/.claude/settings.local.json\n' >> "$PROJECT_DIR/.git/info/exclude"
-  run bash "$HOOK" <<<"$(make_envelope_sid 'Read-only answer.' "$sid")"
+  run bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test unarmed. Alternatives considered: L4.")" "$sid")"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
@@ -537,6 +540,6 @@ resume_stop_verify() {
   key=$(_se_state_key "" "$sid")
   sdir=$(_se_turn_state_dir "$PROJECT_DIR")
   printf 'trellis-turn-baseline v2 unknown\n' >> "$sdir/turn-start.codex.$key"
-  run bash "$HOOK" <<<"$(make_envelope_sid 'Read-only answer.' "$sid")"
+  run bash "$HOOK" <<<"$(make_envelope_sid "$(message_with_entry 5 "- ${TODAY}T13:00:00Z [L5] [scope] Wrong level. Reasoning: Test own file. Alternatives considered: L4.")" "$sid")"
   assert_codex_block
 }

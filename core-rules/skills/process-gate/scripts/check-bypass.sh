@@ -180,20 +180,28 @@ bypass_attachment_state() {
   done
   record="$(bypass_read_owner "$owner")" || return 1
   jq -ec --arg root "$root" --arg checkout "$checkout_id" --arg worktree "$worktree_id" '
-    if type != "object" or .schema_version != 1 or .status != "committed"
+    def valid_harness: . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi";
+    if type != "object"
+      or ((.schema_version == 1 and (has("harnesses") | not))
+          or (.schema_version == 2 and (.harnesses | type == "array" and length > 0 and all(.[]; valid_harness) and (unique | length) == length)) | not)
+      or .status != "committed"
       or .worktree_root != $root or .checkout_id != $checkout or .worktree_id != $worktree
       or (.artifacts | type) != "array" or (has("pre_existing") and (.pre_existing | type) != "array")
       or (has("renders") and (.renders | type) != "array")
     then error("invalid attachment owner") else . end
     | . as $owner
-    | (.artifacts + (.pre_existing // [])) as $owned
-    | (any($owned[]; .path | startswith(".pi/"))) as $has_pi
-    | [$owned[]
-      | if (.path | startswith(".codex/")) then "codex"
-        elif (.path | startswith(".pi/")) then "pi"
-        elif (.path | startswith(".claude/")) then "claude"
-        elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
-        else empty end] | unique as $harnesses
+    | (if .schema_version == 2 then
+         (.harnesses | unique | sort)
+       else
+         (.artifacts + (.pre_existing // [])) as $owned
+         | (any($owned[]; .path | startswith(".pi/"))) as $has_pi
+         | [$owned[]
+           | if (.path | startswith(".codex/")) then "codex"
+             elif (.path | startswith(".pi/")) then "pi"
+             elif (.path | startswith(".claude/")) then "claude"
+             elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
+             else empty end] | unique
+       end) as $harnesses
     | if ($harnesses | length) == 0 then error("attachment has no harnesses")
       else {worktree_root:$owner.worktree_root,checkout_id:$owner.checkout_id,harnesses:$harnesses,
         artifacts:$owner.artifacts,pre_existing:($owner.pre_existing // []),
@@ -242,7 +250,7 @@ bypass_managed_hooks_path() {
     [[ "$owner_id" =~ ^[a-f0-9]{64}$ ]] || return 1
     jq -e --arg checkout "$checkout" --arg worktree "$owner_id" '
       (if has("git_hooks") then .git_hooks else {} end) as $hooks
-      | .schema_version == 1 and .status == "committed" and .checkout_id == $checkout
+      | (.schema_version == 1 or .schema_version == 2) and .status == "committed" and .checkout_id == $checkout
         and .worktree_id == $worktree and (.worktree_root | type == "string" and startswith("/"))
         and (.artifacts | type == "array")
         and ((has("pre_existing") | not) or (.pre_existing | type == "array"))
@@ -330,14 +338,26 @@ bypass_owned_hooks_registered() {
   expectations="$(jq -ce --arg harness "$harness" '
     def registration_path:
       if $harness == "claude" then . == ".claude/settings.json" or . == ".claude/settings.local.json"
+      elif $harness == "antigravity" then . == ".agents/hooks.json"
       else . == ".codex/hooks.json" end;
+    def root_key:
+      if $harness == "antigravity" then "trellis" else "hooks" end;
     def commands:
-      .hooks | objects | to_entries[] | select(.key | test("\\S"))
-      | .value | arrays | .[] | objects | .hooks | arrays | .[] | objects
-      | select(.type == "command" and (.command | type == "string" and test("\\S")));
+      if $harness == "antigravity" then
+        .trellis | objects
+        | ((.SessionStart // []), (.PreInvocation // []), (.Stop // []),
+           ((.PreToolUse // []) | map(objects | .hooks // []) | add // []),
+           ((.PostToolUse // []) | map(objects | .hooks // []) | add // []))
+        | arrays | .[] | objects
+        | select(.type == "command" and (.command | type == "string" and test("\\S")))
+      else
+        .hooks | objects | to_entries[] | select(.key | test("\\S"))
+        | .value | arrays | .[] | objects | .hooks | arrays | .[] | objects
+        | select(.type == "command" and (.command | type == "string" and test("\\S")))
+      end;
     .renders as $renders
     | [$renders[] | select(.path | registration_path)
-        | [.owned_keys[] | select(.path[0] == "hooks")] as $keys
+        | [.owned_keys[] | select(.path[0] == root_key)] as $keys
         | if ($keys | length) > 0
             and (all($keys[]; .path | type == "array" and length > 0 and all(.[]; type == "string")))
             and ([reduce $keys[] as $key ({}; setpath($key.path; $key.value)) | commands] | length) > 0
@@ -358,11 +378,22 @@ bypass_owned_hooks_registered() {
       [ "$(CDPATH='' cd "$(dirname "$PROJECT_DIR/$s")" && pwd -P)" = "$(dirname "$PROJECT_DIR/$s")" ] || continue
       if [ -n "$digest" ]; then
         [ "$(bypass_hash < "$PROJECT_DIR/$s")" = "$digest" ] || continue
-        jq -e '
-          .hooks | objects | to_entries[] | select(.key | test("\\S"))
-          | .value | arrays | .[] | objects | .hooks | arrays | .[] | objects
-          | select(.type == "command" and (.command | type == "string" and test("\\S")))
-        ' "$PROJECT_DIR/$s" >/dev/null 2>&1 || continue
+        if [ "$harness" = "antigravity" ]; then
+          jq -e '
+            .trellis | objects
+            | ((.SessionStart // []), (.PreInvocation // []), (.Stop // []),
+               ((.PreToolUse // []) | map(objects | .hooks // []) | add // []),
+               ((.PostToolUse // []) | map(objects | .hooks // []) | add // []))
+            | arrays | .[] | objects
+            | select(.type == "command" and (.command | type == "string" and test("\\S")))
+          ' "$PROJECT_DIR/$s" >/dev/null 2>&1 || continue
+        else
+          jq -e '
+            .hooks | objects | to_entries[] | select(.key | test("\\S"))
+            | .value | arrays | .[] | objects | .hooks | arrays | .[] | objects
+            | select(.type == "command" and (.command | type == "string" and test("\\S")))
+          ' "$PROJECT_DIR/$s" >/dev/null 2>&1 || continue
+        fi
       else
         jq -e --argjson keys "$keys" '
           . as $settings | all($keys[]; . as $key | $settings | getpath($key.path) == $key.value)
@@ -375,7 +406,7 @@ bypass_owned_hooks_registered() {
   done <<< "$(jq -c '.[]' <<< "$expectations")"
 }
 
-for harness in claude codex; do
+for harness in claude codex antigravity; do
   harness_required=""
   grep -Fxq "$harness" <<< "$attached_harnesses" && harness_required="yes"
   # Preserve the existing Claude settings tampering check even on raw clones.
@@ -383,6 +414,7 @@ for harness in claude codex; do
   case "$harness" in
     claude) hook_files=(".claude/settings.json" ".claude/settings.local.json") ;;
     codex) hook_files=(".codex/hooks.json") ;;
+    antigravity) hook_files=(".agents/hooks.json") ;;
   esac
   settings_seen=""
   hooks_registered=""
@@ -390,10 +422,18 @@ for harness in claude codex; do
     [ -e "$PROJECT_DIR/$s" ] || [ -L "$PROJECT_DIR/$s" ] || continue
     settings_seen="yes"
     [ -f "$PROJECT_DIR/$s" ] || continue
-    # Both attach templates use event -> groups -> hooks -> command entries.
-    # Empty/stripped events and unrelated command objects do not register hooks;
-    # invalid JSON and missing jq also fail closed.
-    if jq -e '
+    if [ "$harness" = "antigravity" ]; then
+      if jq -e '
+        .trellis | objects
+        | ((.SessionStart // []), (.PreInvocation // []), (.Stop // []),
+           ((.PreToolUse // []) | map(objects | .hooks // []) | add // []),
+           ((.PostToolUse // []) | map(objects | .hooks // []) | add // []))
+        | arrays | .[] | objects
+        | select(.type == "command" and (.command | type == "string" and test("\\S")))
+      ' "$PROJECT_DIR/$s" >/dev/null 2>&1; then
+        hooks_registered="yes"
+      fi
+    elif jq -e '
       .hooks | objects | to_entries[] | select(.key | test("\\S"))
       | .value | arrays | .[] | objects | .hooks | arrays | .[] | objects
       | select(.type == "command" and (.command | type == "string" and test("\\S")))
@@ -425,9 +465,40 @@ for harness in claude codex; do
         findings+=(".codex/hooks.json: file missing in a Codex-attached project — Tier 1+2 hooks not registered")
       fi
       ;;
+    antigravity)
+      if [ -n "$settings_seen" ]; then
+        findings+=(".agents/hooks.json: no \"trellis\" event with a command entry matching owner-recorded Trellis hooks — Tier 1+2 hooks not registered")
+      else
+        findings+=(".agents/hooks.json: file missing in an antigravity attached project — Tier 1+2 hooks not registered")
+      fi
+      ;;
   esac
   worst="fail"
 done
+
+if grep -Fxq antigravity <<< "$attached_harnesses" || grep -Fxq opencode <<< "$attached_harnesses"; then
+  expected_agents_target="$(jq -er '.artifacts[] | select(.path == ".agents/AGENTS.md" and .kind == "symlink") | .target' <<< "$attachment_state" 2>/dev/null || true)"
+  if [ -z "$expected_agents_target" ] || [ ! -L "$PROJECT_DIR/.agents/AGENTS.md" ] ||
+     [ "$(readlink "$PROJECT_DIR/.agents/AGENTS.md" 2>/dev/null || true)" != "$expected_agents_target" ] ||
+     [ "$(unset CDPATH; cd "$(dirname "$PROJECT_DIR/.agents/AGENTS.md")" 2>/dev/null && pwd -P)" != "$PROJECT_DIR/.agents" ]; then
+    findings+=(".agents/AGENTS.md: required parent rules symlink missing or tampered")
+    worst="fail"
+  fi
+fi
+
+if grep -Fxq opencode <<< "$attached_harnesses"; then
+  if [ -e "$PROJECT_DIR/.opencode/opencode.jsonc" ] || [ -L "$PROJECT_DIR/.opencode/opencode.jsonc" ]; then
+    findings+=(".opencode/opencode.jsonc: sibling JSONC file shadows .opencode/opencode.json")
+    worst="fail"
+  fi
+  opencode_keys="$(jq -ce '[.renders[] | select(.path == ".opencode/opencode.json")][0].owned_keys | select(type == "array" and length > 0)' <<< "$attachment_state" 2>/dev/null || true)"
+  if [ -z "$opencode_keys" ] || [ ! -f "$PROJECT_DIR/.opencode/opencode.json" ] || [ -L "$PROJECT_DIR/.opencode/opencode.json" ] ||
+     [ "$(unset CDPATH; cd "$PROJECT_DIR/.opencode" 2>/dev/null && pwd -P)" != "$PROJECT_DIR/.opencode" ] ||
+     ! jq -e --argjson keys "$opencode_keys" '. as $doc | all($keys[]; . as $k | $doc | getpath($k.path) == $k.value) and ((.instructions // []) | index(".agents/AGENTS.md") != null)' "$PROJECT_DIR/.opencode/opencode.json" >/dev/null 2>&1; then
+    findings+=(".opencode/opencode.json: required OpenCode instructions render missing or tampered")
+    worst="fail"
+  fi
+fi
 
 # Authenticate every owner-recorded Pi auxiliary, including dormant executables
 # and literal parent directories. The validator filters historical dispatcher

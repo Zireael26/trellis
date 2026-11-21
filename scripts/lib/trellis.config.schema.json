@@ -300,6 +300,11 @@
           "type": "integer",
           "minimum": 0
         },
+        "active_bloat_warn_gb": {
+          "description": "Tripwire: report warns when an active worktree exceeds this many GB (0 disables). Default 2.",
+          "type": "integer",
+          "minimum": 0
+        },
         "apply_disabled_scopes": {
           "description": "Spec 069: scopes that --apply skips (report and dry-run still scan them). The per-scope rollback switch. Default [].",
           "type": "array",
@@ -337,6 +342,10 @@
             "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9._-]+)?$"
           },
           "uniqueItems": true
+        },
+        "cow_deps": {
+          "description": "Opt-in Darwin/APFS copy-on-write node_modules cloning during trellis worktree add when a JS lockfile matches the source checkout. Default false.",
+          "type": "boolean"
         }
       },
       "additionalProperties": true

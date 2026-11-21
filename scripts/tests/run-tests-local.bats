@@ -86,7 +86,7 @@ PY
 #!/usr/bin/env bash
 if [ "${1:-}" = "$FAKE_GATE_MODULE" ]; then
   shift
-  exec "$FAKE_REAL_PYTHON" "$FAKE_SANDBOX/driver.py" "$FAKE_GATE_MODULE" hermetic "$@"
+  exec "$FAKE_REAL_PYTHON" -B "$FAKE_SANDBOX/driver.py" "$FAKE_GATE_MODULE" hermetic "$@"
 fi
 exec "$FAKE_REAL_PYTHON" "$@"
 SH
@@ -97,7 +97,7 @@ SH
 set -uo pipefail
 count="${TRELLIS_TEST_SHARDS:-$(python3 -c 'import os; print(min(12, max(8, (os.cpu_count() or 10) - 2)))')}"
 if [ "${FAKE_PRIORITY_ONLY:-}" != 1 ]; then
-  python3 "$FAKE_SANDBOX/admission.py" || exit 78
+  python3 -B "$FAKE_SANDBOX/admission.py" || exit 78
 fi
 if [ -n "${FAKE_SELECTED_FILE:-}" ]; then
   case " $* " in *" --test-file=$FAKE_SELECTED_FILE "*) ;; *) exit 79 ;; esac
@@ -1111,7 +1111,7 @@ teardown() {
 }
 
 run_wrapper() { run python3 "$WRAPPER"; }
-run_driver() { run python3 "$SANDBOX/driver.py" "$WRAPPER" "$1"; }
+run_driver() { run python3 -B "$SANDBOX/driver.py" "$WRAPPER" "$1"; }
 
 children_dead() {
   local pid
@@ -1163,7 +1163,7 @@ start_wrapper() {
 }
 
 @test "hardening: reap leaves old foreign names and symlink entries alone" {
-  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+  run python3 -I -B - "$WRAPPER" "$SANDBOX" <<'PY'
 import importlib.util, os, sys, time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1190,7 +1190,7 @@ PY
 }
 
 @test "hardening: reap does not follow a symlinked failed-shards root" {
-  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+  run python3 -I -B - "$WRAPPER" "$SANDBOX" <<'PY'
 import importlib.util, os, sys, time
 from pathlib import Path
 from types import SimpleNamespace
@@ -1207,7 +1207,7 @@ PY
 }
 
 @test "hardening: a birthless ancestor cannot become a boundary member" {
-  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+  run python3 -I -B - "$WRAPPER" "$SANDBOX" <<'PY'
 import importlib.util, os, sys, time
 spec = importlib.util.spec_from_file_location('gate', sys.argv[1])
 gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
@@ -1226,7 +1226,7 @@ PY
 }
 
 @test "hardening: boundary membership requires an exact environment entry" {
-  run python3 -I - "$WRAPPER" "$SANDBOX" <<'PY'
+  run python3 -I -B - "$WRAPPER" "$SANDBOX" <<'PY'
 import importlib.util, os, sys, time
 spec = importlib.util.spec_from_file_location('gate', sys.argv[1])
 gate = importlib.util.module_from_spec(spec); spec.loader.exec_module(gate)
@@ -1282,7 +1282,7 @@ PY
 }
 
 @test "shard CPU derivation override validation and historical record paths" {
-  run python3 "$BATS_TEST_DIRNAME/test_gate_shard_count.py"
+  run python3 -B "$BATS_TEST_DIRNAME/test_gate_shard_count.py"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
@@ -1862,17 +1862,84 @@ PY
   done
 }
 
-@test "deadline seam may shorten but cannot extend the authorized 7200 seconds" {
-  local value
-  for value in 7200.001 20000; do
-    TRELLIS_LOCAL_GATE_DEADLINE="$value" run_wrapper
-    [ "$status" -eq 64 ] || { echo "$output"; false; }
-    [[ "$output" == *"must not exceed 7200"* ]] || false
-    [ ! -s "$FAKE_INVOCATIONS" ]; [ ! -e "$SANDBOX/planner" ]
-  done
-  TRELLIS_LOCAL_GATE_DEADLINE=7200 run_wrapper
+check_deadline_policy() {
+  run python3 -I -B - "$WRAPPER" "$1" <<'PY'
+import contextlib
+import importlib.util
+import io
+import math
+import os
+import sys
+
+spec = importlib.util.spec_from_file_location('gate', sys.argv[1])
+gate = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(gate)
+gate.safe_capture = lambda *args: {'head': 'fixture'}
+gate.emit = lambda *args, **kwargs: None
+gate.time.monotonic = lambda: 1000.0
+gate.RunState = lambda **kwargs: object()
+
+class ReachedAdmission(Exception):
+    pass
+
+def capture(deadline=None, reserve=None, grace=None):
+    for suffix, value in [('DEADLINE', deadline), ('RESERVE', reserve), ('TERM_GRACE', grace), ('RECEIPT', None)]:
+        name = 'TRELLIS_LOCAL_GATE_' + suffix
+        os.environ.pop(name, None)
+        if value is not None:
+            os.environ[name] = str(value)
+    observed = []
+    def stop_before_children(state, root, productive_at):
+        observed.append(productive_at - 1000.0)
+        raise ReachedAdmission()
+    gate._invalidate_verdicts = stop_before_children
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            status = gate.main([])
+    except ReachedAdmission:
+        return 0, observed[0], stderr.getvalue()
+    assert not observed
+    return status, None, stderr.getvalue()
+
+case = sys.argv[2]
+if case == 'default':
+    assert gate.GLOBAL_DEADLINE_SECONDS == 7200.0
+    assert capture()[:2] == (0, 7140.0)
+elif case == 'cap':
+    for deadline in (7200, 7200.001, 10800, 14400):
+        status, productive, stderr = capture(deadline)
+        assert status == 0 and math.isclose(productive, deadline - 60), (deadline, status, productive, stderr)
+    for deadline in (14400.001, 20000):
+        status, productive, stderr = capture(deadline)
+        assert (status, productive) == (64, None), deadline
+        assert 'must not exceed 14400 seconds' in stderr, stderr
+elif case == 'reserve':
+    assert capture(10800)[:2] == (0, 10740.0)
+    assert capture(14400, 120, 5)[:2] == (0, 14280.0)
+    for deadline, reserve, grace in ((10800, 10800, 5), (10800, 60, 60)):
+        status, productive, stderr = capture(deadline, reserve, grace)
+        assert (status, productive) == (64, None)
+        assert 'require TERM grace < reserve < deadline' in stderr, stderr
+else:
+    raise AssertionError(case)
+PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  assert_empty
+}
+
+@test "hardening: the global deadline default remains 7200 seconds" {
+  # Inversion: raising the default with the override ceiling must fail.
+  check_deadline_policy default
+}
+
+@test "hardening: explicit deadline overrides admit 14400 seconds but no more" {
+  # Inversion: retaining the old cap or dropping the new cap must fail.
+  check_deadline_policy cap
+}
+
+@test "hardening: extended deadlines still reserve productive and cleanup budgets" {
+  # Inversion: dropping the reserve or admitting grace >= reserve must fail.
+  check_deadline_policy reserve
 }
 
 @test "backwards wall clock uses a safer birth bound and records clock_step" {
@@ -1889,39 +1956,39 @@ PY
 }
 
 @test "secondary environment and path reads tolerate mid-exit metadata races" {
-  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" SecondaryReadTests
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_runner_process_race.py" SecondaryReadTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "fixture process scanner preserves membership on full BSD races" {
-  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" FixtureTableRaceTests
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_runner_process_race.py" FixtureTableRaceTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "vanished process inspections cannot become preflight or teardown survivors" {
-  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" VanishedProcessTests
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_runner_process_race.py" VanishedProcessTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "live unreadable process inspections retain fail-closed containment" {
-  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" LiveUnreadableTests
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_runner_process_race.py" LiveUnreadableTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "unrelated failed BSD reads use independent membership without quarantine" {
   # Inversion: a same-UID full-info failure permanently poisons clean teardown.
-  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests.test_unrelated_failed_bsd_read_does_not_quarantine
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests.test_unrelated_failed_bsd_read_does_not_quarantine
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "transient PID retries wait within the remaining containment budget" {
-  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests.test_transient_retry_waits_once_without_overrunning_budget
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests.test_transient_retry_waits_once_without_overrunning_budget
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
 @test "partial BSD membership preserves fail-closed groups sessions and detached work" {
   # Inversion: unknown birth is treated as pre-run, or PGID alone excludes work.
-  run python3 -I "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_runner_process_race.py" MembershipFallbackTests
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 

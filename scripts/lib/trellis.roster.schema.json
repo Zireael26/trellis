@@ -1,0 +1,282 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://trellis.local/schemas/trellis.roster.schema.json",
+  "title": "Trellis machine-local model roster",
+  "description": "Owner-local routing configuration, not portable policy. The loader checks ownership and file mode (0600 in a 0700 parent). The resolver checks catalog references, allowed efforts, capabilities, and independence rules; this file cannot override them. Store credential references, never credentials or probe output.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "machine", "routes"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "machine": { "$ref": "#/$defs/machine" },
+    "generated": { "$ref": "#/$defs/generated" },
+    "routes": {
+      "description": "Seat aliases mapped to routes in preference order. Omit a seat that is not on this machine. Seat aliases must resolve to portable seats or classified local seats.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": {
+        "type": "array",
+        "minItems": 1,
+        "items": { "$ref": "#/$defs/route" }
+      }
+    },
+    "pools": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": { "$ref": "#/$defs/pool" }
+    },
+    "fleets": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/fleetName" },
+      "additionalProperties": { "$ref": "#/$defs/fleet" }
+    },
+    "local_models": {
+      "description": "Operator-classified extra model IDs. They may not shadow portable models or seats, and IDs that do not identify a fixed model (such as auto) cannot be classified.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/modelId" },
+      "additionalProperties": { "$ref": "#/$defs/localModel" }
+    },
+    "role_extensions": {
+      "description": "Existing portable role IDs mapped to append-only extensions. The resolver checks role/seat references and keeps portable ordering, restrictions and independence rules.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": { "$ref": "#/$defs/roleExtension" }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$(?!\\s)"
+    },
+    "fleetName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?!\\s)"
+    },
+    "modelId": {
+      "type": "string",
+      "pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$(?!\\s)"
+    },
+    "idList": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/id" },
+      "uniqueItems": true
+    },
+    "credentialRef": {
+      "description": "Credential location only: pi-auth:<provider>, env:<VAR>, or keychain:<service>. Never a key value.",
+      "type": "string",
+      "pattern": "^(?:pi-auth:[A-Za-z0-9][A-Za-z0-9._-]*|env:[A-Za-z_][A-Za-z0-9_]*|keychain:[^\\u0000-\\u001f\\u007f]+)$(?!\\s)"
+    },
+    "authProbe": {
+      "description": "Noninteractive command as argv, including its executable, run without a shell. Arguments must not contain credentials, and output must stay out of logs and receipts.",
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "pattern": "^[^\\u0000-\\u001f\\u007f]+$(?!\\s)" }
+    },
+    "machine": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "label": { "$ref": "#/$defs/id" },
+        "verdict_host": {
+          "description": "Set false on a worker that must not decide verdict roles locally.",
+          "type": "boolean"
+        }
+      }
+    },
+    "generated": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["by", "at"],
+      "properties": {
+        "by": { "type": "string", "pattern": "\\S" },
+        "at": {
+          "description": "Timezone-qualified generation timestamp; calendar validity is a consumer check.",
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|[+-][0-9]{2}:[0-9]{2})$(?!\\s)"
+        },
+        "reviewed": { "type": "boolean" }
+      }
+    },
+    "nonPiHarness": {
+      "enum": ["claude-code", "codex", "cursor", "agy", "opencode"]
+    },
+    "route": {
+      "description": "A direct provider, a named pool, or a non-Pi harness's default provider. Pool names must exist. The resolver checks adapter support and model identity; omitting native_model uses the catalog model ID.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["harness"],
+      "properties": {
+        "harness": { "enum": ["pi", "claude-code", "codex", "cursor", "agy", "opencode"] },
+        "provider": { "$ref": "#/$defs/id" },
+        "pool": { "$ref": "#/$defs/id" },
+        "native_model": { "$ref": "#/$defs/modelId" },
+        "credential_ref": { "$ref": "#/$defs/credentialRef" },
+        "metered": {
+          "description": "Operator assertion; omit for a metered route.",
+          "enum": ["prepaid", "unmetered"]
+        },
+        "quota": { "$ref": "#/$defs/quota" },
+        "live_probe": {
+          "description": "Require an exact live listing before selection; the adapter must support it.",
+          "type": "boolean"
+        },
+        "confirmed": {
+          "description": "False marks a provisional route that still needs operator confirmation.",
+          "type": "boolean"
+        },
+        "env_only": {
+          "description": "Route is visible with inherited environment variables but not in a minimal environment.",
+          "type": "boolean"
+        },
+        "opportunistic": {
+          "description": "Overflow only; cannot cast a deciding vote.",
+          "type": "boolean"
+        },
+        "auth_probe": { "$ref": "#/$defs/authProbe" },
+        "verified_flags": {
+          "description": "Whether the harness flags needed by this route have been verified on this host.",
+          "type": "boolean"
+        },
+        "fleets": {
+          "description": "When present, only these fleets may use the route, subject to the fleet's own allow/deny rules.",
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/fleetName" },
+          "uniqueItems": true
+        }
+      },
+      "oneOf": [
+        { "required": ["provider"], "properties": { "pool": false } },
+        { "required": ["pool"], "properties": { "provider": false } },
+        { "properties": { "provider": false, "pool": false, "harness": { "$ref": "#/$defs/nonPiHarness" } } }
+      ]
+    },
+    "quota": {
+      "description": "Quota source and optional report lookup key. The resolver must not infer headroom for a metered route from none or missing telemetry.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": { "enum": ["openusage", "none"] },
+        "provider_key": { "$ref": "#/$defs/id" }
+      }
+    },
+    "pool": {
+      "description": "Member IDs and provider IDs must be unique within a pool. Confirm distinct billing accounts before relying on members as independent capacity; array uniqueness alone cannot check that.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["selector", "members"],
+      "properties": {
+        "selector": { "const": "hrw-v1" },
+        "max_concurrency_per_member": {
+          "description": "Positive per-member advisory concurrency cap.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "members": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/poolMember" },
+          "uniqueItems": true
+        }
+      }
+    },
+    "poolMember": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "provider": { "$ref": "#/$defs/id" },
+        "credential_ref": { "$ref": "#/$defs/credentialRef" },
+        "account": {
+          "description": "Billing workspace/account identity for selection and latches, not a credential. Omit if unknown to use the member ID provisionally. <probe> is an unverified marker, not evidence of a distinct workspace.",
+          "type": "string",
+          "pattern": "^(?:<probe>|[A-Za-z0-9][A-Za-z0-9._-]*)$(?!\\s)"
+        },
+        "key_sha256_10": {
+          "description": "Lowercase ten-hex SHA-256 prefix of the key, used to invalidate stale latches after key rotation. May be omitted for provisional members and fixtures.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{10}$(?!\\s)"
+        },
+        "auth_probe": { "$ref": "#/$defs/authProbe" },
+        "env_only": { "type": "boolean" },
+        "seats": {
+          "description": "When present, restrict this member to these seat aliases. If absent, the member serves every seat routed through this pool.",
+          "$ref": "#/$defs/idList"
+        }
+      }
+    },
+    "fleetSelector": {
+      "description": "Wildcard or a list of seat, harness, or provider IDs.",
+      "oneOf": [
+        { "const": "*" },
+        { "$ref": "#/$defs/idList" }
+      ]
+    },
+    "fleet": {
+      "description": "Fleet fence applied in addition to any route fleets restriction. Denial takes precedence, including a matching pool in deny_pools.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "allow": { "$ref": "#/$defs/fleetSelector" },
+        "deny": { "$ref": "#/$defs/fleetSelector" },
+        "deny_pools": { "$ref": "#/$defs/idList" }
+      }
+    },
+    "localModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "efforts", "seat", "capabilities"],
+      "properties": {
+        "family": { "$ref": "#/$defs/id" },
+        "efforts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "seat": { "$ref": "#/$defs/id" },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/id" },
+          "uniqueItems": true
+        },
+        "context_cap": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "roleExtension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["append"],
+      "properties": {
+        "append": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/roleRung" }
+        }
+      }
+    },
+    "roleRung": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "min_remaining"],
+      "properties": {
+        "agent": { "$ref": "#/$defs/id" },
+        "min_remaining": { "type": "number", "minimum": 0, "maximum": 1 },
+        "opportunistic": { "type": "boolean" },
+        "until": {
+          "description": "Expiry date (YYYY-MM-DD); the resolver checks calendar validity.",
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$(?!\\s)"
+        },
+        "fallback_for": {
+          "description": "Must name a different seat already present earlier in the combined chain.",
+          "$ref": "#/$defs/id"
+        },
+        "auth_probe": { "$ref": "#/$defs/authProbe" }
+      }
+    }
+  }
+}

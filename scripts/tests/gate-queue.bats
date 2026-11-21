@@ -12,7 +12,7 @@ setup() {
 teardown() { rm -rf "$SANDBOX"; }
 
 check_queue() {
-  run python3 -I "$TESTS" "QueueTests.$1"
+  run python3 -I -B "$TESTS" "QueueTests.$1"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 

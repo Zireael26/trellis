@@ -17,6 +17,7 @@ import sys
 
 
 def _load_attachment_fs(path):
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location("trellis_attachment_fs", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -398,7 +399,7 @@ class DetachCommit(object):
             if identity(name) != pinned:
                 return False
             self.guard()
-            os.fchmod(fd, 0o700)
+            os.fchmod(fd, stat.S_IRWXU)
             try:
                 self.guard()
                 os.rename(leaf, "artifact", dst_dir_fd=fd)
@@ -1128,6 +1129,10 @@ class DetachCommit(object):
                 status = self.leaf("attach_exclude_recover", compact(original["exclude"]))
                 if status:
                     raise Stop(status)
+            elif action == "rewrite":
+                status = self.leaf("attach_detach_rewrite_exclude", compact(external["exclude_rewrite"]))
+                if status:
+                    raise Stop(status)
             elif action not in ("none", "transfer"):
                 raise Stop(4)
             self.mark_external(3)
@@ -1211,19 +1216,36 @@ def shell_leaf(action, function, *args):
     # and calls it with ATTACHMENT_ACTION set. Its status is the function's.
     # Transfer records can exceed Linux's per-argument limit. Send the leaf's
     # arguments NUL-framed on stdin instead; the function itself sees EOF.
+    import shutil
     import subprocess
-    bash = os.environ.get("TRELLIS_DETACH_BASH", "")
+    want_bash = os.environ.get("TRELLIS_DETACH_BASH", "")
     script = os.path.dirname(os.path.dirname(ATTACHMENT_FS)) + "/attach-project.sh"  # noqa: F821
-    if not bash.startswith("/") or not is_file(script):
+    if not want_bash.startswith("/") or not os.path.isfile(want_bash) or not is_file(script):
         return 1
+    bash_exe = None
+    for candidate in ("/opt/homebrew/bin/bash", "/usr/local/bin/bash", "/usr/bin/bash", "/bin/bash"):
+        if want_bash == candidate and os.path.isfile(candidate):
+            bash_exe = candidate
+            break
+    if bash_exe is None:
+        found = shutil.which("bash")
+        if not found or not os.path.isfile(found):
+            return 1
+        bash_exe = found
     env = dict(os.environ)
     env.pop("TRELLIS_LIBS_PRELOADED", None)
     sys.stdout.flush()
     sys.stderr.flush()
-    framed = b"".join(os.fsencode(arg) + b"\0" for arg in args)
-    return subprocess.run([bash, "-c", '. "$1" || exit 1; shift; ATTACHMENT_ACTION=$1; shift; '
-                           'while IFS= read -r -d "" arg; do set -- "$@" "$arg"; done; "$@" < /dev/null',
-                           "trellis-detach-leaf", script, action, function], input=framed, env=env).returncode
+    framed = b"".join(os.fsencode(part) + b"\0" for part in (script, action, function, *args))
+    return subprocess.run(
+        [bash_exe, "-c",
+         'IFS= read -r -d "" s && IFS= read -r -d "" act && IFS= read -r -d "" fn || exit 1; '
+         '. "$s" || exit 1; ATTACHMENT_ACTION=$act; '
+         'set -- "$fn"; while IFS= read -r -d "" arg; do set -- "$@" "$arg"; done; "$@" < /dev/null',
+         "trellis-detach-leaf"],
+        input=framed,
+        env=env,
+    ).returncode
 
 
 # --- journal validation (spec 075 T4, R5): `_attachment_detach_journal_valid`
@@ -1264,6 +1286,91 @@ def jq_verdicts(path, filters):
     return verdicts if isinstance(verdicts, dict) else None
 
 
+def exclude_rewrite_data_valid(journal):
+    import base64
+    import hashlib
+    begin = b"# --- Trellis local attachment exclude block ---"
+    end = b"# --- end Trellis local attachment exclude block ---"
+    try:
+        rewrite = journal["external"]["exclude_rewrite"]
+        orig_ex = journal["original_owner"]["exclude"]
+        next_owner = journal["next_owner"]
+        if not isinstance(rewrite, dict) or not isinstance(next_owner, dict):
+            return False
+        next_ex = next_owner["exclude"]
+        def dec(b64_str, expected_sha):
+            raw = base64.b64decode(b64_str.encode("ascii"), validate=True)
+            if hashlib.sha256(raw).hexdigest() != expected_sha:
+                raise ValueError("digest mismatch")
+            return raw
+        rw_before = dec(rewrite["before_base64"], rewrite["before_sha256"])
+        rw_after = dec(rewrite["after_base64"], rewrite["after_sha256"])
+        rw_block = dec(rewrite["managed_block_base64"], rewrite["managed_block_sha256"])
+        orig_block = dec(orig_ex["managed_block_base64"], orig_ex["managed_block_sha256"])
+        orig_before = dec(orig_ex["before_base64"], orig_ex["before_sha256"])
+        next_after = dec(next_ex["after_base64"], next_ex["after_sha256"])
+        if orig_ex["before_exists"] is False and orig_before != b"":
+            return False
+        entries = sorted(set(["/.trellis/runtime"] + [
+            "/" + a["path"] for a in next_owner["artifacts"] if a["kind"] != "parent"
+        ]))
+        expected_block = (begin + b"\n"
+                          + b"".join(e.encode("utf-8") + b"\n" for e in entries)
+                          + end + b"\n")
+        if rw_block != expected_block:
+            return False
+        if not orig_block.startswith(begin + b"\n") or not orig_block.endswith(end + b"\n"):
+            return False
+        def lines_with_offsets(data):
+            start = 0
+            while start < len(data):
+                nl = data.find(b"\n", start)
+                if nl < 0:
+                    yield data[start:], start, len(data), False
+                    return
+                yield data[start:nl + 1], start, nl + 1, True
+                start = nl + 1
+        counts = [0, 0]
+        inside = False
+        b_start = None
+        b_lines = []
+        matches = []
+        for line, off, next_off, term in lines_with_offsets(rw_before):
+            body = line[:-1] if term else line
+            if not inside:
+                if body == begin:
+                    counts[0] += 1
+                    if not term or matches:
+                        return False
+                    inside = True
+                    b_start = off
+                    b_lines = [line]
+                elif body == end:
+                    return False
+            else:
+                if body == begin:
+                    return False
+                b_lines.append(line)
+                if body == end:
+                    counts[1] += 1
+                    if not term or b"".join(b_lines) != orig_block:
+                        return False
+                    matches.append((b_start, next_off))
+                    inside = False
+                    b_lines = []
+        if counts != [1, 1] or inside or len(matches) != 1:
+            return False
+        s_off, e_off = matches[0]
+        if rw_before[:s_off] + expected_block + rw_before[e_off:] != rw_after:
+            return False
+        prefix = orig_before + (b"" if not orig_before or orig_before.endswith(b"\n") else b"\n")
+        if prefix + expected_block != next_after:
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def journal_data_valid(path, filters):
     # _attachment_detach_journal_data_valid
     if not valid_absolute(path):
@@ -1285,6 +1392,8 @@ def journal_data_valid(path, filters):
         return 2
     with open(path, "rb") as handle:
         journal = json.loads(handle.read().decode("utf-8"))
+    if journal["external"].get("exclude_action") == "rewrite" and not exclude_rewrite_data_valid(journal):
+        return 2
     journal_dir = os.path.dirname(path)
     home = os.path.dirname(os.path.dirname(journal_dir))
     if journal_dir != home + "/state/attachment-journals":
@@ -1416,7 +1525,7 @@ def make_holder_dir(locks, prefix):
             os.mkdir(path, 0o700)
         except FileExistsError:
             continue
-        os.chmod(path, 0o700)
+        os.chmod(path, stat.S_IRWXU)
         return path
     raise OSError("no unique lock holder name")
 

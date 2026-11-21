@@ -11,14 +11,28 @@ group_plan_build_release_repo() {
   [ "$version" != 1.3.10 ] || ref=HEAD
   mkdir -p "$repo" || return 1
   git -C "$REPO_ROOT" archive "$ref" core-rules scripts | tar -x -C "$repo" || return 1
+  # Prune heavy test/eval/native subtrees that group-plan attachment/adoption
+  # never touches, cutting 5-tag archive + verify hashing from ~70m to seconds.
+  rm -rf "${repo:?}/core-rules/evals" "${repo:?}/core-rules/native" \
+    "${repo:?}/core-rules/usage-federation" "${repo:?}/scripts/tests" \
+    "${repo:?}/scripts/qualification" "${repo:?}/core-rules/hooks/tests" \
+    "${repo:?}/core-rules/codex/hooks/tests" "${repo:?}/core-rules/pi/tests" \
+    "${repo:?}/core-rules/pi/extensions/tests" "${repo:?}/core-rules/pi/patches/tests" \
+    "${repo:?}/core-rules/pi/web-search/tests" || return 1
+  rm -rf "$repo"/core-rules/skills/*/tests 2>/dev/null || true
   if [ "$version" = 1.3.10 ]; then
     for file in release.sh attach-project.sh seed-inheritance-symlinks.sh; do
       cp "$REPO_ROOT/scripts/$file" "$repo/scripts/$file" || return 1
     done
     printf '%s\n' "$version" > "$repo/core-rules/VERSION"
-    # T34: HEAD carries the 1.5.0 native manifest; 1.3.10 never shipped
-    # native, and without its companion the templates render legacy.
-    rm -rf "${repo:?}/core-rules/native" || return 1
+    # Keep 1.3.10 on the pre-1.5.3 schema-2 shared-manifest surface (v1.5.2,
+    # where Pi runs payload hooks in place) that the historical 1.3.6 -> 1.3.9
+    # -> 1.3.10 exclude-reconciliation contract tests exercise, even after
+    # HEAD's live manifest advances to schema 3 in 1.5.3+.
+    git -C "$REPO_ROOT" show v1.5.2:core-rules/inheritance-manifest.json \
+      > "$repo/core-rules/inheritance-manifest.json" || return 1
+    git -C "$REPO_ROOT" show v1.5.2:core-rules/CLAUDE.md \
+      > "$repo/core-rules/CLAUDE.md" || return 1
   fi
   payload_fixture_git -C "$repo" init -q || return 1
   payload_fixture_git -C "$repo" add -A || return 1
@@ -31,11 +45,12 @@ group_plan_build_release_cache() (
   mkdir -p "$cache/trellis-home" "$cache/operator-home" || return 1
   export HOME="$cache/operator-home"
   export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null
-  for version in 1.3.6 1.3.7 1.3.8 1.3.9 1.3.10; do
+  # Only 1.3.6 (initial attach), 1.3.9 (pre-reconcile adopt), and 1.3.10
+  # (reconciling target) participate; 1.3.7/1.3.8 tree immutability is asserted
+  # directly via SHA-1 tree digests in release-store-part1.bats.
+  for version in 1.3.6 1.3.9 1.3.10; do
     repo="$cache/historical-$version"
     group_plan_build_release_repo "$version" "$repo" || return 1
-    # The same library seam as the suite bootstrap; no fixture hook or machine
-    # binding is embedded in these releases. Normal adopts reverify each copy.
     TRELLIS_HOME="$cache/trellis-home" bash -c '. "$1"; release_store_install "$2" "$3" "" >/dev/null' \
       group-plan-cache "$RELEASE_STORE_LIB" "$version" "$repo" || return 1
   done
@@ -64,7 +79,6 @@ group_plan_setup_group() {
 
 group_plan_build_group() {
   local version old="$TRELLIS_HOME_FIX/releases/1.3.9/payload" versions='1.3.9'
-  [ "${1:-}" != history ] || versions='1.3.7 1.3.8 1.3.9'
   group_plan_release 1.3.6 || return 1
   for version in $versions; do group_plan_release "$version" || return 1; done
   group_plan_release 1.3.10 || return 1

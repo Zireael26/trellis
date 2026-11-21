@@ -71,7 +71,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "123ed13742f39abae36b07ad2c517885e6365ecd5396889fa61f85b20f6853aa",
       "count": 1,
-      "example_line": 169,
+      "example_line": 199,
       "command": "CDPATH='' cd \"$common\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$common\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -82,7 +82,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "1da26bde6dd915e792c92b96dbf75a0ee71094ed700493e8f3d019b3a6f5fbc1",
       "count": 1,
-      "example_line": 1189,
+      "example_line": 1237,
       "command": "CDPATH='' cd -P -- \"$(dirname -- \"$file\")\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$(dirname -- \"$file\")\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -93,7 +93,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "20d8933520a3c0b8cd1c7182c5e9c7ea777527a4bad5d81ca9a6f44de4087063",
       "count": 2,
-      "example_line": 1468,
+      "example_line": 1516,
       "command": "CDPATH='' cd -P \"$releases\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$releases\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -104,7 +104,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "2f41a83b085720e0813ca0505596a48a66de4b6be87ca4d5756bef0242f2950a",
       "count": 1,
-      "example_line": 159,
+      "example_line": 189,
       "command": "CDPATH='' cd \"${TRELLIS_HOME:-${HOME:-}/.trellis}\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"${TRELLIS_HOME:-${HOME:-}/.trellis}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -115,7 +115,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "53a25d80fad141e2807fea6cd6901f3a005f9dba59d35b7d88f480bd335c99a8",
       "count": 1,
-      "example_line": 166,
+      "example_line": 196,
       "command": "CDPATH='' cd \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -137,7 +137,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "9811ee8ab06fd9e3d1b675387e19b89d66ee89ed4d6d12ddc1c7772f0e432bf5",
       "count": 1,
-      "example_line": 1229,
+      "example_line": 1277,
       "command": "CDPATH='' cd -P \"$2\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$2\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -148,7 +148,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "a5b9ed5ad81f208464bb81e144ca6a9c24c73cfa926fa85f45d0bc815e8b3a64",
       "count": 1,
-      "example_line": 254,
+      "example_line": 296,
       "command": "CDPATH='' cd \"${HOME:-}\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"${HOME:-}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -170,7 +170,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "aab5a23a7e6cd769a6c89028f052b594f626361ac6b715f807da176bd7f7f15e",
       "count": 1,
-      "example_line": 255,
+      "example_line": 297,
       "command": "CDPATH='' cd \"${TRELLIS_HOME:-$user/.trellis}\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"${TRELLIS_HOME:-$user/.trellis}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -181,7 +181,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "ae8cda229f4b93187c43d2c18af35b7738986940c7a34732ed8d188699efeb58",
       "count": 2,
-      "example_line": 1228,
+      "example_line": 1276,
       "command": "CDPATH='' cd -P \"$top\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$top\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -192,7 +192,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "cb5a0a33cab8c9109d483cb90f3429e925e2df2b769fc244a661745b4a31f159",
       "count": 1,
-      "example_line": 1192,
+      "example_line": 1240,
       "command": "CDPATH='' cd -P -- \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -203,7 +203,7 @@
       "path": "core-rules/codex/hooks/lib/deps-heavy.sh",
       "sha256": "f83e241a3557ac42a8e19bf03afcc1b93c2d94bb00bed37b2702e9685f587e3d",
       "count": 1,
-      "example_line": 1414,
+      "example_line": 1462,
       "command": "CDPATH='' cd -P \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -292,7 +292,7 @@
       "path": "core-rules/codex/hooks/stop-verify.sh",
       "sha256": "53a25d80fad141e2807fea6cd6901f3a005f9dba59d35b7d88f480bd335c99a8",
       "count": 1,
-      "example_line": 840,
+      "example_line": 853,
       "command": "CDPATH='' cd \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -303,7 +303,7 @@
       "path": "core-rules/codex/hooks/stop-verify.sh",
       "sha256": "ae8cda229f4b93187c43d2c18af35b7738986940c7a34732ed8d188699efeb58",
       "count": 1,
-      "example_line": 1090,
+      "example_line": 1103,
       "command": "CDPATH='' cd -P \"$top\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$top\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -402,7 +402,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "123ed13742f39abae36b07ad2c517885e6365ecd5396889fa61f85b20f6853aa",
       "count": 1,
-      "example_line": 153,
+      "example_line": 183,
       "command": "CDPATH='' cd \"$common\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$common\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -413,7 +413,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "1da26bde6dd915e792c92b96dbf75a0ee71094ed700493e8f3d019b3a6f5fbc1",
       "count": 1,
-      "example_line": 1173,
+      "example_line": 1221,
       "command": "CDPATH='' cd -P -- \"$(dirname -- \"$file\")\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$(dirname -- \"$file\")\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -424,7 +424,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "20d8933520a3c0b8cd1c7182c5e9c7ea777527a4bad5d81ca9a6f44de4087063",
       "count": 2,
-      "example_line": 1452,
+      "example_line": 1500,
       "command": "CDPATH='' cd -P \"$releases\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$releases\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -435,7 +435,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "2f41a83b085720e0813ca0505596a48a66de4b6be87ca4d5756bef0242f2950a",
       "count": 1,
-      "example_line": 143,
+      "example_line": 173,
       "command": "CDPATH='' cd \"${TRELLIS_HOME:-${HOME:-}/.trellis}\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"${TRELLIS_HOME:-${HOME:-}/.trellis}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -446,7 +446,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "53a25d80fad141e2807fea6cd6901f3a005f9dba59d35b7d88f480bd335c99a8",
       "count": 1,
-      "example_line": 150,
+      "example_line": 180,
       "command": "CDPATH='' cd \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -457,7 +457,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "9811ee8ab06fd9e3d1b675387e19b89d66ee89ed4d6d12ddc1c7772f0e432bf5",
       "count": 1,
-      "example_line": 1213,
+      "example_line": 1261,
       "command": "CDPATH='' cd -P \"$2\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$2\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -468,7 +468,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "a5b9ed5ad81f208464bb81e144ca6a9c24c73cfa926fa85f45d0bc815e8b3a64",
       "count": 1,
-      "example_line": 238,
+      "example_line": 280,
       "command": "CDPATH='' cd \"${HOME:-}\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"${HOME:-}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -479,7 +479,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "aab5a23a7e6cd769a6c89028f052b594f626361ac6b715f807da176bd7f7f15e",
       "count": 1,
-      "example_line": 239,
+      "example_line": 281,
       "command": "CDPATH='' cd \"${TRELLIS_HOME:-$user/.trellis}\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"${TRELLIS_HOME:-$user/.trellis}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -490,7 +490,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "ae8cda229f4b93187c43d2c18af35b7738986940c7a34732ed8d188699efeb58",
       "count": 2,
-      "example_line": 1212,
+      "example_line": 1260,
       "command": "CDPATH='' cd -P \"$top\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$top\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -501,7 +501,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "cb5a0a33cab8c9109d483cb90f3429e925e2df2b769fc244a661745b4a31f159",
       "count": 1,
-      "example_line": 1176,
+      "example_line": 1224,
       "command": "CDPATH='' cd -P -- \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -512,7 +512,7 @@
       "path": "core-rules/hooks/lib/deps-heavy.sh",
       "sha256": "f83e241a3557ac42a8e19bf03afcc1b93c2d94bb00bed37b2702e9685f587e3d",
       "count": 1,
-      "example_line": 1398,
+      "example_line": 1446,
       "command": "CDPATH='' cd -P \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -656,7 +656,7 @@
       "path": "core-rules/hooks/stop-verify.sh",
       "sha256": "53a25d80fad141e2807fea6cd6901f3a005f9dba59d35b7d88f480bd335c99a8",
       "count": 1,
-      "example_line": 706,
+      "example_line": 715,
       "command": "CDPATH='' cd \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -667,7 +667,7 @@
       "path": "core-rules/hooks/stop-verify.sh",
       "sha256": "ae8cda229f4b93187c43d2c18af35b7738986940c7a34732ed8d188699efeb58",
       "count": 1,
-      "example_line": 956,
+      "example_line": 965,
       "command": "CDPATH='' cd -P \"$top\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P \"$top\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -711,7 +711,7 @@
       "path": "core-rules/skills/process-gate/scripts/run-all.sh",
       "sha256": "5a45ad57a8c4a48458131c7cadf4dbc621b3decdcb19b55853edeb99b47aa3ca",
       "count": 1,
-      "example_line": 867,
+      "example_line": 880,
       "command": "PROCESS_GATE_PROJECT_DIR=\"$PG_CHECKOUT\" PG_TRUSTED_ROOT=\"$PG_TRUSTED_ROOT\" \\\n        PG_SKILL_ROOT=\"$SKILL_DIR\" PG_GATE_RANGE=\"$RANGE\" \\\n        BASH_ENV=\"$SKILL_DIR/scripts/lib/validator-env.sh\" bash \"$vpath\" --range=\"$RANGE\" 2>&1",
       "context": "$(cd \"$PG_CHECKOUT\" &&\n        PROCESS_GATE_PROJECT_DIR=\"$PG_CHECKOUT\" PG_TRUSTED_ROOT=\"$PG_TRUSTED_ROOT\" \\\n        PG_SKILL_ROOT=\"$SKILL_DIR\" PG_GATE_RANGE=\"$RANGE\" \\\n        BASH_ENV=\"$SKILL_DIR/scripts/lib/validator-env.sh\" bash \"$vpath\" --range=\"$RANGE\" 2>&1)",
       "assignments": [
@@ -737,7 +737,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "0e87027fdb2a27b12e3d409778849605718dc4e6577c59bffa48eb717a237afc",
       "count": 4,
-      "example_line": 1126,
+      "example_line": 1129,
       "command": "CDPATH='' cd -P -- \"${HOME:-/}\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"${HOME:-/}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -748,7 +748,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "1711bfae86ecf85d645d86f644e718ac61bf396af68f4697ae4932fe27e590e5",
       "count": 1,
-      "example_line": 1124,
+      "example_line": 1127,
       "command": "CDPATH='' cd -L -- \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd -L -- \"$root\" 2>/dev/null && pwd -L)",
       "assignments": [
@@ -759,7 +759,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "2dc4abe0df6da468a419cd7b54ea70d3c550ceee605700f11c2677ed6c2500c4",
       "count": 1,
-      "example_line": 1186,
+      "example_line": 1189,
       "command": "CDPATH='' cd -P -- \"$_darwin_base\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$_darwin_base\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -770,7 +770,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "411ea4c2ce8fe810a61bdc42bccb437c2b8c676ce16197256674b79c532042f4",
       "count": 1,
-      "example_line": 1123,
+      "example_line": 1126,
       "command": "CDPATH='' cd -P -- \"$anchor\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$anchor\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -781,7 +781,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "5e9ff0ee8afa7a1e2736679d705adb037d1ad20324e48371080889fc0a2d5789",
       "count": 1,
-      "example_line": 1146,
+      "example_line": 1149,
       "command": "CDPATH='' cd -P -- \"${TMPDIR:-/}\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"${TMPDIR:-/}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -792,7 +792,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "cb5a0a33cab8c9109d483cb90f3429e925e2df2b769fc244a661745b4a31f159",
       "count": 1,
-      "example_line": 1125,
+      "example_line": 1128,
       "command": "CDPATH='' cd -P -- \"$root\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$root\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -803,7 +803,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "d5dfdda19cbb9b0997fb0aadb75af0a63ef0bd4d269b3664ae94b0794fea6586",
       "count": 1,
-      "example_line": 1122,
+      "example_line": 1125,
       "command": "CDPATH='' cd -L -- \"$anchor\" 2>/dev/null",
       "context": "$(CDPATH='' cd -L -- \"$anchor\" 2>/dev/null && pwd -L)",
       "assignments": [
@@ -814,7 +814,7 @@
       "path": "scripts/disk-janitor.sh",
       "sha256": "fe6e63194093ce3289c874896942b47fabacf312e284efee8a7e82df0dfe8998",
       "count": 1,
-      "example_line": 1166,
+      "example_line": 1169,
       "command": "CDPATH='' cd -P -- \"$TMPDIR\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$TMPDIR\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -825,7 +825,7 @@
       "path": "scripts/doctor.sh",
       "sha256": "c311da3b7d0595739a7951e4bd75c7ff8fde65810389278a28fcd6aae9ac3e2e",
       "count": 1,
-      "example_line": 1991,
+      "example_line": 1993,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" release_store_locate \"$active_release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" release_store_locate \"$active_release\" 2>/dev/null)",
       "assignments": [
@@ -836,7 +836,7 @@
       "path": "scripts/doctor.sh",
       "sha256": "d555306ab9a1937c55a933fab02cbd480dbfd92e7864c4a664a47f5860b1d280",
       "count": 1,
-      "example_line": 2249,
+      "example_line": 2373,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" release_store_locate \"$release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" release_store_locate \"$release\" 2>/dev/null)",
       "assignments": [
@@ -844,22 +844,10 @@
       ]
     },
     {
-      "path": "scripts/install-disk-janitor-launchd.sh",
-      "sha256": "473318d54320b7af5b7f95a162c2d2c978e790fa60bb50722878d72e0cbe0457",
-      "count": 1,
-      "example_line": 974,
-      "command": "TRELLIS_HOME=\"$trellis_home\" HOME=\"$user_home\" \"$dj_script\" --apply --yes --safe-only --dehydrate --scopes \"worktrees,caches,releases,pi,tmp,docker\" --dry-run 2>&1",
-      "context": "$(TRELLIS_HOME=\"$trellis_home\" HOME=\"$user_home\" \"$dj_script\" --apply --yes --safe-only --dehydrate --scopes \"worktrees,caches,releases,pi,tmp,docker\" --dry-run 2>&1)",
-      "assignments": [
-        "TRELLIS_HOME",
-        "HOME"
-      ]
-    },
-    {
       "path": "scripts/lib/attach-postjob.sh",
       "sha256": "7406cb8261ec17157e7a47a5189522b77d0e9c3fc6c9ac803cb97a8193d11259",
       "count": 1,
-      "example_line": 365,
+      "example_line": 366,
       "command": "TRELLIS_HOME=\"$home\" release_store_release_path \"$release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_release_path \"$release\" 2>/dev/null)",
       "assignments": [
@@ -881,7 +869,7 @@
       "path": "scripts/lib/attachment.sh",
       "sha256": "2b9558bec4075c87600654b9e28e9c8c37ba7ccab5980696908d39ff7c4e5607",
       "count": 1,
-      "example_line": 9406,
+      "example_line": 8171,
       "command": "CDPATH='' cd \"$home\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$home\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1051,7 +1039,7 @@
       "path": "scripts/lib/disk-janitor-lib.sh",
       "sha256": "51c1dd7cd83d29d26af915d1ba550e9a160236f9f01c3880deba5e31fd374db0",
       "count": 1,
-      "example_line": 152,
+      "example_line": 156,
       "command": "DJ_REGENERABLE=\"$_HY_REGENERABLE_ALWAYS\" DJ_BUILD_MARKERS=\"$_HY_DIST_BUILD_MARKERS\" DJ_TARGET_MARKERS=\"$_HY_TARGET_MARKERS\" \\\n    python3 -I - \"$proj\" <<'PY'",
       "context": "$(DJ_REGENERABLE=\"$_HY_REGENERABLE_ALWAYS\" DJ_BUILD_MARKERS=\"$_HY_DIST_BUILD_MARKERS\" DJ_TARGET_MARKERS=\"$_HY_TARGET_MARKERS\" \\\n    python3 -I - \"$proj\" <<'PY'\nimport ctypes\nimport os\nimport stat\nimport sys\n\nroot_path = sys.argv[1]\n# .next and .turbo hold the three build caches below; they are walked, not\n# reported whole.\nREGENERABLE = set(os.environ[\"DJ_REGENERABLE\"].split()) - {\".next\", \".turbo\"}\nBUILD_MARKERS = os.environ[\"DJ_BUILD_MARKERS\"].split()\nTARGET_MARKERS = os.environ[\"DJ_TARGET_MARKERS\"].split()\nO_DIRECTORY = getattr(os, \"O_DIRECTORY\", 0)\nO_NOFOLLOW = getattr(os, \"O_NOFOLLOW\", 0)\n\n\nclass MountIdentityError(Exception):\n    pass\n\n\nclass StatxTimestamp(ctypes.Structure):\n    _fields_ = [\n        (\"tv_sec\", ctypes.c_int64),\n        (\"tv_nsec\", ctypes.c_uint32),\n        (\"reserved\", ctypes.c_int32),\n    ]\n\n\nclass Statx(ctypes.Structure):\n    _fields_ = [\n        (\"stx_mask\", ctypes.c_uint32),\n        (\"stx_blksize\", ctypes.c_uint32),\n        (\"stx_attributes\", ctypes.c_uint64),\n        (\"stx_nlink\", ctypes.c_uint32),\n        (\"stx_uid\", ctypes.c_uint32),\n        (\"stx_gid\", ctypes.c_uint32),\n        (\"stx_mode\", ctypes.c_uint16),\n        (\"spare0\", ctypes.c_uint16),\n        (\"stx_ino\", ctypes.c_uint64),\n        (\"stx_size\", ctypes.c_uint64),\n        (\"stx_blocks\", ctypes.c_uint64),\n        (\"stx_attributes_mask\", ctypes.c_uint64),\n        (\"stx_atime\", StatxTimestamp),\n        (\"stx_btime\", StatxTimestamp),\n        (\"stx_ctime\", StatxTimestamp),\n        (\"stx_mtime\", StatxTimestamp),\n        (\"stx_rdev_major\", ctypes.c_uint32),\n        (\"stx_rdev_minor\", ctypes.c_uint32),\n        (\"stx_dev_major\", ctypes.c_uint32),\n        (\"stx_dev_minor\", ctypes.c_uint32),\n        (\"stx_mnt_id\", ctypes.c_uint64),\n        (\"stx_dio_mem_align\", ctypes.c_uint32),\n        (\"stx_dio_offset_align\", ctypes.c_uint32),\n        (\"spare3\", ctypes.c_uint64 * 12),\n    ]\n\n\nclass DarwinStatfs(ctypes.Structure):\n    _fields_ = [\n        (\"f_bsize\", ctypes.c_uint32),\n        (\"f_iosize\", ctypes.c_int32),\n        (\"f_blocks\", ctypes.c_uint64),\n        (\"f_bfree\", ctypes.c_uint64),\n        (\"f_bavail\", ctypes.c_uint64),\n        (\"f_files\", ctypes.c_uint64),\n        (\"f_ffree\", ctypes.c_uint64),\n        (\"f_fsid\", ctypes.c_int32 * 2),\n        (\"f_owner\", ctypes.c_uint32),\n        (\"f_type\", ctypes.c_uint32),\n        (\"f_flags\", ctypes.c_uint32),\n        (\"f_fssubtype\", ctypes.c_uint32),\n        (\"f_fstypename\", ctypes.c_char * 16),\n        (\"f_mntonname\", ctypes.c_char * 1024),\n        (\"f_mntfromname\", ctypes.c_char * 1024),\n        (\"f_flags_ext\", ctypes.c_uint32),\n        (\"f_reserved\", ctypes.c_uint32 * 7),\n    ]\n\n\nif not O_DIRECTORY or not O_NOFOLLOW:\n    raise SystemExit(\"dj_find_caches: descriptor no-follow support is unavailable\")\n\nplatform = sys.platform\nlibc = ctypes.CDLL(None, use_errno=True)\nif platform.startswith(\"linux\"):\n    try:\n        statx = libc.statx\n    except AttributeError:\n        raise SystemExit(\"dj_find_caches: Linux statx mount identity is unavailable\")\n    statx.argtypes = [\n        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_uint,\n        ctypes.POINTER(Statx),\n    ]\n    statx.restype = ctypes.c_int\nelif platform == \"darwin\":\n    fstatfs = libc.fstatfs\n    fstatfs.argtypes = [ctypes.c_int, ctypes.POINTER(DarwinStatfs)]\n    fstatfs.restype = ctypes.c_int\nelse:\n    raise SystemExit(\"dj_find_caches: kernel mount identity is unsupported on this platform\")\n\n\ndef mount_identity(fd):\n    if platform.startswith(\"linux\"):\n        result = Statx()\n        if statx(fd, b\"\", 0x1000, 0x1000, ctypes.byref(result)) != 0:\n            raise MountIdentityError(\"statx(STATX_MNT_ID) failed: %s\" % os.strerror(ctypes.get_errno()))\n        if not (result.stx_mask & 0x1000):\n            raise MountIdentityError(\"statx did not return STATX_MNT_ID\")\n        return (\"linux\", int(result.stx_mnt_id))\n    result = DarwinStatfs()\n    if fstatfs(fd, ctypes.byref(result)) != 0:\n        raise MountIdentityError(\"fstatfs failed: %s\" % os.strerror(ctypes.get_errno()))\n    mountpoint = bytes(result.f_mntonname).split(b\"\\0\", 1)[0]\n    source = bytes(result.f_mntfromname).split(b\"\\0\", 1)[0]\n    filesystem = bytes(result.f_fstypename).split(b\"\\0\", 1)[0]\n    if not mountpoint:\n        raise MountIdentityError(\"fstatfs returned no mountpoint\")\n    return (\n        \"darwin\", int(result.f_fsid[0]), int(result.f_fsid[1]),\n        filesystem, mountpoint, source,\n    )\n\n\ndef same_stat(left, right):\n    return left.st_dev == right.st_dev and left.st_ino == right.st_ino\n\n\ndef stat_child(parent_fd, name):\n    try:\n        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)\n    except OSError:\n        return None\n\n\ndef open_child_directory(parent_fd, name, root_device, root_mount):\n    before = stat_child(parent_fd, name)\n    if before is None or not stat.S_ISDIR(before.st_mode):\n        return None\n    try:\n        child_fd = os.open(\n            name, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW, dir_fd=parent_fd\n        )\n    except OSError:\n        return None\n    actual = os.fstat(child_fd)\n    try:\n        mounted = mount_identity(child_fd)\n    except MountIdentityError:\n        os.close(child_fd)\n        return None\n    if not same_stat(actual, before) or actual.st_dev != root_device or mounted != root_mount:\n        os.close(child_fd)\n        return None\n    return child_fd, actual\n\n\ndef allocated_bytes(value):\n    return int(getattr(value, \"st_blocks\", 0)) * 512\n\n\ndef measure_tree(directory_fd, root_device, root_mount):\n    own = os.fstat(directory_fd)\n    try:\n        if own.st_dev != root_device or mount_identity(directory_fd) != root_mount:\n            return None\n    except MountIdentityError:\n        return None\n    try:\n        names = sorted(os.listdir(directory_fd))\n    except OSError:\n        return None\n    total = allocated_bytes(own)\n    for name in names:\n        if name in (\".\", \"..\") or \"/\" in name:\n            return None\n        before = stat_child(directory_fd, name)\n        if before is None:\n            return None\n        if stat.S_ISDIR(before.st_mode):\n            opened = open_child_directory(directory_fd, name, root_device, root_mount)\n            if opened is None:\n                return None\n            child_fd, child_stat = opened\n            try:\n                nested = measure_tree(child_fd, root_device, root_mount)\n            finally:\n                os.close(child_fd)\n            current = stat_child(directory_fd, name)\n            if nested is None or current is None or not same_stat(current, child_stat):\n                return None\n            total += nested\n        else:\n            current = stat_child(directory_fd, name)\n            if current is None or not same_stat(current, before):\n                return None\n            total += allocated_bytes(before)\n    return total\n\n\ndef has_file(directory_fd, names):\n    for marker in names:\n        found = stat_child(directory_fd, marker)\n        if found is not None and stat.S_ISREG(found.st_mode):\n            return True\n    return False\n\n\ndef cache_kind(parent_name, name, parent_fd):\n    if parent_name == \".turbo\" and name == \"cache\":\n        return \"turbo-cache\"\n    if parent_name == \".next\" and name == \"cache\":\n        return \"next-cache\"\n    if parent_name == \".next\" and name == \"dev\":\n        return \"next-dev\"\n    if name in REGENERABLE:\n        return name\n    if name in (\"dist\", \"build\") and has_file(parent_fd, BUILD_MARKERS):\n        return name\n    if name == \"target\" and has_file(parent_fd, TARGET_MARKERS):\n        return name\n    return None\n\n\ndef walk(directory_fd, directory_path, root_device, root_mount):\n    try:\n        names = sorted(os.listdir(directory_fd))\n    except OSError:\n        return\n    parent_name = os.path.basename(directory_path)\n    for name in names:\n        # A control character in a name could split or forge a TSV row\n        # downstream; such a directory is neither reported nor walked.\n        if name in (\".\", \"..\") or \"/\" in name or name == \".git\" or any(\n            ord(ch) < 32 or ord(ch) == 127 for ch in name\n        ):\n            continue\n        opened = open_child_directory(directory_fd, name, root_device, root_mount)\n        if opened is None:\n            continue\n        child_fd, child_stat = opened\n        child_path = os.path.join(directory_path, name)\n        try:\n            kind = cache_kind(parent_name, name, directory_fd)\n            if kind is not None:\n                size = measure_tree(child_fd, root_device, root_mount)\n                current = stat_child(directory_fd, name)\n                if size is not None and current is not None and same_stat(current, child_stat):\n                    print(\"%s\\t%s\\t%d\\t%d\" % (kind, child_path, size, int(child_stat.st_mtime)))\n            else:\n                walk(child_fd, child_path, root_device, root_mount)\n        finally:\n            os.close(child_fd)\n\n\ntry:\n    root_fd = os.open(root_path, os.O_RDONLY | O_DIRECTORY | O_NOFOLLOW)\nexcept OSError as error:\n    raise SystemExit(\"dj_find_caches: registered root cannot be opened without following links: %s\" % error)\ntry:\n    root_stat = os.fstat(root_fd)\n    root_mount = mount_identity(root_fd)\n    walk(root_fd, root_path, root_stat.st_dev, root_mount)\nexcept MountIdentityError as error:\n    raise SystemExit(\"dj_find_caches: %s\" % error)\nfinally:\n    os.close(root_fd)\nPY\n)",
       "assignments": [
@@ -1064,7 +1052,7 @@
       "path": "scripts/lib/disk-janitor-lib.sh",
       "sha256": "e5fb3e0abf5e1a2eb3df004e8c68c08924aaa4fda0dba801292189d030b092fa",
       "count": 1,
-      "example_line": 803,
+      "example_line": 807,
       "command": "CDPATH='' cd \"$probe\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$probe\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1075,7 +1063,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "035de98c4da5bd8ef81af7e12154eab9382b3d1ff6021c0b3a50454893932dff",
       "count": 1,
-      "example_line": 2664,
+      "example_line": 2649,
       "command": "CDPATH='' cd \"$entry\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$entry\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1086,7 +1074,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "091fa99f2c67aa77c1ebda3957c8e450a7847a88c0737fe88d38eb86b87a0fb5",
       "count": 1,
-      "example_line": 2642,
+      "example_line": 2627,
       "command": "CDPATH='' cd \"$payload_dir\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$payload_dir\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1097,7 +1085,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "1273b5dbc59ba69d18e8b5d0984a72c25347c1c5e53f35026d22cd26f767eb5f",
       "count": 1,
-      "example_line": 3756,
+      "example_line": 3741,
       "command": "CDPATH='' cd \"${installed%/*}\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"${installed%/*}\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1108,7 +1096,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "1db88ef0e93e87b2895fe3074d24ab36803d5b8e72c37210a31c6eaaf347ccd0",
       "count": 1,
-      "example_line": 1708,
+      "example_line": 1693,
       "command": "TRELLIS_HOME=\"$home\" release_store_canonical_releases_dir 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_canonical_releases_dir 2>/dev/null)",
       "assignments": [
@@ -1119,7 +1107,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "2b9558bec4075c87600654b9e28e9c8c37ba7ccab5980696908d39ff7c4e5607",
       "count": 1,
-      "example_line": 3755,
+      "example_line": 3740,
       "command": "CDPATH='' cd \"$home\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$home\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1130,7 +1118,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "351cfd84657f86c2822c204940e2ba907bb49c6ad93ab4a3527b480eec575e20",
       "count": 1,
-      "example_line": 2221,
+      "example_line": 2206,
       "command": "TRELLIS_HOME=\"$home\" release_store_reap_tmp summary 1073741824 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_reap_tmp summary 1073741824 2>/dev/null)",
       "assignments": [
@@ -1141,7 +1129,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "398f0d348e1bdf110001e3fc967fdedacb96e527445d404457562a3e5e637859",
       "count": 1,
-      "example_line": 1661,
+      "example_line": 1646,
       "command": "TRELLIS_HOME=\"$home\" release_store_locate \"$version\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_locate \"$version\" 2>/dev/null)",
       "assignments": [
@@ -1152,7 +1140,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "6964b0bc09a6e2dbce6674a61a36289648aa806f6598a48393b1452d8e7989d4",
       "count": 1,
-      "example_line": 2638,
+      "example_line": 2623,
       "command": "CDPATH='' cd \"$store_dir\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$store_dir\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1163,7 +1151,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "7406cb8261ec17157e7a47a5189522b77d0e9c3fc6c9ac803cb97a8193d11259",
       "count": 1,
-      "example_line": 4450,
+      "example_line": 4205,
       "command": "TRELLIS_HOME=\"$home\" release_store_release_path \"$release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_release_path \"$release\" 2>/dev/null)",
       "assignments": [
@@ -1174,7 +1162,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "7d133a84ef6eea14240934e126dfd046a33987a398882d2c64e3bfb0afb47e8e",
       "count": 2,
-      "example_line": 1709,
+      "example_line": 1694,
       "command": "TRELLIS_HOME=\"$home\" release_store_release_json_sha256_no_follow \"$releases\" \"$version\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_release_json_sha256_no_follow \"$releases\" \"$version\" 2>/dev/null)",
       "assignments": [
@@ -1185,7 +1173,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "8431b5aee54e2d368642b660af970170ac97330a1aa6066f81ff9143be07160e",
       "count": 1,
-      "example_line": 3542,
+      "example_line": 3527,
       "command": "CDPATH='' cd \"$caller_dir\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$caller_dir\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1196,7 +1184,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "879be716fb9e9a8fc207953d6167b83bc926f994918a2e408da214edf81678ad",
       "count": 1,
-      "example_line": 5558,
+      "example_line": 5313,
       "command": "CDPATH='' cd -P -- \"$runtime\" 2>/dev/null",
       "context": "$(CDPATH='' cd -P -- \"$runtime\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1207,7 +1195,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "9b318778484df985eec72bf3b9c1db3a99afcc4606958ccc2758d175b0b7dae8",
       "count": 2,
-      "example_line": 2058,
+      "example_line": 2043,
       "command": "TRELLIS_HOME=\"$home\" release_store_release_path \"$version\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_release_path \"$version\" 2>/dev/null)",
       "assignments": [
@@ -1218,7 +1206,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "b3cb8a3641c021353fb1d0395221c94cff41b68b40a990b10e484302b07ea798",
       "count": 1,
-      "example_line": 2629,
+      "example_line": 2614,
       "command": "TRELLIS_HOME=\"$trellis_home\" release_store_locate \"$release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$trellis_home\" release_store_locate \"$release\" 2>/dev/null)",
       "assignments": [
@@ -1229,7 +1217,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "e6ce60ce72b00417e1e7b44f3120f73ccf60695b9757609c4b3665d259371ae8",
       "count": 3,
-      "example_line": 2550,
+      "example_line": 2535,
       "command": "TRELLIS_HOME=\"$home\" release_store_locate \"$release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_locate \"$release\" 2>/dev/null)",
       "assignments": [
@@ -1240,7 +1228,7 @@
       "path": "scripts/lib/health-checks.sh",
       "sha256": "e8179b64cb06be40458c313e2ec77936a411057046315461b7168ac77bcfea81",
       "count": 1,
-      "example_line": 5148,
+      "example_line": 4903,
       "command": "CDPATH='' cd \"$runtime\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$runtime\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1262,7 +1250,7 @@
       "path": "scripts/lib/surface-plan.sh",
       "sha256": "2b9558bec4075c87600654b9e28e9c8c37ba7ccab5980696908d39ff7c4e5607",
       "count": 1,
-      "example_line": 106,
+      "example_line": 118,
       "command": "CDPATH='' cd \"$home\" 2>/dev/null",
       "context": "$(CDPATH='' cd \"$home\" 2>/dev/null && pwd -P)",
       "assignments": [
@@ -1311,7 +1299,7 @@
       "path": "scripts/seed-inheritance-symlinks.sh",
       "sha256": "7406cb8261ec17157e7a47a5189522b77d0e9c3fc6c9ac803cb97a8193d11259",
       "count": 1,
-      "example_line": 253,
+      "example_line": 258,
       "command": "TRELLIS_HOME=\"$home\" release_store_release_path \"$release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$home\" release_store_release_path \"$release\" 2>/dev/null)",
       "assignments": [
@@ -1322,7 +1310,7 @@
       "path": "scripts/show-config.sh",
       "sha256": "cca95bb4bc6140d5752ea4a052c2ca4ea8597d45b9ff100533e3a5374a5f36b0",
       "count": 1,
-      "example_line": 514,
+      "example_line": 517,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" release_store_release_path \"$ACTIVE_RELEASE\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" release_store_release_path \"$ACTIVE_RELEASE\" 2>/dev/null)",
       "assignments": [
@@ -1333,7 +1321,7 @@
       "path": "scripts/sync-hooks.sh",
       "sha256": "28041c5a59fcf08f08b3f56abfecbf36622a54d78eaf2d18bd38601f3913be57",
       "count": 1,
-      "example_line": 193,
+      "example_line": 209,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1)",
       "assignments": [
@@ -1344,7 +1332,7 @@
       "path": "scripts/sync-hooks.sh",
       "sha256": "319ab889f33b22d346a4efca1858b3bdaf93aa19dcd3017a10ba0e60a38d6907",
       "count": 1,
-      "example_line": 410,
+      "example_line": 505,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n      release_store_snapshot_verified_release \"$active_release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n      release_store_snapshot_verified_release \"$active_release\" 2>/dev/null)",
       "assignments": [
@@ -1355,7 +1343,7 @@
       "path": "scripts/sync-hooks.sh",
       "sha256": "7424324cb832f18344ae14904d0cf80554076286e74a50dd774772b8c45f1e40",
       "count": 1,
-      "example_line": 185,
+      "example_line": 201,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_snapshot \"$ACTIVE_REPAIR_SNAPSHOT\" \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_snapshot \"$ACTIVE_REPAIR_SNAPSHOT\" \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1)",
       "assignments": [
@@ -1366,7 +1354,7 @@
       "path": "scripts/sync-hooks.sh",
       "sha256": "75397b2b9acc12a17045703c07780da5353e2d5e82eef124f3ef803b79206223",
       "count": 1,
-      "example_line": 360,
+      "example_line": 435,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \"$version\" 2>&1",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \"$version\" 2>&1)",
       "assignments": [
@@ -1377,7 +1365,7 @@
       "path": "scripts/sync-merge-gate.sh",
       "sha256": "28041c5a59fcf08f08b3f56abfecbf36622a54d78eaf2d18bd38601f3913be57",
       "count": 1,
-      "example_line": 164,
+      "example_line": 167,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1)",
       "assignments": [
@@ -1388,7 +1376,7 @@
       "path": "scripts/sync-merge-gate.sh",
       "sha256": "319ab889f33b22d346a4efca1858b3bdaf93aa19dcd3017a10ba0e60a38d6907",
       "count": 1,
-      "example_line": 395,
+      "example_line": 398,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n      release_store_snapshot_verified_release \"$active_release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n      release_store_snapshot_verified_release \"$active_release\" 2>/dev/null)",
       "assignments": [
@@ -1399,7 +1387,7 @@
       "path": "scripts/sync-merge-gate.sh",
       "sha256": "7424324cb832f18344ae14904d0cf80554076286e74a50dd774772b8c45f1e40",
       "count": 1,
-      "example_line": 156,
+      "example_line": 159,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_snapshot \"$ACTIVE_REPAIR_SNAPSHOT\" \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_snapshot \"$ACTIVE_REPAIR_SNAPSHOT\" \\\n          \"$ACTIVE_REPAIR_RELEASE_VERSION\" 2>&1)",
       "assignments": [
@@ -1410,7 +1398,7 @@
       "path": "scripts/sync-merge-gate.sh",
       "sha256": "75397b2b9acc12a17045703c07780da5353e2d5e82eef124f3ef803b79206223",
       "count": 1,
-      "example_line": 345,
+      "example_line": 348,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \"$version\" 2>&1",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" \\\n        release_store_remove_owned_snapshots \"$version\" 2>&1)",
       "assignments": [
@@ -1421,7 +1409,7 @@
       "path": "scripts/sync-merge-gate.sh",
       "sha256": "d555306ab9a1937c55a933fab02cbd480dbfd92e7864c4a664a47f5860b1d280",
       "count": 1,
-      "example_line": 618,
+      "example_line": 620,
       "command": "TRELLIS_HOME=\"$HOME_PATH\" release_store_locate \"$release\" 2>/dev/null",
       "context": "$(TRELLIS_HOME=\"$HOME_PATH\" release_store_locate \"$release\" 2>/dev/null)",
       "assignments": [

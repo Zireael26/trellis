@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 export AEO_GATE_ALLOW_FIXTURES=1
+# These non-isolated entrypoints import the in-tree aeo_gate package.
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 SKILL="$ROOT/core-rules/skills/aeo-gate"

@@ -48,6 +48,7 @@ scripts/lib/tag_push_reuse.py|1|4b7a5022032454fa|T31: validates the explicit pus
 scripts/tests/test_tag_push_reuse.py|2|bf6d6c6fae0f6146|T31 fixtures: one valid explicit release tag and one VERSION-mismatched tag
 scripts/tests/test_full_trace.py|2|6dd620a2450f57ea|T32 fixtures: captured fd and relative tag-path operands; no tag discovery or release choice
 core-rules/hooks/trellis-worktree-remove.sh|1|b1520ea92ca3ed9c|worktree remove gate: merged-branch check between HEAD and a commit, never walks tags
+core-rules/hooks/lib/spec-gate-core.sh|6|c8e100318c515c7a|spec-gate range validation: ancestry between push-range base/head, integrated merge commit, recorded diff-base and declaring commit; never reads a tag
 core-rules/hooks/code-review-subagent.sh|3|a58ca3e4f87b1023|delta review: is-ancestor between the last reviewed HEAD and HEAD, and between reviewed commit oids, never reads a tag
 core-rules/codex/hooks/code-review-subagent.sh|3|09f01e1b758f5ba0|codex twin: the same delta-review ancestry check between two commits
 core-rules/skills/herdr-foreman/scripts/accept-branch.sh|1|abcaa62ca08b5f1f|is-ancestor between two branch SHAs, no tag involved
@@ -70,7 +71,8 @@ specs/019-claude-5-alignment/audit/E-rollout-surface.md|1|5d5738a672fdf831|audit
 specs/035-repository-debloat/dod-receipt.json|2|0433c9efd3446694|recorded receipt: is-ancestor between two fixed SHAs
 specs/074-fast-hooks/evidence/t1-tick-receipt.md|2|49ced95c6b205601|recorded T1 tick receipt: is-ancestor between two fixed SHAs and HEAD, nothing discovers a tag
 specs/047-session-efficiency-cost-transparency/|31|b69fdc0eb6c65f91|spec 047 records: captured URLs and prose about published tags, nothing executed
-specs/055-routed-defects/|9|fd1a5e0fc66683eb|this spec: the audit and the pattern list themselves'
+specs/055-routed-defects/|9|fd1a5e0fc66683eb|this spec: the audit and the pattern list themselves
+core-rules/skills/process-gate/tests/check-tests-docs-only.bats|3|9ea5906ea8335fb7|fixtures: tests that tag pushes and shallow clones force full tests; never discovers a release'
 
 # consumer_hits <root> <pathlist>: "<path>\t<hit line, indentation trimmed>" for
 # every hit line in each scanned file.

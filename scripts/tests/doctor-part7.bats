@@ -267,10 +267,11 @@ autonomy_ceiling: 2
 Fixture preset
 EOF
   fi
+  printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/AGENTS.md"
   printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/CLAUDE.md"
   printf -- '---\nname: fixture\ndescription: fixture\n---\n' \
     > "$PORTABLE_RELEASE_PAYLOAD/core-rules/skills/fixture/SKILL.md"
-  for command_name in fixture primer primer-refresh primer-check explore surgical; do
+  for command_name in fixture primer primer-refresh primer-check explore surgical lean-sweep red-team test-cleanup de-slop; do
     printf '# fixture command %s\n' "$command_name" \
       > "$PORTABLE_RELEASE_PAYLOAD/core-rules/commands/$command_name.md"
   done
@@ -936,7 +937,7 @@ run_container_runtime_rows() {
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'2\tdocker-cli-from-desktop\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
+  [ "$output" = $'2\tdocker-cli-from-desktop\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; hooks rendered before 1.5.3 lose contexts under their private HOME; re-adopt with 1.5.3+ or export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 }
 
 @test "container-runtime: non-Colima context warns only with Colima and unset host" {
@@ -947,7 +948,7 @@ run_container_runtime_rows() {
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'2\tdocker-context-not-colima\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'desktop-linux\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
+  [ "$output" = $'2\tdocker-context-not-colima\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'desktop-linux\'; hooks rendered before 1.5.3 lose contexts under their private HOME; re-adopt with 1.5.3+ or export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
   run_container_runtime_rows DOCKER_HOST=unix:///fixture/colima.sock
   [ "$status" -eq 0 ]
   [ -z "$output" ]
@@ -961,7 +962,7 @@ run_container_runtime_rows() {
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'3\tdocker-desktop-dormant\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
+  [ "$output" = $'3\tdocker-desktop-dormant\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; hooks rendered before 1.5.3 lose contexts under their private HOME; re-adopt with 1.5.3+ or export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 }
 
 @test "container-runtime: Colima absent is info, and hooks still warn for a non-default context" {
@@ -970,7 +971,7 @@ run_container_runtime_rows() {
   RUNTIME_CONTEXT=desktop-linux
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'3\tcolima-not-installed\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'desktop-linux\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
+  [ "$output" = $'3\tcolima-not-installed\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'desktop-linux\'; hooks rendered before 1.5.3 lose contexts under their private HOME; re-adopt with 1.5.3+ or export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 }
 
 @test "container-runtime: Colima with unset host warns for hooks, plus doctor integration rows" {
@@ -980,7 +981,7 @@ run_container_runtime_rows() {
   chmod 700 "$RUNTIME_BIN/colima"
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
+  [ "$output" = $'2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'colima\'; hooks rendered before 1.5.3 lose contexts under their private HOME; re-adopt with 1.5.3+ or export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 
   build_portable_doctor_home
   run /usr/bin/env -u TRELLIS_CONFIG -u DOCKER_HOST \
@@ -999,7 +1000,7 @@ run_container_runtime_rows() {
   RUNTIME_CONTEXT=orbstack
   run_container_runtime_rows
   [ "$status" -eq 0 ]
-  [ "$output" = $'3\tcolima-not-installed\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'orbstack\'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
+  [ "$output" = $'3\tcolima-not-installed\n2\tdocker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is \'orbstack\'; hooks rendered before 1.5.3 lose contexts under their private HOME; re-adopt with 1.5.3+ or export DOCKER_HOST (e.g. docker context inspect --format \'{{.Endpoints.docker.Host}}\')' ]
 }
 
 @test "container-runtime: docker-host-unset-for-hooks stays silent with an exported host" {

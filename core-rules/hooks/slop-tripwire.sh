@@ -63,9 +63,6 @@ if [ -z "$FILE_PATH" ]; then
   exit 0
 fi
 
-# Extension outside the pattern set: silence, no work.
-SLOP_LANG=$(slop_lang_for_path "$FILE_PATH") || exit 0
-
 FILE_DIR=$(dirname "$FILE_PATH")
 FILE_BASE=$(basename "$FILE_PATH")
 [ -d "$FILE_DIR" ] || exit 0
@@ -87,7 +84,24 @@ if __ST_PREFIX=$(git -C "$FILE_DIR" rev-parse --show-prefix 2>/dev/null); then
 else
   SLOP_REL_PATH="$FILE_PATH"
 fi
-slop_path_carved_out "$SLOP_REL_PATH" && exit 0
+
+SCAN_MODE=""
+SLOP_LANG=""
+if slop_is_settings_path "$SLOP_REL_PATH"; then
+  SCAN_MODE="settings"
+elif SLOP_LANG=$(slop_lang_for_path "$FILE_PATH"); then
+  if slop_path_carved_out "$SLOP_REL_PATH"; then
+    if slop_is_test_path "$SLOP_REL_PATH"; then
+      SCAN_MODE="test_flake"
+    else
+      exit 0
+    fi
+  else
+    SCAN_MODE="slop"
+  fi
+else
+  exit 0
+fi
 
 # __st_added_lines — prints "<new-file line number>\t<content>" for every added
 # line of the touched file, cheapest source first:
@@ -120,8 +134,12 @@ trap 'rm -f "$PAIRS"' EXIT
 __st_added_lines > "$PAIRS"
 [ -s "$PAIRS" ] || exit 0
 
-# slop_scan_text is grep-like: status 1 means the added lines are clean.
-FINDINGS=$(slop_scan_text "$SLOP_LANG" --numbered < "$PAIRS") || exit 0
+# Scan dispatch is grep-like: status 1 means the added lines are clean.
+case "$SCAN_MODE" in
+  settings) FINDINGS=$(slop_scan_settings_secrets --numbered < "$PAIRS") || exit 0 ;;
+  test_flake) FINDINGS=$(slop_scan_test_flake --numbered < "$PAIRS") || exit 0 ;;
+  *) FINDINGS=$(slop_scan_text "$SLOP_LANG" --numbered < "$PAIRS") || exit 0 ;;
+esac
 [ -n "$FINDINGS" ] || exit 0
 
 TOTAL=$(printf '%s\n' "$FINDINGS" | grep -c '^')

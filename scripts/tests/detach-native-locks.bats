@@ -68,7 +68,7 @@ PY
 )
 
 native() {
-  python3 -I -c "$DRIVER" "$PROGRAM" "$@"
+  python3 -I -B -c "$DRIVER" "$PROGRAM" "$@"
 }
 
 # shell FUNCTION ARGS...: one shell lock call in its own process.
@@ -90,7 +90,7 @@ native_hold() {
   local ready="$1"
   shift
   # The python3 process itself is the lock holder, so $! is its pid.
-  python3 -I -c "$DRIVER" "$PROGRAM" "$@" &
+  python3 -I -B -c "$DRIVER" "$PROGRAM" "$@" &
   HOLDERS+=("$!")
   wait_ready "$ready"
 }

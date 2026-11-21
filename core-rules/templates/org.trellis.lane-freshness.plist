@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Trellis lane-availability refresh LaunchAgent template.
+
+  This collector is one local HTTP GET that exits 0 whatever happens, so it
+  never needed a model. Copy `scripts/lane-freshness.py` from the verified
+  active release payload into `$TRELLIS_HOME/state/lane-freshness/lane-freshness.py`
+  (chmod 700, refreshed on release upgrade so `trellis gc --apply` never
+  invalidates the LaunchAgent), then render and install this template:
+
+    __TRELLIS_HOME__     private Trellis home (default: $HOME/.trellis)
+    __USER_HOME__        the account that owns the LaunchAgent
+    __PYTHON3__          an absolute python3 (launchd has no shell PATH)
+
+  Render, then `plutil -lint` the result and bootstrap it into the user's
+  `gui/<uid>` domain. StartInterval is 300 seconds: the cache is stale after 90
+  minutes, so five minutes keeps it fresh while costing nothing but a socket
+  connect when nothing is listening on 127.0.0.1:6736.
+
+  The collector writes only $TRELLIS_HOME/state/lane-availability.json and the
+  atomic temporary siblings it replaces from. Failures preserve the previous
+  snapshot and mark it stale; they never delete it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>org.trellis.lane-freshness</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PYTHON3__</string>
+    <string>-I</string>
+    <string>__TRELLIS_HOME__/state/lane-freshness/lane-freshness.py</string>
+    <string>--home</string>
+    <string>__TRELLIS_HOME__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__TRELLIS_HOME__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>StandardOutPath</key>
+  <string>__TRELLIS_HOME__/state/lane-freshness.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__TRELLIS_HOME__/state/lane-freshness.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>LowPriorityIO</key>
+  <true/>
+</dict>
+</plist>

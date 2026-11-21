@@ -9,7 +9,7 @@ setup() {
 teardown() { rm -rf "$SANDBOX"; }
 
 check_verdict() {
-  run python3 -I "$BATS_TEST_DIRNAME/test_gate_verdict.py" "VerdictTests.$1"
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_gate_verdict.py" "VerdictTests.$1"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 
@@ -33,6 +33,7 @@ check_verdict() {
 @test "verdict mid-run input change prevents publication after green shards" { check_verdict test_midrun_input_change_prevents_publication; }
 @test "verdict failed close deletes a record published before finalization" { check_verdict test_failed_close_deletes_a_published_verdict; }
 @test "verdict narrowed and test seam runs never qualify" { check_verdict test_narrowed_and_test_seam_inputs_never_qualify; }
+@test "verdict deadline override records and reuses but a deadline cut never passes" { check_verdict test_deadline_override_records_and_reuses_but_a_deadline_cut_never_passes; }
 @test "verdict active or quarantined runs cannot reuse an older pass" { check_verdict test_active_or_quarantined_run_never_reuses_an_older_pass; }
 @test "verdict weekly snapshot ignores only occupancy, not disable or bad evidence" { check_verdict test_weekly_snapshot_ignores_occupancy_not_disable_or_bad_evidence; }
 @test "verdict administrative reap does not invalidate a pass" { check_verdict test_reap_does_not_invalidate_a_pass; }

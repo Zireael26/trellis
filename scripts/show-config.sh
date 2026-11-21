@@ -164,7 +164,7 @@ show_config_tracked_policy_is_usable() {
     and (.maintainer_name | type == "string" and length > 0)
     and (.github_user | type == "string" and length > 0)
     and (.harnesses | type == "array" and length > 0
-      and all(.[]; . == "claude" or . == "codex" or . == "pi")
+      and all(.[]; . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi")
       and ((unique | length) == length))
     and ((has("autonomy_default") | not) or (.autonomy_default | level))
     and ((has("mandatory_pipeline") | not) or

@@ -25,7 +25,7 @@ Ground truth for why this file exists: Rule of Three. `n=2` is the danger zone �
 **Lift when:** two more projects reach enough operational maturity to want systematic autopsies.
 
 ### PR size soft-target 400 / hard-ceiling 800
-**Historical project evidence:** these are the projects' original candidate numbers, not the current process-gate defaults. The implemented, overridable parent budget and exclusions are in [`pr-hygiene.md`](skills/process-gate/references/pr-hygiene.md#pr-size).
+**Historical project evidence:** flat PR line-count caps in the parent `process-gate` were retired in `docs/adr/2026-11-17-retire-pr-size-cap.md` in favor of spec-triad/behavioral verification; keep project-local line budgets optional if a specific team requests them.
 **Source:** the single-app project; the polyglot monorepo (registry: "PR size budget 400/800") — n=2.
 **What:** PRs should aim for ≤400 changed lines; ceiling at 800. Larger PRs require justification.
 **Why defer:** the single-app project is a single Next.js app. the monorepo project is a monorepo where cross-package refactors legitimately cross 800 lines (explicitly opts out). The numbers need per-project tuning before being a parent rule.

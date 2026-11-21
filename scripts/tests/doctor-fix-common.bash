@@ -468,9 +468,10 @@ install_portable_doctor_release() {
 {"schema_version":2,"maintainer_name":"Fixture","github_user":"fixture","harnesses":["claude","codex"],"autonomy_default":2}
 EOF
   printf '1.2.3\n' > "$repo/core-rules/VERSION"
+  printf '# fixture rules\n' > "$repo/core-rules/AGENTS.md"
   printf '# fixture rules\n' > "$repo/core-rules/CLAUDE.md"
   printf -- '---\nname: fixture\ndescription: fixture\n---\n' > "$repo/core-rules/skills/fixture/SKILL.md"
-  for command_name in fixture primer primer-refresh primer-check explore surgical; do
+  for command_name in fixture primer primer-refresh primer-check explore surgical lean-sweep red-team test-cleanup de-slop; do
     printf '# fixture command %s\n' "$command_name" > "$repo/core-rules/commands/$command_name.md"
   done
   printf '# primer\n' > "$repo/core-rules/commands/templates/primer-index-template.md"

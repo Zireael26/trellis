@@ -118,7 +118,7 @@ PY
 # The imported-module seam remains test-owned: no CLI/env override can supply
 # another executable, timeout, implementation identity or parser result.
 @test "internal observation witnesses reuse without Bash and both binding mutants" {
-  run python3 -I - "$ADAPTER" "$PROJECT_DIR" <<'PY'
+  run python3 -I -B - "$ADAPTER" "$PROJECT_DIR" <<'PY'
 import importlib.util, pathlib, sys
 p, root = sys.argv[1:]
 spec = importlib.util.spec_from_file_location('adapter', p)
@@ -149,7 +149,7 @@ PY
 }
 
 @test "source drift cleanup persistence and deadline retain distinct outcomes" {
-  run python3 -I - "$ADAPTER" "$PROJECT_DIR" <<'PY'
+  run python3 -I -B - "$ADAPTER" "$PROJECT_DIR" <<'PY'
 import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location('adapter', sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -181,7 +181,7 @@ PY
 }
 
 @test "source bytes and loaded code are independently bound with filename-only normalization" {
-  run python3 -I - "$ADAPTER" "$PROJECT_DIR" "$BATS_TEST_TMPDIR" <<'PY'
+  run python3 -I -B - "$ADAPTER" "$PROJECT_DIR" "$BATS_TEST_TMPDIR" <<'PY'
 import importlib.util, pathlib, sys, time
 original, root, temp = map(pathlib.Path, sys.argv[1:])
 copy = temp / 'adapter.py'; copy.write_bytes(original.read_bytes())
@@ -209,7 +209,7 @@ PY
 }
 
 @test "streaming parser bounds output and reaps only its owned child" {
-  run python3 -I - "$ADAPTER" "$PROJECT_DIR" <<'PY'
+  run python3 -I -B - "$ADAPTER" "$PROJECT_DIR" <<'PY'
 import importlib.util, pathlib, subprocess, sys, time
 spec = importlib.util.spec_from_file_location('adapter', sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -239,7 +239,7 @@ PY
 }
 
 @test "raw snapshot reads enforce per-file and aggregate limits without trusting stat size" {
-  run python3 -I - "$ADAPTER" "$PROJECT_DIR" <<'PY'
+  run python3 -I -B - "$ADAPTER" "$PROJECT_DIR" <<'PY'
 import importlib.util, os, pathlib, sys, time
 spec = importlib.util.spec_from_file_location('adapter', sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
@@ -280,7 +280,7 @@ PY
 }
 
 @test "storage failures stay distinct from dependencies publication and cleanup" {
-  run python3 -I - "$ADAPTER" "$PROJECT_DIR" <<'PY'
+  run python3 -I -B - "$ADAPTER" "$PROJECT_DIR" <<'PY'
 import importlib.util, pathlib, sys
 spec = importlib.util.spec_from_file_location('adapter', sys.argv[1])
 m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)

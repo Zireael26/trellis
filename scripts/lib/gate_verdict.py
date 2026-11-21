@@ -37,7 +37,14 @@ except ImportError:  # Python < 3.11: a pyproject is then read whole.
 if str(Path(__file__).resolve().parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gate_receipts import digest, passing_rows, private, state_root
-from receipt_provenance import probe
+from receipt_provenance import probe as _receipt_probe
+
+
+PROBE_TIMEOUT_SECONDS = 5
+
+
+def probe(command: list[str] | tuple[str, ...], env: dict[str, str], cwd: Path) -> str:
+    return _receipt_probe(command, env, cwd, timeout=PROBE_TIMEOUT_SECONDS)
 
 SCHEMA = 3
 LOCAL_RUNNER_COMMAND = "scripts/run-tests-local.py"
@@ -63,9 +70,13 @@ GATE_MODULES = ("gate_verdict.py", "gate_receipts.py", "receipt_provenance.py")
 # Keep these non-recursive globs aligned with scripts/lib/test-suites.sh.
 DISCOVERY_GLOBS = ("scripts/tests/*.bats", "core-rules/hooks/tests/*.bats",
                    "core-rules/codex/hooks/tests/*.bats", "core-rules/skills/*/tests/*.bats")
-# These values control queueing, output paths or inherited slot ownership, never
-# suite selection/content. Other TRELLIS_LOCAL_GATE_* values are test seams.
+# These values control queueing, output paths, inherited slot ownership or the
+# runtime bound, never suite selection/content. TRELLIS_LOCAL_GATE_DEADLINE only
+# bounds how long the full battery may run (default 7200 s, cap 14400 s); a run
+# cut by it exits 124 and never records a pass. Other TRELLIS_LOCAL_GATE_* values
+# are test seams.
 OPERATIONAL_ENV = {"_", "SHLVL", "TRELLIS_LOCAL_GATE_RECEIPT", "TRELLIS_LOCAL_GATE_QUEUE_WAIT",
+                   "TRELLIS_LOCAL_GATE_DEADLINE",
                    "TRELLIS_HEAVY_FD", "TRELLIS_HEAVY_TOKEN", "TRELLIS_HEAVY_SLOT",
                    "TRELLIS_HEAVY_POOL", "TRELLIS_HEAVY_DIR_ID"}
 
@@ -1315,8 +1326,9 @@ def trusted_gate_policy(root: Path) -> tuple[str, list[str]]:
     except (subprocess.CalledProcessError, UnicodeError, ValueError):
         return "none", []
     gate = document.get("gate", {}) if isinstance(document, dict) else None
-    if (not isinstance(gate, dict) or set(gate) - {"env_passthrough", "verdict_reuse"}
-            or not isinstance(gate.get("verdict_reuse", True), bool)):
+    if (not isinstance(gate, dict) or set(gate) - {"env_passthrough", "verdict_reuse", "docs_only_tests"}
+            or not isinstance(gate.get("verdict_reuse", True), bool)
+            or not isinstance(gate.get("docs_only_tests", True), bool)):
         return "none", []
     names = gate.get("env_passthrough", [])
     if (not isinstance(names, list) or not all(isinstance(name, str) for name in names)

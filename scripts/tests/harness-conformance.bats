@@ -9,7 +9,7 @@ setup_file() {
   # The real interpreter, never a PATH shim: the missing-dependency case runs
   # under an empty PATH where a pyenv bash shim cannot start (R44).
   export PYTHON="$(python3 -c 'import sys; print(sys.executable)')"
-  "$PYTHON" - "$SOURCE" "$EVIDENCE" <<'PY'
+  "$PYTHON" -B - "$SOURCE" "$EVIDENCE" <<'PY'
 import importlib.util
 from pathlib import Path
 import shutil
@@ -54,7 +54,7 @@ PY
 }
 
 @test "complete ordered16 corpus uses actual adapters and cannot claim native outcomes" {
-  "$PYTHON" - "$SOURCE" "$EVIDENCE/positive.json" <<'PY'
+  "$PYTHON" -B - "$SOURCE" "$EVIDENCE/positive.json" <<'PY'
 import importlib.util, json, sys
 from pathlib import Path
 s, receipt = map(Path, sys.argv[1:])
@@ -149,7 +149,7 @@ PY
 }
 
 @test "internal transitive links bind intermediate spelling and target ancestors" {
-  "$PYTHON" - "$SOURCE" "$EVIDENCE" <<'PY'
+  "$PYTHON" -B - "$SOURCE" "$EVIDENCE" <<'PY'
 import hashlib, importlib.util, json, sys
 from pathlib import Path
 source, evidence = map(Path, sys.argv[1:])
@@ -191,7 +191,7 @@ PY
 }
 
 @test "deadline crossing during final hashing cannot produce a passing receipt" {
-  "$PYTHON" - "$SOURCE" "$EVIDENCE" <<'PY'
+  "$PYTHON" -B - "$SOURCE" "$EVIDENCE" <<'PY'
 import contextlib, importlib.util, io, json, sys
 from pathlib import Path
 from unittest.mock import patch

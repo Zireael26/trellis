@@ -525,3 +525,14 @@ test('session start runs the payload hook set and nothing exists under the reser
   rmSync(resolve(f.runtime, 'core-rules/codex/hooks/session-context.sh'));
   assert.match(startup(), /session-context\.sh: unknown — hook unavailable/);
 });
+
+test('parent policy resolves .agents/AGENTS.md and skips duplicate injection when already in systemPrompt', async t => {
+  const f = await deliveredFixture(t);
+  rmSync(resolve(f.cwd, '.agents/rules/trellis.md'));
+  writeFileSync(resolve(f.cwd, '.agents/AGENTS.md'), 'Canonical AGENTS parent policy\n');
+  assert.equal(await blocked(f, 'bash', { command: 'ls' }), undefined);
+  const injected = f.fire('before_agent_start', { systemPrompt: 'host base', messageType: 'user' });
+  assert.match(injected.systemPrompt, /<trellis_parent_policy>\nCanonical AGENTS parent policy\n<\/trellis_parent_policy>/);
+  const deduped = f.fire('before_agent_start', { systemPrompt: 'host base\n\nCanonical AGENTS parent policy\n\nproject rules', messageType: 'user' });
+  assert.equal(deduped.systemPrompt, 'host base\n\nCanonical AGENTS parent policy\n\nproject rules');
+});

@@ -42,14 +42,21 @@ rewrite_manifest() {
     and ([.artifacts[].harness] | unique | sort) == ["claude", "codex", "shared_agents"]
     and ([.artifacts[] | select(.destination == ".claude/skills" or .destination == ".agents/skills")] | length) == 0
     and ([.artifacts[] | select(.kind == "symlink" and .source_scope == "payload") | (.target | contains(".trellis/runtime/"))] | all(.[]; .))
-    and ([.artifacts[] | select(.destination == "AGENTS.md" and .source == "CLAUDE.md" and .source_scope == "project" and .target == "CLAUDE.md" and .fallback_source == "core-rules/CLAUDE.md" and .fallback_source_scope == "payload" and .fallback_target == ".trellis/runtime/core-rules/CLAUDE.md" and .target_policy == "project-if-present-else-payload")] | length) == 1
+    and ([.artifacts[] | select(.destination == "AGENTS.md")] | length) == 1
+    and ([.artifacts[] | select(.destination == ".agents/AGENTS.md")] | length) == 0
+    and ([.artifacts[] | select(.destination == ".claude/rules/trellis.md" and .source == "core-rules/AGENTS.md")] | length) == 1
+    and ([.artifacts[] | select(.destination == ".agents/rules/trellis.md" and .source == "core-rules/AGENTS.md")] | length) == 1
     and ([.artifacts[] | select(.destination == ".codex/hooks/lib/spec-gate-core.sh" and .source == "core-rules/hooks/lib/spec-gate-core.sh")] | length) == 1
     and ([.artifacts[] | select(.destination | startswith(".agents/workflows/")) | .destination] | sort) == [
+      ".agents/workflows/de-slop.md",
       ".agents/workflows/explore.md",
+      ".agents/workflows/lean-sweep.md",
       ".agents/workflows/primer-check.md",
       ".agents/workflows/primer-refresh.md",
       ".agents/workflows/primer.md",
-      ".agents/workflows/surgical.md"
+      ".agents/workflows/red-team.md",
+      ".agents/workflows/surgical.md",
+      ".agents/workflows/test-cleanup.md"
     ]
     and ([.artifacts[] | select(.harness == "pi")] | length) == 0
   ' >/dev/null
@@ -88,9 +95,15 @@ rewrite_manifest() {
 @test "legacy two-harness manifests still plan the project surface" {
   rewrite_manifest '
     .schema_version = 1
-    | .harnesses.codex.links = (.harnesses.shared_agents.links + .harnesses.codex.links)
-    | .harnesses.codex.render = (.harnesses.shared_agents.render + .harnesses.codex.render)
-    | del(.harnesses.pi, .harnesses.shared_agents, .harnesses.user)
+    | .harnesses.codex.links = (
+        ([.harnesses.shared_agents.links[] | select(.consumers | index("codex")) | del(.consumers, .deferrable)])
+        + .harnesses.codex.links
+      )
+    | .harnesses.codex.render = (
+        ([.harnesses.shared_agents.render[] | select(.consumers | index("codex")) | del(.consumers)])
+        + .harnesses.codex.render
+      )
+    | del(.harnesses.antigravity, .harnesses.opencode, .harnesses.pi, .harnesses.shared_agents, .harnesses.user)
   '
 
   run_plan
@@ -298,8 +311,10 @@ rewrite_manifest() {
   printf '%s\n' "$output" | jq -e '
     .harnesses == ["pi"]
     and ([.artifacts[].harness] | unique | sort) == ["pi", "shared_agents"]
+    and any(.artifacts[]; .destination == ".agents/rules/trellis.md")
+    and any(.artifacts[]; .destination | startswith(".pi/agents/"))
+    and (any(.artifacts[]; .destination | startswith(".agents/agents/")) | not)
     and any(.artifacts[]; .destination == "AGENTS.md")
-    and any(.artifacts[]; .destination | startswith(".pi/"))
     and (any(.artifacts[]; .destination | startswith(".codex/")) | not)
     and ([.artifacts[].destination] | length) == ([.artifacts[].destination] | unique | length)
   ' >/dev/null
@@ -313,6 +328,46 @@ rewrite_manifest() {
     and any(.artifacts[]; .destination | startswith(".pi/"))
     and ([.artifacts[].destination] | length) == ([.artifacts[].destination] | unique | length)
   ' >/dev/null
+}
+
+@test "schema-3 manifest expands antigravity and opencode with consumer isolation and non-deferrable .agents/AGENTS.md" {
+  run_plan --harness antigravity
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '%s\n' "$output" | jq -e '
+    .harnesses == ["antigravity"]
+    and ([.artifacts[].harness] | unique | sort) == ["antigravity", "shared_agents"]
+    and ([.artifacts[] | select(.destination == ".agents/AGENTS.md" and .source == "core-rules/AGENTS.md" and .deferrable == false)] | length) == 1
+    and ([.artifacts[] | select(.destination == ".agents/hooks.json" and .kind == "render" and .template == "core-rules/templates/agy-hooks.local.json" and .merge == "explicit-json")] | length) == 1
+    and ([.artifacts[] | select(.destination | startswith(".agents/skills/"))] | length) > 0
+    and ([.artifacts[] | select(.destination | startswith(".agents/workflows/"))] | length) == 9
+    and ([.artifacts[] | select(.destination == ".agents/primers/INDEX.md")] | length) == 1
+    and ([.artifacts[] | select(.destination | (startswith(".pi/") or startswith(".agents/agents/") or . == ".agents/rules/trellis.md" or . == ".opencode/opencode.json" or . == "AGENTS.md"))] | length) == 0
+  ' >/dev/null
+
+  run_plan --harness opencode
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '%s\n' "$output" | jq -e '
+    .harnesses == ["opencode"]
+    and ([.artifacts[].harness] | unique | sort) == ["opencode", "shared_agents"]
+    and ([.artifacts[] | select(.destination == ".agents/AGENTS.md" and .source == "core-rules/AGENTS.md" and .deferrable == false)] | length) == 1
+    and ([.artifacts[] | select(.destination == ".opencode/opencode.json" and .kind == "render" and .template == "core-rules/templates/opencode-compat.json" and .merge == "explicit-json" and .required == true)] | length) == 1
+    and ([.artifacts[] | select(.destination | startswith(".agents/skills/"))] | length) > 0
+    and ([.artifacts[] | select(.destination == ".agents/primers/INDEX.md")] | length) == 1
+    and ([.artifacts[] | select(.destination | (startswith(".agents/workflows/") or startswith(".agents/commands/") or . == ".agents/hooks.json" or . == ".agents/rules/trellis.md" or . == "AGENTS.md"))] | length) == 0
+  ' >/dev/null
+
+  run_plan --harness opencode --harness antigravity --harness pi
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf '%s\n' "$output" | jq -e '
+    .harnesses == ["antigravity", "opencode", "pi"]
+    and ([.artifacts[].destination] | length) == ([.artifacts[].destination] | unique | length)
+    and ([.artifacts[] | select(.destination == ".agents/AGENTS.md" and .deferrable == false)] | length) == 1
+    and ([.artifacts[] | select(.destination | startswith(".pi/agents/"))] | length) > 0
+    and ([.artifacts[] | select(.destination | startswith(".agents/agents/"))] | length) == 0
+  ' >/dev/null
+
+  run_plan --harness agy
+  [ "$status" -eq 2 ]
 }
 
 @test "unknown harnesses are usage errors" {
@@ -473,11 +528,11 @@ rewrite_manifest() {
   [[ "$output" == *"inheritance manifest is malformed or unsafe"* ]] || { echo "$output"; false; }
 
   cp "$REPO_ROOT/core-rules/inheritance-manifest.json" "$MANIFEST"
-  rm "$PAYLOAD/core-rules/CLAUDE.md"
+  rm "$PAYLOAD/core-rules/AGENTS.md"
 
   run_plan --harness claude
   [ "$status" -eq 4 ]
-  [[ "$output" == *"required source is missing from immutable payload: core-rules/CLAUDE.md"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"required source is missing from immutable payload: core-rules/AGENTS.md"* ]] || { echo "$output"; false; }
 }
 
 @test "manifest enumeration failures cannot produce a partial successful plan" {

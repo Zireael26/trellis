@@ -159,11 +159,11 @@ _gr_with_rules() {
 #   Sets GR_JSON to <string> as a JSON string literal, escaped as jq escapes it,
 #   so a decision document reads byte for byte as when jq printed it.
 _gr_json_str() {
-  local LC_ALL=C s=$1 out='' c i
+  local s=$1 out='' c i
   s=${s//\\/\\\\}
   s=${s//\"/\\\"}
   case $s in
-    *[$'\001'-$'\037'$'\177']*)
+    *[$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']*)
       for ((i = 0; i < ${#s}; i++)); do
         c=${s:i:1}
         case $c in
@@ -172,7 +172,7 @@ _gr_json_str() {
           $'\n') out="$out\\n" ;;
           $'\f') out="$out\\f" ;;
           $'\r') out="$out\\r" ;;
-          [$'\001'-$'\037'$'\177']) printf -v c '\\u%04x' "'$c"; out="$out$c" ;;
+          [$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']) printf -v c '\\u%04x' "'$c"; out="$out$c" ;;
           *) out="$out$c" ;;
         esac
       done
@@ -270,27 +270,30 @@ _gr_trellis_home() {
 # (missing, symlinked, malformed, extra data, expired, over-long) is "no
 # override": the guard then runs as usual. read_state.rs applies the same rules.
 _gr_reread_override_active() {
-  local key=$1 file line extra="" expires created reason rest field LC_ALL=C
-  case $key in ''|*[!0-9a-f]*) return 1 ;; esac
+  local key=$1 file line extra="" expires created reason rest field byte_count byte_discard
+  case $key in ''|*[!0123456789abcdef]*) return 1 ;; esac
   [ "${#key}" -eq 16 ] || return 1
   _gr_trellis_home
   [ -n "$GR_TRELLIS_HOME" ] || return 1
   file=$GR_TRELLIS_HOME/state/reread-overrides/$key
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   { IFS= read -r line && ! IFS= read -r extra; } < "$file" 2>/dev/null || return 1
-  [ -z "$extra" ] && [ "${#line}" -le 4095 ] || return 1
+  # printf's %n counts output bytes, even in a multibyte caller locale.
+  printf -v byte_discard '%s%n' "$line" byte_count
+  [ -z "$extra" ] && [ "$byte_count" -le 4095 ] || return 1
   case $line in *$'\t'*$'\t'*) ;; *) return 1 ;; esac
   expires=${line%%$'\t'*} rest=${line#*$'\t'}
   created=${rest%%$'\t'*} reason=${rest#*$'\t'}
   for field in "$expires" "$created"; do
-    case $field in ''|0*|*[!0-9]*) return 1 ;; esac
+    case $field in ''|0*|*[!0123456789]*) return 1 ;; esac
     [ "${#field}" -le 12 ] || return 1
   done
-  case $reason in ''|*[[:cntrl:]]*) return 1 ;; esac
-  [ "${#reason}" -le 2000 ] || return 1
+  case $reason in ''|*[$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']*) return 1 ;; esac
+  printf -v byte_discard '%s%n' "$reason" byte_count
+  [ "$byte_count" -le 2000 ] || return 1
   [ $((created + GR_REREAD_OVERRIDE_TTL)) -eq "$expires" ] || return 1
   _gr_now
-  case $GR_NOW in ''|*[!0-9]*) return 1 ;; esac
+  case $GR_NOW in ''|*[!0123456789]*) return 1 ;; esac
   [ "$expires" -gt "$GR_NOW" ] && [ $((expires - GR_NOW)) -le "$GR_REREAD_OVERRIDE_TTL" ]
 }
 

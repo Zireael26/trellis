@@ -30,7 +30,7 @@ release_fixture_seal_repo() {
   release_fixture_git "$home" -C "$repo" config commit.gpgsign false || return 1
   release_fixture_git "$home" -C "$repo" config tag.gpgSign false || return 1
   release_fixture_git "$home" -C "$repo" config core.autocrlf false || return 1
-  release_fixture_git "$home" -C "$repo" add -A || return 1
+  release_fixture_git "$home" -C "$repo" add -f -A || return 1
   release_fixture_git "$home" -C "$repo" commit -qm "release $version" || return 1
   release_fixture_git "$home" -C "$repo" tag -a "v$version" -m "release $version" || return 1
 }

@@ -22,6 +22,12 @@
       "type": "integer",
       "minimum": 1
     },
+    "process_gate_slots": {
+      "description": "Machine-wide cap for the process-gate lane. The first run uses the reserved gate slot; a second may borrow an idle ordinary slot only when admission checks pass. Absent or invalid means 1 at runtime; invalid values are diagnosed by the heavy supervisor.",
+      "type": "integer",
+      "enum": [1, 2],
+      "default": 1
+    },
     "projects": {
       "description": "Per-project host settings, keyed by the physical path of the project's main checkout (spec 072). Only the Stop hook reads and types it, so a bad value disables only that setting. Honoured only while this file is owned by the current user with mode 0600 or stricter, in a directory with no group or other write bit.",
       "type": "object",

@@ -93,8 +93,7 @@ def git_command(args):
     return ""
 
 
-def fake_git():
-    args = sys.argv[1:]
+def fake_git(args):
     command = git_command(args)
     mode = os.environ["PCN_BOUND_MODE"]
     names = command == "diff" and "--name-only" in args
@@ -129,17 +128,17 @@ def fake_git():
         while True:
             time.sleep(60)
 
-    os.execv(os.environ["PCN_BOUND_REAL_GIT"], [os.environ["PCN_BOUND_REAL_GIT"]] + args)
+    raise SystemExit("unexpected unfaked git invocation: %r" % (args,))
 
 
-def fake_jq():
-    if os.environ["PCN_BOUND_MODE"] == "partial" and "-nc" in sys.argv[1:]:
+def fake_jq(args):
+    if os.environ["PCN_BOUND_MODE"] == "partial" and "-nc" in args:
         record_self("jq")
         sys.stdout.write('{"systemMessage":"incomplete"}\n')
         sys.stdout.flush()
         while True:
             time.sleep(60)
-    os.execv(os.environ["PCN_BOUND_REAL_JQ"], [os.environ["PCN_BOUND_REAL_JQ"]] + sys.argv[1:])
+    raise SystemExit("unexpected unfaked jq invocation: %r" % (args,))
 
 
 def stall_child():
@@ -319,14 +318,68 @@ exec(code)
     wrapper.chmod(0o755)
 
 
+def install_fake_git(fakebin):
+    wrapper = fakebin / "git"
+    wrapper.write_text("""#!/bin/bash
+cmd=""
+skip_next=0
+has_name_only=0
+has_others=0
+for arg in "$@"; do
+  if [ "$skip_next" -eq 1 ]; then
+    skip_next=0
+    continue
+  fi
+  if [ -z "$cmd" ]; then
+    case "$arg" in
+      -C|-c|--git-dir|--work-tree|--namespace|--config-env) skip_next=1 ;;
+      -*) ;;
+      *) cmd="$arg" ;;
+    esac
+  fi
+  case "$arg" in
+    --name-only) has_name_only=1 ;;
+    --others) has_others=1 ;;
+  esac
+done
+if [ "$cmd" = "diff" ] && [ "$has_name_only" -eq 1 ]; then
+  case "${PCN_BOUND_MODE:-}" in
+    flood|stall) exec "$PCN_BOUND_REAL_PYTHON" -B "$PCN_BOUND_SELF" --fake-git "$@" ;;
+  esac
+fi
+if [ "$cmd" = "ls-files" ] && [ "$has_others" -eq 1 ]; then
+  case "${PCN_BOUND_MODE:-}" in
+    untracked-flood|stall) exec "$PCN_BOUND_REAL_PYTHON" -B "$PCN_BOUND_SELF" --fake-git "$@" ;;
+  esac
+fi
+exec "$PCN_BOUND_REAL_GIT" "$@"
+""", encoding="utf-8")
+    wrapper.chmod(0o755)
+
+
+def install_fake_jq(fakebin):
+    wrapper = fakebin / "jq"
+    wrapper.write_text("""#!/bin/bash
+if [ "${PCN_BOUND_MODE:-}" = "partial" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "-nc" ]; then
+      exec "$PCN_BOUND_REAL_PYTHON" -B "$PCN_BOUND_SELF" --fake-jq "$@"
+    fi
+  done
+fi
+exec "$PCN_BOUND_REAL_JQ" "$@"
+""", encoding="utf-8")
+    wrapper.chmod(0o755)
+
+
 def run_case(mode, hook, project, tmpdir):
     directory = Path(tmpdir) / ("primer-bound-" + mode)
     directory.mkdir()
     fakebin = directory / "bin"
     fakebin.mkdir()
-    (fakebin / "git").symlink_to(Path(__file__).resolve())
+    install_fake_git(fakebin)
     if mode == "partial-output":
-        (fakebin / "jq").symlink_to(Path(__file__).resolve())
+        install_fake_jq(fakebin)
     slow_modes = ("mkdir-stall", "mkdir-parent-death", "mkdir-supervisor-death", "mkdir-collision",
                   "output-read-stall", "output-read-signal", "cleanup-stall")
     if mode in slow_modes or mode == "parent-one":
@@ -347,6 +400,7 @@ def run_case(mode, hook, project, tmpdir):
         "PCN_BOUND_DIR": str(directory),
         "PCN_BOUND_MODE": (mode if mode in ("flood", "untracked-flood") else "partial" if mode == "partial-output"
                            else mode if mode in slow_modes or mode in ("stdout-stall", "stderr-stall", "parent-one") else "stall"),
+        "PCN_BOUND_SELF": os.path.realpath(__file__),
         "PCN_BOUND_REAL_GIT": real_git,
         "PCN_BOUND_REAL_JQ": real_jq,
         "PCN_BOUND_REAL_PYTHON": sys.executable,
@@ -475,7 +529,7 @@ def run_case(mode, hook, project, tmpdir):
                         return git, child
             return None
 
-        readiness_limit = 2.0 if mode == "deadline" else 1.2
+        readiness_limit = 2.5 if mode == "deadline" else 2.4
         git, child = wait_for(stalled, observer, started + readiness_limit, "stalled git and its child")
         assert child.get("ignored") is True, "child did not inherit ignored SIGTERM"
         table = observer.sample()
@@ -497,7 +551,7 @@ def run_case(mode, hook, project, tmpdir):
 
         # Events must happen early enough that the ordinary three-second budget
         # cannot masquerade as prompt signal/parent-death handling.
-        assert time.monotonic() - started < 1.2, "stall was reached too late to distinguish the deadline"
+        assert time.monotonic() - started < 2.4, "stall was reached too late to distinguish the deadline"
         table = observer.sample()
         assert alive(root, table) and alive(git, table) and alive(child, table), "stall ended before the event"
         event_at = time.monotonic()
@@ -526,10 +580,10 @@ def run_case(mode, hook, project, tmpdir):
 
 
 def main():
-    if os.path.basename(sys.argv[0]) == "git":
-        fake_git()
-    elif os.path.basename(sys.argv[0]) == "jq":
-        fake_jq()
+    if sys.argv[1:2] == ["--fake-git"]:
+        fake_git(sys.argv[2:])
+    elif sys.argv[1:2] == ["--fake-jq"]:
+        fake_jq(sys.argv[2:])
     elif sys.argv[1:] == ["--stall-child"]:
         stall_child()
     elif sys.argv[1:] == ["--launcher"]:

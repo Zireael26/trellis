@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 
 @test "registry jq controls reject C1 without changing attachment path semantics" {
-  python3 -I - "$BATS_TEST_DIRNAME/../lib/attachment_fs.py" \
+  python3 -I -B - "$BATS_TEST_DIRNAME/../lib/attachment_fs.py" \
     "$BATS_TEST_DIRNAME/../lib/registry_identity_batch.py" "$BATS_TEST_TMPDIR" <<'PY'
 import importlib.util
 import os
@@ -29,5 +29,5 @@ PY
   run bash -c '. "$1"; local_registry_real_directory "worktree root" "$2"' \
     _ "$BATS_TEST_DIRNAME/../lib/local-registry.sh" "$path"
   [ "$status" -eq 2 ]
-  [[ "$output" == *'terminal control characters'* ]]
+  [[ "$output" == *'terminal control characters'* ]] || false
 }

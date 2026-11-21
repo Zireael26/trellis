@@ -44,12 +44,21 @@ fi
 # shellcheck disable=SC2034  # Public constant for sourcing callers, not used inside this lib.
 LOCAL_REGISTRY_SCHEMA_VERSION=1
 
-# Retired harness token dropped by the rc.46 registry migration. Rows written
-# before rc.46 carry this token in checkout harnesses; loads drop it with a
-# one-line stderr notice and the next registry write persists the clean form.
-# This constant is the single source of truth for the token: pass it via
-# jq --arg retired instead of spelling the literal elsewhere in this lib.
-LOCAL_REGISTRY_RETIRED_HARNESS="omp"
+# Retired harness tokens dropped by the rc.46 registry migration. Rows written
+# before rc.46 carry `omp` in checkout harnesses; loads drop it with a one-line
+# stderr notice and the next registry write persists the clean form. This
+# constant is the single source of truth for the tokens: pass it via
+# jq --arg retired instead of spelling a literal elsewhere in this lib, and
+# retire a harness by adding a token here rather than editing every jq program.
+LOCAL_REGISTRY_RETIRED_HARNESSES="omp"
+
+# The release launcher preloads every library into one shell for a verified
+# command bundle, and a bundle deliberately has no payload pathname to read the
+# schema from. This literal is the fallback for exactly that case; it is never
+# consulted when the schema is readable. `scripts/tests/w2-registry-validation.bats`
+# asserts it equals the schema enum, so a schema change without this list fails
+# the suite instead of drifting.
+LOCAL_REGISTRY_HARNESS_FALLBACK="antigravity claude codex opencode pi"
 
 local_registry_err() {
   printf 'trellis registry: %s\n' "$*" >&2
@@ -76,6 +85,40 @@ local_registry_schema_path() {
   else
     printf '%s/trellis.registry.schema.json\n' "$_LOCAL_REGISTRY_LIB_DIR"
   fi
+}
+
+# The admitted harness set is owned by `trellis.registry.schema.json#/$defs/harness`.
+# Every consumer that has to decide whether a harness token is canonical asks
+# this function instead of restating the union, because a restated union drifts:
+# `antigravity` and `opencode` became first-class harnesses while two inline
+# predicates still admitted only `claude|codex|pi`, which made every registry
+# row fail materialization. Returns one compact JSON array of tokens.
+local_registry_harness_union() {
+  local schema union
+  trellis_home_require_jq || return "$?"
+  schema="$(local_registry_schema_path)"
+  if [ -z "$schema" ]; then
+    union="$(printf '%s\n' "$LOCAL_REGISTRY_HARNESS_FALLBACK" | jq -Rc 'split(" ") | map(select(length > 0))')" || {
+      local_registry_err "could not read the preloaded harness union"
+      return "$TRELLIS_EX_STATE"
+    }
+    printf '%s\n' "$union"
+    return 0
+  fi
+  if [ -L "$schema" ] || [ ! -f "$schema" ]; then
+    local_registry_err "registry schema is missing: $schema"
+    return "$TRELLIS_EX_STATE"
+  fi
+  union="$(jq -ec '
+    .["$defs"].harness.enum
+    | if type == "array" and length > 0
+        and all(.[]; type == "string" and test("^[a-z][a-z0-9-]{0,31}$"))
+      then . else error("invalid registry harness union") end
+  ' "$schema" 2>/dev/null)" || {
+    local_registry_err "could not read the canonical harness union: $schema"
+    return "$TRELLIS_EX_STATE"
+  }
+  printf '%s\n' "$union"
 }
 
 local_registry_require_project_id() {
@@ -302,18 +345,23 @@ local_registry_identity_for_root() {
 }
 
 local_registry_normalize_harnesses() {
-  local harnesses="${1:-}" normalized
+  local harnesses="${1:-}" normalized union
   [ -n "$harnesses" ] || harnesses='[]'
   trellis_home_require_jq || return "$?"
   # rc.46 migration: the retired token is dropped, never rejected, so writes
   # against legacy rows succeed. Any other unknown token still errors.
-  normalized="$(printf '%s\n' "$harnesses" | jq -c --arg retired "$LOCAL_REGISTRY_RETIRED_HARNESS" '
+  union="$(local_registry_harness_union)" || return "$?"
+  normalized="$(printf '%s\n' "$harnesses" | jq -c --arg retired "$LOCAL_REGISTRY_RETIRED_HARNESSES" \
+    --argjson union "$union" '
+    ($retired | split(" ")) as $retired_tokens
+    | def live: . as $token | ($retired_tokens | index($token)) == null;
     if type != "array" then error("harnesses must be an array")
-    elif ([.[] | select(. != $retired)] | all(. == "claude" or . == "codex" or . == "pi")) then map(select(. != $retired)) | unique | sort
+    elif ([.[] | select(live)] | all(. as $token | ($union | index($token)) != null))
+      then map(select(live)) | unique | sort
     else error("unsupported harness")
     end
   ' 2>/dev/null)" || {
-    local_registry_err "harnesses must be JSON array values from claude, codex, pi"
+    local_registry_err "harnesses must be JSON array values from the canonical harness set"
     return "$TRELLIS_EX_USAGE"
   }
   printf '%s\n' "$normalized"
@@ -387,7 +435,7 @@ local_registry_json_is_valid() {
       and (.root | safe_path) and (.git_common_dir | safe_path)
       and ((has("release") | not) or (.release | version))
       and (.harnesses | type == "array"
-           and all(.[]; . == "claude" or . == "codex" or . == "pi")
+           and all(.[]; . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi")
            and ((unique | length) == length))
       and (.worktrees | type == "object"
            and all(keys[]; sha256)
@@ -487,22 +535,24 @@ local_registry_require_private_state() {
 # is left untouched so the schema-aware validator below reports it as before;
 # only the retired token is ever removed. Unknown tokens still fail validation.
 local_registry_drop_retired_harness_rows() {
-  local file="${1:-}" count tmp
+  local file="${1:-}" count tmp token
   trellis_home_require_jq || return "$?"
-  count="$(jq -r --arg retired "$LOCAL_REGISTRY_RETIRED_HARNESS" '[.projects[]?.checkouts[]?.harnesses | select(type == "array" and index($retired))] | length' "$file" 2>/dev/null)" || return 0
-  case "$count" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$count" -gt 0 ] || return 0
-  tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.migrate.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
-  if ! jq -S --arg retired "$LOCAL_REGISTRY_RETIRED_HARNESS" '(.projects // {}) |= with_entries(.value.checkouts |= with_entries(.value.harnesses |= (if type == "array" then map(select(. != $retired)) else . end)))' "$file" > "$tmp" 2>/dev/null; then
+  for token in $LOCAL_REGISTRY_RETIRED_HARNESSES; do
+    count="$(jq -r --arg retired "$token" '[.projects[]?.checkouts[]?.harnesses | select(type == "array" and index($retired))] | length' "$file" 2>/dev/null)" || continue
+    case "$count" in ''|*[!0-9]*) continue ;; esac
+    [ "$count" -gt 0 ] || continue
+    tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.registry.migrate.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
+    if ! jq -S --arg retired "$token" '(.projects // {}) |= with_entries(.value.checkouts |= with_entries(.value.harnesses |= (if type == "array" then map(select(. != $retired)) else . end)))' "$file" > "$tmp" 2>/dev/null; then
+      rm -f "$tmp"
+      continue
+    fi
+    if ! cat "$tmp" > "$file"; then
+      rm -f "$tmp"
+      return "$TRELLIS_EX_UNAVAILABLE"
+    fi
     rm -f "$tmp"
-    return 0
-  fi
-  if ! cat "$tmp" > "$file"; then
-    rm -f "$tmp"
-    return "$TRELLIS_EX_UNAVAILABLE"
-  fi
-  rm -f "$tmp"
-  local_registry_err "dropped retired harness \"$LOCAL_REGISTRY_RETIRED_HARNESS\" from $count checkout row(s); rewrite with any registry write"
+    local_registry_err "dropped retired harness \"$token\" from $count checkout row(s); rewrite with any registry write"
+  done
 }
 
 local_registry_validate_file() {
@@ -2928,8 +2978,9 @@ local_registry_manifest_project_id() {
         and (["PATH", "HOME", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS", "IFS", "CDPATH", "NODE_OPTIONS", "DOCKER_HOST", "DOCKER_CONTEXT", "POSIXLY_CORRECT", "ZDOTDIR", "RUBYOPT", "PERL5OPT", "JAVA_TOOL_OPTIONS", "JDK_JAVA_OPTIONS", "PWD", "OLDPWD", "SHLVL", "_", "LANG", "LANGUAGE", "TZ", "NODE_PATH", "NODE_REPL_EXTERNAL_MODULE", "NODE_EXTRA_CA_CERTS", "NODE_ICU_DATA", "NODE_V8_COVERAGE", "RANDOM", "SRANDOM", "SECONDS", "LINENO", "OPTIND", "OPTARG", "PPID", "UID", "EUID", "GROUPS", "DIRSTACK", "FUNCNAME", "PIPESTATUS", "SHELL", "PS1", "PS2", "PS3", "PS4"] | index($name) == null)
         and ($name | test("^(XDG_|TMP|TEMP|GIT_|TRELLIS_|PROCESS_GATE_|SECURITY_GATE_|PYTHON|BASH|LD_|DYLD_|CALLER_|LC_|DOCKER_|COREPACK_|PERL|RUBY|GEM_|GH_)") | not));
     def gate:
-      type == "object" and ((keys_unsorted - ["env_passthrough", "verdict_reuse"]) | length == 0)
+      type == "object" and ((keys_unsorted - ["env_passthrough", "verdict_reuse", "docs_only_tests"]) | length == 0)
       and ((has("verdict_reuse") | not) or (.verdict_reuse | type == "boolean"))
+      and ((has("docs_only_tests") | not) or (.docs_only_tests | type == "boolean"))
       and ((has("env_passthrough") | not) or (.env_passthrough | type == "array" and all(.[]; env_name) and ((unique | length) == length)));
     def security_gate:
       type == "object" and ((keys_unsorted - ["semgrep_timeout"]) | length == 0)

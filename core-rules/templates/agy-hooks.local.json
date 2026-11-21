@@ -1,0 +1,49 @@
+{
+  "trellis": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "__TRELLIS_SESSION_START__",
+        "timeout": 30
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "__TRELLIS_PRE_INVOCATION__",
+        "timeout": 30
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "run_command|edit_file|write_file|multi_edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRELLIS_PRE_TOOL_USE__",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "run_command|edit_file|write_file|multi_edit|read_file|view_file",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "__TRELLIS_POST_TOOL_USE__",
+            "timeout": 130
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "__TRELLIS_STOP__",
+        "timeout": 310
+      }
+    ]
+  }
+}

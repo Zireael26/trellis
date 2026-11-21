@@ -375,3 +375,24 @@ t61_fixture() {
   done
   git -C "$PROJECT_DIR" worktree remove --force "$wt"
 }
+
+@test "P43 + AGY: redacts secrets and extracts AGY USER_INPUT / PLANNER_RESPONSE records" {
+  local hook tx="$PROJECT_DIR/agy-t.jsonl" sk_pfx="sk-ant-api03-" ghp_pfx="ghp_"
+  local sk="${sk_pfx}abcdefghijklmnopqrstuvwxyz012345"
+  local ghp="${ghp_pfx}ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+  cat > "$tx" <<EOF
+{"type":"USER_INPUT","content":"Deploy using $sk please"}
+{"type":"PLANNER_RESPONSE","content":"Confirmed token $ghp and updated config."}
+EOF
+  for hook in "$HOOK" "$CODEX_HOOK"; do
+    rm -f "$PROJECT_DIR/context-log.md"
+    run env TRELLIS_HOME="$BATS_TEST_TMPDIR/th-p43-$(basename "$(dirname "$hook")")" \
+      CLAUDE_PROJECT_DIR="$PROJECT_DIR" CODEX_PROJECT_DIR="$PROJECT_DIR" \
+      bash "$hook" <<<"{\"transcriptPath\":\"$tx\"}"
+    [ "$status" -eq 0 ] || { echo "$hook: $status $output"; false; }
+    grep -q 'Deploy using \[REDACTED\] please' "$PROJECT_DIR/context-log.md" || { cat "$PROJECT_DIR/context-log.md"; false; }
+    grep -q 'Confirmed token \[REDACTED\] and updated config.' "$PROJECT_DIR/context-log.md" || { cat "$PROJECT_DIR/context-log.md"; false; }
+    [ "$(grep -cF "$sk" "$PROJECT_DIR/context-log.md")" -eq 0 ]
+    [ "$(grep -cF "$ghp" "$PROJECT_DIR/context-log.md")" -eq 0 ]
+  done
+}

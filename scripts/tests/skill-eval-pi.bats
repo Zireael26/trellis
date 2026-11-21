@@ -1201,7 +1201,7 @@ JSON
 # Deterministic boundary injection: change the path AFTER validation captures A,
 # before _run starts. An alarm makes FIFO regressions fail rather than hang.
 binding_probe() {
-  "$PYTHON" - "$MODULE" "$PI" "$CWD" "$PROMPT" "$POLICY" "$OUT" "$1" "$2" <<'PY'
+  "$PYTHON" -B - "$MODULE" "$PI" "$CWD" "$PROMPT" "$POLICY" "$OUT" "$1" "$2" <<'PY'
 import hashlib, importlib.util, json, os, signal, sys
 from pathlib import Path
 module, pi, cwd, prompt, policy, out, kind, selected = sys.argv[1:]
@@ -1270,7 +1270,7 @@ PY
 
 @test "input open rejects a symlink swapped at the descriptor boundary" {
   mkcase open-race
-  "$PYTHON" - "$MODULE" "$PROMPT" <<'PY'
+  "$PYTHON" -B - "$MODULE" "$PROMPT" <<'PY'
 import importlib.util, os, sys
 from pathlib import Path
 spec = importlib.util.spec_from_file_location('adapter', sys.argv[1])
@@ -1328,7 +1328,7 @@ PY
   scenario <<'JSON'
 {"session_mode":420,"events":[{"kind":"thinking_level_change"},{"kind":"assistant","text":"answer"}]}
 JSON
-  "$PYTHON" - "$MODULE" "$PI" "$CWD" "$PROMPT" "$POLICY" "$OUT" <<'PY'
+  "$PYTHON" -B - "$MODULE" "$PI" "$CWD" "$PROMPT" "$POLICY" "$OUT" <<'PY'
 import importlib.util, json, sys
 from pathlib import Path
 module, pi, cwd, prompt, policy, out = sys.argv[1:]
@@ -1487,7 +1487,7 @@ RETAINED_STDOUT
 {"type":"message","id":"5d8a2efc","parentId":"3c2497d6","timestamp":"2026-09-06T07:56:37.326Z","message":{"role":"user","content":[{"type":"text","text":"Return exactly this JSON object and nothing else: {\"probe\":\"trellis-pi-generation-v1\"}"}],"timestamp":1788681397325}}
 {"type":"message","id":"a1a3a286","parentId":"5d8a2efc","timestamp":"2026-09-06T07:56:41.607Z","message":{"role":"assistant","content":[{"type":"text","text":"{\"probe\":\"trellis-pi-generation-v1\"}","textSignature":"{\"v\":1,\"id\":\"msg_0dd20f80d7cb345f016a9d1cb8717887d09ac8879ef80c956e\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-6-astra","usage":{"input":73,"output":15,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":88,"cost":{"input":0.0007300000000000001,"output":0.00075,"cacheRead":0,"cacheWrite":0,"total":0.00148}},"stopReason":"stop","timestamp":1788681397329,"responseId":"resp_0dd20f80d7cb345f016a9d1cb692ec87d09418bc016a4280db","rawStopReason":"completed"}}
 RETAINED_SESSION
-  "$PYTHON" - "$MODULE" "$CASE/native-session.jsonl" "$CASE/native-stdout.jsonl" <<'PY'
+  "$PYTHON" -B - "$MODULE" "$CASE/native-session.jsonl" "$CASE/native-stdout.jsonl" <<'PY'
 import importlib.util, json, sys
 module, session_path, stdout_path = sys.argv[1:]
 spec = importlib.util.spec_from_file_location('adapter', module)

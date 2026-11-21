@@ -244,6 +244,93 @@ EOF
   return 1
 }
 
+# slop_is_test_path <path>
+#   - status 0 when <path> is an authored test source file (not fixtures/mocks/
+#     vendored/build artifacts) eligible for advisory anti-flake checks (P39).
+slop_is_test_path() {
+  local path="${1:-}" probe
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) probe="$path" ;;
+    *) probe="/$path" ;;
+  esac
+  case "$probe" in
+    */fixtures/*|*/__mocks__/*|*/vendor/*|*/dist/*|*/build/*|*/target/*|*/anti-slop/*) return 1 ;;
+    */tests/*|*/test/*|*/__tests__/*|*/e2e/*|*/cypress/*|*/playwright/*|*_test.*|*.spec.*|*.test.*|*/test_*.py) return 0 ;;
+  esac
+  return 1
+}
+
+# slop_is_settings_path <path>
+#   - status 0 when <path> is a harness settings/hooks JSON file eligible for
+#     inline-secret advisory scanning (P43).
+slop_is_settings_path() {
+  local path="${1:-}" probe
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /*) probe="$path" ;;
+    *) probe="/$path" ;;
+  esac
+  case "$probe" in
+    */.claude/settings.json|*/.claude/settings.*.json|*/.agents/hooks.json|*/.opencode/opencode.json) return 0 ;;
+  esac
+  return 1
+}
+
+# slop_scan_rows <rows-tsv> [--numbered]
+#   - internal awk engine shared by slop_scan_text, slop_scan_test_flake, and
+#     slop_scan_settings_secrets.
+slop_scan_rows() {
+  local rows_text="$1"
+  awk -v numbered="${2:-}" '
+    BEGIN { FS = "\t" }
+    NR == FNR {
+      if ($0 ~ /^[[:space:]]*(#|$)/) next
+      rows++
+      id[rows] = $1
+      match_re[rows] = $2
+      suppress_re[rows] = $3
+      next
+    }
+    {
+      if (numbered == "--numbered") {
+        tab = index($0, "\t")
+        line = substr($0, 1, tab - 1)
+        if (!tab || line !~ /^[1-9][0-9]*$/) { scan_error = 1; exit }
+        $0 = substr($0, tab + 1)
+      }
+      for (i = 1; i <= rows; i++) {
+        if ($0 !~ match_re[i]) continue
+        if (suppress_re[i] != "-" && ($0 ~ suppress_re[i] || prev ~ suppress_re[i] || cmt ~ suppress_re[i])) continue
+        printf "%d\t%s\t%s\n", FNR, id[i], $0
+        hits++
+      }
+      prev = $0
+      if ($0 ~ /^[[:space:]]*(#|\/\/|\/\*|\*)/) { cmt = cmt " " $0 } else { cmt = "" }
+    }
+    END { exit (scan_error ? 2 : (hits > 0 ? 0 : 1)) }
+  ' <(printf '%s\n' "$rows_text") -
+}
+
+# slop_scan_test_flake [--numbered]
+#   - advisory anti-flake check (P39): flags hardcoded sleeps in test diffs
+#     unless justified with SAFETY:.
+slop_scan_test_flake() {
+  local rows
+  rows=$(printf '%s\t%s\t%s\n' \
+    'test-hardcoded-sleep' '(\.waitForTimeout\([[:space:]]*[0-9]|cy\.wait\([[:space:]]*[0-9]|new[[:space:]]+Promise\([^)]*setTimeout\(|(^|[^A-Za-z0-9_])time\.sleep\([[:space:]]*[0-9]|thread::sleep\(|time\.Sleep\()' 'SAFETY:')
+  slop_scan_rows "$rows" "${1:-}"
+}
+
+# slop_scan_settings_secrets [--numbered]
+#   - advisory inline-secret check on harness settings files (P43).
+slop_scan_settings_secrets() {
+  local rows
+  rows=$(printf '%s\t%s\t%s\n' \
+    'settings-inline-secret' '(AKIA[0-9A-Z]{16}|sk-ant-[A-Za-z0-9_-]{16,}|sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|Bearer[[:space:]]+[A-Za-z0-9._~+/=-]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----)' 'SAFETY:')
+  slop_scan_rows "$rows" "${1:-}"
+}
+
 # slop_scan_text <lang>
 #   - reads the text to scan on stdin (a whole file, or just a diff's added
 #     lines — the caller owns line accounting) and prints one finding per line:
@@ -458,7 +545,16 @@ slop__self_test() {
     found=$(slop__red_sample "$lang" | slop_scan_text "$lang" | cut -f2 || true)
     missing=""
     for id in $(slop_patterns_for_lang "$lang" | cut -f1); do
-      printf '%s\n' "$found" | grep -qx "$id" || missing="$missing $id"
+      # Whole-line match without a pipe: grep -q closing early made printf
+      # die of SIGPIPE, which pipefail reported as a miss.
+      case "
+$found
+" in
+        *"
+$id
+"*) ;;
+        *) missing="$missing $id" ;;
+      esac
     done
     if [ -n "$missing" ]; then
       echo "FAIL ${lang}: red sample missed:${missing}"

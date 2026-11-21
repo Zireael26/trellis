@@ -430,15 +430,14 @@ PY
   [[ "$output" == *"doctor-fix files changed without a doctor split"* ]] || false
 }
 
-@test "release-store parts and their equivalence guard are scheduled locally and in CI" {
+@test "release-store parts are scheduled locally and in CI" {
   local scope suite i suites weights="$REPO_ROOT/scripts/tests/stage-weights.tsv"
   for scope in local ci; do
     suites="$(test_suites_for "$scope")"
     run grep -Fx release-store <<< "$suites"
     [ "$status" -eq 1 ]
-    for i in 1 2 3 4 5 split; do
+    for i in 1 2 3 4 5; do
       suite="release-store-part$i"
-      [ "$i" != split ] || suite=release-store-split
       printf '%s\n' "$suites" | grep -Fxq "$suite"
       awk -F '\t' -v name="bats scripts/tests/$suite.bats" '
         $1 == name && $2 ~ /^[0-9]+$/ && $2 > 0 { found++ }
@@ -496,7 +495,6 @@ PY
       'bats scripts/tests/attach-postjob-batch.bats' \
       'bats scripts/tests/trellis-latency-sc13.bats' \
       'bats core-rules/hooks/tests/stop-verify-active.bats' \
-      'bats core-rules/hooks/tests/pi-compaction-synthetic.bats' \
       'bats core-rules/hooks/tests/parity.bats' \
       'cargo test native/trellis-hooks/tests/session_save.rs' \
       'cargo test native/trellis-hooks/tests/optional_locks.rs' \

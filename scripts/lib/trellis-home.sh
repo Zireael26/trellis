@@ -249,10 +249,11 @@ trellis_jq() (
 )
 
 trellis_home_has_unsafe_chars() {
-  local LC_ALL=C value
-  value="$1"
+  local value="$1"
+  # Enumerate bytes: ranges depend on locale, and changing Bash's own locale
+  # can crash Bash 5.3 after fork (even with explicit save/restore).
   case "$value" in
-    *[$'\001'-$'\037'$'\177']*|*$'\302'[$'\200'-$'\237']*) return 0 ;;
+    *[$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']*|*$'\302'[$'\200\201\202\203\204\205\206\207\210\211\212\213\214\215\216\217\220\221\222\223\224\225\226\227\230\231\232\233\234\235\236\237']*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -275,10 +276,10 @@ trellis_home_require_safe_text() {
 # env treats any command operand containing '=' as another assignment,
 # even after '--'. Quoted shell metacharacters are otherwise ordinary bytes.
 trellis_home_native_entry_path_is_safe() {
-  local LC_ALL=C path="$1"
+  local path="$1"
   case "$path" in /*) ;; *) return 1 ;; esac
   case "$path" in
-    *=*|*[$'\001'-$'\037'$'\177']*|*$'\302'[$'\200'-$'\237']*) return 1 ;;
+    *=*|*[$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']*|*$'\302'[$'\200\201\202\203\204\205\206\207\210\211\212\213\214\215\216\217\220\221\222\223\224\225\226\227\230\231\232\233\234\235\236\237']*) return 1 ;;
   esac
   return 0
 }
@@ -1163,11 +1164,10 @@ trellis_home_validate_config() {
       and ((.discovery_roots | unique | length) == (.discovery_roots | length))
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
 
-    # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
-    # alone (spec 054), so a bad value disables only the heavy gate. projects
-    # (per-project host settings such as stop_checks.fast) is typed by the
-    # Stop hook alone (spec 072), so a bad value costs only the faster suite.
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "projects"])
+    # The heavy supervisor owns slot typing (spec 054). A bad
+    # process_gate_slots value must reach it for diagnosis and a cap of 1.
+    # The Stop hook alone types projects (spec 072).
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "process_gate_slots", "projects"])
     and ((has("$schema") | not) or (.["$schema"] | no_machine_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)

@@ -6,6 +6,131 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.5.6] - 2026-11-19
+
+### Added
+
+- **Gemini 4 Neon roster promotion & `/de-slop` workflow (`docs/adr/2026-11-19-gemini-4-neon-roster-and-deslop.md`):**
+  - Promoted Gemini 4 Neon (`low`, `medium`, `high`, `xhigh` effort tiers) into the canonical portable catalog and role routing while retiring `gemini-4-argon`, `sol-max`, `hydrogen-medium`, and `hydrogen-high`, and preserving `gemini-3.8-flash` for Google AI Pro subscriptions without Hydrogen or Neon access.
+  - Added `/de-slop` command (`.claude/commands/de-slop.md`), multi-harness `.agents/workflows/test-cleanup.md` and `.agents/workflows/de-slop.md` wiring (`antigravity`, `codex`, and `pi`), and `test_diet` telemetry in `trellis lean-audit`.
+- **Heavy concurrency & docs-only process-gate policy:**
+  - `scripts/lib/heavy-lane.sh` adds `process_gate_slots` (default `2`) with borrow-from-ordinary-slot pressure probes (`vm_stat` / `sysctl` / `/proc/meminfo` + load average) so two non-conflicting `pre-push` gates can proceed concurrently on low-load machines without exhausting RAM or starving ordinary heavy slots.
+  - `core-rules/skills/process-gate/scripts/lib/docs-policy.py` and `check-tests.sh` harden docs-only test skipping with configurable `gate.docs_only_tests` in `.trellis.json` (`auto` / `never` / `push-only`) and explicit scope receipts.
+- **Scheduled-tasks cadence ledger & zero-cost lane-freshness LaunchAgent:**
+  - Added `scheduled-tasks/cadence.json` with fail-closed README/cadence parity, consolidated `fleet-process-audit` and `lean-trend` templates, and added `core-rules/templates/org.trellis.lane-freshness.plist` (300s payload collector at zero model cost) while retiring 9 redundant/legacy templates (23 → 16) and deleting the frozen `scripts/full-audit-sweep-ledger.mjs`.
+- **Disk hygiene & opt-in APFS CoW worktrees:**
+  - `scripts/worktree.sh` adds opt-in `--cow-deps` APFS copy-on-write dependency hydration and `.metadata_never_index` Spotlight suppression.
+  - `scripts/disk-janitor.sh` expands `tmp` scanning across both `$DARWIN_USER_TEMP_DIR` and `/private/tmp` (9 scratch patterns, chmod-tolerant removal), prunes `$TRELLIS_HOME/state/gate-xdg/cache/uv` and `npm` caches, reports `trellis gc --dry-run`, `vm.swapusage`, active-worktree `>2 GiB` bloat, and `antigravity-cli` / `opencode` transcripts.
+
+### Changed
+
+- `roster.py` and `resolve-roles.py` discover user-installed harness CLIs across standard user `PATH` locations instead of requiring pre-populated login shell paths.
+- Relaxed the L4/L5 `spec-gate` interview-artifact check so `decisions-log.md` is no longer required at `pre-push` for any autonomy level; logging decisions is left solely to the operating model's judgment.
+- Restricted Gemini 4 Carbon strictly to `medium` effort only (`antigravity/gemini-4-carbon:medium`; retired `carbon-high` and enforced `medium`-only in `resolve-roles.py` so `low`, `high`, and `xhigh` are refused before selection).
+
+### Fixed
+
+- **Native `trellis-hooks` `antigravity` / `agy` reliability & slop-patterns SIGPIPE:**
+  - Bounded `stop/baseline.rs` `turn-baseline` fingerprinting to an 8s deadline with a 20k untracked-file cap, streaming NUL-cap enforcement, in-flight poison markers, and advisory-only timeout/crash handling for `NeverBlocks` hooks (`PreInvocation` / `UserPromptSubmit`) so large workspaces no longer fail with 20s timeouts.
+  - Emitted explicit `{"decision":"allow"}` for `antigravity` `PreToolUse` allows in both native `trellis-hooks` and `core-rules/native/hook-adapter.sh` (preventing empty-reason denials under `agy >= 1.5.12`), updated native adapter exit/launch-failure handling, and eliminated a SIGPIPE-prone pipe in `slop-patterns.sh`.
+- **Worktree-isolated `spec-gate` & minified-bundle `security-gate` carve-out:**
+  - Scoped `spec-gate` surgical markers (`.claude/session-surgical`) to the active worktree root so concurrent worktrees no longer clobber each other's surgical declarations.
+  - `security-gate` skips Semgrep `PartialParsing` false positives on minified/generated bundles (`*.min.js`, `*.umd.js`, `dist/`, etc.) with explicit carve-out reporting.
+- **Scheduled-task 5-harness materializer, PID sidecars, & `trellis gc` sprawl sweep:**
+  - Derived the admitted harness union in `scripts/lib/local-registry.sh` and `scripts/materialize-scheduled-task.sh` directly from `trellis.registry.schema.json` (fixing 5-harness `antigravity`/`opencode` materialization failures), wrote `<stage>.owner.json` PID sidecars on task stages, updated `run-test-health-host.sh` to materialize first with a `$5` budget default, fixed `scripts/check-schedule-freshness.mjs`, and extended `trellis gc` to sweep leaked `state/scratch/.cmd.*` (with `chmod u+w` for read-only Go caches and `lsof +D` + full-tree mtime guards), orphaned `tasks/<fleet>/.*.tmp.*` + `.owner.json` sidecars, and `pi-worktrees.test.*` strays.
+- **`trellis launchd` macOS ACL & test portability:**
+  - `trellis launchd` (`scripts/install-disk-janitor-launchd.sh`) accepts macOS's stock single-ACE `0: group:everyone deny delete` extended ACL on `$HOME/Library` (matching `$HOME`) while continuing to reject any other ACL entry.
+  - Replaced a synthetic private-project fixture identifier in `core-rules/hooks/tests/stop-verify-receipts.bats` with `sample-fx` and pinned `LC_ALL=C` on BSD `pgrep` survivor probes in `scripts/tests/trellis-latency-bench.bats`.
+
+## [1.5.4] - 2026-11-18
+
+### Added
+
+- **Machine-specific model roster & stateless OpenCode Go pool balancer (`spec 077`, `docs/adr/2026-11-18-machine-local-roster.md`):**
+  - Canonical portable catalog (`core-rules/skills/herdr-foreman/models.json`, 6 model families including `zhipu` `glm-5.3` + `harnesses.json` across `pi`, `claude-code`, `codex`, `cursor`, `agy`, `opencode`) paired with private `$TRELLIS_HOME/roster.json` (`0600` in `0700` parent, `scripts/lib/trellis.roster.schema.json`) and `trellis roster` (`discover`, `show`, `gaps`, `probe`, `latch`, `unlatch`, `classify`, `migrate`).
+  - Deterministic `hrw-v1` rendezvous pool selection across OpenCode Go accounts with shared `$TRELLIS_HOME/state/prepaid-latch.json` `429` cooldown latching, `not-on-machine` / `topology` vs `quota` degradation diagnostics, and defensive `red_teamer` (`--classify red-team`) routing while preserving inline `roles.json` fallback when `roster.json` is absent.
+- **`trellis lean-audit`, `/lean-sweep`, and `/red-team`:**
+  - Read-only mature-repository bloat, giant-file (`>500` LOC), and redundant-test audit CLI (`scripts/lean-audit.sh`, `scripts/lean-audit.py`) plus `.claude/commands/` and `.agents/workflows/` commands (`lean-sweep.md`, `red-team.md`).
+- **5-harness `trellis worktree launch` & Antigravity global skill linking:**
+  - Added `trellis worktree launch --harness <claude|codex|pi|antigravity|opencode>` enforcing centralized `~/projects/worktrees/` placement and linked `~/.gemini/config/skills/herdr-foreman` under `harnesses.user.links` (with matching `sync-to-template.sh` and `mirror-lint.sh` private projection guards).
+
+### Fixed
+
+- `trellis launchd` (`scripts/install-disk-janitor-launchd.sh`) accepts macOS's stock single-ACE `0: group:everyone deny delete` extended ACL on the operator home directory while continuing to reject every other ACL entry.
+- `trellis gc` (`scripts/gc.sh`) reaps orphaned `$TRELLIS_HOME/releases/.exec/.lock.*` lockfiles alongside stale execution snapshots.
+- Replaced synthetic private-project string literals in two `.bats` fixtures so `trellis mirror` privacy lint passes cleanly.
+
+## [1.5.3] - 2026-11-18
+
+### Added
+
+- **Full Antigravity (`antigravity` / `agy` >= 1.5.9) and OpenCode (`opencode` >= 2.0.25) harness compatibility (`spec 076`):**
+  schema-3 `inheritance-manifest.json`, explicit `--harness antigravity|opencode` selectors, contextual `.agents/hooks.json` Option B native companion rendering (`Harness::Antigravity` across `SessionStart`, `PreInvocation`, `PreToolUse`, `PostToolUse`, `Stop`), non-deferrable `.agents/AGENTS.md`, `.opencode/opencode.json` merging with sibling JSONC drift guards, and Pi roster isolation under `.pi/agents`.
+- **`trellis gc` (`scripts/gc.sh`):** safe, dry-run-by-default garbage collector for stale/missing registry worktrees, unreferenced release artifacts, and orphaned local runtime state.
+- **Verification & Local CI Modernization (`P37`–`P51`):**
+  - `P37`: structural `<git-dir>/trellis-local/last-verified.json` (`0600` in `0700` dir) written by `stop-verify` when checks pass so Claude, Codex, and Antigravity Stop turns succeed without fragile HTML comment scraping.
+  - `P39`/`P40`: base-branch `REVIEW.md` loading (`git cat-file blob "$MERGE_BASE:REVIEW.md"`), 3-round critical repair escalation (`REVIEW_MAX_ROUNDS=3`), and advisory `test-hardcoded-sleep` anti-flake detection in `slop-tripwire`.
+  - `P43`: `.claude/settings*.json`, `.agents/hooks.json`, and `.opencode/opencode.json` inline secret scanning plus zero-subprocess secret redaction in `save-context-log`.
+  - `P45`–`P51`: `tsrs` -> `tsgo` -> `tsc` and `oxlint` -> `biome` -> `eslint` auto-detection, parallel static process-gate rows (`run-all.sh`) and parallel `typecheck` + `lint` + `tests` (`check-tests.sh`), superseded local test-run cancellation (`scripts/run-tests-local.py`), reverse import-graph test selection (`push-test-map.py --explain`, `run-tests.sh --changed`), `+400` net test-LOC growth ratchet, and `/test-cleanup`.
+- **Scheduled `ai-dev-trends` audit (`2026-11-17`):** latest landscape report, dashboard index, and adopt ledger.
+
+### Changed
+
+- **OpenAI GPT-6.2 Sol & Astra roster cutover:** upgraded all live Sol (`sol`, `sol-xhigh`, `sol-max`, `sol-ro`, `sol-rw`, `security-reviewer`) and Astra (`astra`, `astra-ro`) routes from `gpt-6.1-sol` / `gpt-6-astra` to `gpt-6.2-sol` and `gpt-6.2-astra` (`Terra` remains `gpt-6.1-terra`), with Pi setup and Codex preflight defaults updated to `gpt-6.2-sol` (`codex-cli >= 0.169.0`, `pi >= 1.5.2`, `272K` standard-pricing context cap).
+- **Canonical rules switched from `CLAUDE.md` to `AGENTS.md`:** `core-rules/AGENTS.md` is now canonical (`core-rules/CLAUDE.md -> AGENTS.md` retained as compatibility symlink), `antigravity` and `opencode` attachments leave root `<project>/AGENTS.md` untouched via non-deferrable `.agents/AGENTS.md`, `codex`/`pi` retain deferrable root `AGENTS.md` linking, and `trellis release adopt` atomically retargets `CLAUDE.md` symlinks to `AGENTS.md`.
+- **Voluntary L4/L5 decision logging:** dropped forced per-turn `## Decisions made (L<n>)` blocks on routine turns where no consequential decision was taken; `decision-receipt` validates voluntary blocks when emitted while preserving `.trellis.json` schema and canonical `decisions-log.md` integrity.
+- **Node `26.13.1` LTS baseline & project-pinned toolchain resolution:** bumped `dependency-baseline.json` to Node `26.13.1` LTS, updated Pi floor to `1.5.2` (`@tintinweb/pi-subagents@0.26.0`), and resolved project `.nvmrc` / `.node-version` / `engines.node` + Python `>=3.10` into private shims across `Stop`, `PostToolUse`, `pre-push`, `trellis heavy`, and `trellis attach --refresh-toolchain`.
+- **Retired 800/1200-line PR size cap & purged 64 dead zombie files:** removed `pr-size.py` and size-waiver ADRs, deleted retired legacy `rollout-*.sh` scripts and `0.85` Pi patches, wired 4 orphaned Python test suites, and slimmed `release-store-part1.bats` by ~78%.
+
+### Fixed
+
+- Pi `agent_before_settle` skips success completion gates when a provider error terminates a turn before any tool call (`fix/pi-error-completion`).
+- Linked-worktree `trellis attach --refresh-toolchain` preserves `git_hooks.enabled == false` instead of coercing boolean `false` to `true` under `jq`'s `//` operator.
+
+- Test module imports and process-gate verdict helpers no longer leave Python
+  bytecode in writable source checkouts. The test runner fails on remaining
+  `__pycache__` directories instead of silently accepting the pollution.
+- Process-gate's default test ceiling is 90 minutes rather than 25, allowing
+  full suites and database-lock waits; typecheck and lint retain their own cap.
+- An old native Stop bundle missing `deps-heavy.sh` still blocks, but now tells
+  the user to restart the session rather than retry hook synchronisation.
+- Home resolution and related byte-validation helpers avoid runtime locale
+  changes that can crash Bash 5.3 when the caller has no locale variables.
+  Assignment lint blocks reintroduction; native-pinned SemVer and the guard
+  regex wrapper remain explicit, digest-bound follow-ups.
+- Managed pre-push hooks resolve the caller's current Docker context before HOME
+  isolation when no explicit host or context is set, forwarding only its endpoint
+  as `DOCKER_HOST`. Explicit values keep precedence; post-checkout avoids the new
+  lookup. Re-adopt on 1.5.3+ to update existing rendered hooks.
+- Heavy launcher test hooks use exact-line Bash matching instead of early-exiting
+  grep pipelines, preventing broken-pipe diagnostics without changing hook
+  output, flag gating or pause precedence.
+- Surgical and emergency declarations validate against their canonical branch
+  scope on later update pushes, retaining branch/worktree and declaring-commit
+  binding. Spec-gate discounts proven whole-path protected imports from both
+  floor and cumulative-ceiling counts, with raw/discounted/anchor receipts;
+  mixed-file and uncertain cases conservatively retain the full count.
+- Rebuild both native companions (T71 rebuild 15, superseding 14) with the
+  repaired embedded spec-gate and launcher test-hook inputs, retaining
+  source-bound records and the pinned toolchain.
+- Pi completion and lifecycle bind to the project's attached release even when
+  the management CLI has another release active. Native Pi session verification
+  uses bundled stamp and full-verification helpers, not helpers from the payload
+  being diagnosed; both native companions are rebuilt for these changes.
+- 1.5.3 post-E fixes: the latency recorder waits while a detached postjob's lock
+  exists even if its process-identity probe is temporarily unavailable. Saved
+  T73a qualification fixtures are regenerated against that producer.
+- The local test runner retains its 7,200-second default and permits explicit
+  deadline overrides up to 14,400 seconds. Deadline transport no longer prevents
+  exact-input verdict reuse; a timed-out run still cannot publish a pass.
+- Bash 3 test assertions now fail explicitly, doctor batch-parity fixtures use a
+  fixed reference clock, and T45 stage weights reflect the retained runs.
+- Gate fixtures isolate doctor HOME/Codex state and npm grammar inputs, disable
+  detached Git maintenance before snapshot copies, include the real attachment
+  filesystem module in rollout payloads, and join postjobs despite non-UTF-8
+  process arguments. The npm fixture change adds isolation and diagnostics; the
+  historical full-gate failure's trigger has not been identified.
+
 ## [1.5.2] - 2026-11-13
 
 **Highlights.** This release reduces repeated work in read-only doctor, registry

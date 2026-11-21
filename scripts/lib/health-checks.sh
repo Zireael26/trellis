@@ -77,12 +77,11 @@ hc_container_runtime_rows() {
   elif [ -n "$docker_cli" ] && [ "${DOCKER_HOST+x}" != x ] && [ "$context" != colima ]; then
     printf '%s\t%s\n' "$HC_WARN" 'docker-context-not-colima'
   fi
-  # Sits alongside docker-context-not-colima (which pins the colima-fleet drift
-  # expectation above): any non-default context is invisible to managed hooks,
-  # which run with a private HOME, so only an exported DOCKER_HOST reaches the
-  # gate. Overlap on a drifted colima machine intentionally reports both rows.
+  # Keep the legacy-hook reminder alongside the colima-fleet drift row above:
+  # current pre-push dispatchers snapshot the endpoint before HOME isolation, but hooks
+  # rendered before 1.5.3 need re-adoption or an exported DOCKER_HOST.
   if [ -n "$docker_cli" ] && [ "${DOCKER_HOST+x}" != x ] && [ "$context" != default ]; then
-    printf '%s\t%s\n' "$HC_WARN" "docker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is '$context'; managed hooks run with a private HOME, so contexts are invisible; export DOCKER_HOST (e.g. docker context inspect --format '{{.Endpoints.docker.Host}}')"
+    printf '%s\t%s\n' "$HC_WARN" "docker-host-unset-for-hooks: DOCKER_HOST is unset and the active docker context is '$context'; hooks rendered before 1.5.3 lose contexts under their private HOME; re-adopt with 1.5.3+ or export DOCKER_HOST (e.g. docker context inspect --format '{{.Endpoints.docker.Host}}')"
   fi
 }
 
@@ -1222,54 +1221,56 @@ hc_prepush_wired_runall() {
 # Present -> OK; absent (or file missing) -> WARN.
 hc_receipt_grammar_present() {
   local canon="$1"
-  local claudemd="$canon/core-rules/CLAUDE.md"
-  if [ -f "$claudemd" ] && grep -qF 'dod-receipt' "$claudemd" 2>/dev/null; then
-    echo "receipt-grammar-present: dod-receipt grammar present in core-rules/CLAUDE.md"
+  local rulefile="$canon/core-rules/CLAUDE.md"
+  local rel="core-rules/CLAUDE.md"
+  if [ -f "$canon/core-rules/AGENTS.md" ] && [ ! -L "$canon/core-rules/AGENTS.md" ]; then
+    rulefile="$canon/core-rules/AGENTS.md"
+    rel="core-rules/AGENTS.md"
+  fi
+  if [ -f "$rulefile" ] && grep -Eq 'dod-receipt|last-verified\.json' "$rulefile" 2>/dev/null; then
+    echo "receipt-grammar-present: dod-receipt grammar present in $rel"
     return "$HC_OK"
   fi
-  echo "receipt-grammar-present: dod-receipt grammar MISSING from core-rules/CLAUDE.md — execute receipts have no canonical contract"
+  echo "receipt-grammar-present: dod-receipt grammar MISSING from $rel — execute receipts have no canonical contract"
   return "$HC_WARN"
 }
 
-# hc_claudemd_budget <canonical>
-# STATIC (adopt-loop, spec 008 — digest 2026-07-07 hygiene): SINGLE-ARG
-# canonical-side check (Tier-0). core-rules/CLAUDE.md is the parent doctrine
-# every project inherits. A repeated community finding is that past ~200 lines /
-# ~150 instructions a CLAUDE.md starts getting PARTIALLY IGNORED — instructions
-# beyond the cliff silently lose force. 006 just added lines to the doctrine, so
-# a growth guardrail is timely. WARN (never blocks) when core-rules/CLAUDE.md
-# crosses the ~200-line attention budget; advisory, future-growth prevention.
-#
-# METRIC CHOICE (deliberate): this instrument adopts the community ATTENTION-CLIFF
-# finding, which is stated in lines/instructions, so it measures LINES and uses
-# the community's ~200 figure verbatim as the budget. Trellis's SEPARATE "small
-# surface" byte target — <= 19,000 bytes for core-rules/CLAUDE.md, stated in that
-# file's Control plane section — is a separate goal tracked there and in the
-# cross-project audits, and is deliberately NOT what this check
-# enforces. At the parent's ~130 B/line density a 200-line budget permits ~26 KB
-# (~5× the byte target): byte-bloat and the attention cliff are different
-# concerns, and this check guards only the latter. Missing file => OK (skip):
-# an absent parent is caught by the inheritance checks, not here. The <canonical>
-# arg ($1) is the standard Tier-0 signature.
+# hc_claudemd_budget <canonical> (aliased as hc_agentsmd_budget)
+# Enforces <=200 lines (attention cliff) and <=24,000 bytes (AGY per-file cap)
+# across canonical core-rules/AGENTS.md (or legacy core-rules/CLAUDE.md).
 hc_claudemd_budget() {
   local canon="$1"
   local claudemd="$canon/core-rules/CLAUDE.md"
+  local rel="core-rules/CLAUDE.md"
+  if [ -f "$canon/core-rules/AGENTS.md" ] && [ ! -L "$canon/core-rules/AGENTS.md" ]; then
+    claudemd="$canon/core-rules/AGENTS.md"
+    rel="core-rules/AGENTS.md"
+  fi
   local budget=200
+  local byte_budget=24000
   if [ ! -f "$claudemd" ]; then
-    echo "claudemd-budget: core-rules/CLAUDE.md absent — line-budget check skipped"
+    echo "claudemd-budget: $rel absent — line-budget check skipped"
     return "$HC_OK"
   fi
-  # awk NR counts the final line even without a trailing newline (robust vs a
-  # naive `wc -l`); always a bare integer, safe for the -gt comparison below.
-  local lines
+  local lines bytes
   lines="$(awk 'END{print NR}' "$claudemd" 2>/dev/null || echo 0)"
+  bytes="$(wc -c < "$claudemd" 2>/dev/null | tr -d '[:space:]' || echo 0)"
   [ -n "$lines" ] || lines=0
+  [ -n "$bytes" ] || bytes=0
   if [ "$lines" -gt "$budget" ]; then
-    echo "claudemd-budget: core-rules/CLAUDE.md is $lines lines (budget: $budget) — past the attention cliff where instructions get partially ignored; trim or split reference into sibling docs"
+    echo "claudemd-budget: $rel is $lines lines (budget: $budget) — past the attention cliff where instructions get partially ignored; trim or split reference into sibling docs"
     return "$HC_WARN"
   fi
-  echo "claudemd-budget: core-rules/CLAUDE.md is $lines lines (budget: $budget)"
+  if [ "$bytes" -gt "$byte_budget" ]; then
+    echo "claudemd-budget: $rel is $bytes bytes (budget: $byte_budget) — exceeds the 24,000-byte per-file rule limit; trim or split reference into sibling docs"
+    return "$HC_WARN"
+  fi
+  echo "claudemd-budget: $rel is $lines lines (budget: $budget)"
   return "$HC_OK"
+}
+
+hc_agentsmd_budget() {
+  hc_claudemd_budget "$@"
 }
 
 # Codex config-intent observation, not a native activation or enforcement probe.
@@ -1319,23 +1320,6 @@ hc_codex_hooks_enabled() {
   return "$HC_INFO"
 }
 
-# WARN-class, global and read-only: inspect companion plugin hook compatibility.
-# Repair is an explicit operator action, never a side effect of doctor.
-hc_codex_plugin_surface() {
-  local script="$SCRIPT_DIR/check-codex-plugin-surface.sh"
-  if [ ! -x "$script" ]; then
-    echo "codex-plugin-surface: check script missing at $script"
-    return "$HC_WARN"
-  fi
-  local out
-  if out="$(bash "$script" 2>&1)"; then
-    printf '%s\n' "$out"
-    return "$HC_OK"
-  fi
-  printf 'codex-plugin-surface: WARN — %s\n' "$out"
-  return "$HC_WARN"
-}
-
 # ===========================================================================
 # PORTABLE LOCAL-STATE HEALTH
 #
@@ -1354,9 +1338,17 @@ hc_harness_capability_observation() {
   fi
   while IFS= read -r harness; do
     printf 'harness-capability: %s installation=%s; native-loaded=unknown; native-exercised=unknown\n' "$harness" "$installation"
-    if [ "$harness" = pi ]; then
-      printf '%s\n' 'harness-capability: pi hard Stop=unsupported; settled/post-action=advisory; portable post-compaction recovery=unsupported'
-    fi
+    case "$harness" in
+      pi)
+        printf '%s\n' 'harness-capability: pi hard Stop=unsupported; settled/post-action=advisory; portable post-compaction recovery=unsupported'
+        ;;
+      antigravity)
+        printf '%s\n' 'harness-capability: antigravity hooks=.agents/hooks.json (SessionStart, PreInvocation, PreToolUse, PostToolUse, Stop); PreCompact=unsupported; personal ~/.gemini/antigravity/skills overrides workspace .agents/skills on name collision'
+        ;;
+      opencode)
+        printf '%s\n' 'harness-capability: opencode mode=instructions-only (.opencode/opencode.json -> .agents/AGENTS.md); turn-time hooks=unsupported; enforcement=Git pre-push/post-checkout only'
+        ;;
+    esac
   done < <(printf '%s\n' "$harnesses" | jq -r '.[]')
   return "$HC_INFO"
 }
@@ -1588,12 +1580,14 @@ hc_portable_surface_plan_metadata() (
   _attachment_canonical_file "$manifest" || return 1
   directories="$(printf '%s\n' "$plan" | jq -cS --slurpfile manifest "$manifest" '
     .harnesses as $selected
-    | [$selected[] as $harness
-       | $manifest[0].harnesses[$harness].links[]?
-       | select(has("source_children"))
-       | (.source_children | split("/") | last) as $source_kind
-       | select($source_kind == "skills" or $source_kind == "commands" or $source_kind == "agents")
-       | .destination_dir]
+    | [($selected[] as $harness | $manifest[0].harnesses[$harness].links[]?),
+       ($manifest[0].harnesses.shared_agents.links[]?
+        | (.consumers // ["codex","pi"]) as $consumers
+        | select(any($selected[]; . as $h | ($consumers | index($h)) != null)))]
+    | map(select(has("source_children"))
+      | (.source_children | split("/") | last) as $source_kind
+      | select($source_kind == "skills" or $source_kind == "commands" or $source_kind == "agents")
+      | .destination_dir)
     | unique | sort
   ')" || return 1
   plan="$(printf '%s\n' "$plan" | trellis_jq -cS --argjson directories "$directories" \
@@ -1653,7 +1647,7 @@ hc_portable_payload_surface_plan() (
   local harness
   for harness in "$@"; do
     case "$harness" in
-      claude|codex|pi|user) ;;
+      antigravity|claude|codex|opencode|pi|user) ;;
       *) return 1 ;;
     esac
     harness_args+=(--harness "$harness")
@@ -1728,7 +1722,7 @@ hc_portable_normalize_harnesses() {
   local raw="${1:-}" normalized
   normalized="$(printf '%s\n' "$raw" | jq -cS '
     if type == "array" and length > 0
-       and all(.[]; . == "claude" or . == "codex" or . == "pi")
+       and all(.[]; . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi")
     then unique | sort
     else error("invalid harness set")
     end
@@ -1832,11 +1826,10 @@ hc_portable_machine_config() {
       and ([.discovery_roots[] | absolute_safe_path] | all)
       and ((.discovery_roots | unique | length) == (.discovery_roots | length))
       and ((has("shared_infra_root") | not) or (.shared_infra_root | absolute_safe_path));
-    # heavy_slots and heavy_light_slots are typed by `trellis heavy --check`
-    # alone (spec 054), so a bad value disables only the heavy gate. projects
-    # (per-project host settings such as stop_checks.fast) is typed by the
-    # Stop hook alone (spec 072), so a bad value costs only the faster suite.
-    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "projects"])
+    # The heavy supervisor owns slot typing (spec 054). A bad
+    # process_gate_slots value must reach it for diagnosis and a cap of 1.
+    # The Stop hook alone types projects (spec 072).
+    closed_object(["schema_version", "source_root", "release_remote", "active_cli_release", "default_fleet", "fleets"]; ["$schema", "heavy_slots", "heavy_light_slots", "process_gate_slots", "projects"])
     and ((has("$schema") | not) or (.["$schema"] | no_machine_controls and length > 0))
     and .schema_version == 1
     and (.source_root | absolute_safe_path)
@@ -2034,11 +2027,12 @@ _hc_portable_owner_capture_surface_fields() {
     . as $owner | ($owner.artifacts + ($owner.pre_existing // [])) as $all
     | (any($all[]; .path | startswith(".pi/"))) as $has_pi
     | ($owner.release // ""), "\u0000", $owner.worktree_root, "\u0000",
-      ([$all[] | if (.path | startswith(".codex/")) then "codex"
-        elif (.path | startswith(".pi/")) then "pi"
-        elif (.path | startswith(".claude/")) then "claude"
-        elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
-        else empty end] | unique | sort | tojson), "\u0000",
+      ((if $owner.schema_version == 2 then ($owner.harnesses | unique | sort)
+        else [$all[] | if (.path | startswith(".codex/")) then "codex"
+          elif (.path | startswith(".pi/")) then "pi"
+          elif (.path | startswith(".claude/")) then "claude"
+          elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
+          else empty end] | unique | sort end) | tojson), "\u0000",
       (($owner.pre_existing // []) | tojson), "\u0000",
       ([$owner.artifacts[] | select(.kind != "parent" and .kind != "directory")
         | {kind:.kind,path:.path,target:(.target // null)}] | sort_by(.path, .kind) | tojson), "\u0000"
@@ -3804,11 +3798,11 @@ hc_claude_code_version() {
   return "$HC_WARN"
 }
 
-# The recommended pi setup (AGENT_PI_SETUP.md) supports pi 1.1.0 and above.
+# The recommended pi setup (AGENT_PI_SETUP.md) supports pi 1.5.2 and above.
 # WARN below it, or when pi is missing but a registered checkout selects the pi
 # harness; INFO when pi is missing and unselected, or its version can't be read
 # (including a `pi --version` that outlives the timeout); silent at or above it.
-HC_PI_MIN_VERSION=1.1.0
+HC_PI_MIN_VERSION=1.5.2
 HC_PI_VERSION_TIMEOUT_SECONDS=10
 hc_pi_version() {
   local registry="${1:-}" version
@@ -3829,6 +3823,54 @@ hc_pi_version() {
   fi
   [ "$(hc_higher_version "$version" "$HC_PI_MIN_VERSION")" = "$version" ] && return "$HC_OK"
   echo "pi version: $version is below $HC_PI_MIN_VERSION, the floor of the recommended pi setup; update pi (AGENT_PI_SETUP.md step 1)"
+  return "$HC_WARN"
+}
+
+HC_AGY_MIN_VERSION=1.5.9
+HC_AGY_VERSION_TIMEOUT_SECONDS=10
+hc_agy_version() {
+  local registry="${1:-}" version
+  if ! command -v agy >/dev/null 2>&1; then
+    if [ -f "$registry" ] &&
+       jq -e 'any(.projects[]?.checkouts[]?.harnesses[]?; . == "antigravity")' "$registry" >/dev/null 2>&1; then
+      echo "agy version: agy not found on PATH, but a registered checkout selects the antigravity harness; install agy CLI $HC_AGY_MIN_VERSION or later"
+      return "$HC_WARN"
+    fi
+    echo "agy version: agy not found on PATH and no registered checkout selects the antigravity harness"
+    return "$HC_INFO"
+  fi
+  version="$(perl -e '$ENV{PATH} = shift; alarm shift; exec @ARGV' "${TRELLIS_ATTACH_CALLER_PATH:-$PATH}" "$HC_AGY_VERSION_TIMEOUT_SECONDS" agy --version </dev/null 2>/dev/null \
+    | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)" || version=""
+  if [ -z "$version" ]; then
+    echo "agy version: unreadable (agy --version gave no X.Y.Z within ${HC_AGY_VERSION_TIMEOUT_SECONDS}s); the $HC_AGY_MIN_VERSION floor is unverified"
+    return "$HC_INFO"
+  fi
+  [ "$(hc_higher_version "$version" "$HC_AGY_MIN_VERSION")" = "$version" ] && return "$HC_OK"
+  echo "agy version: $version is below $HC_AGY_MIN_VERSION, the agy CLI compatibility floor; update agy"
+  return "$HC_WARN"
+}
+
+HC_OPENCODE_MIN_VERSION=2.0.25
+HC_OPENCODE_VERSION_TIMEOUT_SECONDS=10
+hc_opencode_version() {
+  local registry="${1:-}" version
+  if ! command -v opencode >/dev/null 2>&1; then
+    if [ -f "$registry" ] &&
+       jq -e 'any(.projects[]?.checkouts[]?.harnesses[]?; . == "opencode")' "$registry" >/dev/null 2>&1; then
+      echo "opencode version: opencode not found on PATH, but a registered checkout selects the opencode harness; install OpenCode $HC_OPENCODE_MIN_VERSION or later"
+      return "$HC_WARN"
+    fi
+    echo "opencode version: opencode not found on PATH and no registered checkout selects the opencode harness"
+    return "$HC_INFO"
+  fi
+  version="$(perl -e '$ENV{PATH} = shift; alarm shift; exec @ARGV' "${TRELLIS_ATTACH_CALLER_PATH:-$PATH}" "$HC_OPENCODE_VERSION_TIMEOUT_SECONDS" opencode --version </dev/null 2>/dev/null \
+    | head -n 1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)" || version=""
+  if [ -z "$version" ]; then
+    echo "opencode version: unreadable (opencode --version gave no X.Y.Z within ${HC_OPENCODE_VERSION_TIMEOUT_SECONDS}s); the $HC_OPENCODE_MIN_VERSION floor is unverified"
+    return "$HC_INFO"
+  fi
+  [ "$(hc_higher_version "$version" "$HC_OPENCODE_MIN_VERSION")" = "$version" ] && return "$HC_OK"
+  echo "opencode version: $version is below $HC_OPENCODE_MIN_VERSION, the OpenCode compatibility floor; update opencode"
   return "$HC_WARN"
 }
 
@@ -4538,6 +4580,12 @@ hc_portable_verify_payload_render_record() (
       return $?
       ;;
     explicit-json)
+      actual_root="$(jq -r '.worktree_root' "$owner")" || return 1
+      _attachment_canonical_dir "$actual_root" || return 1
+      if [ "$destination" = .opencode/opencode.json ] &&
+         { [ -e "$actual_root/.opencode/opencode.jsonc" ] || [ -L "$actual_root/.opencode/opencode.jsonc" ]; }; then
+        return 1
+      fi
       jq -se 'length == 1 and (.[0] | type == "object")' "$source" >/dev/null 2>&1 || return 1
       render_record="$(jq -c --arg path "$destination" '
         [.renders[] | select(.path == $path)]
@@ -4821,14 +4869,18 @@ hc_portable_native_surfaces() (
     owner_harnesses="$_HC_DIAG_OWNER_HARNESSES"
   else
     owner_harnesses="$(jq -cS '
-    (.artifacts + (.pre_existing // [])) as $leaves
-    | (any($leaves[]; .path | startswith(".pi/"))) as $has_pi
-    | [$leaves[]
-      | if (.path | startswith(".codex/")) then "codex"
-        elif (.path | startswith(".pi/")) then "pi"
-        elif (.path | startswith(".claude/")) then "claude"
-        elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
-        else empty end] | unique | sort
+    if .schema_version == 2 then
+      (.harnesses | unique | sort)
+    else
+      (.artifacts + (.pre_existing // [])) as $leaves
+      | (any($leaves[]; .path | startswith(".pi/"))) as $has_pi
+      | [$leaves[]
+        | if (.path | startswith(".codex/")) then "codex"
+          elif (.path | startswith(".pi/")) then "pi"
+          elif (.path | startswith(".claude/")) then "claude"
+          elif (($has_pi | not) and (.path == "AGENTS.md" or (.path | startswith(".agents/")))) then "codex"
+          else empty end] | unique | sort
+    end
     ' "$owner" 2>/dev/null)" || owner_harnesses=""
   fi
   if [ "$owner_harnesses" != "$normalized_registry" ]; then

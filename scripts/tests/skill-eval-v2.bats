@@ -240,7 +240,7 @@ result = m.main()
 (root / 'link-order.json').write_text(json.dumps(dict(result=result, destinations=destinations)))
 raise SystemExit(result)
 ''')
-    result = execute([sys.executable, str(driver), *command(root)[1:]])
+    result = execute([sys.executable, '-B', str(driver), *command(root)[1:]])
     order = json.loads((root / 'link-order.json').read_text())
     assert result.returncode == 0 and order['result'] == 0, 'publication driver did not publish'
     assert order['destinations'] == [str(root / 'evidence/benchmark.json'), str(root / 'evidence/evaluation.json')], 'publication hard-link order is not benchmark then evaluation: ' + json.dumps(order['destinations'])
@@ -360,7 +360,7 @@ finally:
 assert arms == [30, 0], arms
 raise SystemExit(result)
 ''')
-        result = execute([sys.executable, str(driver), *command(root)[1:]])
+        result = execute([sys.executable, '-B', str(driver), *command(root)[1:]])
         expected = 'TimeoutError: 30-second' if failure == 'alarm' else 'BrokenPipeError: controlled stdout failure'
         assert result.returncode == 1 and expected in result.stderr, 'publication failure not controlled: ' + failure
         assert not (root / 'evidence/benchmark.json').exists(), 'benchmark leaked on stdout failure'

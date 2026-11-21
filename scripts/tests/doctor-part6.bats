@@ -267,10 +267,11 @@ autonomy_ceiling: 2
 Fixture preset
 EOF
   fi
+  printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/AGENTS.md"
   printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/CLAUDE.md"
   printf -- '---\nname: fixture\ndescription: fixture\n---\n' \
     > "$PORTABLE_RELEASE_PAYLOAD/core-rules/skills/fixture/SKILL.md"
-  for command_name in fixture primer primer-refresh primer-check explore surgical; do
+  for command_name in fixture primer primer-refresh primer-check explore surgical lean-sweep red-team test-cleanup de-slop; do
     printf '# fixture command %s\n' "$command_name" \
       > "$PORTABLE_RELEASE_PAYLOAD/core-rules/commands/$command_name.md"
   done
@@ -802,7 +803,7 @@ copy_show_config_into() {
   git -C "$PORTABLE_PROJECT" -c user.name=fixture -c user.email=fixture@example.invalid commit -qm agents
   prepare_portable_attachment
   rm "$PORTABLE_PROJECT/AGENTS.md"
-  ln -s .trellis/runtime/core-rules/CLAUDE.md "$PORTABLE_PROJECT/AGENTS.md"
+  ln -s .trellis/runtime/core-rules/AGENTS.md "$PORTABLE_PROJECT/AGENTS.md"
 
   run_portable_show_config
 

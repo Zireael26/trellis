@@ -67,12 +67,12 @@ dj_agent_expected() {
   )
   case "$label" in
     "$DJ_AGENT_REPORT_LABEL")
-      DJ_AGENT_EXPECTED_ARGV+=("$user_home/.local/bin/trellis" disk-janitor --report)
+      DJ_AGENT_EXPECTED_ARGV+=("$user_home/.local/bin/trellis" disk-janitor --report --scopes "caches,worktrees,stores,docker,releases,release-tmp,pi,orphans,logs,tmp,transcripts")
       DJ_AGENT_EXPECTED_HOUR=3
       DJ_AGENT_EXPECTED_MINUTE=30
       ;;
     "$DJ_AGENT_APPLY_LABEL")
-      DJ_AGENT_EXPECTED_ARGV+=("$user_home/.local/bin/trellis" disk-janitor --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker")
+      DJ_AGENT_EXPECTED_ARGV+=("$user_home/.local/bin/trellis" disk-janitor --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,docker,releases,release-tmp,pi,tmp")
       DJ_AGENT_EXPECTED_HOUR=4
       DJ_AGENT_EXPECTED_MINUTE=0
       ;;
@@ -264,7 +264,7 @@ dj_agent_scan() {
         local dry_run_rc=0 dry_run_out=""
         if [ -n "$dj_script" ] && [ -x "$dj_script" ]; then
           dry_run_out="$(/usr/bin/env -u TRELLIS_LIBS_PRELOADED TRELLIS_HOME="$trellis_home" HOME="$user_home" \
-            "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker" --dry-run 2>&1)" || dry_run_rc=$?
+            "$dj_script" --apply --yes --safe-only --dehydrate --scopes "worktrees,caches,docker,releases,release-tmp,pi,tmp" --dry-run 2>&1)" || dry_run_rc=$?
         else
           dry_run_rc=126
           dry_run_out="janitor script is missing or not executable: ${dj_script:-not found}"

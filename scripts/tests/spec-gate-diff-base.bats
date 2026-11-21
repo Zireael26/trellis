@@ -467,32 +467,19 @@ foreign_marker() {
   [[ "$output" == "diff-base: ${M0:0:12} origin/main via default "* ]] || false
 }
 
-@test "L4 interview requires the complete branch identity at head and in the worktree" {
+@test "L4 triad passes without requiring a decisions-log entry at head or in the worktree" {
   git checkout -qb feature/pay main || return 1
   lines src/large.js 120 || return 1
   triad 010-intake || return 1
+  rm -f specs/010-intake/clarify.md
   printf '{"template":{"branch":"main"},"autonomy":4,"mandatory_pipeline":{"enabled":true}}\n' > .trellis.json || return 1
-  printf '%s\n' '- feature/payments-v2: another branch' '- prefix-feature/pay: another branch' '- feature/pay/child: another branch' > decisions-log.md || return 1
-  git add -A && git commit -qm 'unrelated intake records' || return 1
+  git add -A && git commit -qm 'l4 triad without decisions-log' || return 1
   local tip gate
   tip="$(git rev-parse HEAD)" || return 1
   for gate in "$GATE" "$CODEX_GATE"; do
     run bash "$gate" --gate --ref feature/pay --head "$tip" --range "$M0..$tip"
-    [ "$status" -eq 1 ] && [[ "$output" == *'interview artifact is missing'* ]] || { echo "$output"; return 1; }
-    run bash "$gate" --gate
-    [ "$status" -eq 1 ] && [[ "$output" == *'interview artifact is missing'* ]] || { echo "$output"; return 1; }
-  done
-  printf '%s\n' '- `feature/pay`: self-answered intake' > decisions-log.md || return 1
-  for gate in "$GATE" "$CODEX_GATE"; do
-    run bash "$gate" --gate
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
-    run bash "$gate" --gate --ref feature/pay --head "$tip" --range "$M0..$tip"
-    [ "$status" -eq 1 ] || { echo "$output"; return 1; }
-  done
-  git add decisions-log.md && git commit -qm 'own intake record' || return 1
-  tip="$(git rev-parse HEAD)" || return 1
-  for gate in "$GATE" "$CODEX_GATE"; do
-    run bash "$gate" --gate --ref feature/pay --head "$tip" --range "$M0..$tip"
+    run bash "$gate" --gate
     [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   done
 }
@@ -734,4 +721,503 @@ direct_copy_project() {
   [ "$status" -eq 4 ]
   [ ! -e "$BATS_TEST_TMPDIR/agents-planted-executed" ]
   mv "$SANDBOX/saved-resolver-agents.sh" "$RUNTIME/core-rules/skills/process-gate/scripts/lib/diff-base.sh"
+}
+
+# 1.5.3: declarations cover canonical branch scope, not one transport update.
+sg153_verdict() {
+  run bash -c '. "$1"; sg_verdict "$PWD" "$2" "$3" "$4"' _ \
+    "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$1" "${2:-}" "${3:-}"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+sg153_main() {
+  local file="$1" count="$2" branch
+  branch=$(git branch --show-current) || return 1
+  git checkout -q main || return 1
+  lines "$file" "$count" || return 1
+  git add -- "$file" && git commit -qm 'protected changes' || return 1
+  IMPORT_TIP=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$IMPORT_TIP" || return 1
+  git checkout -q "$branch" || return 1
+  git merge -q --no-ff main -m 'Merge protected changes' || return 1
+}
+sg153_widget() {
+  git checkout -qb release/demo-base main || return 1
+  lines src/parent.js 10 || return 1
+  git add src/parent.js && git commit -qm parent || return 1
+  DECL_BASE=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/demo-base "$DECL_BASE" || return 1
+  git checkout -qb feature/widget || return 1
+  git config branch.feature/widget.trellisParent refs/remotes/origin/demo-base || return 1
+  git config branch.feature/widget.trellisBase "$DECL_BASE" || return 1
+  lines src/already-pushed.js 5 || return 1
+  git add src/already-pushed.js && git commit -qm 'previous push' || return 1
+  REMOTE_OLD=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/widget "$REMOTE_OLD" || return 1
+  lines src/first.js 45 || return 1
+  git add src/first.js && git commit -qm 'first branch change' || return 1
+  sg153_main src/protected-first.js 60 || return 1
+  lines src/second.js 40 || return 1
+  git add src/second.js && git commit -qm 'second branch change' || return 1
+  sg153_main src/protected-second.js 60 || return 1
+  WIDGET_HEAD=$(git rev-parse HEAD) || return 1
+}
+
+@test "153 marker validates an update range and later descendants in both twins" {
+  stack no-triad 10 || return 1
+  local old="$BTIP" declared head gate flag
+  lines src/update.js 120 || return 1
+  git add src/update.js && git commit -qm update || return 1
+  declared=$(git rev-parse HEAD) || return 1
+  for gate in "$GATE" "$CODEX_GATE"; do
+    for flag in --mark --mark-emergency; do
+      run bash "$gate" "$flag" 'mechanical update'
+      [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+      [ "$(awk 'NR==3' .claude/session-surgical)" = "$ATIP" ]
+      run bash "$gate" --gate --range "$old..$declared" --ref refs/heads/feature/b --head "$declared"
+      [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    done
+  done
+  lines src/descendant.js 20 || return 1
+  git add src/descendant.js && git commit -qm descendant || return 1
+  head=$(git rev-parse HEAD) || return 1
+  [ "$(awk 'NR==4' .claude/session-surgical)" = "$declared" ]
+  run bash "$GATE" --gate --range "$old..$head" --ref refs/heads/feature/b --head "$head"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "153 widget-shaped non-default recorded parent discounts two protected merges and honors emergency" {
+  sg153_widget || return 1
+  sg153_verdict "$REMOTE_OLD..$WIDGET_HEAD" refs/heads/feature/widget "$WIDGET_HEAD" || return 1
+  [[ "$output" == $'block\t'*'85 gated lines over floor 80'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"protected-imports: raw=205 discounted=85 anchor=$IMPORT_TIP"* ]] || { echo "$output"; return 1; }
+  local gate
+  for gate in "$GATE" "$CODEX_GATE"; do
+    run bash "$gate" --mark-emergency 'urgent long-lived branch update'
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ "$(awk 'NR==3' .claude/session-surgical)" = "$DECL_BASE" ]
+    run bash "$gate" --gate --range "$REMOTE_OLD..$WIDGET_HEAD" --ref refs/heads/feature/widget --head "$WIDGET_HEAD"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  done
+  grep -q 'emergency-override.*diff=90' .claude/spec-gate-audit.log
+}
+
+@test "153 protected-only imports do not force a triad and receipts bind both counts and anchor" {
+  git checkout -qb feature/import main || return 1
+  local old="$M0" head gate
+  lines src/own.js 20 || return 1
+  git add src/own.js && git commit -qm own || return 1
+  sg153_main src/protected.js 120 || return 1
+  head=$(git rev-parse HEAD) || return 1
+  for gate in "$GATE" "$CODEX_GATE"; do
+    run bash "$gate" --gate --range "$old..$head" --ref refs/heads/feature/import --head "$head"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == *"protected-imports: raw=140 discounted=20 anchor=$IMPORT_TIP"* ]] || { echo "$output"; return 1; }
+  done
+  sg153_verdict "$old..$head" refs/heads/feature/import "$head" || return 1
+  [[ "$output" == *'sub-floor(20<=80)'* ]] || { echo "$output"; return 1; }
+}
+
+@test "153 cumulative surgical ceiling also discounts protected imports" {
+  stack no-triad 250 || return 1
+  sg153_main src/protected.js 250 || return 1
+  local head
+  head=$(git rev-parse HEAD) || return 1
+  run bash "$GATE" --mark 'bounded mechanical branch'
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [ "$(awk 'NR==3' .claude/session-surgical)" = "$ATIP" ]
+  run bash "$GATE" --gate --range "$ATIP..$head" --ref refs/heads/feature/b --head "$head"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == *"protected-imports: raw=500 discounted=250 anchor=$IMPORT_TIP"* ]] || { echo "$output"; return 1; }
+}
+
+@test "153 repeated pushes cannot narrow a cumulative over-ceiling surgical declaration" {
+  stack no-triad 300 || return 1
+  local old="$BTIP" head
+  lines src/update.js 120 || return 1
+  git add src/update.js && git commit -qm update || return 1
+  head=$(git rev-parse HEAD) || return 1
+  run bash "$GATE" --mark 'not below cumulative ceiling'
+  [ "$status" -eq 0 ] || return 1
+  run bash "$GATE" --gate --range "$old..$head" --ref refs/heads/feature/b --head "$head"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  grep -q 'oversized-surgical.*diff=420>ceiling=400' .claude/spec-gate-audit.log
+}
+
+@test "153 declaring HEAD must be present and ancestral; unknown marker mode never passes" {
+  stack no-triad || return 1
+  git checkout -qb feature/unrelated main || return 1
+  git commit -q --allow-empty -m unrelated || return 1
+  local other head mode
+  other=$(git rev-parse HEAD) || return 1
+  git checkout -q feature/b || return 1
+  for head in '' nonexistent HEAD "$other"; do
+    mkdir -p .claude
+    printf '%s\n' feature/b "$REPO_DIR" "$ATIP" "$head" session emergency reason > .claude/session-surgical
+    run bash "$GATE" --gate
+    [ "$status" -eq 1 ] || { echo "head=$head: $output"; return 1; }
+  done
+  printf '%s\n' feature/b "$REPO_DIR" "$ATIP" "$BTIP" session unknown reason > .claude/session-surgical
+  run bash "$GATE" --gate
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+}
+
+@test "153 a child declaration does not authorize an expanded or non-ancestor push range" {
+  stack no-triad || return 1
+  run bash "$GATE" --mark-emergency 'child only'
+  [ "$status" -eq 0 ] || return 1
+  run bash "$GATE" --gate --range "$M0..$BTIP" --ref refs/heads/feature/b --head "$BTIP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  git checkout -qb feature/side main || return 1
+  lines src/side.js 100 || return 1
+  git add src/side.js && git commit -qm side || return 1
+  local side
+  side=$(git rev-parse HEAD) || return 1
+  git checkout -q feature/b || return 1
+  run bash "$GATE" --gate --range "$side..$BTIP" --ref refs/heads/feature/b --head "$BTIP"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+}
+
+@test "153 protected deletion is discounted but a private before-state deletion is not" {
+  # Identical generated fixture lines must not turn a deletion/addition into a
+  # zero-line rename before the protected-transition proof is exercised.
+  git config diff.renames false || return 1
+  lines src/obsolete.js 120 || return 1
+  git add src/obsolete.js && git commit -qm seed-obsolete || return 1
+  local old head
+  old=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$old" || return 1
+  git checkout -qb feature/delete || return 1
+  lines src/own.js 20 || return 1
+  git add src/own.js && git commit -qm own || return 1
+  git checkout -q main || return 1
+  git rm -q src/obsolete.js && git commit -qm remove-obsolete || return 1
+  IMPORT_TIP=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$IMPORT_TIP" || return 1
+  git checkout -q feature/delete && git merge -q --no-ff main -m 'Merge removal' || return 1
+  head=$(git rev-parse HEAD) || return 1
+  sg153_verdict "$old..$head" refs/heads/feature/delete "$head" || return 1
+  [[ "$output" == *'sub-floor(20<=80)'* ]] || { echo "$output"; return 1; }
+  # Now a path introduced only by this branch is deleted to match protected absence.
+  lines src/private.js 120 || return 1
+  git add src/private.js && git commit -qm private || return 1
+  old=$(git rev-parse HEAD) || return 1
+  git rm -q src/private.js && git commit -qm remove-private || return 1
+  sg153_main src/protected.js 120 || return 1
+  head=$(git rev-parse HEAD) || return 1
+  sg153_verdict "$old..$head" refs/heads/feature/delete "$head" || return 1
+  [[ "$output" == $'block\t'*'120 gated lines over floor 80'* ]] || { echo "$output"; return 1; }
+}
+
+@test "153 mixed files retain the full count and later unmerged protected changes cannot discount it" {
+  lines src/shared.js 100 || return 1
+  git add src/shared.js && git commit -qm seed-shared || return 1
+  local old head
+  old=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$old" || return 1
+  git checkout -qb feature/mixed || return 1
+  printf 'branch-only\n' >> src/shared.js
+  git add src/shared.js && git commit -qm branch || return 1
+  git checkout -q main || return 1
+  printf 'protected-only\n' > "$SANDBOX/shared"
+  printf '%s\n' "$(< src/shared.js)" >> "$SANDBOX/shared"
+  cp "$SANDBOX/shared" src/shared.js
+  git add src/shared.js && git commit -qm protected || return 1
+  IMPORT_TIP=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$IMPORT_TIP" || return 1
+  git checkout -q feature/mixed && git merge -q --no-ff main -m 'Merge mixed edits' || return 1
+  head=$(git rev-parse HEAD) || return 1
+  sg153_verdict "$old..$head" refs/heads/feature/mixed "$head" || return 1
+  [[ "$output" == *'sub-floor(2<=80)'* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *'protected-imports:'* ]] || { echo "$output"; return 1; }
+  # Unmerged protected content is not an authority for the range's after state.
+  lines src/unique.js 120 || return 1
+  git add src/unique.js && git commit -qm unique || return 1
+  head=$(git rev-parse HEAD) || return 1
+  git checkout -q main || return 1
+  lines src/unique.js 120 || return 1
+  git add src/unique.js && git commit -qm unmerged || return 1
+  git update-ref refs/remotes/origin/main "$(git rev-parse HEAD)" || return 1
+  git checkout -q feature/mixed || return 1
+  sg153_verdict "$old..$head" refs/heads/feature/mixed "$head" || return 1
+  [[ "$output" == $'block\t'*'122 gated lines over floor 80'* ]] || { echo "$output"; return 1; }
+}
+
+@test "153 literal hostile paths discount only the pinned protected transitions" {
+  git checkout -qb feature/paths main || return 1
+  local path head
+  lines src/own.js 20 || return 1
+  git add src/own.js && git commit -qm own || return 1
+  git checkout -q main || return 1
+  for path in 'src/space name.js' $'src/tab\tname.js' $'src/newline\nname.js' 'src/[glob]*.js'; do
+    lines "$path" 30 || return 1
+  done
+  git add src && git commit -qm 'protected literal paths' || return 1
+  IMPORT_TIP=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$IMPORT_TIP" || return 1
+  git checkout -q feature/paths && git merge -q --no-ff main -m 'Merge literal paths' || return 1
+  head=$(git rev-parse HEAD) || return 1
+  lines src/later.js 120 || return 1
+  git add src/later.js && git commit -qm later || return 1
+  sg153_verdict "$M0..$head" refs/heads/feature/paths "$head" || return 1
+  [[ "$output" == *'sub-floor(20<=80)'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"protected-imports: raw=140 discounted=20 anchor=$IMPORT_TIP"* ]] || { echo "$output"; return 1; }
+}
+
+@test "153 rename rows and missing or ambiguous import proof retain the raw count" {
+  git config diff.renames true || return 1
+  git checkout -qb feature/rename main || return 1
+  lines src/old.js 150 || return 1
+  git add src/old.js && git commit -qm private || return 1
+  local old head
+  old=$(git rev-parse HEAD) || return 1
+  git checkout -q main || return 1
+  lines src/new.js 100 || return 1
+  git add src/new.js && git commit -qm protected || return 1
+  IMPORT_TIP=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$IMPORT_TIP" || return 1
+  git checkout -q feature/rename || return 1
+  git mv src/old.js src/new.js || return 1
+  lines src/new.js 100 || return 1
+  git add src && git commit -qm 'rename and remove private tail' || return 1
+  git merge -q --no-ff main -m 'Merge identical protected destination' || return 1
+  head=$(git rev-parse HEAD) || return 1
+  sg153_verdict "$old..$head" refs/heads/feature/rename "$head" || return 1
+  [[ "$output" == *'sub-floor(50<=80)'* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *'protected-imports:'* ]] || { echo "$output"; return 1; }
+
+  git checkout -qb feature/proof main || return 1
+  old=$(git rev-parse HEAD) || return 1
+  lines src/own.js 20 || return 1
+  git add src/own.js && git commit -qm own || return 1
+  sg153_main src/imported.js 120 || return 1
+  head=$(git rev-parse HEAD) || return 1
+  local shim="$SANDBOX/git-shim" kind
+  mkdir -p "$shim"
+  export SG153_REAL_GIT SG153_ANCHOR="$IMPORT_TIP" SG153_OLD="$old"
+  SG153_REAL_GIT=$(command -v git) || return 1
+  cat > "$shim/git" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *'diff --numstat -z'*)
+    case "$SG153_PROBE" in
+      raw-truncated) printf '140\t0\tsrc/imported.js'; exit 0 ;;
+      raw-invalid) printf 'invalid\t0\tsrc/imported.js\0'; exit 0 ;;
+    esac ;;
+  *'merge-base --all'*)
+    if [ "$SG153_PROBE" = ambiguous ]; then printf '%s\n%s\n' "$SG153_OLD" "$SG153_ANCHOR"; exit 0; fi ;;
+  *diff-tree*)
+    case "$SG153_PROBE" in
+      error) exit 42 ;;
+      truncated) printf 'src/own.js'; exit 0 ;;
+    esac ;;
+esac
+exec "$SG153_REAL_GIT" "$@"
+SH
+  chmod +x "$shim/git"
+  for kind in error truncated ambiguous; do
+    run env PATH="$shim:$PATH" SG153_PROBE="$kind" bash -c '. "$1"; sg_verdict "$PWD" "$2" "$3" "$4"' _ \
+      "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$old..$head" refs/heads/feature/proof "$head"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == $'block\t'*'140 gated lines over floor 80'* ]] || { echo "$kind: $output"; return 1; }
+    [[ "$output" != *'protected-imports:'* ]] || { echo "$output"; return 1; }
+  done
+  for kind in raw-truncated raw-invalid; do
+    run env PATH="$shim:$PATH" SG153_PROBE="$kind" bash -c '. "$1"; sg_verdict "$PWD" "$2" "$3" "$4"' _ \
+      "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$old..$head" refs/heads/feature/proof "$head"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == $'block\t'*'cannot-compute-diff-baseline'* ]] || { echo "$kind: $output"; return 1; }
+  done
+}
+
+@test "153 pure protected imports are zero under Bash 3.2 nounset without scratch leaks" {
+  git checkout -qb feature/pure main || return 1
+  sg153_main src/protected.js 120 || return 1
+  local head
+  head=$(git rev-parse HEAD) || return 1
+  export TMPDIR="$SANDBOX/count-tmp"
+  mkdir -m 700 "$TMPDIR" || return 1
+  run /bin/bash -uc '. "$1"; sg_compute_gated_diff "$2" "$3"' _ \
+    "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$REPO_DIR" "$M0..$head"
+  [ "$status" -eq 0 ] && [ "$output" = 0 ] || { echo "$output"; return 1; }
+  run /bin/bash -uc '. "$1"; sg_verdict "$PWD" "$2" "$3" "$4"' _ \
+    "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$M0..$head" refs/heads/feature/pure "$head"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+  [[ "$output" == $'pass\t'*'sub-floor(0<=80)'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"protected-imports: raw=120 discounted=0 anchor=$IMPORT_TIP"* ]] || { echo "$output"; return 1; }
+  [ -z "$(find "$TMPDIR" -maxdepth 1 -name 'trellis-spec-diff.*' -print)" ]
+}
+
+@test "153 malformed measurement protocol cannot authorize a surgical or emergency route" {
+  stack no-triad || return 1
+  run bash "$GATE" --mark-emergency 'requires a known count'
+  [ "$status" -eq 0 ] || return 1
+  local value
+  for value in '' garbage $'120\tbad\t-'; do
+    run env SG153_MEASURE="$value" bash -c '. "$1"
+      _sg_measure_gated_diff() { printf "%s" "$SG153_MEASURE"; }
+      sg_verdict "$PWD" "$2" "$3" "$4"' _ \
+      "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$ATIP..$BTIP" refs/heads/feature/b "$BTIP"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [[ "$output" == $'block\t'*'cannot-compute-diff-baseline'* ]] || { echo "$output"; return 1; }
+    run env SG153_MEASURE="$value" bash -c '. "$1"
+      _sg_measure_gated_diff() { printf "%s" "$SG153_MEASURE"; }
+      sg_compute_gated_diff "$PWD" "$2"' _ "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$ATIP..$BTIP"
+    [ "$status" -eq 0 ] && [ "$output" = -1 ] || { echo "$output"; return 1; }
+    run env SG153_MEASURE="$value" bash -c '. "$1"
+      _sg_measure_gated_diff() { printf "%s" "$SG153_MEASURE"; }
+      if sg_valid_marker "$PWD" "$PWD" "$2" 120 400 feature/b "$3"; then exit 5; fi' _ \
+      "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$ATIP" "$BTIP"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    [ ! -e .claude/spec-gate-audit.log ]
+  done
+}
+
+@test "153 contradictory explicit head refuses and ref-only historical ranges use historical policy" {
+  stack no-triad 350 || return 1
+  local first="$BTIP" later historical
+  run bash "$GATE" --mark 'first bounded state'
+  [ "$status" -eq 0 ] || return 1
+  lines src/later.js 100 || return 1
+  git add src/later.js && git commit -qm 'over ceiling later' || return 1
+  later=$(git rev-parse HEAD) || return 1
+  run bash "$GATE" --gate --ref refs/heads/feature/b --head "$later" --range "$ATIP..$first"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'range-head-mismatch'* ]] || { echo "$output"; return 1; }
+
+  git checkout -qb feature/historical main || return 1
+  lines src/own.js 120 || return 1
+  triad 003-historical || return 1
+  rm specs/003-historical/clarify.md || return 1
+  git add src/own.js specs/003-historical && git commit -qm 'triad without interview' || return 1
+  historical=$(git rev-parse HEAD) || return 1
+  mkdir -p .claude
+  printf 'later waiver\n' > .claude/spec-waiver
+  git add .claude/spec-waiver && git commit -qm 'later interview waiver' || return 1
+  run bash "$GATE" --gate --ref refs/heads/feature/historical --range "$M0..$historical"
+  [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+  [[ "$output" == *'interview artifact is missing'* ]] || { echo "$output"; return 1; }
+  later=$(git rev-parse HEAD) || return 1
+  run bash "$GATE" --gate --ref refs/heads/feature/historical --head "$later" --range "$M0..$later"
+  [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+}
+
+@test "153 compatibility API keeps root-relative paths with diff.relative enabled" {
+  git checkout -qb feature/sub main || return 1
+  lines src/app.js 120 || return 1
+  git add src/app.js && git commit -qm own || return 1
+  sg153_main src/protected.js 10 || return 1
+  local head
+  head=$(git rev-parse HEAD) || return 1
+  git config diff.relative true || return 1
+  run bash -c '. "$1"; sg_compute_gated_diff "$2/src" "$3"' _ \
+    "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$REPO_DIR" "$M0..$head"
+  [ "$status" -eq 0 ] && [ "$output" = 120 ] || { echo "$output"; return 1; }
+}
+
+@test "153 extra range delimiters are refused rather than silently normalized" {
+  stack no-triad 20 || return 1
+  local range gate
+  for range in "$ATIP..not-a-rev..$BTIP" "$ATIP..$M0 $ATIP..$BTIP"; do
+    for gate in "$GATE" "$CODEX_GATE"; do
+      run bash "$gate" --gate --range "$range"
+      [ "$status" -eq 1 ] || { echo "$output"; return 1; }
+    done
+    run bash -c '. "$1"; sg_compute_gated_diff "$PWD" "$2"' _ "$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh" "$range"
+    [ "$status" -eq 0 ] && [ "$output" = -1 ] || { echo "$output"; return 1; }
+  done
+}
+
+@test "153 judged-branch template policy cannot select an accomplice import anchor" {
+  git checkout -qb feature/accomplice main || return 1
+  lines src/accomplice.js 120 || return 1
+  git add src/accomplice.js && git commit -qm accomplice || return 1
+  git update-ref refs/remotes/origin/feature/accomplice "$(git rev-parse HEAD)" || return 1
+  git checkout -qb feature/judged main || return 1
+  jq -c '.template.branch="feature/accomplice"' .trellis.json > "$SANDBOX/policy"
+  cp "$SANDBOX/policy" .trellis.json
+  git add .trellis.json && git commit -qm 'untrusted head-side policy' || return 1
+  git merge -q --no-ff feature/accomplice -m 'Merge accomplice' || return 1
+  local head
+  head=$(git rev-parse HEAD) || return 1
+  sg153_verdict "$M0..$head" refs/heads/feature/judged "$head" || return 1
+  [[ "$output" == $'block\t'*'122 gated lines over floor 80'* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *'protected-imports:'* ]] || { echo "$output"; return 1; }
+}
+
+@test "153 quoted lookup keys distinguish control bytes from literal escape spellings" {
+  git checkout -qb feature/quoted main || return 1
+  local path head
+  for path in 'src/newline\nname.js' 'src/tab\tname.js'; do
+    lines "$path" 60 || return 1
+  done
+  git add src && git commit -qm 'literal escape spellings' || return 1
+  git checkout -q main || return 1
+  for path in $'src/newline\nname.js' $'src/tab\tname.js'; do
+    lines "$path" 60 || return 1
+  done
+  git add src && git commit -qm 'protected control-byte paths' || return 1
+  IMPORT_TIP=$(git rev-parse HEAD) || return 1
+  git update-ref refs/remotes/origin/main "$IMPORT_TIP" || return 1
+  git checkout -q feature/quoted && git merge -q --no-ff main -m 'Merge distinct path bytes' || return 1
+  head=$(git rev-parse HEAD) || return 1
+  sg153_verdict "$M0..$head" refs/heads/feature/quoted "$head" || return 1
+  [[ "$output" == $'block\t'*'120 gated lines over floor 80'* ]] || { echo "$output"; return 1; }
+  [[ "$output" == *"protected-imports: raw=240 discounted=120 anchor=$IMPORT_TIP"* ]] || { echo "$output"; return 1; }
+}
+
+@test "153 unavailable awk retains the full raw count with a visible diagnostic" {
+  git checkout -qb feature/awk-fallback main || return 1
+  lines src/own.js 20 || return 1
+  git add src/own.js && git commit -qm own || return 1
+  sg153_main src/protected.js 120 || return 1
+  local head core="$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh"
+  head=$(git rev-parse HEAD) || return 1
+  sg153_verdict "$M0..$head" refs/heads/feature/awk-fallback "$head" || return 1
+  [[ "$output" == $'pass\t'*'sub-floor(20<=80)'* ]] || { echo "$output"; return 1; }
+  # Fault only the private runtime copy; never remove/rename system awk or
+  # modify the production core to introduce a test-only dependency selector.
+  python3 -I -B - "$core" "$SANDBOX/missing-awk" <<'PY'
+from pathlib import Path
+import shlex,sys
+core=Path(sys.argv[1]);missing=Path(sys.argv[2]);assert not missing.exists()
+text=core.read_text();needle='/usr/bin/env LC_ALL=C /usr/bin/awk'
+assert text.count(needle)==1
+core.write_text(text.replace(needle,'/usr/bin/env LC_ALL=C '+shlex.quote(str(missing))))
+PY
+  run --separate-stderr bash -c '. "$1"; sg_compute_gated_diff "$2" "$3"' _ \
+    "$core" "$REPO_DIR" "$M0..$head" </dev/null
+  [ "$status" -eq 0 ] && [ "$output" = 140 ] || { echo "$output $stderr"; return 1; }
+  [[ "$stderr" == *'protected import lookup unavailable; counting full range'* ]] || { echo "$stderr"; return 1; }
+  run --separate-stderr bash -c '. "$1"; sg_verdict "$PWD" "$2" "$3" "$4"' _ \
+    "$core" "$M0..$head" refs/heads/feature/awk-fallback "$head" </dev/null
+  [ "$status" -eq 0 ] || { echo "$output $stderr"; return 1; }
+  [[ "$output" == $'block\t'*'140 gated lines over floor 80'* ]] || { echo "$output"; return 1; }
+  [[ "$output" != *'protected-imports:'* ]] || { echo "$output"; return 1; }
+  [[ "$stderr" == *'protected import lookup unavailable; counting full range'* ]] || { echo "$stderr"; return 1; }
+}
+
+@test "153 temporary directories containing equals remain filenames not awk assignments" {
+  git checkout -qb feature/tmp-equals main || return 1
+  lines src/own.js 20 || return 1
+  git add src/own.js && git commit -qm own || return 1
+  sg153_main src/protected.js 120 || return 1
+  local head tmp core="$RUNTIME/core-rules/hooks/lib/spec-gate-core.sh"
+  head=$(git rev-parse HEAD) || return 1
+  for tmp in "$SANDBOX/scratch=absolute" 'scratch=relative'; do
+    mkdir -m 700 -- "$tmp" || return 1
+    export TMPDIR="$tmp"
+    # EOF is explicit: if the relative name regresses into a var=value operand,
+    # awk must not wait on the interactive runner's stdin instead of failing.
+    run --separate-stderr bash -c '. "$1"; sg_compute_gated_diff "$2" "$3"' _ \
+      "$core" "$REPO_DIR" "$M0..$head" </dev/null
+    [ "$status" -eq 0 ] && [ "$output" = 20 ] || { echo "$output $stderr"; return 1; }
+    [ -z "$stderr" ] || { echo "$stderr"; return 1; }
+    run --separate-stderr bash -c '. "$1"; sg_verdict "$PWD" "$2" "$3" "$4"' _ \
+      "$core" "$M0..$head" refs/heads/feature/tmp-equals "$head" </dev/null
+    [ "$status" -eq 0 ] || { echo "$output $stderr"; return 1; }
+    [[ "$output" == $'pass\t'*'sub-floor(20<=80)'* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"protected-imports: raw=140 discounted=20 anchor=$IMPORT_TIP"* ]] || { echo "$output"; return 1; }
+    [ -z "$stderr" ] || { echo "$stderr"; return 1; }
+    [ -z "$(find "$TMPDIR" -maxdepth 1 -name 'trellis-spec-diff.*' -print)" ]
+  done
 }

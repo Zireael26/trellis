@@ -278,6 +278,11 @@ attachment_reconcile() {
     "--expected-harnesses-json" "$harnesses_json"
   )
   if [ "$VERIFY_ONLY" -eq 1 ]; then
+    if printf '%s\n' "$harnesses_json" | jq -e 'index("opencode") != null' >/dev/null 2>&1 &&
+       { [ -e "$TARGET/.opencode/opencode.jsonc" ] || [ -L "$TARGET/.opencode/opencode.jsonc" ]; }; then
+      printf 'verify: OpenCode sibling .opencode/opencode.jsonc conflicts with .opencode/opencode.json: %s\n' "$TARGET" >&2
+      return 1
+    fi
     # attachment_verify checks every owned artifact (including rendered files).
     # Bind that complete result to this exact registry worktree row and to the
     # immutable release anchor; scalar owner metadata alone is not enough.
@@ -286,13 +291,18 @@ attachment_reconcile() {
        attachment_verify "$home" "$owner" >/dev/null 2>&1 &&
        jq -e --arg fleet "$fleet" --arg project_id "$project_id" --arg checkout "$checkout" \
          --arg worktree "$worktree" --arg attachment "$attachment_id" --arg release "$release" \
-         --arg root "$TARGET" --arg payload "$payload" '
+         --arg root "$TARGET" --arg payload "$payload" --argjson harnesses "$harnesses_json" '
            .status == "committed"
            and .fleet == $fleet and .project_id == $project_id
            and .checkout_id == $checkout and .worktree_id == $worktree
            and .attachment_id == $attachment
            and .project_root == $root and .worktree_root == $root
            and .release == $release
+           and (if .schema_version == 2 then (.harnesses | unique | sort) == ($harnesses | unique | sort) else true end)
+           and (if ($harnesses | (index("antigravity") != null or index("opencode") != null))
+                then any(.artifacts[]; .path == ".agents/AGENTS.md" and .kind == "symlink")
+                  and (any((.pre_existing // [])[]; .path == ".agents/AGENTS.md") | not)
+                else true end)
            and ([.artifacts[]
                  | select(.path == ".trellis/runtime"
                           and .kind == "symlink"
@@ -305,6 +315,11 @@ attachment_reconcile() {
     fi
     printf 'verify: opted-in worktree is missing its local Trellis attachment: %s\n' "$TARGET" >&2
     return 1
+  fi
+  if printf '%s\n' "$harnesses_json" | jq -e 'index("opencode") != null' >/dev/null 2>&1 &&
+     { [ -e "$TARGET/.opencode/opencode.jsonc" ] || [ -L "$TARGET/.opencode/opencode.jsonc" ]; }; then
+    printf 'trellis worktree: OpenCode sibling .opencode/opencode.jsonc conflicts with .opencode/opencode.json at %s\n' "$TARGET" >&2
+    return "$TRELLIS_EX_CONFLICT"
   fi
   # A target row with an attachment ID is an explicit repair request. A new
   # worktree may inherit this checkout's attachment only from a fully verified

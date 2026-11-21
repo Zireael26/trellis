@@ -20,6 +20,7 @@ setup() {
 #!/bin/sh
 printf 'DOCKER_HOST=%s\\n' "\${DOCKER_HOST-__UNSET__}" > "$RECORD"
 printf 'DOCKER_CONTEXT=%s\\n' "\${DOCKER_CONTEXT-__UNSET__}" >> "$RECORD"
+printf 'DOCKER_CONFIG=%s\\n' "\${DOCKER_CONFIG-__UNSET__}" >> "$RECORD"
 SH
   chmod 700 "$ROOT/project-hook"
   cp "$ROOT/project-hook" "$PRIOR/pre-push"
@@ -104,15 +105,15 @@ GATE
 
 run_prior() {
   prepare_pre_push || return 1
-  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
-    "PATH=$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
+  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    "PATH=$ROOT/bin" "HOME=$HOME" \
     "TMPDIR=$ROOT/tmp" "HOOK_RECORD=$RECORD" "$@" \
     /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
     _ "$PROJECT" "$MANAGED/pre-push" "$ROOT/refs"
 }
 
 run_shim() {
-  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
+  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
     "PATH=$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
     "HOOK_RECORD=$RECORD" "$@" \
     /bin/bash -c 'cd "$1" && "$2"' _ "$PROJECT" "$MANAGED/pre-commit"
@@ -122,6 +123,7 @@ assert_hook_env() {
   [ "$status" -eq 0 ] || { printf '%s\n' "$output" >&2; return 1; }
   grep -Fx "DOCKER_HOST=$1" "$RECORD"
   grep -Fx 'DOCKER_CONTEXT=__UNSET__' "$RECORD"
+  grep -Fx 'DOCKER_CONFIG=__UNSET__' "$RECORD"
 }
 
 @test "pre-push prior hook forwards set DOCKER_HOST" {
@@ -187,8 +189,8 @@ assert_hook_env() {
 run_gate() {
   prepare_pre_push || return 1
   rm -f "$ROOT/gate-env"
-  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT \
-    "PATH=$ROOT/bin:/usr/bin:/bin:/usr/sbin:/sbin" "HOME=$HOME" \
+  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    "PATH=$ROOT/bin" "HOME=$HOME" \
     "TMPDIR=$ROOT/tmp" "$@" \
     /bin/bash -c 'cd "$1" && "$2" origin fixture < "$3"' \
     _ "$PROJECT" "$MANAGED/pre-push" "$ROOT/refs"
@@ -219,9 +221,13 @@ stub_docker_context() {
   printf 'unix://%s/docker.sock\n' "$ROOT" > "$HOME/docker-endpoint"
   cat > "$ROOT/bin/docker" <<SH
 #!/bin/sh
+printf 'call\\n' >> "$ROOT/docker-calls"
 printf '%s\\n' "\$HOME" > "$ROOT/docker-home"
 printf '%s\\n' "\$@" > "$ROOT/docker-args"
-[ "${1:-0}" -eq 0 ] || exit 1
+[ "${1:-0}" -eq 0 ] || { printf 'untrusted\\nDocker error\\n' >&2; exit 1; }
+if [ "\$3" = --format ]; then
+  /usr/bin/grep -q '"currentContext": "colima"' "\${DOCKER_CONFIG:-\$HOME/.docker}/config.json" || exit 1
+fi
 /bin/cat "\$HOME/docker-endpoint"
 SH
   chmod 700 "$ROOT/bin/docker"
@@ -229,8 +235,106 @@ SH
 
 assert_context_resolution() {
   grep -Fx "$HOME" "$ROOT/docker-home"
-  printf '%s\n' context inspect "$1" --format '{{.Endpoints.docker.Host}}' > "$ROOT/expected-args"
+  printf '%s\n' context inspect "$@" --format '{{.Endpoints.docker.Host}}' > "$ROOT/expected-args"
   cmp "$ROOT/expected-args" "$ROOT/docker-args"
+  [ "$(wc -l < "$ROOT/docker-calls" | tr -d ' ')" -eq 1 ]
+}
+
+stub_docker_current_context() {
+  stub_docker_context "$@"
+  mkdir -p "$HOME/.docker"
+  printf '%s\n' '{"currentContext": "colima"}' > "$HOME/.docker/config.json"
+}
+
+@test "pre-push snapshots currentContext once before isolation for prior hook and gate" {
+  stub_docker_current_context
+  run_gate
+  assert_gate_env "unix://$ROOT/docker.sock"
+  assert_hook_env "unix://$ROOT/docker.sock"
+  assert_context_resolution
+  grep -Fx 'DOCKER_CONTEXT=__UNSET__' "$ROOT/gate-env"
+  grep -Fx 'DOCKER_CONFIG=__UNSET__' "$ROOT/gate-env"
+  ! grep -Fx "HOME=$HOME" "$ROOT/gate-env"
+  [ -z "$stderr" ]
+}
+
+@test "pre-push resolves currentContext from caller DOCKER_CONFIG without forwarding it" {
+  stub_docker_current_context
+  mv "$HOME/.docker" "$HOME/context-store"
+  run_gate "DOCKER_CONFIG=$HOME/context-store"
+  assert_gate_env "unix://$ROOT/docker.sock"
+  assert_hook_env "unix://$ROOT/docker.sock"
+  assert_context_resolution
+  grep -Fx 'DOCKER_CONFIG=__UNSET__' "$ROOT/gate-env"
+  [ -z "$stderr" ]
+}
+
+@test "post-checkout does not resolve currentContext or warn on a broken context" {
+  local payload="$TRELLIS_HOME/releases/1.2.3/payload" manifest
+  stub_docker_current_context 1
+  prepare_pre_push
+  manifest="$(_attachment_hooks_release_manifest_sha256 "$payload")"
+  _attachment_hooks_post_checkout_dispatcher_body "$payload" "$manifest" > "$MANAGED/post-checkout"
+  chmod 700 "$MANAGED/post-checkout"
+  run --separate-stderr /usr/bin/env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_CONFIG \
+    "PATH=$ROOT/bin" "HOME=$HOME" "TMPDIR=$ROOT/tmp" \
+    /bin/bash -c 'cd "$1" && "$2" old new 0' _ "$PROJECT" "$MANAGED/post-checkout"
+  [ "$status" -eq 0 ]
+  [ ! -e "$ROOT/docker-calls" ]
+  [ -z "$stderr" ]
+}
+
+@test "pre-push currentContext failure warns once without leaking Docker stderr" {
+  stub_docker_current_context 1
+  run_gate
+  assert_gate_env __UNSET__
+  assert_hook_env __UNSET__
+  assert_context_resolution
+  [ -z "$output" ]
+  [ "$stderr" = 'Trellis: cannot resolve current Docker context; continuing without DOCKER_HOST.' ]
+}
+
+@test "pre-push currentContext empty endpoint warns and leaves host unset" {
+  stub_docker_current_context
+  : > "$HOME/docker-endpoint"
+  run_gate
+  assert_gate_env __UNSET__
+  assert_context_resolution
+  [ "$stderr" = 'Trellis: cannot resolve current Docker context; continuing without DOCKER_HOST.' ]
+}
+
+@test "pre-push without docker leaves host unset without a warning" {
+  run_gate
+  assert_gate_env __UNSET__
+  assert_hook_env __UNSET__
+  [ ! -e "$ROOT/bin/docker" ]
+  [ -z "$stderr" ]
+}
+
+@test "pre-push explicit host overrides currentContext without calling docker" {
+  stub_docker_current_context
+  run_gate DOCKER_HOST=unix:///fixture/explicit.sock DOCKER_CONTEXT=desktop-linux
+  assert_gate_env unix:///fixture/explicit.sock
+  assert_hook_env unix:///fixture/explicit.sock
+  [ ! -e "$ROOT/docker-calls" ]
+  [ -z "$stderr" ]
+}
+
+@test "pre-push explicit empty host overrides currentContext without calling docker" {
+  stub_docker_current_context
+  run_gate DOCKER_HOST=
+  assert_gate_env ''
+  assert_hook_env ''
+  [ ! -e "$ROOT/docker-calls" ]
+  [ -z "$stderr" ]
+}
+
+@test "pre-push explicit empty context keeps the named-context path without a fallback" {
+  stub_docker_current_context 1
+  run_gate DOCKER_CONTEXT=
+  assert_gate_env __UNSET__
+  assert_context_resolution ''
+  [ "$stderr" = 'Trellis: cannot resolve Docker context ""; continuing without DOCKER_HOST.' ]
 }
 
 @test "pre-push resolves caller DOCKER_CONTEXT before isolation" {
@@ -304,4 +408,12 @@ assert_context_resolution() {
   run_gate DOCKER_CONTEXT=empty
   assert_gate_env __UNSET__
   [ "$stderr" = 'Trellis: cannot resolve Docker context "empty"; continuing without DOCKER_HOST.' ]
+}
+
+@test "pre-push refuses a context endpoint whose unix path exists as a non-socket file" {
+  stub_docker_current_context
+  : > "$ROOT/docker.sock"
+  run_gate
+  assert_gate_env __UNSET__
+  [ "$stderr" = 'Trellis: cannot resolve current Docker context; continuing without DOCKER_HOST.' ]
 }

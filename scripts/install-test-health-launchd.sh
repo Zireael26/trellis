@@ -34,6 +34,9 @@ DURABLE_LAUNCHER="$USER_HOME/.local/bin/trellis"
 # NVM default Node/pnpm toolchain and pyenv shims as well as Homebrew, Bun, Go,
 # and Cargo locations.
 DURABLE_PATH="$USER_HOME/.local/bin:$USER_HOME/.nvm/default-node/bin:$USER_HOME/.pyenv/shims:$USER_HOME/.bun/bin:$USER_HOME/.cargo/bin:$USER_HOME/go/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+# Cents, not dollars: the prompt reads materialized inputs and runs each
+# project's own fast suite. Override with TEST_HEALTH_MAX_BUDGET_USD.
+MAX_BUDGET_USD="${TEST_HEALTH_MAX_BUDGET_USD:-5}"
 
 UNINSTALL=false
 RUNNER_TMP=""
@@ -80,6 +83,7 @@ render_plist() {
   TRELLIS_PLIST_ROOT="$TRELLIS_SOURCE_ROOT" TRELLIS_PLIST_HOME="$TRELLIS_HOME" \
   TRELLIS_PLIST_FLEET="$TRELLIS_FLEET_NAME" TRELLIS_PLIST_LAUNCHER="$DURABLE_LAUNCHER" \
   TRELLIS_PLIST_USER="$USER_HOME" TRELLIS_PLIST_CLAUDE="$DURABLE_CLAUDE_BIN" \
+  TRELLIS_PLIST_BUDGET="$MAX_BUDGET_USD" \
   TRELLIS_PLIST_PATH="$DURABLE_PATH" /usr/bin/python3 - "$TEMPLATE" "$PLIST_TMP" <<'PY'
 import os
 import sys
@@ -92,6 +96,7 @@ values = {
     '__TRELLIS_LAUNCHER__': 'TRELLIS_PLIST_LAUNCHER',
     '__USER_HOME__': 'TRELLIS_PLIST_USER',
     '__CLAUDE_BIN__': 'TRELLIS_PLIST_CLAUDE',
+    '__MAX_BUDGET_USD__': 'TRELLIS_PLIST_BUDGET',
     '__PATH__': 'TRELLIS_PLIST_PATH',
 }
 with open(sys.argv[1], encoding='utf-8') as source:
@@ -127,10 +132,19 @@ preflight_install() {
     printf 'info: test-health could not run: off-host (uname=%s); darwin node_modules cannot execute under this kernel\n' "$host" >&2
     return 3
   }
+  case "$MAX_BUDGET_USD" in
+    ''|*[!0-9]*|0)
+      printf 'test-health: refused (budget): MAX_BUDGET_USD must be a positive integer: %s\n' "$MAX_BUDGET_USD" >&2
+      return 1
+      ;;
+  esac
 }
 
 install_agent() {
-  mkdir -p "$LAUNCH_AGENTS_DIR" "$USER_HOME/Library/Caches" "$TRELLIS_SOURCE_ROOT/logs"
+  # Logs belong in mutable private state, not inside the release payload or the
+  # implementation checkout a plist might be rendered from: an immutable payload
+  # cannot accept a launchd write, and a deleted worktree takes its logs with it.
+  mkdir -p "$LAUNCH_AGENTS_DIR" "$USER_HOME/Library/Caches" "$TRELLIS_HOME/logs"
   RUNNER_TMP="$(mktemp "$LAUNCH_AGENTS_DIR/.$LABEL.runner.XXXXXX")"
   PLIST_TMP="$(mktemp "$LAUNCH_AGENTS_DIR/.$LABEL.plist.XXXXXX")"
 
@@ -150,8 +164,9 @@ install_agent() {
   printf 'installed: %s\n' "$PLIST_DEST"
   printf 'installed runner: %s\n' "$RUNNER_DEST"
   printf 'bootstrapped LaunchAgent: %s\n' "$LABEL"
-  printf '  runs: %s -p <materialized test-health prompt> (Monday 11:00 local)\n' "$DURABLE_CLAUDE_BIN"
-  printf '  logs: %s/logs/test-health.out.log and %s/logs/test-health.err.log\n' "$TRELLIS_SOURCE_ROOT" "$TRELLIS_SOURCE_ROOT"
+  printf '  runs: %s -p <materialized test-health prompt> (Monday 11:00 local, budget $%s)\n' \
+    "$DURABLE_CLAUDE_BIN" "$MAX_BUDGET_USD"
+  printf '  logs: %s/logs/test-health.out.log and %s/logs/test-health.err.log\n' "$TRELLIS_HOME" "$TRELLIS_HOME"
 }
 
 if $UNINSTALL; then

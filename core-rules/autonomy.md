@@ -11,8 +11,8 @@ Consultation entries below are defaults for decisions the user has not already r
 | **L1** | Pedagogical | Ask before every non-trivial action. Explain reasoning, alternatives, tradeoffs. Wait. | Conversation captures decisions. |
 | **L2** | Cautious | Ask before non-trivial. Embed agent's recommendation + one-line rationale. Wait yes/no. | Conversation captures decisions. |
 | **L3** | Standard (default) | Plan-approval for 3+ step / architectural. Flag ambiguity, wait. One-q-at-a-time brainstorm. Per-phase approval on multi-file refactors. | Conversation captures decisions. |
-| **L4** | Initiative | Batches related interview questions. Picks-and-documents on routine ambiguity. Single plan-approval at start, no per-phase pause. **Architectural decisions surface inline mid-turn.** | Decision-log written to `decisions-log.md` and rendered at end-of-turn. |
-| **L5** | Autonomous | Decides silently. No plan-approval pause. No per-phase pause. Answers brainstorm questions with documented reasoning. **Architectural decisions surface inline mid-turn.** | Full decision-log written to `decisions-log.md` and rendered at end-of-turn + in PR description. |
+| **L4** | Initiative | Batches related interview questions. Picks-and-documents on routine ambiguity. Single plan-approval at start, no per-phase pause. **Architectural decisions surface inline mid-turn.** | Consequential decisions logged to `decisions-log.md` and rendered in `## Decisions made (L4)` when taken. |
+| **L5** | Autonomous | Decides silently. No plan-approval pause. No per-phase pause. Answers brainstorm questions with documented reasoning. **Architectural decisions surface inline mid-turn.** | Consequential decisions logged to `decisions-log.md` and rendered in `## Decisions made (L5)` + PR description when taken. |
 
 ## Bright-line guardrails (always-on at every level, including L5)
 
@@ -33,7 +33,7 @@ Consultation entries below are defaults for decisions the user has not already r
 - Codebase pattern-conflict resolution.
 - Brainstorming question batching.
 - Spec-Kit phase handoff (clarify → spec → plan → tasks → analyze) — at L5 agent answers clarify questions itself with documented reasoning.
-- Mandatory-pipeline intake interview (when `mandatory_pipeline` is enabled, spec 006). The pre-push *gate* is deterministic and fires the same at every level — it is **not** a bright-line guardrail, but the slider does not switch it off. What flexes is *who answers* the feature-intake: at **L1–L3** `clarify` interviews the user and `clarify.md` (or a `.claude/spec-waiver`) satisfies the gate; at **L4/L5** the agent self-answers and a `decisions-log.md` entry naming the branch satisfies it. See `engineering-process.md` §14.7 + `core-rules/hooks.md`.
+- Mandatory-pipeline intake interview (when `mandatory_pipeline` is enabled, spec 006). The pre-push *gate* is deterministic and fires the same at every level — it is **not** a bright-line guardrail, but the slider does not switch it off. What flexes is *who answers* the feature-intake: at **L1–L3** `clarify` interviews the user and `clarify.md` (or a `.claude/spec-waiver`) satisfies the gate; at **L4/L5** the agent self-answers and the spec triad itself satisfies the gate without requiring a `decisions-log.md` entry (writing to `decisions-log.md` is voluntary and left to the operating model's judgment). See `engineering-process.md` §14.7 + `core-rules/hooks.md`.
 - PR creation — at L5 agent may auto-open PR after gates pass; at L≤4 confirms.
 - End-of-turn reporting register — terse while the operator is watching, plain-prose re-grounding when nobody is (see *Reporting register* below).
 
@@ -100,7 +100,7 @@ A present but unreadable project policy cannot establish its active presets or c
 
 ## Decision log
 
-When active level ≥ 4, agent appends one line per decision to `<canonical-root>/decisions-log.md` as decisions happen. Format:
+When active level ≥ 4 and a genuine consequential decision is taken on the user's behalf, the agent appends one line per decision to `<canonical-root>/decisions-log.md` as decisions happen (routine turns with no decision do not log filler entries). Format:
 
 ```
 - {ISO-8601 timestamp} [L<n>] [{kind}] {what was decided}. Reasoning: {why}. Alternatives considered: {what else}.
@@ -110,9 +110,9 @@ Append ` SURFACED INLINE` if the entry is `architectural` (so audit knows it was
 
 Kinds: `interpretation`, `pattern`, `scope`, `architectural`.
 
-End-of-turn assistant message renders a `## Decisions made (L<n>)` block pulling this turn's entries. When `gh pr create` runs, the PR description body includes the same block. `session-context.sh` injects the last 10 entries from `decisions-log.md` at session start when active level ≥ 4.
+When decisions were logged during the turn, the end-of-turn assistant message renders a `## Decisions made (L<n>)` block pulling this turn's entries (and `gh pr create` includes the branch's decisions in the PR body). `session-context.sh` injects the last 10 entries from `decisions-log.md` at session start when active level ≥ 4.
 
-At `Stop`, `decision-receipt.sh` enforces this contract only for substantive L4/L5 turns: commits since the turn baseline, a dirty worktree, or a filled current-turn DoD marker requires exactly one block for the effective post-ceiling level. Where the running harness registers turn-baseline, a missing baseline also requires a block (fail closed). Each rendered entry must use the current UTC date and exist byte-for-byte in the canonical-root log; architectural entries require `SURFACED INLINE`. The gate is forward-only and never edits or retroactively validates historical entries. L1-L3 and clean read-only turns with no commits since baseline remain unchanged.
+At `Stop`, `decision-receipt.sh` validates voluntary decision blocks on substantive L4/L5 turns: turns without a `## Decisions made (L...)` heading pass cleanly, while any emitted block must match the effective post-ceiling level, use the current UTC date, include `SURFACED INLINE` on `architectural` entries, and exist byte-for-byte in the canonical-root `decisions-log.md`. The gate is forward-only and never edits or retroactively validates historical entries. L1-L3 and clean read-only turns with no commits since baseline remain unchanged.
 
 ### Storage policy
 
@@ -120,11 +120,11 @@ At `Stop`, `decision-receipt.sh` enforces this contract only for substantive L4/
 
 - Decisions accumulate value over time (architecture audits, ADR cross-references, post-incident review).
 - A team operating Trellis benefits from shared visibility into per-session decisions across developers.
-- An operator autonomy-drift rollup requires the file to persist across weeks; gitignored files don't survive `git clean -fdx`.
+- An operator `fleet-process-audit` rollup requires the file to persist across weeks; gitignored files don't survive `git clean -fdx`.
 
 Operators who want per-developer decision logs (e.g., personal scratch projects with only one author) can opt out by adding `/decisions-log.md` to their project `.gitignore`. The Trellis-canonical `gitignore.fragment` does NOT ignore it by default.
 
-If the file grows beyond 100 entries, `autonomy-drift` flags `decisions-log-overflow` (info severity); recommended action is to rotate to `decisions-log.archive.md` and truncate the live file to the last 50 entries.
+If the file grows beyond 100 entries, `fleet-process-audit` flags `decisions-log-overflow` (info severity); recommended action is to rotate to `decisions-log.archive.md` and truncate the live file to the last 50 entries.
 
 ## Session override (`/autonomy N`)
 

@@ -1,6 +1,6 @@
 # communication — human-attention-first output
 
-The default is set in `core-rules/CLAUDE.md` § Communication; this file is the
+The default is set in `core-rules/AGENTS.md` § Communication; this file is the
 full doctrine. It governs every message a human reads in conversation, from any
 agent under any harness — the rules address "you"/"the agent" so every
 inheriting model behaves identically.
@@ -89,10 +89,12 @@ caveats included.
 
 - These rules shape the reply a human sees, never the reasoning behind it.
   Think at whatever length the problem requires.
-- Machine-parsed output is exempt: DoD receipts, `<!-- follow-ups: … -->`
-  markers, and any hook-checked block are emitted complete and exact.
+- Structured blocks checked by hooks (such as `## Decisions made (L<n>)` at
+  L4/L5) are exempt from compression and emitted complete and exact. (`stop-verify`
+  records executed verification evidence into `<git-dir>/trellis-local/last-verified.json`
+  automatically; state command, exit code, and diff summary concisely in prose.)
 - Content conventions for code, commit messages, and technical docs come from
-  `CLAUDE.md` § Code quality. When one of those is the requested deliverable,
+  `AGENTS.md` § Code quality. When one of those is the requested deliverable,
   this doctrine adds only the ship-bare wrapper rule; the content itself
   follows its own conventions.
 - An unattended run's final message keeps the re-grounding requirement of

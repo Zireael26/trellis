@@ -169,6 +169,7 @@ _pgcfg_validate_policy_fallback() {
         and optional_nonnegative_integer("logs_min_mb")
         and optional_nonnegative_integer("logs_min_age_days")
         and optional_nonnegative_integer("tmp_ttl_days")
+        and optional_nonnegative_integer("active_bloat_warn_gb")
         and optional_nonnegative_integer("cc_worktree_idle_days")
         and (
           (has("apply_disabled_scopes") | not)
@@ -187,6 +188,7 @@ _pgcfg_validate_policy_fallback() {
           or (.push_owners | valid_string_list
               and all(.[]; test("^[A-Za-z0-9][A-Za-z0-9-]*(/[A-Za-z0-9._-]+)?$")))
         )
+        and optional_boolean("cow_deps")
       else false end;
     def valid_loop_safety:
       if type == "object" then

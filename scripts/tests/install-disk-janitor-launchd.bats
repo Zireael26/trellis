@@ -38,6 +38,7 @@ SH
 teardown() {
   unset BASH_ENV BASH_ENV_POISON TRELLIS_TEST_ACL_PATH TRELLIS_TEST_ACL_PREFIX 2>/dev/null || true
   unset -f poisoned_launchd_function 2>/dev/null || true
+  [ -z "${HOME:-}" ] || [ ! -e "$HOME/Library" ] || chmod -N "$HOME/Library" 2>/dev/null || true
   [ -z "${SANDBOX:-}" ] || rm -rf "$SANDBOX"
 }
 
@@ -215,9 +216,9 @@ SH
     "HOME=$canonical_home" \
     "TRELLIS_HOME=$canonical_trellis_home" \
     'PATH=/usr/bin:/bin:/usr/sbin:/sbin' \
-    /bin/bash --noprofile --norc "$canonical_home/.local/bin/trellis" disk-janitor --report
+    /bin/bash --noprofile --norc "$canonical_home/.local/bin/trellis" disk-janitor --report --scopes caches,worktrees,stores,docker,releases,release-tmp,pi,orphans,logs,tmp,transcripts
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(cat "$canonical_home/launchd-argv")" = "$(printf 'disk-janitor\n--report')" ]
+  [ "$(cat "$canonical_home/launchd-argv")" = "$(printf 'disk-janitor\n--report\n--scopes\ncaches,worktrees,stores,docker,releases,release-tmp,pi,orphans,logs,tmp,transcripts')" ]
   grep -Fx "HOME=$canonical_home" "$canonical_home/launchd-env"
   grep -Fx "TRELLIS_HOME=$canonical_trellis_home" "$canonical_home/launchd-env"
   grep -Fx 'PATH=/usr/bin:/bin:/usr/sbin:/sbin' "$canonical_home/launchd-env"
@@ -760,12 +761,14 @@ EOF
   [ "$dehydrate_flag" = true ] || { echo "missing --dehydrate"; false; }
   [ "$scopes_flag" = true ] || { echo "missing --scopes"; false; }
 
-  # Validate scopes: must be a subset of safe set {worktrees, caches, releases, pi, tmp, docker}
+  # Validate scopes: must be a subset of safe set {worktrees, caches, docker, releases, release-tmp, pi, tmp}
+  # (stores stays attended so unattended nightly runs never prune caches under a
+  # live install/test; --safe-only still gates worktree reap; Docker volumes are never deleted).
   for scope in "${scopes[@]}"; do
     case "$scope" in
-      worktrees|caches|releases|pi|tmp|docker) ;;
+      worktrees|caches|docker|releases|release-tmp|pi|tmp) ;;
       *)
-        echo "scope '$scope' is outside the safe set (worktrees, caches, releases, pi, tmp, docker)"
+        echo "scope '$scope' is outside the safe set (worktrees, caches, docker, releases, release-tmp, pi, tmp)"
         false
         ;;
     esac
@@ -793,6 +796,24 @@ EOF
     }
   done
   [ "${#template_args[@]}" -eq "${#expected_argv[@]}" ]
+}
+
+@test "accepts stock macOS deny-delete ACL on HOME/Library while rejecting other ACLs" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: ls -e ACL listing and chmod +a fixture'
+  mkdir -p "$HOME/Library"
+  chmod +a "group:everyone deny delete" "$HOME/Library"
+  run_installer
+  local stock_status="$status" stock_output="$output"
+
+  chmod +a "user:$(id -un) allow read" "$HOME/Library"
+  run_installer
+  local extra_status="$status" extra_output="$output"
+
+  chmod -N "$HOME/Library"
+
+  [ "$stock_status" -eq 0 ] || { echo "stock deny-delete failed ($stock_status): $stock_output"; false; }
+  [ "$extra_status" -eq 4 ] || { echo "extra ACL not rejected ($extra_status): $extra_output"; false; }
+  [[ "$extra_output" == *"has an extended ACL: $HOME/Library"* ]] || { echo "$extra_output"; false; }
 }
 
 

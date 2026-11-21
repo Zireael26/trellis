@@ -1,8 +1,8 @@
 # AGENT_UPGRADE.md — upgrading a machine and its attached projects
 
-This runbook moves **one machine's local Trellis state, and the projects attached to it**, from one immutable release to another. It is harness-neutral: every command runs through the installed stable launcher at `~/.local/bin/trellis`, so Claude Code, Codex, and Pi execute it identically.
+This runbook moves **one machine's local Trellis state, and the projects attached to it**, from one immutable release to another. It is harness-neutral: every command runs through the installed stable launcher at `~/.local/bin/trellis`, so `claude`, `codex`, `antigravity`, `opencode`, and `pi` execute it identically.
 
-It does not publish, tag, or mirror anything, does not change a project's tracked files, and does not make an attached project run from a source checkout. For first-machine setup use [AGENT_SETUP.md](AGENT_SETUP.md); for onboarding a new project use [AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md); for the reference semantics behind every step here — exit classes, row states, adoption scope rules, and the current release's specifics — use [`docs/UPGRADING.md`](docs/UPGRADING.md).
+It does not publish, tag, or mirror anything, does not change a project's tracked files, and does not make an attached project run from a source checkout. For first-machine setup use [AGENT_SETUP.md](AGENT_SETUP.md); for onboarding a new project use [AGENT_ONBOARD_PROJECT.md](AGENT_ONBOARD_PROJECT.md); for the reference semantics behind every step here — exit classes, row states, adoption scope rules, `< 1.5.0` two-step native companion bootstrap, and `1.5.3` fleet rollout specifics — use [`docs/UPGRADING.md`](docs/UPGRADING.md) and [`CHANGELOG.md`](CHANGELOG.md).
 
 For the 1.0.0 launcher transition, explicit Pi selection and shared-worktree refresh, follow [Migrating to 1.0.0](docs/MIGRATING-1.0.0.md) alongside this general runbook.
 
@@ -55,16 +55,21 @@ Expected: exit `0` from both. Record the currently adopted release as `ROLLBACK_
 
 A `--fleet`-scoped listing attests to that fleet and nothing else; it exits `0` while another fleet holds a broken row, by design. For a whole-machine verdict, run `"$TRELLIS" registry list` with no flag.
 
-## 3. Install and verify the release
+## 3. Install, verify, and configure the machine launcher
 
-Installation never adopts. Every attachment stays on its recorded release until section 4.
+Installation never adopts project rows. Every project attachment stays on its recorded release until section 4.
 
 ```bash
 "$TRELLIS" release install "$TARGET_RELEASE" --remote "$RELEASE_REMOTE"
 "$TRELLIS" release verify "$TARGET_RELEASE"
+"$TRELLIS" configure --home "$TRELLIS_HOME" --release "$TARGET_RELEASE" \
+  --launcher-template "$TRELLIS_HOME/releases/$TARGET_RELEASE/payload/scripts/trellis-launcher.sh"
+"$TRELLIS" relink --home "$TRELLIS_HOME" --user
 ```
 
-Expected: exit `0` from both; a new immutable payload exists at `$TRELLIS_HOME/releases/$TARGET_RELEASE/`.
+*(If `ROLLBACK_RELEASE` in section 2 was `< 1.5.0` — e.g. `1.3.x` or `1.4.x` — run the two-step native companion `configure` bootstrap documented in [`docs/UPGRADING.md`](docs/UPGRADING.md) before `relink --user` so the native `trellis-hooks` binary is staged and digest-pinned.)*
+
+Expected: exit `0` from each; a new immutable payload exists at `$TRELLIS_HOME/releases/$TARGET_RELEASE/` and the machine launcher + user surface point to `$TARGET_RELEASE`.
 
 Stop conditions specific to this section:
 
@@ -118,7 +123,7 @@ Expected: exit `0` from both; `attach` prints the attached root, not `already at
 
 What changes on disk: `detach` removes only attachment-owned artifacts — the runtime anchor, the rendered harness surfaces, the managed local exclude block, the ownership record, the local hook dispatchers — and leaves the tracked `.trellis.json` intact and inert. `attach` writes them back from the target payload. Tracked project work, including pre-existing dirty and staged changes, must be preserved. Repeat attachment for every intended registered worktree removed by the group detach; see the 1.0.0 migration guide.
 
-Pass the same harness set that was detached. A set that differs from the recorded attachment is refused as class `3`; detaching first is what makes the set re-selectable at all. Attach the harnesses the project actually has — do not add one because this block lists three.
+Pass the exact harness set installed and used for that project on this machine (`--harness claude`, `--harness codex`, `--harness pi`, `--harness antigravity`, `--harness opencode`). A set that differs from the recorded attachment is refused as class `3` unless detached first; detaching first is what makes the set re-selectable when adding or removing a harness (for example, keeping `--harness claude --harness codex` on a two-harness machine, or adding `--harness antigravity` / `--harness opencode` on `1.5.3+`). Do not add a harness that is not installed on the machine.
 
 ## 6. Re-materialize scheduled tasks
 

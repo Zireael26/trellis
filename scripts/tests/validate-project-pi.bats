@@ -293,19 +293,26 @@ attach_fixture() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
-@test "release-roster copies pass in .pi/agents and .agents/agents; an edited one refuses" {
+@test "release-roster copies pass in .pi/agents only; .agents/agents copy or edited .pi/agents copy refuses" {
   roster="$(ls "$REPO_ROOT"/core-rules/pi/agents/*.md 2>/dev/null | head -1)"
   [ -n "$roster" ] || skip "no release roster in this checkout"
   name="$(basename "$roster")"
-  mkdir -p "$WT/.pi/agents" "$WT/.agents/agents"
+  mkdir -p "$WT/.pi/agents"
   cp "$roster" "$WT/.pi/agents/$name"
-  cp "$roster" "$WT/.agents/agents/$name"
   run "$VALIDATOR" --foreman "$WT"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  printf 'tools: read, bash, write\n' >>"$WT/.agents/agents/$name"
+
+  mkdir -p "$WT/.agents/agents"
+  cp "$roster" "$WT/.agents/agents/$name"
   run "$VALIDATOR" --foreman "$WT"
   [ "$status" -eq 1 ]
   [[ "$output" == *".agents/agents/$name"* ]] || false
+
+  rm -rf "$WT/.agents/agents"
+  printf 'tools: read, bash, write\n' >>"$WT/.pi/agents/$name"
+  run "$VALIDATOR" --foreman "$WT"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *".pi/agents/$name"* ]] || false
 }
 
 @test "a source-canonical skill link at the protected base passes" {

@@ -12,7 +12,10 @@ set -euo pipefail
 LABEL=com.trellis.test-health
 TASK=test-health
 MAX_TURNS=100
-MAX_BUDGET_USD=25
+# A task that reads materialized inputs and runs each project's own fast suite
+# should cost cents. The previous default of 25 was spent on eight consecutive
+# no-op runs that never reached a project.
+MAX_BUDGET_USD="${MAX_BUDGET_USD:-5}"
 CLAUDE_BIN="${CLAUDE_BIN:-$HOME/.local/bin/claude}"
 TRELLIS_HOME="${TRELLIS_HOME:-$HOME/.trellis}"
 TRELLIS_FLEET="${TRELLIS_FLEET:-personal}"
@@ -41,6 +44,13 @@ validate_home() {
     /*) ;;
     *) refuse home "TRELLIS_HOME must be absolute: $TRELLIS_HOME" ;;
   esac
+}
+
+validate_budget() {
+  case "$MAX_BUDGET_USD" in
+    ''|*[!0-9]*) refuse budget "MAX_BUDGET_USD must be a positive integer: $MAX_BUDGET_USD" ;;
+  esac
+  [ "$MAX_BUDGET_USD" -gt 0 ] || refuse budget "MAX_BUDGET_USD must be a positive integer: $MAX_BUDGET_USD"
 }
 
 validate_manifest() {
@@ -72,6 +82,7 @@ esac
 # The host gate precedes every task or checkout access.
 host_gate || exit 3
 validate_home
+validate_budget
 
 if ! $smoke; then
   mkdir -p "$(dirname "$LOCK_FILE")" || refuse lock "$LOCK_FILE"
@@ -81,8 +92,8 @@ if ! $smoke; then
     exit 0
   fi
   trap 'rm -f "$LOCK_FILE"' EXIT
-  materialize_err="$("$TRELLIS_LAUNCHER" task materialize --fleet "$TRELLIS_FLEET" "$TASK" \
-    --home "$TRELLIS_HOME" 2>&1 >/dev/null)" ||
+  materialize_err="$("$TRELLIS_LAUNCHER" task materialize --home "$TRELLIS_HOME" --fleet "$TRELLIS_FLEET" "$TASK" \
+    2>&1 >/dev/null)" ||
     refuse materialize "$TRELLIS_LAUNCHER: $(printf '%s' "$materialize_err" | tail -n 1)"
 fi
 

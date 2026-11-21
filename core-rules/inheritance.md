@@ -411,8 +411,8 @@ doctrine are not part of portable attachment. They may be recognized only by
 compatibility and migration tooling until cutover; they MUST NOT be created for
 new attachments.
 
-For migration sequencing and rollback, read
-`docs/MIGRATING-LOCAL-FLEETS.md`. For release installation, verification, and
-adoption policy, read `docs/UPGRADING.md`. The broader operator and publication
-process belongs in `engineering-process.md`. None of those operational guides
-changes the ownership, inert-contributor, or immutable-runtime invariants above.
+For machine setup and registry rebuilds, read `AGENT_SETUP.md`. For release
+installation, verification, and adoption policy, read `docs/UPGRADING.md`. The
+broader operator and publication process belongs in `engineering-process.md`.
+None of those operational guides changes the ownership, inert-contributor, or
+immutable-runtime invariants above.

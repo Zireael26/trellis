@@ -10,7 +10,7 @@ setup() {
 teardown() { rm -rf "$SANDBOX"; }
 
 check_tag() {
-  run python3 -I "$BATS_TEST_DIRNAME/test_tag_push_reuse.py" "TagReuseTests.$1"
+  run python3 -I -B "$BATS_TEST_DIRNAME/test_tag_push_reuse.py" "TagReuseTests.$1"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 

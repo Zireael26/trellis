@@ -79,7 +79,7 @@ calls() { grep -c -- "$1" "$GIT_LOG" || true; }
     # Claude blocks with exit 2; the Codex twin emits the same decision on exit 0.
     [[ "$output" == *'"decision":"block"'* ]] || { echo "$gate: $status $output"; return 1; }
     [[ "$output" == *"diff-base: "* ]] || { echo "$gate lost its receipt: $output"; return 1; }
-    [[ "$output" == *"gated lines over floor"* ]]
+    [[ "$output" == *"gated lines over floor"* ]] || false
     [ "$(calls '^check-ref-format --branch')" -eq 1 ] || { echo "$gate"; cat "$GIT_LOG"; return 1; }
   done
 }

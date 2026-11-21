@@ -291,7 +291,9 @@ _attachment_project_authored_file() {
 # regardless of which one the plan currently targets: a copy of either is a
 # dropping, and which one it copies says nothing about intent.
 _attachment_symlink_destination_authored() {
-  local record=$1 root=$2 payload=$3 path=$4 scope source fallback
+  local record=$1 root=$2 payload=$3 path=$4 deferrable scope source fallback
+  deferrable=$(printf '%s\n' "$record" | jq -r 'if has("deferrable") then .deferrable else true end') || return 1
+  [ "$deferrable" = true ] || return 1
   scope=$(printf '%s\n' "$record" | jq -r '.source_scope') || return 1
   source=$(printf '%s\n' "$record" | jq -r '.source') || return 1
   if [ "$scope" = project ]; then
@@ -417,9 +419,9 @@ _attachment_detach_step_refuse() {
 # Control characters as visible escapes (`\n`, `\r`, `\t`, else `\xHH`), so
 # a path can never split a one-line diagnostic. Any other text is unchanged.
 _attachment_visible() {
-  local LC_ALL=C value=$1 out='' char i
+  local value=$1 out='' char i
   case "$value" in
-    *[[:cntrl:]]*) ;;
+    *[$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']*) ;;
     *) printf '%s' "$value"; return 0 ;;
   esac
   for ((i = 0; i < ${#value}; i++)); do
@@ -428,7 +430,7 @@ _attachment_visible() {
       $'\n') out+='\n' ;;
       $'\r') out+='\r' ;;
       $'\t') out+='\t' ;;
-      [[:cntrl:]]) out+=$(printf '\\x%02x' "'$char") ;;
+      [$'\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\025\026\027\030\031\032\033\034\035\036\037\177']) out+=$(printf '\\x%02x' "'$char") ;;
       *) out+=$char ;;
     esac
   done
@@ -957,6 +959,7 @@ attachment_contextual_render_required() {
          and (
            .template == "core-rules/templates/claude-settings.local.json"
            or .template == "core-rules/templates/codex-hooks.local.json"
+           or .template == "core-rules/templates/agy-hooks.local.json"
            or .template == "core-rules/templates/claude-user-settings.json"
          )
        )]
@@ -992,7 +995,7 @@ def pairs(items):
 def parse(text):
     return json.loads(text, object_pairs_hook=pairs)
 def marked(v):
-    return type(v) is str and any(m in v for m in markers)
+    return type(v) is str and ('__TRELLIS_' in v or any(m in v for m in markers))
 def reject_marks(v):
     if type(v) is dict:
         require(not any(marked(k) for k in v), 'marker in JSON key')
@@ -1046,42 +1049,66 @@ try:
     # I-A3 Q always single-quotes, even words shlex.quote would leave bare.
     q = lambda value: "'" + value.replace("'", "'\\''") + "'"
     doc = parse(Path(source).read_text()); require(type(doc) is dict, 'contextual template must be an object')
-    hooks = doc.get('hooks', {}); require(type(hooks) is dict, 'invalid hook events')
     sentinel = []
-    harness = 'codex' if template.endswith('/codex-hooks.local.json') else 'claude'
-    events = {'PreToolUse','PostToolUse','UserPromptSubmit','UserPromptExpansion','SessionStart','Stop','PreCompact','WorktreeCreate','WorktreeRemove'}
-    for event, blocks in hooks.items():
-        require(event in events and type(blocks) is list, 'invalid rendered hook event')
-        for block in blocks:
-            require(type(block) is dict and type(block.get('hooks')) is list, 'invalid rendered hook block')
-            for hook in block['hooks']:
-                require(type(hook) is dict, 'invalid rendered hook')
-                command = hook.get('command')
-                if command == markers[2]:
-                    require(hook.get('type') == 'command' and hook.get('args') == ['hook','event',harness,event], 'invalid native registration placeholder')
-                    require(type(hook.get('timeout')) is int and hook['timeout'] >= 30, 'native registration timeout below 30')
-                    require(set(hook) <= {'type','command','args','timeout','onFailure'}, 'unknown native registration field')
-                    # T34b: the user worktree callbacks fail by exit status and
-                    # render in shell form without onFailure (a placeholder
-                    # may carry it; the render drops it); every other Claude
-                    # entry blocks.
-                    worktree = harness == 'claude' and event in ('WorktreeCreate', 'WorktreeRemove')
-                    require(worktree or harness != 'claude' or hook.get('onFailure') == 'block', 'native Claude registration must block on failure')
-                    require(not worktree or hook.get('onFailure', 'block') == 'block', 'native worktree registration onFailure must be block or absent')
-                    require(harness != 'codex' or 'onFailure' not in hook, 'unsupported Codex onFailure')
-                    sentinel.append((event, hook))
-                    continue
-                args = hook.get('args')
-                if type(args) is list and any(marked(v) for v in args):
-                    require(command == '/usr/bin/env' and args[:5] == ['-i','HOME='+markers[0], 'TRELLIS_HOME='+markers[1], 'PATH=/usr/bin:/bin:/usr/sbin:/sbin',markers[2]], 'invalid contextual exec registration')
-                    require(all(type(v) is str for v in args) and len(args) > 5, 'invalid contextual argv')
-                    hook['args'] = [v.replace(markers[0], user).replace(markers[1], home).replace(markers[2], launcher) for v in args]
-                elif marked(command):
-                    prefix = '/usr/bin/env -i HOME='+markers[0]+' TRELLIS_HOME='+markers[1]+' PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc '+markers[2]+' '
-                    require(command.startswith(prefix), 'invalid contextual shell registration')
-                    for marker, value in replacements.items():
-                        command = command.replace(marker, q(value))
-                    hook['command'] = command
+    if template == 'core-rules/templates/agy-hooks.local.json':
+        harness = 'antigravity'
+        require(set(doc) == {'trellis'} and type(doc['trellis']) is dict, 'invalid AGY hook template')
+        agy_events = {
+            'SessionStart': '__TRELLIS_SESSION_START__',
+            'PreInvocation': '__TRELLIS_PRE_INVOCATION__',
+            'PreToolUse': '__TRELLIS_PRE_TOOL_USE__',
+            'PostToolUse': '__TRELLIS_POST_TOOL_USE__',
+            'Stop': '__TRELLIS_STOP__',
+        }
+        require(set(doc['trellis']) == set(agy_events), 'invalid rendered AGY hook events')
+        for event, items in doc['trellis'].items():
+            require(type(items) is list and len(items) > 0, 'invalid rendered AGY hook list')
+            if event in ('PreToolUse', 'PostToolUse'):
+                hook_items = []
+                for block in items:
+                    require(type(block) is dict and set(block) == {'matcher', 'hooks'} and type(block['matcher']) is str and len(block['matcher']) > 0 and type(block['hooks']) is list and len(block['hooks']) > 0, 'invalid rendered AGY matcher block')
+                    hook_items.extend(block['hooks'])
+            else:
+                hook_items = items
+            for hook in hook_items:
+                require(type(hook) is dict and set(hook) == {'type', 'command', 'timeout'} and hook.get('type') == 'command' and hook.get('command') == agy_events[event] and type(hook.get('timeout')) is int and hook['timeout'] >= 30, 'invalid native AGY registration placeholder')
+                sentinel.append((event, hook))
+    else:
+        hooks = doc.get('hooks', {}); require(type(hooks) is dict, 'invalid hook events')
+        harness = 'codex' if template.endswith('/codex-hooks.local.json') else 'claude'
+        events = {'PreToolUse','PostToolUse','UserPromptSubmit','UserPromptExpansion','SessionStart','Stop','PreCompact','WorktreeCreate','WorktreeRemove'}
+        for event, blocks in hooks.items():
+            require(event in events and type(blocks) is list, 'invalid rendered hook event')
+            for block in blocks:
+                require(type(block) is dict and type(block.get('hooks')) is list, 'invalid rendered hook block')
+                for hook in block['hooks']:
+                    require(type(hook) is dict, 'invalid rendered hook')
+                    command = hook.get('command')
+                    if command == markers[2]:
+                        require(hook.get('type') == 'command' and hook.get('args') == ['hook','event',harness,event], 'invalid native registration placeholder')
+                        require(type(hook.get('timeout')) is int and hook['timeout'] >= 30, 'native registration timeout below 30')
+                        require(set(hook) <= {'type','command','args','timeout','onFailure'}, 'unknown native registration field')
+                        # T34b: the user worktree callbacks fail by exit status and
+                        # render in shell form without onFailure (a placeholder
+                        # may carry it; the render drops it); every other Claude
+                        # entry blocks.
+                        worktree = harness == 'claude' and event in ('WorktreeCreate', 'WorktreeRemove')
+                        require(worktree or harness != 'claude' or hook.get('onFailure') == 'block', 'native Claude registration must block on failure')
+                        require(not worktree or hook.get('onFailure', 'block') == 'block', 'native worktree registration onFailure must be block or absent')
+                        require(harness != 'codex' or 'onFailure' not in hook, 'unsupported Codex onFailure')
+                        sentinel.append((event, hook))
+                        continue
+                    args = hook.get('args')
+                    if type(args) is list and any(marked(v) for v in args):
+                        require(command == '/usr/bin/env' and args[:5] == ['-i','HOME='+markers[0], 'TRELLIS_HOME='+markers[1], 'PATH=/usr/bin:/bin:/usr/sbin:/sbin',markers[2]], 'invalid contextual exec registration')
+                        require(all(type(v) is str for v in args) and len(args) > 5, 'invalid contextual argv')
+                        hook['args'] = [v.replace(markers[0], user).replace(markers[1], home).replace(markers[2], launcher) for v in args]
+                    elif marked(command):
+                        prefix = '/usr/bin/env -i HOME='+markers[0]+' TRELLIS_HOME='+markers[1]+' PATH=/usr/bin:/bin:/usr/sbin:/sbin /bin/bash --noprofile --norc '+markers[2]+' '
+                        require(command.startswith(prefix), 'invalid contextual shell registration')
+                        for marker, value in replacements.items():
+                            command = command.replace(marker, q(value))
+                        hook['command'] = command
     if sentinel:
         require(root and Path(root).is_dir() and str(Path(root).resolve()) == root, 'native registration needs a concrete canonical project root')
         base = Path(source).parents[1] / 'native'
@@ -1104,12 +1131,6 @@ try:
         semver = numeric + r'\.' + numeric + r'\.' + numeric + r'(?:-' + prerelease + r'(?:\.' + prerelease + r')*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?'
         require(type(d['version']) is str and re.fullmatch('[0-9a-f]{64}', a['sha256']) and re.fullmatch(semver, d['version']), 'invalid native registration identity')
         companion = home+'/bin/native/'+d['version']+'/'+target+'/'+a['sha256']+'/trellis-hooks'
-        # The first 1.4.x -> 1.5.x configure relinks the user surface through
-        # this payload before any companion is staged (the old configure cannot
-        # stage one). With no companion anywhere on its path, the user template
-        # takes the complete legacy surface (labelled); the second configure
-        # stages the companion and relinks native. A present-but-wrong
-        # companion still refuses below, and project templates still refuse.
         if template == 'core-rules/templates/claude-user-settings.json':
             try:
                 ordinary(companion)
@@ -1119,20 +1140,11 @@ try:
         data, mode = ordinary(companion)
         require(stat.S_IMODE(mode.st_mode) == 0o500 and mode.st_uid == os.getuid(), 'unsafe companion ownership/mode')
         require(len(data) == a['size'] and hashlib.sha256(data).hexdigest() == a['sha256'], 'registration companion digest mismatch')
-        # Policy belongs to this verified release and its immutable companion,
-        # not the global management launcher's currently selected generation.
-        # Mixed-release checkouts keep using their own digest entry after a
-        # management repin (including interruption before a scoped adoption).
         adapter_bytes, _ = ordinary(str(base/'hook-adapter.sh'))
         require(hashlib.sha256(adapter_bytes).hexdigest() == d['adapter']['sha256'] and len(adapter_bytes) == d['adapter']['size'], 'registration adapter digest mismatch')
         adapter = '\n'.join(line for line in adapter_bytes.decode().splitlines() if not line.lstrip().startswith('#'))
         shell = '/bin/dash' if os.access('/bin/dash', os.X_OK) else '/bin/sh'
-        # T34: the client timeout outlasts the native per-event supervisor
-        # budget (protocol::event_deadline_secs) by 10 s.
         budgets = {'Stop': 300, 'PostToolUse': 120, 'WorktreeCreate': 50, 'WorktreeRemove': 110}
-        # The caller settings each shell-form member reads, forwarded as data
-        # exactly as protocol::{STOP,POST_ACTION,WORKTREE}_SETTINGS name them;
-        # legacy direct registrations inherited them from the harness.
         STOP_SETTINGS = ('TRELLIS_REVIEW_IN_PROGRESS', 'PROCESS_GATE_FORCE_ROOT', 'PROCESS_GATE_NO_RECEIPTS', 'TODOS_FILE', 'TRELLIS_NO_JQ_DEGRADE', 'RUSTUP_HOME')
         POST_ACTION_SETTINGS = ('SLOP_TRIPWIRE', 'TRELLIS_NO_JQ_DEGRADE')
         WORKTREE_SETTINGS = ('TRELLIS_WORKTREE_ROOT', 'TRELLIS_WORKTREE_SYNC_WAIT_S')
@@ -1142,15 +1154,9 @@ try:
             timeout = budgets.get(event, 20) + 10
             hook.clear()
             if harness == 'claude' and event in ('WorktreeCreate', 'WorktreeRemove'):
-                # T34b (apex ruling A): shell form, so the caller's PATH is
-                # forwarded, as data only, in TRELLIS_ATTACH_CALLER_PATH; the
-                # companion never resolves a command through it.
                 command = '/usr/bin/env -i HOME='+q(user)+' TRELLIS_HOME='+q(home)+' PATH=/usr/bin:/bin:/usr/sbin:/sbin "TRELLIS_ATTACH_CALLER_PATH=$PATH" '+settings(WORKTREE_SETTINGS)+q(companion)+' event-client claude '+event+' '+q(root)
                 hook.update(type='command', command=command, timeout=timeout)
             elif harness == 'claude' and direct == 'true' and event in ('PostToolUse', 'Stop'):
-                # R1 PATH ruling (option A): these events run project tools,
-                # so they take the shell form and forward the caller's PATH as
-                # data in TRELLIS_CALLER_PATH; onFailure still blocks.
                 command = '/usr/bin/env -i HOME='+q(user)+' TRELLIS_HOME='+q(home)+' PATH=/usr/bin:/bin:/usr/sbin:/sbin "TRELLIS_CALLER_PATH=$PATH" '+settings(STOP_SETTINGS if event == 'Stop' else POST_ACTION_SETTINGS)+q(companion)+' event-client claude '+event+' '+q(root)
                 hook.update(type='command', command=command, timeout=timeout, onFailure='block')
             elif harness == 'claude' and direct == 'true':
@@ -1173,6 +1179,24 @@ attachment_contextual_template_select() {
   attachment_contextual_template_render_impl "$source" "$template" "$context" "$root" && return 0
   rc=$?
   [ "$rc" -eq 10 ] || [ "$rc" -eq 11 ] || return "$rc"
+  if [ "$template" = core-rules/templates/agy-hooks.local.json ]; then
+    if [ "$rc" -ne 11 ]; then
+      _attachment_diag 'contextual registration refused: antigravity hooks require a native companion asset for this platform'
+      return 4
+    fi
+    jq -Se '
+      if type == "object" and (keys_unsorted | sort) == ["trellis"] and (.trellis | type == "object")
+         and (.trellis | keys_unsorted | sort) == ["PostToolUse","PreInvocation","PreToolUse","SessionStart","Stop"]
+      then
+        .trellis.SessionStart |= map(if .command == "__TRELLIS_SESSION_START__" then .command = "/bin/sh -c \u0027printf \"%s\\n\" \"{}\"\u0027" else error("bad marker") end)
+        | .trellis.PreInvocation |= map(if .command == "__TRELLIS_PRE_INVOCATION__" then .command = "/bin/sh -c \u0027printf \"%s\\n\" \"{}\"\u0027" else error("bad marker") end)
+        | .trellis.PreToolUse |= map(.hooks |= map(if .command == "__TRELLIS_PRE_TOOL_USE__" then .command = "/bin/sh -c \u0027printf \"%s\\n\" \"{}\"\u0027" else error("bad marker") end))
+        | .trellis.PostToolUse |= map(.hooks |= map(if .command == "__TRELLIS_POST_TOOL_USE__" then .command = "/bin/sh -c \u0027printf \"%s\\n\" \"{}\"\u0027" else error("bad marker") end))
+        | .trellis.Stop |= map(if .command == "__TRELLIS_STOP__" then .command = "/bin/sh -c \u0027printf \"%s\\n\" \"{}\"\u0027" else error("bad marker") end)
+      else error("invalid AGY fallback template") end
+    ' "$source" || return 4
+    return 0
+  fi
   provider="${source%/*}"; provider="${provider%/*}/legacy-hooks"
   fallback="$(attachment_legacy_template_file "$provider" "${template##*/}")" || return "$?"
   [ "$rc" -eq 11 ] || _attachment_diag 'legacy fallback: native selection miss 10; rendering the complete pinned legacy surface'
@@ -1199,6 +1223,10 @@ attachment_contextual_template_render() {
 attachment_contextual_template_render_impl() {
   local source=$1 template=$2 context=$3 expected user_home trellis_home launcher provider
   local user_home_shell trellis_home_shell launcher_shell legacy_hooks=null
+  if [ "$template" = core-rules/templates/agy-hooks.local.json ]; then
+    attachment_contextual_candidate_render "$source" "$template" "$context" "${4:-}"
+    return "$?"
+  fi
   if printf '%s\n' "$template" | grep -Eq '^core-rules/templates/(claude-settings.local|codex-hooks.local|claude-user-settings)\.json$' &&
      jq -e 'any(.. | objects; .command? == "__TRELLIS_LAUNCHER__" or (has("args") and (.args | type) == "array" and any(.args[]; type == "string" and contains("__TRELLIS_")))) or (any(.. | strings; contains("__TRELLIS_")) and has("hooks") and (.hooks | has("WorktreeCreate") or has("WorktreeRemove")))' "$source" >/dev/null 2>&1; then
     attachment_contextual_candidate_render "$source" "$template" "$context" "${4:-}"
@@ -1692,7 +1720,7 @@ _attachment_hooks_default_hooks_dir() {
 # library predates default shims.
 _attachment_hooks_expected_passthrough_names() {
   local root=${1:-} previous=${2:-} payload=${3:-} dir="" entry base regular=false seen=false
-  local LC_ALL=C
+  local -a names=()
   case "$previous" in
     "")
       [ -n "$root" ] || return 0
@@ -1707,8 +1735,8 @@ _attachment_hooks_expected_passthrough_names() {
       dir="$root/$previous"
       ;;
   esac
-  # A readable, searchable, nonempty directory is the normal case. Bash's C
-  # locale glob is already sorted, and hook names never begin with a dot. If
+  # A readable, searchable, nonempty directory is the normal case. Sort hook
+  # names in an external C-locale process, never by changing Bash's locale. If
   # the glob finds no entries, it may be empty or a failed enumeration: ask
   # the slow scanner rather than treating that ambiguity as proof of absence.
   if [ -d "$dir" ] && [ -r "$dir" ] && [ -x "$dir" ]; then
@@ -1721,10 +1749,15 @@ _attachment_hooks_expected_passthrough_names() {
         continue
       fi
       if { [ -f "$entry" ] || [ -L "$entry" ]; } && [ -x "$entry" ]; then
-        printf '%s\n' "$base"
+        names+=("$base")
       fi
     done
-    [ "$seen" = false ] || return 0
+    if [ "$seen" = true ]; then
+      if [ "${#names[@]}" -gt 0 ]; then
+        printf '%s\n' "${names[@]}" | /usr/bin/env LC_ALL=C sort || return "$?"
+      fi
+      return 0
+    fi
   fi
   _attachment_hooks_expected_passthrough_names_slow "$dir" "$regular"
 }
@@ -2145,8 +2178,9 @@ except (UnicodeError, ValueError):
 if not isinstance(document, dict):
     sys.exit(0)
 gate = document.get("gate", {})
-if (not isinstance(gate, dict) or set(gate) - {"env_passthrough", "verdict_reuse"}
-        or not isinstance(gate.get("verdict_reuse", True), bool)):
+if (not isinstance(gate, dict) or set(gate) - {"env_passthrough", "verdict_reuse", "docs_only_tests"}
+        or not isinstance(gate.get("verdict_reuse", True), bool)
+        or not isinstance(gate.get("docs_only_tests", True), bool)):
     sys.exit(0)
 names = gate.get("env_passthrough", [])
 if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
@@ -2200,16 +2234,38 @@ for name in names:
   # Last, and never a caller value: TRELLIS_ names are refused above.
   caller_gate_env+=("TRELLIS_GATE_ENV_POLICY=$trellis_env_policy")
 }
-# Resolve a context with the caller's HOME before isolation, forwarding only
-# its endpoint. The caller's XDG config path is retained as a positional input
-# for the single pnpm-setting query; neither value is exported to payloads.
+# Resolve an explicit context with the caller's HOME before isolation,
+# forwarding only its endpoint. The caller's XDG config path is retained as a
+# positional input for the single pnpm-setting query; neither value is exported
+# to payloads.
+# Validate endpoints resolved from Docker contexts before forwarding across
+# HOME isolation: if a unix:// path already exists on disk, it must be a socket
+# owned by the current UID or root so a foreign-UID file or non-socket cannot
+# hijack the daemon connection.
+trellis_valid_docker_context_endpoint() {
+  local endpoint="$1" sock owner_uid
+  case "$endpoint" in
+    unix:///*)
+      sock="${endpoint#unix://}"
+      if [ -e "$sock" ]; then
+        [ -S "$sock" ] || return 1
+        if [ ! -O "$sock" ]; then
+          owner_uid="$(/usr/bin/stat -L -f '%u' "$sock" 2>/dev/null || /usr/bin/stat -L -c '%u' "$sock" 2>/dev/null || printf 'x')"
+          [ "$owner_uid" = "0" ] || return 1
+        fi
+      fi
+      ;;
+  esac
+  return 0
+}
 # An explicit DOCKER_HOST, including an empty one, always wins.
 caller_docker_host_set=${DOCKER_HOST+x}
 caller_docker_host=${DOCKER_HOST-}
 if [ "$caller_docker_host_set" != x ] && [ "${DOCKER_CONTEXT+x}" = x ]; then
-  if caller_docker_host=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}' </dev/null 2>/dev/null) && [ -n "$caller_docker_host" ]; then
+  if caller_docker_host=$(docker context inspect "$DOCKER_CONTEXT" --format '{{.Endpoints.docker.Host}}' </dev/null 2>/dev/null) && [ -n "$caller_docker_host" ] && trellis_valid_docker_context_endpoint "$caller_docker_host"; then
     caller_docker_host_set=x
   else
+    caller_docker_host=""
     printf 'Trellis: cannot resolve Docker context "%s"; continuing without DOCKER_HOST.\n' \
       "$(printf '%s' "$DOCKER_CONTEXT" | /usr/bin/env LC_ALL=C /usr/bin/tr '[:cntrl:]' '?')" >&2
   fi
@@ -2217,6 +2273,15 @@ fi
 EOF
   if [ "$kind" != post-checkout ]; then
     cat <<'EOF'
+# Snapshot the current context only for pre-push, before HOME isolation.
+if [ "$caller_docker_host_set" != x ] && [ "${DOCKER_CONTEXT+x}" != x ] && command -v docker >/dev/null 2>&1; then
+  if caller_docker_host=$(docker context inspect --format '{{.Endpoints.docker.Host}}' </dev/null 2>/dev/null) && [ -n "$caller_docker_host" ] && trellis_valid_docker_context_endpoint "$caller_docker_host"; then
+    caller_docker_host_set=x
+  else
+    caller_docker_host=""
+    printf 'Trellis: cannot resolve current Docker context; continuing without DOCKER_HOST.\n' >&2
+  fi
+fi
 trellis_env_project_root="$(CDPATH='' cd . && pwd -P)" || exit 1
 if ! trellis_collect_gate_env "$trellis_env_project_root"; then
   caller_gate_env=()
@@ -2472,7 +2537,10 @@ trellis_gate_toolchain_path() {
   fi
   entries="$(jq -er \
     --arg checkout "$checkout" --arg worktree "$worktree" --arg root "$project_root" '
-      if .schema_version == 1
+      if ((.schema_version == 1 and (has("harnesses") | not))
+           or (.schema_version == 2 and (.harnesses | type == "array" and length > 0
+               and all(.[]; . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi")
+               and (unique | length) == length)))
          and .status == "committed"
          and .checkout_id == $checkout
          and .worktree_id == $worktree
@@ -2511,7 +2579,138 @@ trellis_gate_toolchain_path() {
       return 1
     fi
   done <<< "$entries"
+  local pinned_node=""
+  pinned_node="$(trellis_gate_pinned_node_dir "$project_root" "$toolchain_path" 2>/dev/null)" || pinned_node=""
+  if [ -n "$pinned_node" ] && trellis_canonical_dir "$pinned_node"; then
+    case "$toolchain_path:" in
+      "$pinned_node:"*) ;;
+      *) toolchain_path="$pinned_node:$toolchain_path" ;;
+    esac
+  fi
   printf '%s\n' "$toolchain_path"
+}
+
+trellis_gate_pinned_node_dir() {
+  local root="$1" cur_path="${2:-}" pkg_spec="" nvm_root="" best="" perl_bin="/usr/bin/perl"
+  [ -x "$perl_bin" ] || perl_bin="$(command -v perl 2>/dev/null)" || return 1
+  if [ -f "$root/package.json" ] && [ ! -L "$root/package.json" ] && command -v jq >/dev/null 2>&1; then
+    pkg_spec="$(jq -r '.engines.node // empty' "$root/package.json" 2>/dev/null)" || pkg_spec=""
+  fi
+  nvm_root="${NVM_DIR:-${HOME:-}/.nvm}/versions/node"
+  best="$("$perl_bin" -e '
+    use strict; use warnings;
+    my ($root, $cur_path, $pkg_spec, $nvm_root) = @ARGV;
+    my $spec = "";
+    for my $fn ("$root/.nvmrc", "$root/.node-version") {
+      next if -l $fn || !-f $fn;
+      if (open my $fh, "<", $fn) {
+        while (my $ln = <$fh>) {
+          $ln =~ s/#.*$//; $ln =~ s/^\s+|\s+$//g;
+          if (length $ln) { $spec = $ln; last; }
+        }
+        close $fh;
+      }
+      last if length $spec;
+    }
+    $spec = $pkg_spec if !length($spec) && defined($pkg_spec);
+    $spec =~ s/^\s+|\s+$//g;
+    exit 1 unless length $spec;
+    sub parse_ver {
+      my ($s) = @_;
+      return undef unless defined $s && $s =~ /^\s*v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:[-+].*)?\s*$/;
+      return [int($1), defined($2) ? int($2) : 0, defined($3) ? int($3) : 0];
+    }
+    sub cmp_ver {
+      my ($a, $b) = @_;
+      return ($a->[0] <=> $b->[0]) || ($a->[1] <=> $b->[1]) || ($a->[2] <=> $b->[2]);
+    }
+    sub clause_ok {
+      my ($v, $c) = @_;
+      $c =~ s/^\s+|\s+$//g;
+      return 1 if $c eq "" || $c eq "*" || lc($c) eq "x" || lc($c) eq "node" || lc($c) eq "stable" || lc($c) eq "current";
+      if (lc($c) =~ /^lts\/(\*|[a-z0-9_-]+)$/) {
+        my %lts = ("*" => 26, "lithium" => 26, "jod" => 24, "iron" => 20, "hydrogen" => 18);
+        return exists($lts{lc($1)}) ? ($v->[0] == $lts{lc($1)}) : 0;
+      }
+      if ($c =~ /^(>=|<=|>|<|=)\s*v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($op, $rM, $rm, $rp) = ($1, int($2), $3, $4);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $hp = defined($rp) && $rp =~ /^\d+$/;
+        my $m = $hm ? int($rm) : 0;
+        my $p = $hp ? int($rp) : 0;
+        return ($v->[0] == $rM && (!$hm || $v->[1] == $m) && (!$hp || $v->[2] == $p)) if $op eq "=";
+        return ($op eq "<=" ? ($v->[0] <= $rM) : ($v->[0] > $rM)) if !$hm && ($op eq "<=" || $op eq ">");
+        return ($op eq "<=" ? (cmp_ver($v, [$rM, $m + 1, 0]) < 0) : (cmp_ver($v, [$rM, $m + 1, 0]) >= 0)) if $hm && !$hp && ($op eq "<=" || $op eq ">");
+        my $c2 = cmp_ver($v, [$rM, $m, $p]);
+        return $c2 >= 0 if $op eq ">=";
+        return $c2 <= 0 if $op eq "<=";
+        return $c2 > 0  if $op eq ">";
+        return $c2 < 0  if $op eq "<";
+      }
+      if ($c =~ /^\^\s*v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($M, $rm, $rp) = (int($1), $2, $3);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $hp = defined($rp) && $rp =~ /^\d+$/;
+        my $m = $hm ? int($rm) : 0;
+        my $p = $hp ? int($rp) : 0;
+        my $lo = [$M, $m, $p];
+        my $hi = $M > 0 ? [$M + 1, 0, 0] : ($hm && $m > 0 ? [0, $m + 1, 0] : ($hp ? [0, 0, $p + 1] : [1, 0, 0]));
+        return cmp_ver($v, $lo) >= 0 && cmp_ver($v, $hi) < 0;
+      }
+      if ($c =~ /^~\s*v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($M, $rm, $rp) = (int($1), $2, $3);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $p = (defined($rp) && $rp =~ /^\d+$/) ? int($rp) : 0;
+        my $lo = [$M, $hm ? int($rm) : 0, $p];
+        my $hi = $hm ? [$M, int($rm) + 1, 0] : [$M + 1, 0, 0];
+        return cmp_ver($v, $lo) >= 0 && cmp_ver($v, $hi) < 0;
+      }
+      if ($c =~ /^v?(\d+)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?(?:[-+].*)?$/i) {
+        my ($M, $rm, $rp) = (int($1), $2, $3);
+        my $hm = defined($rm) && $rm =~ /^\d+$/;
+        my $hp = defined($rp) && $rp =~ /^\d+$/;
+        return $v->[0] == $M && (!$hm || $v->[1] == int($rm)) && (!$hp || $v->[2] == int($rp));
+      }
+      return 0;
+    }
+    sub constraint_ok {
+      my ($v, $s) = @_;
+      for my $alt (split /\|\|/, $s) {
+        $alt =~ s/^\s+|\s+$//g;
+        return 1 if $alt eq "";
+        $alt =~ s/v?(\d+(?:\.\d+){0,2})\s+-\s+v?(\d+(?:\.\d+){0,2})/>=$1 <=$2/ig;
+        $alt =~ s/([><=~^])\s+/$1/g;
+        my @parts = grep { length } split /\s+/, $alt;
+        my $ok = 1;
+        for my $p (@parts) { if (!clause_ok($v, $p)) { $ok = 0; last; } }
+        return 1 if $ok;
+      }
+      return 0;
+    }
+    for my $d (split /:/, ($cur_path // "")) {
+      next unless length($d) && -x "$d/node" && !-d "$d/node";
+      my $out = `"\Q$d/node\E" -v 2>/dev/null`;
+      my $v = parse_ver($out);
+      exit 1 if $v && constraint_ok($v, $spec);
+      last;
+    }
+    exit 1 unless defined($nvm_root) && -d $nvm_root;
+    opendir(my $dh, $nvm_root) or exit 1;
+    my @cands;
+    while (my $e = readdir($dh)) {
+      next if $e =~ /^\./;
+      my $bin = "$nvm_root/$e/bin";
+      next unless -d $bin && -x "$bin/node" && !-d "$bin/node";
+      my $v = parse_ver($e);
+      push @cands, [$v, $bin] if $v && constraint_ok($v, $spec);
+    }
+    closedir($dh);
+    @cands = sort { cmp_ver($b->[0], $a->[0]) } @cands;
+    exit 1 unless @cands;
+    print $cands[0][1];
+  ' "$root" "$cur_path" "$pkg_spec" "$nvm_root" 2>/dev/null)" || return 1
+  [ -n "$best" ] || return 1
+  (CDPATH= cd "$best" && pwd -P 2>/dev/null)
 }
 
 # This function is emitted VERBATIM into the managed dispatcher body (it is
@@ -4393,9 +4592,11 @@ _attachment_plan_filter='
     and (.user_home | abs) and (.trellis_home | abs) and (.launcher | abs)
     and (.user_home_shell | shell_quote) and (.trellis_home_shell | shell_quote) and (.launcher_shell | shell_quote);
   def contextual_render:
-    .path == ".claude/settings.local.json" or .path == ".codex/hooks.json";
+    .path == ".claude/settings.local.json" or .path == ".codex/hooks.json" or .path == ".agents/hooks.json";
   def contextual_renders:
     has("renders") and (.renders | type == "array" and any(.[]; contextual_render));
+  def harness_id: . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi";
+  def harnesses: type == "array" and length > 0 and all(.[]; harness_id) and (unique | length) == length;
   def deferred:
     type == "object" and exact(["kind","path","reason","target"]) and (.path | rel)
     and (if .kind == "symlink"
@@ -4405,9 +4606,10 @@ _attachment_plan_filter='
          then .reason == "project-authored-render" and .target == null
          else false end);
   type == "object"
-    and exact(["$schema","artifacts","attachment_id","checkout_id","exclude","exclude_block_hash","fleet","git_hooks","pre_existing","project_id","project_root","release","render_context","renders","schema_version","status","surface","toolchain_path","worktree_id","worktree_root"])
+    and exact(["$schema","artifacts","attachment_id","checkout_id","exclude","exclude_block_hash","fleet","git_hooks","harnesses","pre_existing","project_id","project_root","release","render_context","renders","schema_version","status","surface","toolchain_path","worktree_id","worktree_root"])
     and (if has("$schema") then (."$schema" | type == "string" and length > 0) else true end)
-    and .schema_version == 1 and .status == "prepared"
+    and ((.schema_version == 1 and (has("harnesses") | not)) or (.schema_version == 2 and has("harnesses") and (.harnesses | harnesses)))
+    and .status == "prepared"
     and (if has("surface") then .surface == "project" else true end)
     and (.fleet | type == "string" and test("^[a-z0-9][a-z0-9._-]{0,63}$"))
     and (.project_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
@@ -4430,6 +4632,7 @@ _attachment_validate_plan_file() {
 _attachment_normalize_plan() {
   jq -cS '{schema_version,status,fleet,project_id,checkout_id,worktree_id,attachment_id,project_root,worktree_root,release,artifacts}
     + (if has("surface") then {surface} else {} end)
+    + (if has("harnesses") then {harnesses} else {} end)
     + (if has("toolchain_path") then {toolchain_path} else {} end)
     + (if has("pre_existing") then {pre_existing} else {} end)
     + (if has("renders") then {renders} else {} end)
@@ -4647,7 +4850,7 @@ _attachment_journal_json_valid() {
   jq -e "(. as \$journal
     | (del(.applied,.phase,.pending,.removal,.journal_version) | $_attachment_plan_filter)
     and ((has(\"journal_version\") | not) or .journal_version == 2)
-    and ((keys_unsorted - [\"applied\",\"phase\",\"pending\",\"removal\",\"journal_version\",\"artifacts\",\"attachment_id\",\"checkout_id\",\"exclude\",\"exclude_block_hash\",\"fleet\",\"git_hooks\",\"pre_existing\",\"project_id\",\"project_root\",\"release\",\"render_context\",\"renders\",\"schema_version\",\"status\",\"surface\",\"toolchain_path\",\"worktree_id\",\"worktree_root\"]) | length) == 0
+    and ((keys_unsorted - [\"applied\",\"phase\",\"pending\",\"removal\",\"journal_version\",\"artifacts\",\"attachment_id\",\"checkout_id\",\"exclude\",\"exclude_block_hash\",\"fleet\",\"git_hooks\",\"harnesses\",\"pre_existing\",\"project_id\",\"project_root\",\"release\",\"render_context\",\"renders\",\"schema_version\",\"status\",\"surface\",\"toolchain_path\",\"worktree_id\",\"worktree_root\"]) | length) == 0
     and (.phase | type == \"number\" and floor == . and . >= 0 and . <= (\$journal.artifacts | length))
     and (.applied | type == \"array\")
     and .applied == .artifacts[0:.phase]
@@ -4721,9 +4924,11 @@ _attachment_owner_schema_filter='
       and (.user_home | abs) and (.trellis_home | abs) and (.launcher | abs)
       and (.user_home_shell | shell_quote) and (.trellis_home_shell | shell_quote) and (.launcher_shell | shell_quote);
     def contextual_render:
-      .path == ".claude/settings.local.json" or .path == ".codex/hooks.json";
+      .path == ".claude/settings.local.json" or .path == ".codex/hooks.json" or .path == ".agents/hooks.json";
     def contextual_renders:
       has("renders") and (.renders | type == "array" and any(.[]; contextual_render));
+    def harness_id: . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi";
+    def harnesses: type == "array" and length > 0 and all(.[]; harness_id) and (unique | length) == length;
     def deferred:
       type == "object" and exact(["kind","path","reason","target"]) and (.path | rel)
       and (if .kind == "symlink"
@@ -4739,9 +4944,10 @@ _attachment_owner_schema_filter='
       elif .kind == "directory" or .kind == "parent" then exact(["kind","path"])
       else false end;
     type == "object"
-      and exact(["$schema","artifacts","attachment_id","checkout_id","exclude","exclude_block_hash","fleet","git_hooks","pre_existing","project_id","project_root","release","render_context","renders","schema_version","status","surface","toolchain_path","worktree_id","worktree_root"])
+      and exact(["$schema","artifacts","attachment_id","checkout_id","exclude","exclude_block_hash","fleet","git_hooks","harnesses","pre_existing","project_id","project_root","release","render_context","renders","schema_version","status","surface","toolchain_path","worktree_id","worktree_root"])
       and (if has("$schema") then (."$schema" | type == "string" and length > 0) else true end)
-      and .schema_version == 1 and .status == "committed"
+      and ((.schema_version == 1 and (has("harnesses") | not)) or (.schema_version == 2 and has("harnesses") and (.harnesses | harnesses)))
+      and .status == "committed"
       and (if has("surface") then .surface == "project" else true end)
       and (.fleet | type == "string" and test("^[a-z0-9][a-z0-9._-]{0,63}$"))
       and (.project_id | type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
@@ -6433,6 +6639,7 @@ import sys
 
 def _load_attachment_fs(path):
     # The shared primitives, by absolute payload path, never from sys.path.
+    sys.dont_write_bytecode = True
     spec = importlib.util.spec_from_file_location("trellis_attachment_fs", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -7086,7 +7293,8 @@ _attachment_detach_journal_schema_filter='
       and (.root | abs) and (.git_common_dir | abs)
       and (.release | type == "string" and test("^[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$"))
       and (.harnesses | type == "array" and length > 0
-        and all(.[]; . == "claude" or . == "codex" or . == "pi") and (unique | length) == length)
+        and all(.[]; . == "antigravity" or . == "claude" or . == "codex" or . == "opencode" or . == "pi")
+        and (unique | length) == length)
       and (.worktrees | type == "object" and all(keys[]; sha)
         and all(.[]; type == "object"
           and (exact(["root"]) or exact(["root","attachment_id"]))
@@ -7097,21 +7305,32 @@ _attachment_detach_journal_schema_filter='
       and (.expected | del(.harnesses)) == (.after | del(.harnesses))
       and (.after.harnesses - .expected.harnesses | length) == 0
       and (.expected.harnesses - .after.harnesses | length) > 0;
+    def exclude_rewrite:
+      type == "object"
+      and exact(["after_base64","after_mode","after_sha256","before_base64","before_mode","before_sha256","managed_block_base64","managed_block_sha256","path"])
+      and (.path | abs)
+      and (.before_mode | mode) and .after_mode == "0600"
+      and (.before_sha256 | sha) and (.after_sha256 | sha) and (.managed_block_sha256 | sha)
+      and (.before_base64 | b64) and (.after_base64 | b64) and (.managed_block_base64 | b64);
     def external:
       type == "object"
-      and ((del(.registry_update)) | exact(["clear_registry","exclude_action","phase","render_pending","render_phase","renders","restore_hooks","transfer"]))
+      and ((del(.registry_update,.exclude_rewrite)) | exact(["clear_registry","exclude_action","phase","render_pending","render_phase","renders","restore_hooks","transfer"]))
       and (if has("registry_update") then (.registry_update == null or (.registry_update | registry_update)) else true end)
       and (.phase | type == "number" and floor == . and . >= 0 and . <= 5)
       and (.transfer == null or (.transfer | transfer))
       and (.renders | type == "array" and all(.[]; rendered) and ((map(.path) | unique | length) == length))
-      and ((.exclude_action == "none") or (.exclude_action == "transfer") or (.exclude_action == "restore"))
+      and ((.exclude_action == "none") or (.exclude_action == "transfer") or (.exclude_action == "restore") or (.exclude_action == "rewrite"))
+      and (if .exclude_action == "rewrite"
+           then has("exclude_rewrite") and (.exclude_rewrite | exclude_rewrite)
+           else ((has("exclude_rewrite") | not) or .exclude_rewrite == null)
+           end)
       and (.restore_hooks | type == "boolean") and (.clear_registry | type == "boolean")
       and (.render_phase | type == "number" and floor == . and . >= 0)
       and (.render_pending == null or (.render_pending | render_pending));
     . as $journal
     | type == "object"
     and exact(["attachment_id","checkout_id","external","next_owner","original_owner","owner_committed","phase","removal","remove","schema_version","status","worktree_id"])
-    and .schema_version == 1 and .status == "detaching"
+    and (.schema_version == 1 or .schema_version == 2) and .status == "detaching"
     and (if has("surface") then .surface == "project" else true end)
     and (.attachment_id | uuid) and (.checkout_id | sha) and (.worktree_id | sha)
     and (.remove | type == "array")
@@ -7138,22 +7357,32 @@ _attachment_detach_journal_invariants_filter='
               | if $found == null then .ok = false else .cursor = ($found + 1) end
             else . end)
       | .ok;
-    def harness($path):
-      if ($path | startswith(".codex/")) then "codex"
-      elif ($path | startswith(".pi/")) then "pi"
-      elif ($path | startswith(".claude/")) then "claude"
-      elif $path == "AGENTS.md" or ($path | startswith(".agents/")) then "shared_agents"
-      else null end;
+    def consumers($path):
+      if ($path | startswith(".claude/")) then ["claude"]
+      elif ($path | startswith(".codex/")) then ["codex"]
+      elif ($path | startswith(".pi/")) then ["pi"]
+      elif ($path | startswith(".opencode/")) then ["opencode"]
+      elif $path == ".agents/hooks.json" then ["antigravity"]
+      elif $path == ".agents/AGENTS.md" then ["antigravity","opencode"]
+      elif ($path | startswith(".agents/workflows/")) then ["antigravity","codex","pi"]
+      elif ($path | startswith(".agents/rules/")) or ($path | startswith(".agents/commands/")) then ["codex","pi"]
+      elif ($path | startswith(".agents/skills/")) or ($path | startswith(".agents/primers/")) then ["antigravity","codex","opencode","pi"]
+      elif $path == "AGENTS.md" or ($path | startswith(".agents/agents/")) or ($path | startswith(".agents/")) then ["codex","pi"]
+      else [] end;
     def harnesses($owner):
-      ($owner.artifacts + ($owner.pre_existing // [])) as $owned
-      | (any($owned[]; .path | startswith(".pi/"))) as $has_pi
-      | [$owned[] | harness(.path)
-         | if . == "shared_agents" then (if $has_pi then empty else "codex" end)
-           elif . == null then empty else . end] | unique | sort;
+      if $owner.schema_version == 2 then ($owner.harnesses | sort)
+      else
+        ($owner.artifacts + ($owner.pre_existing // [])) as $owned
+        | (any($owned[]; .path | startswith(".pi/"))) as $has_pi
+        | [$owned[] | .path as $p
+           | if ($p | startswith(".codex/")) then "codex"
+             elif ($p | startswith(".pi/")) then "pi"
+             elif ($p | startswith(".claude/")) then "claude"
+             elif $p == "AGENTS.md" or ($p | startswith(".agents/")) then (if $has_pi then empty else "codex" end)
+             else empty end] | unique | sort
+      end;
     def keep($path; $remaining):
-      harness($path) as $h
-      | ($h != null and ($remaining | index($h)) != null)
-        or ($h == "shared_agents" and any($remaining[]; . == "codex" or . == "pi"));
+      any(consumers($path)[]; . as $c | ($remaining | index($c)) != null);
     . as $journal
     | .external as $external
     | ($external.registry_update // null) as $update
@@ -7161,21 +7390,24 @@ _attachment_detach_journal_invariants_filter='
     | (if $next == null then [] else $next.artifacts end) as $next_artifacts
     | (if $next == null then [] else ($next.renders // []) end) as $next_renders
     | ($external.renders | map(.path)) as $render_paths
-    | ($original.artifacts | map(.path) | unique | length == ($original.artifacts | length))
+    | ($journal.schema_version == $original.schema_version)
+    and ($original.artifacts | map(.path) | unique | length == ($original.artifacts | length))
     and paths_unique($next_artifacts)
     and paths_unique($journal.remove)
     and ($journal.attachment_id == $original.attachment_id)
     and ($journal.checkout_id == $original.checkout_id)
     and ($journal.worktree_id == $original.worktree_id)
     and (if $next == null then true
-         else ($next | del(.artifacts,.render_context,.renders,.pre_existing)) == ($original | del(.artifacts,.render_context,.renders,.pre_existing))
+         else ($next | del(.artifacts,.render_context,.renders,.pre_existing,.harnesses,.exclude,.exclude_block_hash))
+                == ($original | del(.artifacts,.render_context,.renders,.pre_existing,.harnesses,.exclude,.exclude_block_hash))
+           and (if $original.schema_version == 2 then $next.harnesses == $remaining else ($next | has("harnesses") | not) end)
            and ($next | has("pre_existing")) == ($original | has("pre_existing"))
            and ($next.pre_existing // []) == [($original.pre_existing // [])[] | select(keep(.path; $remaining))]
            and [$next_artifacts[] | select(.kind != "parent")]
              == [$original.artifacts[] | select(.kind != "parent")
                  | select(.path == ".trellis/runtime" or keep(.path; $remaining))]
            and $next_renders == [($original.renders // [])[] | select(keep(.path; $remaining))]
-           and (if any($next_renders[]; .path == ".claude/settings.local.json" or .path == ".codex/hooks.json")
+           and (if any($next_renders[]; .path == ".claude/settings.local.json" or .path == ".codex/hooks.json" or .path == ".agents/hooks.json")
                 then $next.render_context == $original.render_context
                 else ($next.render_context // null) == null
                 end)
@@ -7231,14 +7463,36 @@ _attachment_detach_journal_invariants_filter='
                 or $journal.removal.path == $external.render_pending.staging_path)
          else false end)
     and (($external.exclude_action == "transfer") == ($external.transfer != null))
+    and (($external.exclude_action == "rewrite") == (($external.exclude_rewrite // null) != null))
     and (if $external.exclude_action == "restore" then
            $external.transfer == null and $original.exclude.managed_by_attachment == true and $next == null
          else true end)
     and (if $external.exclude_action == "none" then $external.transfer == null else true end)
+    and (if $external.exclude_action == "rewrite" then
+           $external.transfer == null and $next != null
+           and $original.exclude.managed_by_attachment == true
+           and $next.exclude.managed_by_attachment == true
+           and $next.exclude.path == $original.exclude.path
+           and $next.exclude.git_common_dir == $original.exclude.git_common_dir
+           and $next.exclude.before_exists == $original.exclude.before_exists
+           and $next.exclude.before_sha256 == $original.exclude.before_sha256
+           and $next.exclude.before_base64 == $original.exclude.before_base64
+           and $next.exclude.after_exists == true
+           and $next.exclude_block_hash == $next.exclude.managed_block_sha256
+           and $external.exclude_rewrite.path == $original.exclude.path
+           and $external.exclude_rewrite.managed_block_sha256 == $next.exclude.managed_block_sha256
+           and $external.exclude_rewrite.managed_block_base64 == $next.exclude.managed_block_base64
+         else true end)
     and (if $external.restore_hooks then $original.git_hooks.enabled == true else true end)
     and ($external.clear_registry == ($next == null))
-    and (if $next == null then $update == null
-         else $update != null and $external.exclude_action == "none" and $external.restore_hooks == false
+    and (if $next == null then $update == null and $external.exclude_action != "rewrite"
+         else $update != null and $external.restore_hooks == false
+           and (
+             $external.exclude_action == "rewrite"
+             or ($journal.schema_version == 1 and $external.exclude_action == "none"
+                 and $next.exclude == $original.exclude
+                 and $next.exclude_block_hash == $original.exclude_block_hash)
+           )
            and ($update.expected.harnesses | sort) == harnesses($original)
            and ($update.after.harnesses | sort) == $remaining
            and $update.expected.release == $original.release
@@ -7263,6 +7517,91 @@ _attachment_detach_journal_invariants_filter='
          end)
 '
 
+_attachment_detach_exclude_rewrite_data_valid() {
+  local file=$1
+  python3 -I - "$file" <<'PY'
+import base64, hashlib, json, sys
+begin = b"# --- Trellis local attachment exclude block ---"
+end = b"# --- end Trellis local attachment exclude block ---"
+try:
+    journal = json.loads(open(sys.argv[1], "rb").read().decode("utf-8"))
+    rewrite = journal["external"]["exclude_rewrite"]
+    orig_ex = journal["original_owner"]["exclude"]
+    next_owner = journal["next_owner"]
+    if not isinstance(rewrite, dict) or not isinstance(next_owner, dict):
+        raise SystemExit(2)
+    next_ex = next_owner["exclude"]
+    def dec(b64_str, expected_sha):
+        raw = base64.b64decode(b64_str.encode("ascii"), validate=True)
+        if hashlib.sha256(raw).hexdigest() != expected_sha:
+            raise ValueError("digest mismatch")
+        return raw
+    rw_before = dec(rewrite["before_base64"], rewrite["before_sha256"])
+    rw_after = dec(rewrite["after_base64"], rewrite["after_sha256"])
+    rw_block = dec(rewrite["managed_block_base64"], rewrite["managed_block_sha256"])
+    orig_block = dec(orig_ex["managed_block_base64"], orig_ex["managed_block_sha256"])
+    orig_before = dec(orig_ex["before_base64"], orig_ex["before_sha256"])
+    next_after = dec(next_ex["after_base64"], next_ex["after_sha256"])
+    if orig_ex["before_exists"] is False and orig_before != b"":
+        raise SystemExit(2)
+    entries = sorted(set(["/.trellis/runtime"] + [
+        "/" + a["path"] for a in next_owner["artifacts"] if a["kind"] != "parent"
+    ]))
+    expected_block = (begin + b"\n"
+                      + b"".join(e.encode("utf-8") + b"\n" for e in entries)
+                      + end + b"\n")
+    if rw_block != expected_block or not orig_block.startswith(begin + b"\n") or not orig_block.endswith(end + b"\n"):
+        raise SystemExit(2)
+    def lines_with_offsets(data):
+        start = 0
+        while start < len(data):
+            nl = data.find(b"\n", start)
+            if nl < 0:
+                yield data[start:], start, len(data), False
+                return
+            yield data[start:nl + 1], start, nl + 1, True
+            start = nl + 1
+    counts = [0, 0]
+    inside = False
+    b_start = None
+    b_lines = []
+    matches = []
+    for line, off, next_off, term in lines_with_offsets(rw_before):
+        body = line[:-1] if term else line
+        if not inside:
+            if body == begin:
+                counts[0] += 1
+                if not term or matches:
+                    raise SystemExit(2)
+                inside = True
+                b_start = off
+                b_lines = [line]
+            elif body == end:
+                raise SystemExit(2)
+        else:
+            if body == begin:
+                raise SystemExit(2)
+            b_lines.append(line)
+            if body == end:
+                counts[1] += 1
+                if not term or b"".join(b_lines) != orig_block:
+                    raise SystemExit(2)
+                matches.append((b_start, next_off))
+                inside = False
+                b_lines = []
+    if counts != [1, 1] or inside or len(matches) != 1:
+        raise SystemExit(2)
+    s_off, e_off = matches[0]
+    if rw_before[:s_off] + expected_block + rw_before[e_off:] != rw_after:
+        raise SystemExit(2)
+    prefix = orig_before + (b"" if not orig_before or orig_before.endswith(b"\n") else b"\n")
+    if prefix + expected_block != next_after:
+        raise SystemExit(2)
+except Exception:
+    raise SystemExit(2)
+PY
+}
+
 _attachment_detach_journal_data_valid() {
   local file=$1 original next transfer expected after attachment journal_dir state_dir home transfer_path transfer_checkout transfer_worktree
   _attachment_valid_absolute "$file" || return 2
@@ -7285,6 +7624,9 @@ _attachment_detach_journal_data_valid() {
     _attachment_detach_owner_data_valid "$after" || return 2
   fi
   trellis_jq -e --argjson original "$original" --argjson next "$next" "$_attachment_detach_journal_invariants_filter" "$file" >/dev/null 2>&1 || return 2
+  if [ "$(jq -r '.external.exclude_action' "$file")" = rewrite ]; then
+    _attachment_detach_exclude_rewrite_data_valid "$file" || return 2
+  fi
   attachment=$(jq -r '.attachment_id' "$file") || return 2
   journal_dir=$(dirname "$file") || return 2
   state_dir=$(dirname "$journal_dir") || return 2
@@ -7699,7 +8041,7 @@ _attachment_detach_prepare_impl() {
   printf '%s\n' "$external" | jq -e 'type == "object"' >/dev/null 2>&1 || return 2
   journal=$(_attachment_detach_journal_path "$home" "$attachment")
   expected=$(trellis_jq -cn --argjson original "$original" --argjson next "$next_owner" --argjson remove "$remove" --argjson external "$external" \
-    '{schema_version:1,status:"detaching",attachment_id:$original.attachment_id,checkout_id:$original.checkout_id,worktree_id:$original.worktree_id,original_owner:$original,next_owner:$next,remove:$remove,phase:0,owner_committed:false,removal:null,external:($external + {phase:0,render_phase:0,render_pending:null})}') || return 2
+    '{schema_version:$original.schema_version,status:"detaching",attachment_id:$original.attachment_id,checkout_id:$original.checkout_id,worktree_id:$original.worktree_id,original_owner:$original,next_owner:$next,remove:$remove,phase:0,owner_committed:false,removal:null,external:($external + {phase:0,render_phase:0,render_pending:null})}') || return 2
   if [ -e "$journal" ] || [ -L "$journal" ]; then
     _attachment_detach_journal_valid "$journal" || {
       status=$?

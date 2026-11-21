@@ -28,7 +28,7 @@ PY
 # qualification run.json records a historical tree inventory, research paths
 # included, so it is a record like research/ itself, never a live pin.
 sol_hits() {
-  git -C "$1" grep -n "$(printf '%s%s' 'gpt-6' '-sol')" -- ':!specs' ':!docs/adr' ':!research' ':!CHANGELOG.md' \
+  git -C "$1" grep -n -E "$(printf '%s%s|%s%s' 'gpt-6' '-sol' 'gpt-6\.1' '-sol')" -- ':!specs' ':!docs/adr' ':!docs/plans' ':!docs/specs' ':!research' ':!CHANGELOG.md' ':!decisions-log.md' ':!follow-ups.md' ':!HANDOFF*' \
     ':!scripts/tests/fixtures/qualification/*/run.json'
 }
 
@@ -38,24 +38,27 @@ sol_hits() {
 }
 
 @test "a recorded tree inventory is not a live Sol reference, and a live pin still is" {
-  local repo="$BATS_TEST_TMPDIR/repo" sol
+  local repo="$BATS_TEST_TMPDIR/repo" sol sol61
   sol="$(printf '%s%s' 'gpt-6' '-sol')"
+  sol61="$(printf '%s%s' 'gpt-6.1' '-sol')"
   git init -q "$repo"
   mkdir -p "$repo/scripts/tests/fixtures/qualification/pinned-before" "$repo/core-rules/pi/agents"
   printf '{"path": "research/reports/%s.md"}\n' "$sol" > "$repo/scripts/tests/fixtures/qualification/pinned-before/run.json"
-  printf 'model: openai-codex/gpt-6.1-sol\n' > "$repo/core-rules/pi/agents/sol-ro.md"
+  printf 'model: openai-codex/gpt-6.2-sol\n' > "$repo/core-rules/pi/agents/sol-ro.md"
   git -C "$repo" add -A
   run sol_hits "$repo"
   [ "$status" -eq 1 ] || { echo "$output"; false; }
 
-  printf 'model: openai-codex/%s\n' "$sol" > "$repo/core-rules/pi/agents/sol-ro.md"
-  git -C "$repo" add -A
-  run sol_hits "$repo"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$output" = "core-rules/pi/agents/sol-ro.md:1:model: openai-codex/$sol" ] || { echo "$output"; false; }
+  for retired in "$sol" "$sol61"; do
+    printf 'model: openai-codex/%s\n' "$retired" > "$repo/core-rules/pi/agents/sol-ro.md"
+    git -C "$repo" add -A
+    run sol_hits "$repo"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ "$output" = "core-rules/pi/agents/sol-ro.md:1:model: openai-codex/$retired" ] || { echo "$output"; false; }
+  done
 }
 
-@test "Sol catalog and shipped pi agents pin GPT-6.1 at their existing efforts" {
+@test "Sol and Astra catalog and shipped pi agents pin GPT-6.2 at their existing efforts" {
   run python3 - "$ROOT/core-rules/skills/herdr-foreman/roles.json" "$ROOT/core-rules/pi/agents" <<'PY'
 import json
 import re
@@ -64,11 +67,16 @@ from pathlib import Path
 
 roles_path, agent_dir = map(Path, sys.argv[1:])
 roles = json.loads(roles_path.read_text())["agents"]
-for agent, effort in (("sol", "high"), ("sol-xhigh", "xhigh"), ("sol-max", "max")):
-    assert roles[agent]["model"] == f"openai-codex/gpt-6.1-sol:{effort}", roles[agent]
-for name in ("sol-ro", "sol-rw"):
+for agent, effort in (("sol-low", "low"), ("sol-medium", "medium"), ("sol", "high"), ("sol-xhigh", "xhigh")):
+    assert roles[agent]["model"] == f"openai-codex/gpt-6.2-sol:{effort}", roles[agent]
+assert "sol-max" not in roles
+assert roles["astra"]["model"] == "openai-codex/gpt-6.2-astra:high", roles["astra"]
+assert roles["astra-medium"]["model"] == "openai-codex/gpt-6.2-astra:medium", roles["astra-medium"]
+for name in ("sol-ro", "sol-rw", "security-reviewer"):
     text = (agent_dir / f"{name}.md").read_text()
-    assert re.search(r"(?m)^model: openai-codex/gpt-6\.1-sol$", text), name
+    assert re.search(r"(?m)^model: openai-codex/gpt-6\.2-sol$", text), name
+astra_text = (agent_dir / "astra-ro.md").read_text()
+assert re.search(r"(?m)^model: openai-codex/gpt-6\.2-astra$", astra_text), "astra-ro"
 PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }

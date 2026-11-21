@@ -183,10 +183,11 @@ PROJECT_DIR="$(pg_project_dir)"
 # Snapshot the Tests endpoints before any row can move a ref. Three-dot uses
 # its merge-base, and an explicit head need not be the checkout HEAD.
 _pg_tests_range="$RANGE"
-if [ "$PG_MODE" = push ]; then
-  _pg_tests_base="$(pg_range_base "$PROJECT_DIR" "$RANGE")" &&
-    _pg_tests_head="$(pg_range_head "$PROJECT_DIR" "$RANGE")" &&
-    _pg_tests_range="$_pg_tests_base..$_pg_tests_head"
+if _pg_tests_base="$(pg_range_base "$PROJECT_DIR" "$RANGE")" &&
+   _pg_tests_head="$(pg_range_head "$PROJECT_DIR" "$RANGE")"; then
+  _pg_tests_range="$_pg_tests_base..$_pg_tests_head"
+else
+  _pg_tests_base=""; _pg_tests_head=""
 fi
 
 # A refusal that still renders a verdict: callers treat a passing rc without an
@@ -208,26 +209,39 @@ pg_load_config --range="$RANGE" >/dev/null ||
 # $ ` \, or "${KEY:-literal}" naming its own key. Prints every value assigned
 # to SECURITY_GATE_AUDIT_DIR; non-zero when any line is not data.
 pg_audit_dir_values() {
-  local LC_ALL=C line key val
-  local re_assign='^(SECURITY_GATE_[A-Z0-9_]+|LLM_[A-Z0-9_]+)=(.*)$'
-  local re_tail='([[:space:]]+(#.*)?)?$'
-  local re_dq='^"([^"$`\\]*)"'"$re_tail"
-  local re_sq="^'([^']*)'$re_tail"
-  local re_bare='^([A-Za-z0-9_./:,@+%=-]*)'"$re_tail"
-  local re_def='^"[$][{]([A-Z0-9_]+):-([^"$`\\}]*)[}]"'"$re_tail"
+  local line key val raw tail whitespace=$' \t\r\n\v\f'
+  # Literal shell patterns also preserve invalid bytes; UTF-8 EREs do not.
   while IFS= read -r line || [ -n "$line" ]; do
-    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line#"${line%%[!$whitespace]*}"}"
     case "$line" in ''|'#'*) continue ;; esac
-    [[ "$line" =~ $re_assign ]] || return 1
-    key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
-    if [[ "$val" =~ $re_def ]]; then
-      [ "${BASH_REMATCH[1]}" = "$key" ] || return 1
-      val="${BASH_REMATCH[2]}"
-    elif [[ "$val" =~ $re_dq ]] || [[ "$val" =~ $re_sq ]] || [[ "$val" =~ $re_bare ]]; then
-      val="${BASH_REMATCH[1]}"
-    else
-      return 1
-    fi
+    case "$line" in *=*) ;; *) return 1 ;; esac
+    key=${line%%=*} val=${line#*=}
+    case "$key" in SECURITY_GATE_?*) raw=${key#SECURITY_GATE_} ;; LLM_?*) raw=${key#LLM_} ;; *) return 1 ;; esac
+    case "$raw" in *[!ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*) return 1 ;; esac
+    case "$val" in
+      '"'*)
+        val=${val#'"'}
+        case "$val" in *'"'*) tail=${val#*'"'}; val=${val%%'"'*} ;; *) return 1 ;; esac
+        case "$val" in
+          '${'*':-'*'}')
+            raw=${val#'${'}; raw=${raw%%':-'*}
+            [ "$raw" = "$key" ] || return 1
+            val=${val#*':-'}; val=${val%'}'}
+            case "$val" in *'}'*) return 1 ;; esac ;;
+        esac
+        case "$val" in *'$'*|*'`'*|*'\'*|*'"'*) return 1 ;; esac ;;
+      "'"*)
+        val=${val#"'"}
+        case "$val" in *"'"*) tail=${val#*"'"}; val=${val%%"'"*} ;; *) return 1 ;; esac ;;
+      *)
+        raw=$val; val=${val%%[$whitespace]*}; tail=${raw#"$val"}
+        case "$val" in *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:,@+%=-]*) return 1 ;; esac ;;
+    esac
+    case "$tail" in
+      '') ;;
+      [$whitespace]*) tail=${tail#"${tail%%[!$whitespace]*}"}; case "$tail" in ''|'#'*) ;; *) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
     [ "$key" != SECURITY_GATE_AUDIT_DIR ] || printf '%s\n' "$val"
   done
 }
@@ -770,11 +784,29 @@ PG_CHECKOUT="$PROJECT_LOG"
 # The trusted code root: the range base's process-gate-local trees (both
 # twins), project validators and declared validator dependencies, copied out of
 # the base commit. Set here, never taken from the caller's environment.
+PG_TRUSTED_ROOT=""
+PG_ROW_SCRATCH=""
+PG_ROW_PIDS=()
+pg_cleanup_all() {
+  local _pid
+  for _pid in ${PG_ROW_PIDS[@]+"${PG_ROW_PIDS[@]}"}; do
+    pkill -TERM -P "$_pid" 2>/dev/null || true
+    kill "$_pid" 2>/dev/null || true
+    wait "$_pid" 2>/dev/null || true
+  done
+  [ -z "${PG_ROW_SCRATCH:-}" ] || rm -rf "$PG_ROW_SCRATCH"
+  [ -z "${PG_TRUSTED_ROOT:-}" ] || rm -rf "$PG_TRUSTED_ROOT"
+}
+trap 'pg_cleanup_all' EXIT
+
 PG_TRUSTED_ROOT="$(mktemp -d 2>/dev/null || mktemp -d -t process-gate-base)" ||
   pg_blocked_verdict "process-gate cannot create a private directory for base validators"
-trap 'rm -rf "$PG_TRUSTED_ROOT"' EXIT
 PG_TRUSTED_ROOT="$(cd -P "$PG_TRUSTED_ROOT" && pwd -P)" ||
   pg_blocked_verdict "process-gate cannot resolve its private validator directory"
+PG_ROW_SCRATCH="$(umask 077; mktemp -d 2>/dev/null || mktemp -d -t process-gate-rows)" ||
+  pg_blocked_verdict "process-gate cannot create a private directory for concurrent gate rows"
+PG_ROW_SCRATCH="$(cd -P "$PG_ROW_SCRATCH" && pwd -P)" ||
+  pg_blocked_verdict "process-gate cannot resolve its private row directory"
 
 pg_unshadow
 for _tree in .agents/skills/process-gate-local .claude/skills/process-gate-local; do
@@ -827,102 +859,159 @@ if [ -n "$CONFIG_CHANGES" ]; then
   fi
 fi
 
-run_gate 0 "$SKILL_DIR/scripts/check-pr.sh"
-run_gate 1 "$SKILL_DIR/scripts/check-secrets.sh"
-run_gate 2 "$SKILL_DIR/scripts/check-bypass.sh"
-run_gate 4 "$SKILL_DIR/scripts/check-docs.sh"
+pg_write_row_scratch() {
+  local idx="$1" status="$2" out="$3"
+  printf '%s\n' "$status" > "$PG_ROW_SCRATCH/$idx.status"
+  # Trailing sentinel dot preserves intentional trailing newlines across $(< ...).
+  printf '%s.' "$out" > "$PG_ROW_SCRATCH/$idx.out"
+}
 
-# Stack profile (idx 5). Validators run as their base copies (materialised
-# above) under the validator-env.sh source guard.
-pg_unshadow
-profile="${PROCESS_GATE_STACK_PROFILE:-}"
-if [ -z "$profile" ] || [ "$profile" = "n-a" ]; then
-  set_result 5 "n/a" "profile=${profile:-<unset>} (no validators run)"
-elif [ -z "${PROCESS_GATE_STACK_VALIDATORS+set}" ]; then
-  set_result 5 "warn" "profile=$profile but PROCESS_GATE_STACK_VALIDATORS unset (no validators run)"
-else
-  validators=("${PROCESS_GATE_STACK_VALIDATORS[@]:-}")
-  nonblank=0
-  for v in "${validators[@]}"; do
-    [ -n "$v" ] && nonblank=$((nonblank + 1))
-  done
-  if [ "$nonblank" -eq 0 ]; then
-    set_result 5 "warn" "profile=$profile but PROCESS_GATE_STACK_VALIDATORS empty (no validators run)"
-  elif [ ! -s "$SKILL_DIR/scripts/lib/validator-env.sh" ]; then
-    set_result 5 "fail" "validator source guard missing: scripts/lib/validator-env.sh — re-run the skill rollout"
+pg_collect_row_scratch() {
+  local idx="$1" status="" raw=""
+  if [ ! -s "$PG_ROW_SCRATCH/$idx.status" ] || [ ! -s "$PG_ROW_SCRATCH/$idx.out" ]; then
+    set_result "$idx" "fail" "process-gate row ${LABELS[$idx]} exited unexpectedly without recording status"
+    return 0
+  fi
+  IFS= read -r status < "$PG_ROW_SCRATCH/$idx.status"
+  raw="$(< "$PG_ROW_SCRATCH/$idx.out")"
+  set_result "$idx" "$status" "${raw%.}"
+}
+
+pg_spawn_gate() {
+  local idx="$1"
+  (
+    run_gate "$@"
+    pg_write_row_scratch "$idx" "${RESULTS[$idx]}" "${FINDINGS[$idx]}"
+  ) &
+  PG_ROW_PIDS+=("$!")
+}
+
+pg_run_stack_row() {
+  pg_unshadow
+  local profile="${PROCESS_GATE_STACK_PROFILE:-}"
+  if [ -z "$profile" ] || [ "$profile" = "n-a" ]; then
+    set_result 5 "n/a" "profile=${profile:-<unset>} (no validators run)"
+  elif [ -z "${PROCESS_GATE_STACK_VALIDATORS+set}" ]; then
+    set_result 5 "warn" "profile=$profile but PROCESS_GATE_STACK_VALIDATORS unset (no validators run)"
   else
-    worst="pass"; combined=""
+    local validators=("${PROCESS_GATE_STACK_VALIDATORS[@]:-}")
+    local nonblank=0 v vpath vout vrc worst combined
     for v in "${validators[@]}"; do
-      [ -z "$v" ] && continue
-      if ! vpath="$(resolve_stack_validator "$v")"; then
-        combined="${combined}${vpath:-validator missing: $v}"$'\n'
-        worst="fail"; continue
-      fi
-      # The trusted roots and the source guard are set here, never inherited.
-      # The validator's bytes come from the base copy; it runs against the
-      # checkout under test: PROCESS_GATE_PROJECT_DIR names it and is the cwd.
-      # No `-p` here: it would skip the BASH_ENV guard. The purge above
-      # already left no function to import.
-      vout="$(cd "$PG_CHECKOUT" &&
+      [ -n "$v" ] && nonblank=$((nonblank + 1))
+    done
+    if [ "$nonblank" -eq 0 ]; then
+      set_result 5 "warn" "profile=$profile but PROCESS_GATE_STACK_VALIDATORS empty (no validators run)"
+    elif [ ! -s "$SKILL_DIR/scripts/lib/validator-env.sh" ]; then
+      set_result 5 "fail" "validator source guard missing: scripts/lib/validator-env.sh — re-run the skill rollout"
+    else
+      worst="pass"; combined=""
+      for v in "${validators[@]}"; do
+        [ -z "$v" ] && continue
+        if ! vpath="$(resolve_stack_validator "$v")"; then
+          combined="${combined}${vpath:-validator missing: $v}"$'\n'
+          worst="fail"; continue
+        fi
+        # The trusted roots and the source guard are set here, never inherited.
+        # The validator's bytes come from the base copy; it runs against the
+        # checkout under test: PROCESS_GATE_PROJECT_DIR names it and is the cwd.
+        # No `-p` here: it would skip the BASH_ENV guard. The purge above
+        # already left no function to import.
+        vout="$(cd "$PG_CHECKOUT" &&
         PROCESS_GATE_PROJECT_DIR="$PG_CHECKOUT" PG_TRUSTED_ROOT="$PG_TRUSTED_ROOT" \
         PG_SKILL_ROOT="$SKILL_DIR" PG_GATE_RANGE="$RANGE" \
         BASH_ENV="$SKILL_DIR/scripts/lib/validator-env.sh" bash "$vpath" --range="$RANGE" 2>&1)"; vrc=$?
-      combined="${combined}${vout}"$'\n'
-      case "$vrc" in
-        0) ;;
-        2) [ "$worst" = "pass" ] && worst="warn" ;;
-        *) worst="fail" ;;
-      esac
-    done
-    set_result 5 "$worst" "$combined"
+        combined="${combined}${vout}"$'\n'
+        case "$vrc" in
+          0) ;;
+          2) [ "$worst" = "pass" ] && worst="warn" ;;
+          *) worst="fail" ;;
+        esac
+      done
+      set_result 5 "$worst" "$combined"
+    fi
   fi
-fi
+}
+
+pg_run_slop_row() {
+  # Anti-slop (idx 8) — posture-driven from the project's
+  # `gate_profiles.anti_slop.posture`. Set inline rather than via run_gate because
+  # the row needs an `n/a` state and no exit code carries one: check-slop.sh's rc
+  # says only whether it blocks (1 = posture `enforced` with findings), while its
+  # first printed token carries the level. So an `advisory` project's findings
+  # surface as ⚠️ warn — NEEDS CHANGES, never BLOCKED — and an undeclared or `off`
+  # project renders ➖ n/a. Deliberately absent from the PR-shape downgrade set:
+  # the only posture that can fail is one the project opted into.
+  #
+  # Existence is checked FIRST, and a missing script is a FAIL. The row reads the
+  # level off check-slop.sh's exit code first and its first printed token second:
+  # a nonzero rc fails the row even with no contract token, and past the contract
+  # tokens (pass/warn/fail/info) the `*)` arm fails rather than rendering n/a —
+  # historically this arm rendered n/a, the only gate in this aggregator that
+  # failed open. Every run_gate gate lands a missing script in its
+  # `*) status="fail"` arm; this one says so explicitly.
+  if [ ! -f "$SKILL_DIR/scripts/check-slop.sh" ]; then
+    set_result 8 "fail" "fail Anti-slop: validator not found at scripts/check-slop.sh — this process-gate leaf predates gate row 9; re-run the skill rollout"
+  else
+    local slop_out slop_rc slop_token
+    slop_out="$(env -u BASH_ENV -u ENV bash -p "$SKILL_DIR/scripts/check-slop.sh" --range="$RANGE" 2>&1)"; slop_rc=$?
+    slop_token="$(printf "%s\n" "$slop_out" | head -1 | awk '{print $1}')"
+    if [ "$slop_rc" -ne 0 ]; then
+      set_result 8 "fail" "$slop_out"
+    else
+      case "$slop_token" in
+        pass) set_result 8 "pass" "$slop_out" ;;
+        warn) set_result 8 "warn" "$slop_out" ;;
+        fail) set_result 8 "fail" "$slop_out" ;;
+        info) set_result 8 "n/a"  "$slop_out" ;;
+        *)    set_result 8 "fail" "$slop_out" ;;
+      esac
+    fi
+  fi
+}
+
+# Launch all independent read-only static rows concurrently, wait for completion,
+# and collect their outputs into RESULTS/FINDINGS in exact deterministic order.
+trap 'pg_cleanup_all; exit 130' INT
+trap 'pg_cleanup_all; exit 143' TERM
+pg_spawn_gate 0 "$SKILL_DIR/scripts/check-pr.sh"
+pg_spawn_gate 1 "$SKILL_DIR/scripts/check-secrets.sh"
+pg_spawn_gate 2 "$SKILL_DIR/scripts/check-bypass.sh"
+pg_spawn_gate 4 "$SKILL_DIR/scripts/check-docs.sh"
+
+(
+  pg_run_stack_row
+  pg_write_row_scratch 5 "${RESULTS[5]}" "${FINDINGS[5]}"
+) &
+PG_ROW_PIDS+=("$!")
 
 # Security (diff) (idx 6) — always-hard. Adapter wraps security-gate run-diff.sh.
 # A push that targets main/master is passed on: run-diff refuses a change to
 # its own gate config there, approved or not.
 if [ "$PG_TARGET_MAIN" = true ]; then
-  run_gate 6 "$SKILL_DIR/scripts/check-security-diff.sh" --target=main
+  pg_spawn_gate 6 "$SKILL_DIR/scripts/check-security-diff.sh" --target=main
 else
-  run_gate 6 "$SKILL_DIR/scripts/check-security-diff.sh"
+  pg_spawn_gate 6 "$SKILL_DIR/scripts/check-security-diff.sh"
 fi
 
 # Analyze (idx 7) — PR-shape (downgrades at push). Adapter never exits 1.
-run_gate 7 "$SKILL_DIR/scripts/check-analyze.sh"
+pg_spawn_gate 7 "$SKILL_DIR/scripts/check-analyze.sh"
 
-# Anti-slop (idx 8) — posture-driven from the project's
-# `gate_profiles.anti_slop.posture`. Set inline rather than via run_gate because
-# the row needs an `n/a` state and no exit code carries one: check-slop.sh's rc
-# says only whether it blocks (1 = posture `enforced` with findings), while its
-# first printed token carries the level. So an `advisory` project's findings
-# surface as ⚠️ warn — NEEDS CHANGES, never BLOCKED — and an undeclared or `off`
-# project renders ➖ n/a. Deliberately absent from the PR-shape downgrade set:
-# the only posture that can fail is one the project opted into.
-#
-# Existence is checked FIRST, and a missing script is a FAIL. The row reads the
-# level off check-slop.sh's exit code first and its first printed token second:
-# a nonzero rc fails the row even with no contract token, and past the contract
-# tokens (pass/warn/fail/info) the `*)` arm fails rather than rendering n/a —
-# historically this arm rendered n/a, the only gate in this aggregator that
-# failed open. Every run_gate gate lands a missing script in its
-# `*) status="fail"` arm; this one says so explicitly.
-if [ ! -f "$SKILL_DIR/scripts/check-slop.sh" ]; then
-  set_result 8 "fail" "fail Anti-slop: validator not found at scripts/check-slop.sh — this process-gate leaf predates gate row 9; re-run the skill rollout"
-else
-  slop_out="$(env -u BASH_ENV -u ENV bash -p "$SKILL_DIR/scripts/check-slop.sh" --range="$RANGE" 2>&1)"; slop_rc=$?
-  slop_token="$(printf "%s\n" "$slop_out" | head -1 | awk '{print $1}')"
-  if [ "$slop_rc" -ne 0 ]; then
-    set_result 8 "fail" "$slop_out"
-  else
-    case "$slop_token" in
-      pass) set_result 8 "pass" "$slop_out" ;;
-      warn) set_result 8 "warn" "$slop_out" ;;
-      fail) set_result 8 "fail" "$slop_out" ;;
-      info) set_result 8 "n/a"  "$slop_out" ;;
-      *)    set_result 8 "fail" "$slop_out" ;;
-    esac
-  fi
-fi
+(
+  pg_run_slop_row
+  pg_write_row_scratch 8 "${RESULTS[8]}" "${FINDINGS[8]}"
+) &
+PG_ROW_PIDS+=("$!")
+
+for _pg_pid in "${PG_ROW_PIDS[@]}"; do
+  wait "$_pg_pid"
+done
+PG_ROW_PIDS=()
+trap - INT TERM
+
+for _pg_static_idx in 0 1 2 4 5 6 7 8; do
+  pg_collect_row_scratch "$_pg_static_idx"
+done
+unset _pg_pid _pg_static_idx
 
 # All cheap rows run before Tests. At push only, an always-hard failure has
 # already refused the push: do not start the battery or imply it passed.
@@ -939,8 +1028,69 @@ fi
 if [ "$tests_blocked" = true ]; then
   set_result 3 "n/a" "Tests: not run (mode=push: always-hard cheap row failed; battery skipped)"
 else
-  run_gate 3 "$SKILL_DIR/scripts/check-tests.sh" --mode="$PG_MODE" ${_pg_tag_args[@]+"${_pg_tag_args[@]}"}
+  _pg_tests_args=("--mode=$PG_MODE")
+  [ "$PG_TARGET_MAIN" != true ] || _pg_tests_args+=(--target=main)
+  [ -n "$_pg_range$_pg_base" ] || _pg_tests_args+=(--docs-policy-default-range)
+  run_gate 3 "$SKILL_DIR/scripts/check-tests.sh" "${_pg_tests_args[@]}" ${_pg_tag_args[@]+"${_pg_tag_args[@]}"}
 fi
+
+# Only exact checker findings count; captured command output is indented
+# further. Take the final canonical scope and strictly bind a docs policy
+# record to the resolved endpoints and claimed outcome, even on a failed row.
+pg_tests_scope_records() {
+  local line kind n expected='' docs_count=0 child_count=0 bad=0 report=''
+  local oid='([0-9a-f]{40}|[0-9a-f]{64})'
+  local context_re="^  (tests: docs-policy v1 base=$oid head=$oid policy=$oid paths=([1-9][0-9]*) battery=(not-required|targeted))$"
+  local scope_re='^  Tests: (full|partial|not run|unknown|reused: configured command|narrowed: [1-9][0-9]* selected|no-tests: docs-only|narrowed \((docs-only|release-metadata): [1-9][0-9]* files\))$'
+  docs_policy_record=''
+  tests_scope=unknown
+  while IFS= read -r line; do
+    case "$line" in
+      '  tests: docs-policy'*)
+        docs_count=$((docs_count + 1))
+        if [[ "$line" =~ $context_re ]] &&
+           [ "${BASH_REMATCH[2]}" = "$_pg_tests_base" ] && [ "${BASH_REMATCH[3]}" = "$_pg_tests_head" ] &&
+           [ "${#BASH_REMATCH[4]}" -eq "${#_pg_tests_base}" ]; then
+          docs_policy_record="${BASH_REMATCH[1]}"
+          n="${BASH_REMATCH[5]}"; kind="${BASH_REMATCH[6]}"
+        else
+          bad=1
+        fi
+        continue ;;
+      '  tests: no-tests scope reported by configured command')
+        child_count=$((child_count + 1)); continue ;;
+    esac
+    if [[ "$line" =~ $scope_re ]]; then tests_scope="${BASH_REMATCH[1]}"; fi
+    report="$report$line"$'\n'
+  done <<<"${FINDINGS[3]}"
+  case "$tests_scope" in
+    'no-tests: docs-only')
+      # The existing child receipt has its own provenance, never a docs policy.
+      if [ "$child_count" -eq 1 ] && [ "$docs_count" -eq 0 ] && [ "$PG_MODE" = push ]; then
+        :
+      else
+        expected=not-required
+      fi ;;
+    'narrowed (docs-only: '*)
+      expected=either; [ "$tests_scope" = "narrowed (docs-only: ${n:-} files)" ] || bad=1 ;;
+    'narrowed (release-metadata: '*)
+      expected=targeted; [ "$tests_scope" = "narrowed (release-metadata: ${n:-} files)" ] || bad=1 ;;
+  esac
+  if [ -n "$expected" ]; then
+    if [ "$docs_count" -ne 1 ] || [ "$child_count" -ne 0 ] ||
+       { [ "$expected" != either ] && [ "$expected" != "${kind:-}" ]; }; then bad=1; fi
+  elif [ "$docs_count" -ne 0 ] || { [ "$child_count" -ne 0 ] && [ "$tests_scope" != 'no-tests: docs-only' ]; }; then
+    bad=1
+  fi
+  if [ "$bad" -eq 1 ]; then
+    docs_policy_record=''
+    tests_scope=unknown
+    report+="  invalid or missing checker-owned docs-policy record for the Tests scope"$'\n'
+    RESULTS[3]=fail
+  fi
+  FINDINGS[3]="${report%$'\n'}"
+}
+pg_tests_scope_records
 
 # --- Render verdict --------------------------------------------------------
 glyph() {
@@ -963,10 +1113,7 @@ done
 
 printf "## process-gate verdict (mode=%s)\n\n" "$PG_MODE"
 printf "%s\n\n" "$DIFF_BASE_RECEIPT"
-# Only the checker's own two-space finding counts, never captured command
-# output (four spaces). The checker's final receipt wins over earlier findings.
-tests_scope="$(printf '%s\n' "${FINDINGS[3]}" | sed -nE 's/^  Tests: (full|partial|not run|unknown|reused: configured command|narrowed: [1-9][0-9]* selected|no-tests: docs-only|narrowed \((docs-only|release-metadata): [0-9]+ files\))$/\1/p' | tail -n 1)"
-tests_scope="${tests_scope:-unknown}"
+[ "$tests_blocked" != true ] || tests_scope='not run'
 for i in 0 1 2 3 4 5 6 7 8; do
   printf "%-18s %s" "${LABELS[$i]}:" "$(glyph "${RESULTS[$i]}")"
   [ "$i" != 3 ] || printf ' — %s' "$tests_scope"
@@ -977,11 +1124,17 @@ for i in 0 1 2 3 4 5 6 7 8; do
   printf '\n'
 done
 printf "\nOverall: %s\n\nTests: %s\n\n" "$overall" "$tests_scope"
+[ -z "$docs_policy_record" ] || printf '%s\n\n' "$docs_policy_record"
 # Pass rows normally hide checker output. Preserve the bypass check's coverage
 # limitation there; non-pass rows already show it in the Findings section.
 if [ "${RESULTS[2]}" = pass ]; then
   bypass_coverage="$(printf '%s\n' "${FINDINGS[2]}" | grep -E '^  (Bypass|Husky) coverage:' || true)"
   [ -z "$bypass_coverage" ] || printf '%s\n\n' "$bypass_coverage"
+fi
+# A passing security row would otherwise hide the diff's parse coverage note.
+if [ "${RESULTS[6]}" = pass ]; then
+  bundle_notice="$(printf '%s\n' "${FINDINGS[6]}" | grep -E '^semgrep: PartialParsing skipped \(minified/generated bundle\): [1-9][0-9]* target\(s\)$' || true)"
+  [ -z "$bundle_notice" ] || printf '%s\n\n' "$bundle_notice"
 fi
 # Cache identity and the tag rerun supplement the canonical scope; neither is
 # parsed as a second Tests scope or allowed to override its result.

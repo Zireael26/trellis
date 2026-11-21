@@ -7,10 +7,11 @@ a run environment token, private-tmp files/cwd, pinned output fds, and descendan
 The checkout's cwd is NEVER an ownership signal. Enumeration is in-process
 (libproc and KERN_PROCARGS2), without lsof/ps subprocesses.
 
-TRELLIS_LOCAL_GATE_RUNNER/RECEIPT/DEADLINE/TERM_GRACE remain hermetic test
-seams. TRELLIS_LOCAL_GATE_RESERVE scales the cleanup reserve in tests;
-TRELLIS_GATE_STATE_DIR isolates durable quarantine records in tests. Production
-uses 7200 seconds, a 60-second reserve, and a 5-second TERM grace.
+TRELLIS_LOCAL_GATE_RUNNER/RECEIPT/TERM_GRACE remain hermetic test seams.
+TRELLIS_LOCAL_GATE_DEADLINE explicitly overrides the 7200-second default,
+up to 14400 seconds. TRELLIS_LOCAL_GATE_RESERVE scales the cleanup reserve in
+tests; TRELLIS_GATE_STATE_DIR isolates durable quarantine records in tests.
+The default reserve is 60 seconds and the default TERM grace is 5 seconds.
 
 Spec 066 process: START provenance precedes admission and the first planner;
 <aggregate>.provenance.jsonl retains caller and effective fenced shard snapshots
@@ -590,12 +591,45 @@ def save_record(path: Path, data: Dict[str, Any]) -> None:
             os.unlink(temporary)
 
 
+def _resolve_worktree_branch(head: str, worktree: Optional[str], branch: Optional[str],
+                             repo_root: Optional[Path] = None) -> Tuple[str, str]:
+    wt = (worktree if worktree is not None else os.environ.get("TRELLIS_GATE_WORKTREE", "")).strip()
+    br = (branch if branch is not None else os.environ.get("TRELLIS_GATE_BRANCH", "")).strip()
+    if not wt and not br and re.fullmatch(r"[0-9a-f]{40,64}", head):
+        try:
+            git_cmd = ["git", "-C", str(repo_root)] if repo_root is not None else ["git"]
+            top = subprocess.run(
+                [*git_cmd, "rev-parse", "--show-toplevel"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2, check=False,
+            )
+            if top.returncode == 0 and top.stdout.strip():
+                wt = top.stdout.strip()
+                ref = subprocess.run(
+                    ["git", "-C", wt, "rev-parse", "--abbrev-ref", "HEAD"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=2, check=False,
+                )
+                if ref.returncode == 0:
+                    br = ref.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            wt, br = "", ""
+    if wt and os.path.isabs(wt):
+        try:
+            wt = os.path.realpath(wt)
+        except OSError:
+            pass
+    if br == "HEAD":
+        br = ""
+    return wt, br
+
+
 class RunState:
     POLL_SECONDS = 2.0
     HEARTBEAT_SECONDS = 15.0
     LEASE_SECONDS = 60.0
 
-    def __init__(self, head: str = "unknown", no_wait: bool = False) -> None:
+    def __init__(self, head: str = "unknown", no_wait: bool = False,
+                 worktree: Optional[str] = None, branch: Optional[str] = None,
+                 repo_root: Optional[Path] = None) -> None:
         try:
             self.root = gate_state_root()
         except ValueError as exc:
@@ -606,6 +640,7 @@ class RunState:
         for directory in (self.runs, self.queue):
             _private_directory(directory)
         self.holder = self.root / "gate-holder.json"
+        self.supersede = self.root / "gate-supersede.json"
         self.lock_fd = self._open_lock("queue.lock")
         self.legacy_fd: Optional[int] = None
         self.guard = threading.Lock()
@@ -619,8 +654,15 @@ class RunState:
             os.close(self.lock_fd)
             raise ContainmentError("{} queue process birth identity unavailable".format(
                 "libproc" if sys.platform == "darwin" else "procfs"))
-        self.entry = {"token": uuid.uuid4().hex, "pid": identity[0], "start_us": identity[1],
-                      "head": head, "heartbeat": time.time()}
+        resolved_wt, resolved_br = _resolve_worktree_branch(head, worktree, branch, repo_root=repo_root)
+        self.entry: Dict[str, Any] = {
+            "token": uuid.uuid4().hex, "pid": identity[0], "start_us": identity[1],
+            "head": head, "heartbeat": time.time(),
+        }
+        if resolved_wt:
+            self.entry["worktree"] = resolved_wt
+        if resolved_br:
+            self.entry["branch"] = resolved_br
         try:
             wait = _positive_float("TRELLIS_LOCAL_GATE_QUEUE_WAIT", 3 * GLOBAL_DEADLINE_SECONDS)
             end = time.monotonic() + wait
@@ -674,12 +716,89 @@ class RunState:
                     or not isinstance(data["pid"], int) or data["pid"] <= 1
                     or not isinstance(data["start_us"], int) or data["start_us"] <= 0
                     or not isinstance(data["head"], str)
+                    or not isinstance(data.get("worktree", ""), str)
+                    or not isinstance(data.get("branch", ""), str)
                     or not isinstance(data["heartbeat"], (int, float))
                     or not math.isfinite(data["heartbeat"]) or data["heartbeat"] <= 0):
                 raise ValueError("invalid lease")
             return data
         except (OSError, KeyError, TypeError, ValueError) as exc:
             raise ContainmentError("corrupt queue entry {}: {}".format(path, exc)) from exc
+
+    @staticmethod
+    def _supersede_message(branch: str, head: str) -> str:
+        if head:
+            return "superseded by newer run on {} ({})".format(branch, head)
+        return "superseded by newer run on {}".format(branch)
+
+    def _read_supersede(self) -> Dict[str, Any]:
+        if not self.supersede.exists() and not self.supersede.is_symlink():
+            return {}
+        try:
+            if not private(self.supersede):
+                raise ValueError("not owner-private")
+            raw = json.loads(self.supersede.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict):
+                raise ValueError("not an object")
+        except (OSError, TypeError, ValueError):
+            self._quarantine(self.supersede, "corrupt supersede")
+            return {}
+        now = time.time()
+        cutoff = 3 * GLOBAL_DEADLINE_SECONDS
+        tokens = raw.get("tokens")
+        if isinstance(tokens, dict):
+            kept = {
+                tok: info for tok, info in tokens.items()
+                if isinstance(tok, str) and isinstance(info, dict)
+                and isinstance(info.get("branch"), str) and isinstance(info.get("head"), str)
+                and isinstance(info.get("created", now), (int, float))
+                and now - float(info.get("created", now)) <= cutoff
+            }
+            if kept:
+                raw["tokens"] = kept
+            else:
+                raw.pop("tokens", None)
+        else:
+            raw.pop("tokens", None)
+        if "token" in raw:
+            created = raw.get("created", now)
+            if (not isinstance(raw.get("token"), str)
+                    or not isinstance(raw.get("branch"), str)
+                    or not isinstance(raw.get("head"), str)
+                    or not isinstance(created, (int, float))
+                    or now - float(created) > cutoff):
+                for key in ("token", "branch", "head", "worktree", "created"):
+                    raw.pop(key, None)
+        return raw
+
+    def _write_supersede(self, payload: Dict[str, Any]) -> None:
+        has_holder = isinstance(payload.get("token"), str) and bool(payload.get("token"))
+        has_waiters = isinstance(payload.get("tokens"), dict) and bool(payload.get("tokens"))
+        if not has_holder and not has_waiters:
+            if self.supersede.exists() or self.supersede.is_symlink():
+                self.supersede.unlink()
+            return
+        save_record(self.supersede, payload)
+
+    def _consume_supersede(self, token: str) -> Optional[Tuple[str, str]]:
+        payload = self._read_supersede()
+        if not payload:
+            return None
+        found: Optional[Tuple[str, str]] = None
+        if payload.get("token") == token:
+            found = (str(payload.get("branch", "")), str(payload.get("head", "")))
+            for key in ("token", "branch", "head", "worktree", "created"):
+                payload.pop(key, None)
+        tokens = payload.get("tokens")
+        if isinstance(tokens, dict) and token in tokens:
+            info = tokens.pop(token)
+            if not tokens:
+                payload.pop("tokens", None)
+            if found is None:
+                found = (str(info.get("branch", "")), str(info.get("head", "")))
+        if found is not None:
+            self._write_supersede(payload)
+        return found
 
     def _quarantine(self, path: Path, reason: str) -> None:
         target = path.with_name(path.name + ".quarantine-" + uuid.uuid4().hex)
@@ -722,13 +841,22 @@ class RunState:
         self.path = path
 
     def _admit(self, no_wait: bool) -> bool:
+        if self.path is not None and not self.path.exists():
+            superseded = self._consume_supersede(self.entry["token"])
+            if superseded is not None:
+                raise ContainmentError(self._supersede_message(*superseded))
+            raise ContainmentError("queue waiter lease lost")
         holder = self._live(self.holder, holder=True)
-        waiters = []
+        waiters: List[Path] = []
+        waiter_entries: Dict[Path, Dict[str, Any]] = {}
         for path in sorted(self.queue.glob("*.json")):
             if not re.fullmatch(r"[0-9]{20}\.json", path.name):
                 self._quarantine(path, "corrupt ticket")
-            elif self._live(path):
-                waiters.append(path)
+            else:
+                live_entry = self._live(path)
+                if live_entry is not None:
+                    waiters.append(path)
+                    waiter_entries[path] = live_entry
         if no_wait and (holder or waiters):
             raise ContainmentError("queue occupied (--no-wait); holder={} waiters={}".format(
                 holder["head"] if holder else "none", len(waiters)))
@@ -763,10 +891,56 @@ class RunState:
                 if os.path.exists(temporary):
                     os.unlink(temporary)
             waiters.append(self.path)
+            waiter_entries[self.path] = self.entry
             waiters.sort()
         # Refresh waiting leases on every poll; holders use the background thread.
         if not self.path.exists():
+            superseded = self._consume_supersede(self.entry["token"])
+            if superseded is not None:
+                raise ContainmentError(self._supersede_message(*superseded))
             raise ContainmentError("queue waiter lease lost")
+        worktree = self.entry.get("worktree", "")
+        branch = self.entry.get("branch", "")
+        if (worktree and branch and branch not in ("main", "master", "HEAD")
+                and os.environ.get("TRELLIS_GATE_SUPERSEDE", "1") != "0"):
+            supersede_payload = self._read_supersede()
+            supersede_dirty = False
+            kept_waiters: List[Path] = []
+            for waiter_path in waiters:
+                w_data = waiter_entries.get(waiter_path)
+                if (waiter_path != self.path and waiter_path.name < self.path.name
+                        and w_data is not None
+                        and w_data.get("worktree") == worktree
+                        and w_data.get("branch") == branch):
+                    tokens_map = supersede_payload.setdefault("tokens", {})
+                    tokens_map[w_data["token"]] = {
+                        "branch": branch,
+                        "head": self.entry["head"],
+                        "created": time.time(),
+                    }
+                    waiter_path.unlink()
+                    supersede_dirty = True
+                    print("run-tests-local: superseded waiter ticket={} on {} ({})".format(
+                        waiter_path.stem, branch, self.entry["head"]), flush=True)
+                else:
+                    kept_waiters.append(waiter_path)
+            waiters = kept_waiters
+            if (holder is not None and holder["token"] != self.entry["token"]
+                    and holder.get("worktree") == worktree
+                    and holder.get("branch") == branch
+                    and holder.get("head") != self.entry["head"]):
+                if (supersede_payload.get("token") != holder["token"]
+                        or supersede_payload.get("head") != self.entry["head"]):
+                    supersede_payload["token"] = holder["token"]
+                    supersede_payload["branch"] = branch
+                    supersede_payload["head"] = self.entry["head"]
+                    supersede_payload["worktree"] = worktree
+                    supersede_payload["created"] = time.time()
+                    supersede_dirty = True
+                    print("run-tests-local: signaling supersede to holder on {} ({})".format(
+                        branch, self.entry["head"]), flush=True)
+            if supersede_dirty:
+                self._write_supersede(supersede_payload)
         self.entry["heartbeat"] = time.time()
         save_record(self.path, self.entry)
         if not holder and waiters[0] == self.path:
@@ -798,6 +972,9 @@ class RunState:
                     try:
                         if self._read(self.path)["token"] != self.entry["token"]:
                             raise ContainmentError("queue lease lost")
+                        superseded = self._consume_supersede(self.entry["token"])
+                        if superseded is not None:
+                            raise ContainmentError(self._supersede_message(*superseded))
                         self.entry["heartbeat"] = time.time()
                         save_record(self.path, self.entry)
                     finally:
@@ -808,7 +985,19 @@ class RunState:
 
     def check(self) -> None:
         if self.error is not None:
+            if "superseded by newer run on " in str(self.error):
+                raise ContainmentError(str(self.error))
             raise ContainmentError("queue heartbeat failed: {}".format(self.error))
+        if self.supersede.exists() or self.supersede.is_symlink():
+            with self.guard:
+                if self._lock():
+                    try:
+                        superseded = self._consume_supersede(self.entry["token"])
+                    finally:
+                        fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+                    if superseded is not None:
+                        self.error = ContainmentError(self._supersede_message(*superseded))
+                        raise self.error
 
     def records(self) -> List[Path]:
         return sorted(self.runs.glob("*.json"))
@@ -825,6 +1014,10 @@ class RunState:
         try:
             if self._lock():
                 try:
+                    try:
+                        self._consume_supersede(self.entry["token"])
+                    except ContainmentError:
+                        pass
                     if self.path is not None and self.path.exists():
                         try:
                             if self._read(self.path)["token"] == self.entry["token"]:
@@ -1593,8 +1786,8 @@ def main(argv: Sequence[str]) -> int:
     started = time.monotonic()
     try:
         deadline = _positive_float("TRELLIS_LOCAL_GATE_DEADLINE", GLOBAL_DEADLINE_SECONDS)
-        if deadline > GLOBAL_DEADLINE_SECONDS:
-            raise ValueError("TRELLIS_LOCAL_GATE_DEADLINE must not exceed 7200 seconds")
+        if deadline > 14400:
+            raise ValueError("TRELLIS_LOCAL_GATE_DEADLINE must not exceed 14400 seconds")
         reserve = _positive_float("TRELLIS_LOCAL_GATE_RESERVE", TEARDOWN_RESERVE_SECONDS)
         grace = _positive_float("TRELLIS_LOCAL_GATE_TERM_GRACE", TERM_GRACE_SECONDS)
         if reserve >= deadline or grace >= reserve:
@@ -1611,7 +1804,8 @@ def main(argv: Sequence[str]) -> int:
     kept = None
     try:
         state = RunState(head=provenance.get("head", "unknown") if argv != ["--runs-reap"] else "reap",
-                         no_wait="--no-wait" in argv)
+                         no_wait="--no-wait" in argv,
+                         repo_root=root if argv != ["--runs-reap"] else None)
         # Queue waiting is outside both the productive and cleanup deadline.
         started_us = time.time_ns() // 1000
         started = time.monotonic()
@@ -1702,7 +1896,7 @@ def main(argv: Sequence[str]) -> int:
             probe_env = dict(env, TRELLIS_GATE_RUN_ID=data["token"], TMPDIR=str(run_root / "tmp"))
             with planner_output.open("wb") as stream:
                 process = _spawn(data, record_path, sentinel_fd, processes, command, cwd, probe_env, stream)
-                end = time.monotonic() + 2
+                end = time.monotonic() + 15
                 while observe_exit(process) is None:
                     if time.monotonic() >= end:
                         return "unavailable: probe timeout"

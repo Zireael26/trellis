@@ -29,7 +29,14 @@ inherited declaration is ignored: this is a reviewed config assertion about the
 battery's contents, not an environment bypass. Trellis's own declaration matches
 `run-tests.sh`'s `shellcheck_tree` and `aeo_static_and_python` stages.
 
-Web stacks default to `pnpm` if `pnpm-lock.yaml` is present, `bun` if `bun.lockb`, `npm` if `package-lock.json`. The gate auto-detects but local.config.sh wins.
+Web stacks default to `pnpm` if `pnpm-lock.yaml` is present, `bun` if `bun.lock` or `bun.lockb`, `npm` if `package-lock.json`. The gate auto-detects `scripts.typecheck`, `scripts.lint`, and `scripts.test` first, while `local.config.sh` wins. When `package.json` omits `scripts.typecheck` or `scripts.lint` and `node_modules` is installed locally, `check-tests.sh` falls back to fast local `node_modules/.bin` binaries (`P45`):
+
+- **typecheck** (requires `tsconfig.json`): `tsrs --noEmit` → `tsgo --noEmit` → `tsc --noEmit`.
+- **lint**: `oxlint` (when `.oxlintrc.json`, `oxlint.config.*`, or `package.json` `oxlint` is present) → `biome check .` (`biome.json` / `biome.jsonc`) → `eslint . --quiet` (`.eslintrc*` / `eslint.config.*`). Missing or uninstalled tools downgrade to `warn` rather than false-blocking.
+
+When `typecheck`, `lint`, and `tests` are independent (and `PROCESS_GATE_TEST_COVERS_STATIC` has not folded static checks into the full battery), `check-tests.sh` executes them concurrently bounded by local host CPU cores and collects findings in deterministic order (`typecheck` → `lint` → `tests`). Set `PROCESS_GATE_SERIAL_CHECKS=1` to force sequential execution. Static read-only rows in `run-all.sh` likewise execute concurrently before `Tests & coverage`.
+
+For stateless JS/TS unit suites (`P50`), prefer Vitest `isolate: false` (or Node's native `--test` runner on Node 26 with built-in TypeScript stripping) and narrow in-memory fixtures over per-file VM re-initialization and full-project disk clones.
 
 Python projects auto-detect in this order: `uv.lock` → `uv run`, `pdm.lock` → `pdm run`, otherwise `pyproject.toml` alone → `python -m` (from the project's active venv). Default commands once a runner is selected:
 
@@ -48,7 +55,7 @@ Automatic detection chooses one test command, not a polyglot dispatcher. When it
 | All three commands pass | **pass** |
 | Typecheck or lint fails | **fail** — non-negotiable; same gate that `stop-verify` enforces in-session |
 | Tests fail | **fail** |
-| Tests timeout (default 25 min: up to 15 min database-lock wait plus 10 min battery; override via `PROCESS_GATE_TEST_TIMEOUT`) | **fail** |
+| Tests timeout (default 90 min to bound runaway runs while allowing full suites and database-lock waits; override via `PROCESS_GATE_TEST_TIMEOUT`, loaded from BASE so an increase cannot apply to its own push) | **fail** |
 | Typecheck command not declared AND not auto-detectable | **fail** — typecheck is non-negotiable per `engineering-process.md` §7 (Definition of done); a project that cannot typecheck cannot meet the bar |
 | Lint or test command not declared AND not auto-detectable | **warn** — declare them in `local.config.sh` |
 
@@ -72,6 +79,10 @@ PROCESS_GATE_COVERAGE_FLOOR=70  # warn below this
 ```
 
 Falling below floor: **warn** (don't block, but visible in verdict).
+
+## Net test-LOC growth ratchet (`P49`)
+
+On non-tag ranges where `base..head` resolves, `check-tests.sh` sums `git diff --numstat` added minus deleted lines across test paths (`*.bats`, `tests/**`, `__tests__/**`, `*test*`, `*spec*`). By default (`PROCESS_GATE_TEST_NET_BUDGET=400`, `PROCESS_GATE_TEST_NET_BUDGET_MODE=warn`), ranges adding more than `+400` net test lines emit a warning nudging table-driven consolidation (or `/test-cleanup`). Set `PROCESS_GATE_TEST_NET_BUDGET_MODE=block` in `local.config.sh` to enforce as a hard failure, or `off` to disable.
 
 ## What the gate does NOT enforce
 
@@ -486,30 +497,40 @@ after successful execution and verified containment cleanup. Planner and shard
 children do not receive the gate receipt interface.
 
 The Trellis mapper over-includes transitive `source`/Bats `load` dependencies,
-`shellcheck source=` hints, and literal helper/fixture references from both
-endpoint trees. A removed dependency edge therefore still selects its old
+`shellcheck source=` hints, Python `import`/`from` modules under `scripts/`,
+JS/TS/MJS `import`/`require` edges under `core-rules/pi/` and `scripts/`,
+optional `declared-test-inputs.json` fixture mappings, and literal helper/fixture
+references from both endpoint trees. Inspect suite selection provenance with
+`python3 scripts/lib/push-test-map.py --explain <base>..<head>` (emitting
+`explicit-owner`, `import-consumer`, `declared-fixture`, and `fixed-smoke` reason
+tags), or run narrowed suites locally via `bash scripts/run-tests.sh --changed`.
+Set `PROCESS_GATE_TEST_SELECTION=full` to force the full battery (`P48`). A removed dependency edge still selects its old
 consumer. Changes to `scripts/lib/` always require the full battery; unknown
-paths, missing required suites, and dependencies reaching core hook/skill
-suites also fall back to full. Selections travel only as command arguments,
+paths, missing required suites, and dependencies reaching core hook/skill/Pi
+suites also fall back to full (`uncertain-full`). Selections travel only as command arguments,
 never as an environment-carried file list.
 
 ## Docs-only ranges (opt-in)
 
 A range that changes only passive records can skip the test battery. The rule is narrow, and doubt runs the full battery.
 
-The project opts in with a policy file at `.claude/skills/process-gate-local/docs-only-tests.policy` or `.agents/skills/process-gate-local/docs-only-tests.policy`. If both exist, they must be identical. The gate reads the policy from Git objects at the range's base, never from the range or the checkout. A policy edit carried in a PR therefore takes effect only after it merges, and the edit itself runs the full battery because it changes a dot-directory path.
+The project opts in with a policy file at `.claude/skills/process-gate-local/docs-only-tests.policy` or `.agents/skills/process-gate-local/docs-only-tests.policy`. If both exist, their Git blobs must be byte-identical. The gate reads the policy and canonical `.trellis.json` from the range's base, never from the checkout. Set `"gate": {"docs_only_tests": false}` to disable both the ordinary and release-metadata classes. Absent or `true` does not opt in by itself; invalid base project JSON disables narrowing. A policy edit cannot exempt its own push. A later incremental push can use a policy already at its branch base, but that is not protected-base approval or merge evidence.
 
 The format is one directive per line. Comments are whole lines starting with `#`; the rest of a directive line is its value.
 
 ```
-# allow: an anchored, case-sensitive ERE. deny: an ERE that beats every allow.
+# scope push: optional; only an explicit, unprotected branch-only push.
+scope push
+# allow: an anchored, case-sensitive ERE. deny: case-insensitive, beats all allows.
 # tests: an optional command, at most once, run in place of the battery.
 allow ^docs/adr/[A-Za-z0-9][A-Za-z0-9._-]*\.md$
 deny ^docs/adr/0009-pinned\.md$
 tests bats scripts/tests/docs-consumers.bats
 ```
 
-`allow` patterns must be anchored with `^…$`. An unknown keyword, an empty or invalid pattern, or a second `tests` line makes the policy malformed.
+`allow` patterns must be anchored with `^…$`. An unknown keyword, an empty or invalid pattern, or a second `tests` or `scope` line makes the policy malformed.
+
+With `scope push`, use a reviewed passive subtree such as `^docs/records/…$` or an exact approved Markdown path. Global allow rules, `docs/`-wide rules, and subtree rules for `docs/implementation/` do not qualify. Behaviour-bearing namespaces such as `config`, `schemas`, `workflows`, `specs`, `site`, and `content` are excluded regardless of case. Markdown can still be a program or test input: keep full Tests or name a replacement that exercises those consumers. A push-scoped policy requires the clean physical worktree at the gated head (including index, submodules, and unignored untracked files). It cannot narrow tag, mixed, protected, merge, or manual/default runs, or declare the release-metadata class. Policies without `scope push` keep their legacy contexts; older checkers reject the directive and run full.
 
 **Eligibility.** The range narrows only when every path touched by every commit in it qualifies. That covers both sides of a rename, deleted paths, and changes made and then reverted inside the range. A path qualifies only if it meets all of these:
 
@@ -519,7 +540,7 @@ tests bats scripts/tests/docs-consumers.bats
   - a `.md` suffix;
   - no behaviour-bearing namespace (`core-rules/`, `scripts/`, `hooks/`, `skills/`, `commands/`, `agents/`, `prompts/`, `templates/`, test, fixture and baseline directories, secret directories);
   - no operative file name (`SKILL.md`, `CLAUDE.md`, `AGENTS.md`, `README.md`, `prompt.md`, `targets.md` and similar), and no `VERSION`, `UPGRADING` or secret-like name. These name checks are case-insensitive.
-- Its blob is a plain `100644` file: not a symlink, gitlink or executable, with no NUL byte, and not an LFS pointer.
+- Both old and new entries, where present, are plain `100644` UTF-8 text without binary controls or LFS pointers. Case-fold aliases, symlinks, gitlinks and executables do not qualify.
 
 **Full battery, with a `process-gate: notice (docs-only: full tests — <reason>)` on stderr, when:**
 
@@ -536,7 +557,7 @@ With no policy at the base, or a range the shared diff-base resolver (`core-rule
 - Typecheck and lint still run.
 - The battery is replaced by the policy's `tests` command, or skipped if the policy has none. That command takes no heavy slot.
 - Coverage and the mutation spot-check are skipped.
-- A scoped push with no policy tests command prints `Tests: no-tests: docs-only`. A policy command's canonical scope receipt is retained when present; other docs-only runs keep `Tests: narrowed (docs-only: N files)`, where N counts net changed paths. `run-all.sh` repeats the scope under the verdict. A narrowed pass is never a full-battery pass.
+- A scoped push with no policy tests command prints `Tests: no-tests: docs-only`. Other ordinary docs-only runs print `Tests: narrowed (docs-only: N files)`, where N counts net changed paths. The verdict includes a checker-owned `tests: docs-policy v1` record with the exact endpoints, policy blob, count, and `battery=not-required|targeted`. The record describes scope, not success or proof that hooks ran. A narrowed pass is never a full-battery pass.
 - The other rows are unaffected. Secrets, Bypass markers, Docs discipline and Security run in full on every range.
 
 The narrowing presumes that the protected base passed its own full gate. It does not reuse or verify a prior test receipt.

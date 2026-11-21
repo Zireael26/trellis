@@ -126,7 +126,7 @@ compare_corpus() {
 @test "a shell leaf takes an argument beyond one argv string's limit" {
   local program
   program="$(bash -c '. "$1"; _attachment_detach_program' _ "$LIB")"
-  PROGRAM="$program" TRELLIS_DETACH_BASH="$BASH" python3 -I - <<'PY'
+  PROGRAM="$program" TRELLIS_DETACH_BASH="$BASH" python3 -I -B - <<'PY'
 import os
 namespace = {"__name__": "shell_leaf_check"}
 exec(compile(os.environ["PROGRAM"], "detach_native.py", "exec"), namespace)

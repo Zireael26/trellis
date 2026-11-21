@@ -7,8 +7,9 @@
 #
 # Waits for one of N slots (`heavy_slots` in $TRELLIS_HOME/config.json, default
 # 2; with --light, one of `heavy_light_slots`, default 4). Heavy lane process-gate
-# uses reserved slot 0 instead, without reducing ordinary lane capacity. Runs the
-# command in its own process group and holds the slot until that group has exited.
+# uses reserved slot 0. An opt-in second gate must borrow an idle ordinary
+# slot. Runs the command in its own process group and holds the permits until
+# that group has exited.
 # --timeout counts from launch, not from the wait. This file validates the
 # argument shape and then execs the perl supervisor, which
 # never returns; see scripts/lib/heavy-supervisor.pl for the lock and teardown.
@@ -31,12 +32,19 @@ until every process in the command's process group has exited.
                      or targeted runs expected under 2 minutes; a light run that
                      passes 120 s prints one advisory line and keeps running
   --lane NAME        label shown to waiting callers (letters, digits, . _ -);
-                     process-gate reserves heavy slot 0, separate from the
-                     heavy_slots ordinary slots and never used by other lanes;
-                     cannot use --light or run inside an ordinary heavy/light wrapper
+                     process-gate reserves slot 0; cannot use --light or run
+                     inside an ordinary heavy/light wrapper
+  process_gate_slots machine config: 1 (default) or 2. A second process gate
+                     needs a distinct Git common directory, an idle ordinary
+                     slot, and verified host headroom. For separate scratch
+                     volumes set TRELLIS_HEAVY_GATE_SCRATCH_DIRS to a JSON
+                     array of absolute directory paths (per workload).
+                     Enable 2 only after qualifying the overlapping workloads
+                     and updating all launchers and payloads sharing the home.
+                     To downgrade, set 1 and wait for overflow to drain first.
   --timeout SECONDS  TERM the workload this long after launch (then KILL after
                      TRELLIS_HEAVY_KILL_AFTER, default 10); exit 124
-  --check            validate heavy_slots and the slot directory; exit 78 if not
+  --check            validate slot setup and report the process-gate protocol
   --status           show each slot of both pools, including retired slots
 
 Exit: the command's status; 128+N when interrupted by signal N; 124 on timeout;
@@ -54,11 +62,13 @@ mode=run
 pool=heavy
 lane=-
 timeout=0
+require_gate_protocol=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --check) mode=check; shift ;;
     --status) mode=status; shift ;;
     --light) pool=light; shift ;;
+    --require-gate-protocol=2) require_gate_protocol=1; shift ;;
     --lane)
       [ "$#" -ge 2 ] || usage_error '--lane requires a value'
       lane="$2"; shift 2 ;;
@@ -76,6 +86,9 @@ done
 [[ "$lane" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || usage_error "invalid --lane: $lane"
 if [ "$lane" = process-gate ] && [ "$pool" != heavy ]; then
   usage_error '--lane process-gate requires the heavy pool (drop --light)'
+fi
+if [ "$require_gate_protocol" = 1 ] && { [ "$mode" != run ] || [ "$lane" != process-gate ]; }; then
+  usage_error '--require-gate-protocol=2 requires a process-gate workload'
 fi
 [[ "$timeout" =~ ^[0-9]{1,7}$ ]] || usage_error "--timeout must be a whole number of seconds: $timeout"
 case "$mode" in

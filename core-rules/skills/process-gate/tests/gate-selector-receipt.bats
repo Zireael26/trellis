@@ -18,11 +18,14 @@ setup() {
   export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/gate-state" TRELLIS_ATTACH_POSTJOB=off
   mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR" "$PI_CODING_AGENT_DIR" \
     "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME"
+  chmod 700 "$TRELLIS_HOME"
+  printf '{"process_gate_slots":1}\n' > "$TRELLIS_HOME/config.json"
+  chmod 600 "$TRELLIS_HOME/config.json"
   local real="$BATS_TEST_DIRNAME/../scripts"
   SKILL="$BATS_TEST_TMPDIR/skill"
   mkdir -p "$SKILL/scripts/lib"
   cp "$real/run-all.sh" "$real/check-tests.sh" "$SKILL/scripts/"
-  cp "$real/lib/common.sh" "$real/lib/diff-base.sh" "$SKILL/scripts/lib/"
+  cp "$real/lib/common.sh" "$real/lib/diff-base.sh" "$real/lib/docs-policy.py" "$SKILL/scripts/lib/"
   local row
   for row in pr secrets bypass docs security-diff analyze slop; do
     printf '#!/usr/bin/env bash\necho "pass fixture"\n' > "$SKILL/scripts/check-$row.sh"

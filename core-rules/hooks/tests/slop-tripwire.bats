@@ -377,3 +377,35 @@ write_lines() {
     [ -z "$output" ] || { echo "$dir: $output"; false; }
   done
 }
+
+@test "P40: test-hardcoded-sleep trips in test diffs while zero-delay ticks stay silent" {
+  mkdir -p "$PROJECT_DIR/tests"
+  write_lines tests/test_worker.py 'import time' 'def test_poll():' '    time.sleep(2)'
+  run_tripwire "$PROJECT_DIR/tests/test_worker.py"
+  [ "$status" -eq 0 ]
+  [[ "$(ctx)" == *"test-hardcoded-sleep at $PROJECT_DIR/tests/test_worker.py:3"* ]] || { echo "$output"; false; }
+
+  write_lines tests/test_tick.ts 'export async function tick() {' '  await new Promise((r) => setTimeout(r, 0));' '}'
+  run_tripwire "$PROJECT_DIR/tests/test_tick.ts"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "$output"; false; }
+}
+
+@test "P43: settings-inline-secret trips on harness settings files and stays silent on clean configs" {
+  mkdir -p "$PROJECT_DIR/.claude" "$PROJECT_DIR/.agents"
+  local tok="sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345"
+  write_lines .claude/settings.local.json "{\"env\":{\"ANTHROPIC_API_KEY\":\"$tok\"}}"
+  run_tripwire "$PROJECT_DIR/.claude/settings.local.json"
+  [ "$status" -eq 0 ]
+  [[ "$(ctx)" == *"settings-inline-secret at $PROJECT_DIR/.claude/settings.local.json:1"* ]] || { echo "$output"; false; }
+
+  write_lines .agents/hooks.json "{\"trellis\":{\"Stop\":[{\"command\":\"TOKEN=$tok ./run.sh\"}]}}"
+  run_tripwire "$PROJECT_DIR/.agents/hooks.json"
+  [ "$status" -eq 0 ]
+  [[ "$(ctx)" == *"settings-inline-secret at $PROJECT_DIR/.agents/hooks.json:1"* ]] || { echo "$output"; false; }
+
+  write_lines .agents/hooks.json '{"trellis":{"Stop":[{"type":"command","command":"./run.sh","timeout":30}]}}'
+  run_tripwire "$PROJECT_DIR/.agents/hooks.json"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ] || { echo "$output"; false; }
+}

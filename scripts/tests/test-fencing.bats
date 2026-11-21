@@ -82,13 +82,13 @@ setup_fences_trellis_home() {
 RESET_ALLOWED=(
   "scripts/tests/setup-runbooks.bats|6|persistent-home case: setup() already moved HOME into the sandbox, so the launcher's ~/.trellis default is the sandbox"
   "core-rules/skills/process-gate/tests/check-bypass.bats|2|§4 points HOME at a BATS_TEST_TMPDIR home before the unset; R1 unsets HOME as well"
-  "scripts/tests/rollout-hooks-part6.bats|1|passes HOME=\$HOME, which setup() made the sandbox, and an explicit --home"
   "core-rules/hooks/tests/pi-review-route.bats|1|restores the caller's value after a run under a fake HOME and its own TRELLIS_HOME"
   "scripts/tests/configure.bats|1|setup() exports a sandbox HOME before the unset"
   "scripts/tests/config-load.bats|1|every loader call passes a sandbox HOME and TRELLIS_HOME through env"
   "scripts/tests/usage-federation.bats|1|the same env call sets HOME to the case's sandbox home"
   "core-rules/hooks/tests/session-context-task.bats|1|teardown() only, after the test has run"
   "scripts/tests/test-fencing.bats|1|the canary; the suite under test re-fences in setup() and HOME is a fake account"
+  "core-rules/skills/process-gate/tests/check-tests.bats|2|H8 tests move HOME into a temp sandbox before unsetting TRELLIS_HOME to verify default ~/.trellis precedence"
 )
 
 reset_sites() {

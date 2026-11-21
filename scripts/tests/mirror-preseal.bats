@@ -54,7 +54,7 @@ assert_scratch_clean() {
   local path
   for path in dependency-baseline.json audits/fleet-remediation-ledger.json trellis.config.json \
     scripts/tests/check-secrets.bats scripts/.DS_Store scripts/cache.swp \
-    scripts/__pycache__/cached scripts/workflows/private scripts/full-audit-sweep-ledger.mjs \
+    scripts/__pycache__/cached scripts/workflows/private \
     core-rules/pi/agents/private core-rules/usage-federation/private \
     core-rules/skills/herdr-foreman/private scripts/lib/usage_federation/private \
     scripts/tests/usage-federation.bats scripts/tests/pi-guide-parity.bats \

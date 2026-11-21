@@ -115,7 +115,7 @@ fi
 # them self-poisons idempotency (the marker written this turn would reappear as
 # untracked content next turn, changing the diff hash).
 _cr_untracked() {
-  git ls-files --others --exclude-standard -z -- ':/' ':(exclude,top).claude' ':(exclude,top).codex' 2>/dev/null
+  git ls-files --others --exclude-standard -z -- ':/' ':(exclude,top).claude' ':(exclude,top).codex' ':(exclude,top).agents' 2>/dev/null
 }
 _cr_tracked_diff() {
   if [ "$CR_HAS_HEAD" -eq 1 ]; then
@@ -224,7 +224,7 @@ try:
         pending += chunk
         while b'\0' in pending:
             raw, pending = pending.split(b'\0', 1)
-            if raw in (b'.claude', b'.codex') or raw.startswith((b'.claude/', b'.codex/')):
+            if raw in (b'.claude', b'.codex', b'.agents') or raw.startswith((b'.claude/', b'.codex/', b'.agents/')):
                 continue
             count += 1
             identity.update(raw + b'\0')
@@ -1049,9 +1049,19 @@ if [ "$AUTONOMY_LEVEL" -ge 4 ] 2>/dev/null && [ -f "$DECISIONS_LOG_PATH" ]; then
 else
   DECISIONS_PAYLOAD=""
 fi
+# P40: load REVIEW.md ONLY from the committed merge-base (never working tree),
+# bounded to 16 KiB so untrusted in-turn edits cannot self-exempt review rules.
+CR_REVIEW_GUIDELINES=""
+if [ "$CR_HAS_HEAD" -eq 1 ]; then
+  CR_MERGE_BASE=$(_se_review_merge_base "$REPO_ROOT")
+  if [ -n "$CR_MERGE_BASE" ] && [ "$(git cat-file -t "${CR_MERGE_BASE}:REVIEW.md" 2>/dev/null)" = "blob" ]; then
+    CR_REVIEW_GUIDELINES=$(git cat-file blob "${CR_MERGE_BASE}:REVIEW.md" 2>/dev/null | head -c 16384)
+  fi
+fi
 jq -nc --rawfile diff "$CR_DIFF_FILE" \
-  --arg level "$AUTONOMY_LEVEL" --arg decisions "$DECISIONS_PAYLOAD" --slurpfile excluded "$CR_EXCLUDED_FILE" \
-  '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions, excluded_paths: $excluded[0]}' \
+  --arg level "$AUTONOMY_LEVEL" --arg decisions "$DECISIONS_PAYLOAD" \
+  --arg guidelines "$CR_REVIEW_GUIDELINES" --slurpfile excluded "$CR_EXCLUDED_FILE" \
+  '{diff: $diff, autonomy_level: ($level | tonumber), decisions_log: $decisions, excluded_paths: $excluded[0]} + (if ($guidelines | length) > 0 then {review_guidelines: $guidelines} else {} end)' \
   > "$CR_CAPTURE_DIR/request.json" || _cr_failed 'code-review-subagent: review envelope unavailable'
 
 # --- Invoke the reviewer ladder (sibling lib) ---
@@ -1143,6 +1153,18 @@ CRITICAL=$(printf '%s' "$FINDINGS" | jq -r '.findings[]? | select(.severity == "
 if [ -n "$CRITICAL" ]; then
   REASON="Code review flagged critical issues — resolve or explicitly defer:
 ${CRITICAL}"
+  CR_MAX_ROUNDS="${REVIEW_MAX_ROUNDS:-3}"
+  case "$CR_MAX_ROUNDS" in ''|*[!0-9]*) CR_MAX_ROUNDS=3 ;; esac
+  if [ -n "$CR_STATE" ]; then
+    CR_CRIT_ROUND=$(cat "$CR_STATE/critical-rounds.$CR_HARNESS" 2>/dev/null) || CR_CRIT_ROUND=0
+    case "$CR_CRIT_ROUND" in ''|*[!0-9]*) CR_CRIT_ROUND=0 ;; esac
+    CR_CRIT_ROUND=$((CR_CRIT_ROUND + 1))
+    ( umask 077 && printf '%s\n' "$CR_CRIT_ROUND" > "$CR_STATE/critical-rounds.$CR_HARNESS" ) 2>/dev/null || true
+    if [ "$CR_CRIT_ROUND" -ge "$CR_MAX_ROUNDS" ]; then
+      REASON="${REASON}
+ESCALATE: automated critical-review repair cap (${CR_MAX_ROUNDS} rounds) reached — stop retrying blind fixes and surface this unresolved critical finding to the operator."
+    fi
+  fi
   if [ "$CR_INCOMPLETE" -eq 1 ]; then
     _cr_exclusion_notice "$CR_EXCLUDED_FILE"
     REASON="$REASON
@@ -1155,6 +1177,7 @@ Coverage remains UNREVIEWED; excluded (up to 8 paths): $CR_DISPLAY_EXCLUDED$(_cr
   # corrected diff (which will hash differently anyway).
   exit 2
 fi
+[ -z "$CR_STATE" ] || rm -f "$CR_STATE/critical-rounds.$CR_HARNESS" 2>/dev/null || true
 
 # Never mark an unrecognised severity as reviewed. A known critical in the
 # same envelope was handled first, before rejecting the malformed remainder.

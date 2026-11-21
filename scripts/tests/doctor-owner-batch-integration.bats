@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 # Differential doctor integration with two real attached worktrees. A private
 # copy of the entry script adds logging/fault injection; the sealed release is
-# not modified. Stdout, stderr and exit status are compared byte for byte.
+# not modified. Stdout, stderr and exit status are compared byte for byte;
+# both paths use one reference time for the attachment-status age check.
 REPO_ROOT="$(CDPATH='' cd "$BATS_TEST_DIRNAME/../.." && pwd -P)"
 . "$REPO_ROOT/scripts/tests/helpers/release-fixture.bash"
 . "$REPO_ROOT/scripts/tests/helpers/doctor-wait-postjobs.bash"
@@ -92,6 +93,19 @@ _attachment_verify_owner_artifacts() {
   fi
   _test_real_scalar "$@"
 }
+# Freeze only the classifier's clock, not doctor or filesystem timestamps.
+# Otherwise sequential batch/scalar runs can straddle its warning threshold.
+eval "$(declare -f attach_status_classify | sed '1s/attach_status_classify/_test_real_status_classify/')"
+attach_status_classify() (
+  date() {
+    if [ "$#" -eq 1 ] && [ "$1" = +%s ]; then
+      printf '%s\n' "$TEST_STATUS_NOW"
+    else
+      command date "$@"
+    fi
+  }
+  _test_real_status_classify "$@"
+)
 SHIM
 }
 
@@ -103,10 +117,15 @@ teardown_file() {
 setup() {
   export HOME="$BASE/live/user" TRELLIS_HOME="$BASE/live/trellis"
   export TEST_EVENTS="$BATS_TEST_TMPDIR/events" TEST_MODE=normal
+  export TEST_STATUS_NOW="$(date +%s)"
   : > "$TEST_EVENTS"
 }
 
 teardown() {
+  if [ -f "$BATS_TEST_TMPDIR/status.original" ]; then
+    cp -p "$BATS_TEST_TMPDIR/status.original" \
+      "$TRELLIS_HOME/state/attachment-status/${MAIN_OWNER#"$TRELLIS_HOME/state/attachments/"}"
+  fi
   chmod 700 "$TRELLIS_HOME/state/attachments" 2>/dev/null || :
   chmod 700 "${MAIN_OWNER%/*}" 2>/dev/null || :
   if [ -d "$BASE/journals.saved" ] && [ ! -e "$TRELLIS_HOME/state/attachment-journals" ]; then
@@ -128,7 +147,8 @@ run_doctor_file() {
   fi
   env -u TRELLIS_CONFIG HOME="$HOME" TRELLIS_HOME="$TRELLIS_HOME" \
     TEST_EVENTS="$TEST_EVENTS" TEST_MODE="$TEST_MODE" DOCTOR_TEST_SHIM="$DOCTOR_TEST_SHIM" \
-    LINKED_OWNER="$LINKED_OWNER" ARTIFACT="$ARTIFACT" TEST_TMP_ANCESTOR="$BASE" TMPDIR="$TRELLIS_HOME/state/scratch" \
+    TEST_STATUS_NOW="$TEST_STATUS_NOW" LINKED_OWNER="$LINKED_OWNER" ARTIFACT="$ARTIFACT" \
+    TEST_TMP_ANCESTOR="$BASE" TMPDIR="$TRELLIS_HOME/state/scratch" \
     PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$BASH" "$doctor" "$@" \
     > "$BATS_TEST_TMPDIR/$label.out" 2> "$BATS_TEST_TMPDIR/$label.err" || rc=$?
   printf '%s\n' "$rc" > "$BATS_TEST_TMPDIR/$label.rc"
@@ -304,6 +324,37 @@ compare_runs() {
   : > "$TEST_EVENTS"
   TEST_MODE=scalar run_doctor_file scalar
   compare_runs
+}
+
+@test "pending status matches scalar on both sides of the age threshold" {
+  local status="$TRELLIS_HOME/state/attachment-status/${MAIN_OWNER#"$TRELLIS_HOME/state/attachments/"}"
+  local age expected
+  [ -f "$status" ]
+  cp -p "$status" "$BATS_TEST_TMPDIR/status.original"
+  # A day-old reference proves that both doctors actually use the test clock.
+  TEST_STATUS_NOW=$((TEST_STATUS_NOW - 86400))
+  mv "$LINKED" "$LINKED.moved"
+  for age in 840 960; do
+    jq --argjson at "$((TEST_STATUS_NOW - age))" \
+      '.state = "pending" | .updated_at = $at | .checks = [] | .failure = null' \
+      "$BATS_TEST_TMPDIR/status.original" > "$BATS_TEST_TMPDIR/status.input"
+    cp "$BATS_TEST_TMPDIR/status.input" "$status"
+    if [ "$age" -eq 840 ]; then
+      expected='  i attachment checks: pending; pre-push runs them inline until they finish'
+    else
+      expected='  ⚠ attachment checks: pending for 16 min; pre-push runs them inline; remedy: trellis doctor --fix'
+    fi
+    : > "$TEST_EVENTS"
+    TEST_MODE=normal run_doctor_file fast
+    grep -qx 'batch 1' "$TEST_EVENTS"
+    grep -Fxq "$expected" "$BATS_TEST_TMPDIR/fast.out"
+    cmp "$BATS_TEST_TMPDIR/status.input" "$status"
+    TEST_MODE=scalar run_doctor_file scalar
+    grep -Fxq "scalar $MAIN_OWNER" "$TEST_EVENTS"
+    grep -Fxq "$expected" "$BATS_TEST_TMPDIR/scalar.out"
+    cmp "$BATS_TEST_TMPDIR/status.input" "$status"
+    compare_runs
+  done
 }
 
 @test "a moved worktree and fix dry-run retain scalar behavior" {

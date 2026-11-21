@@ -50,7 +50,7 @@ if [ -n "$INPUT" ]; then
       # document is an object or null).
       if ! TRANSCRIPT=$(printf '%s' "$INPUT" | jq -rs '
         if (.[-1] == null or .[-1] == false) then ("" | halt_error(1))
-        else (.[] | .transcript_path // empty) end'); then
+        else (.[] | .transcript_path // .transcriptPath // empty) end'); then
         echo "save-context-log: malformed envelope JSON — parse error; skipping" >&2
         exit 1
       fi
@@ -165,8 +165,17 @@ _WRITE_FAILED=0
   TODOS_FILE="${PROJECT_DIR}/.claude/todos.json"
   if [ -f "$TODOS_FILE" ]; then
     if jq -r '
+      def redact:
+        gsub("AKIA[0-9A-Z]{16}"; "[REDACTED]")
+        | gsub("sk-ant-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+        | gsub("sk-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+        | gsub("gh[pousr]_[A-Za-z0-9]{20,}"; "[REDACTED]")
+        | gsub("github_pat_[A-Za-z0-9_]{20,}"; "[REDACTED]")
+        | gsub("xox[baprs]-[A-Za-z0-9-]{10,}"; "[REDACTED]")
+        | gsub("Bearer [A-Za-z0-9._~+/=-]{20,}"; "Bearer [REDACTED]")
+        | gsub("-----BEGIN [A-Z ]*PRIVATE KEY-----"; "[REDACTED PRIVATE KEY]");
       (.. | objects | select(.status? == "in_progress" or .status? == "pending"))
-      | "- [\(.status)] \(.content // .task // "?")"
+      | ("- [\(.status)] \(.content // .task // "?")" | redact)
     ' "$TODOS_FILE" >"$_todos_out" 2>"$_todos_err"; then
       OPEN=$(head -20 "$_todos_out")
       if [ -n "$OPEN" ]; then
@@ -193,9 +202,26 @@ _WRITE_FAILED=0
     # malformed-transcript output and write-failure classing are unchanged.
     _scl_tok="__trellis_scl_${TMPDIR##*.}_$$__"
     if jq -s -r --arg tok "$_scl_tok" '
-      ([ .[] | select(.type == "user" and (.message.content | type) == "string") | .message.content ] | .[-2:][]),
+      def redact:
+        gsub("AKIA[0-9A-Z]{16}"; "[REDACTED]")
+        | gsub("sk-ant-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+        | gsub("sk-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+        | gsub("gh[pousr]_[A-Za-z0-9]{20,}"; "[REDACTED]")
+        | gsub("github_pat_[A-Za-z0-9_]{20,}"; "[REDACTED]")
+        | gsub("xox[baprs]-[A-Za-z0-9-]{10,}"; "[REDACTED]")
+        | gsub("Bearer [A-Za-z0-9._~+/=-]{20,}"; "Bearer [REDACTED]")
+        | gsub("-----BEGIN [A-Z ]*PRIVATE KEY-----"; "[REDACTED PRIVATE KEY]");
+      def user_msg:
+        if .type == "user" and (.message.content | type) == "string" then .message.content | redact
+        elif .type == "USER_INPUT" and (.content | type) == "string" then .content | redact
+        else empty end;
+      def asst_msg:
+        if .type == "assistant" and (.message.content | type) == "array" then (.message.content | map(select(.type == "text") | .text) | join("\n") | redact)
+        elif .type == "PLANNER_RESPONSE" and (.content | type) == "string" and (.content | length) > 0 then .content | redact
+        else empty end;
+      ([ .[] | user_msg ] | .[-2:][]),
       $tok,
-      ([ .[] | select(.type == "assistant" and (.message.content | type) == "array") | .message.content | map(select(.type == "text") | .text) | join("\n") ] | .[-2:][])
+      ([ .[] | asst_msg ] | .[-2:][])
     ' "$TRANSCRIPT" >"$_user_out" 2>/dev/null; then
       _scl_both=$(cat "$_user_out")
       USER_MSGS="${_scl_both%%"$_scl_tok"*}"
@@ -209,7 +235,17 @@ _WRITE_FAILED=0
         printf '## Last assistant decisions\n%s\n\n' "$ASSISTANT_MSGS" || _WRITE_FAILED=1
       fi
     else
-      if jq -s -r '[ .[] | select(.type == "user" and (.message.content | type) == "string") | .message.content ] | .[-2:][]' "$TRANSCRIPT" >"$_user_out" 2>"$_user_err"; then
+      if jq -s -r '
+        def redact:
+          gsub("AKIA[0-9A-Z]{16}"; "[REDACTED]")
+          | gsub("sk-ant-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+          | gsub("sk-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+          | gsub("gh[pousr]_[A-Za-z0-9]{20,}"; "[REDACTED]")
+          | gsub("github_pat_[A-Za-z0-9_]{20,}"; "[REDACTED]")
+          | gsub("xox[baprs]-[A-Za-z0-9-]{10,}"; "[REDACTED]")
+          | gsub("Bearer [A-Za-z0-9._~+/=-]{20,}"; "Bearer [REDACTED]")
+          | gsub("-----BEGIN [A-Z ]*PRIVATE KEY-----"; "[REDACTED PRIVATE KEY]");
+        [ .[] | if .type == "user" and (.message.content | type) == "string" then .message.content | redact elif .type == "USER_INPUT" and (.content | type) == "string" then .content | redact else empty end ] | .[-2:][]' "$TRANSCRIPT" >"$_user_out" 2>"$_user_err"; then
         USER_MSGS=$(cat "$_user_out")
         if [ -n "$USER_MSGS" ]; then
           printf '## Last user asks\n%s\n\n' "$USER_MSGS" || _WRITE_FAILED=1
@@ -221,7 +257,17 @@ _WRITE_FAILED=0
         echo "save-context-log: transcript malformed — $_user_err_msg" >&2
       fi
       rm -f "$_user_out" "$_user_err"
-      if jq -s -r '[ .[] | select(.type == "assistant" and (.message.content | type) == "array") | .message.content | map(select(.type == "text") | .text) | join("\n") ] | .[-2:][]' "$TRANSCRIPT" >"$_assist_out" 2>"$_assist_err"; then
+      if jq -s -r '
+        def redact:
+          gsub("AKIA[0-9A-Z]{16}"; "[REDACTED]")
+          | gsub("sk-ant-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+          | gsub("sk-[A-Za-z0-9_-]{20,}"; "[REDACTED]")
+          | gsub("gh[pousr]_[A-Za-z0-9]{20,}"; "[REDACTED]")
+          | gsub("github_pat_[A-Za-z0-9_]{20,}"; "[REDACTED]")
+          | gsub("xox[baprs]-[A-Za-z0-9-]{10,}"; "[REDACTED]")
+          | gsub("Bearer [A-Za-z0-9._~+/=-]{20,}"; "Bearer [REDACTED]")
+          | gsub("-----BEGIN [A-Z ]*PRIVATE KEY-----"; "[REDACTED PRIVATE KEY]");
+        [ .[] | if .type == "assistant" and (.message.content | type) == "array" then (.message.content | map(select(.type == "text") | .text) | join("\n") | redact) elif .type == "PLANNER_RESPONSE" and (.content | type) == "string" and (.content | length) > 0 then .content | redact else empty end ] | .[-2:][]' "$TRANSCRIPT" >"$_assist_out" 2>"$_assist_err"; then
         ASSISTANT_MSGS=$(cat "$_assist_out")
         if [ -n "$ASSISTANT_MSGS" ]; then
           printf '## Last assistant decisions\n%s\n\n' "$ASSISTANT_MSGS" || _WRITE_FAILED=1

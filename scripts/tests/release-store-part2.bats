@@ -1020,7 +1020,7 @@ PY
   jq '.release="1.5.0"' "$user_owner" > "$SANDBOX/b1-stale-native-user"
   cp "$SANDBOX/b1-stale-native-user" "$user_owner"
   chmod 600 "$user_owner"
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REPO_ROOT/scripts/rollout-settings.sh" --yes
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" "$HOME/.local/bin/trellis" relink --user --home "$TRELLIS_HOME_FIX" --release 1.5.0
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   jq -e '.project_user == true and (.hooks.WorktreeCreate[0].hooks[0].command | contains("/bin/native/")) and [.hooks.WorktreeCreate[1].hooks[].command] == ["project-user-hook"] and (has("workflowSizeGuideline") | not)' "$settings" >/dev/null
   before="$(shasum -a 256 "$settings" "$user_owner")"
@@ -1052,7 +1052,7 @@ PY
   jq --slurpfile old "$SANDBOX/b1-old-owner.json" '.renders=$old[0].renders | .artifacts |= map(.path as $path | [$old[0].artifacts[] | select(.path == $path and .kind == "file")] as $old_artifact | if ($old_artifact | length) == 1 then .sha256=$old_artifact[0].sha256 else . end)' "$owner" > "$SANDBOX/b1-old-shape-owner"
   cp "$SANDBOX/b1-old-shape-owner" "$owner"
   chmod 600 "$owner"
-  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$REPO_ROOT/scripts/rollout-settings.sh" --yes
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" "$HOME/.local/bin/trellis" release adopt 1.5.0 --fleet personal --project b1-owned-arrays
   [ "$status" -eq 0 ] || { echo "$output"; return 1; }
   for settings in "$B1_ROOT/.claude/settings.local.json" "$B1_ROOT/.codex/hooks.json"; do
     jq -e '(.hooks.PreToolUse[0].hooks[0].command | contains("/bin/native/")) and [.hooks.PreToolUse[1].hooks[].command] == ["project-rollout-hook"]' "$settings" >/dev/null
@@ -1235,6 +1235,9 @@ PY
   git -C "$old" commit -qm 'immutable historical v1.4.0 source'
   git -C "$old" tag -a v1.4.0 -m 'historical v1.4.0 fixture'
   printf '1.5.0\n' > "$candidate/core-rules/VERSION"
+  git -C "$REPO_ROOT" show v1.5.2:core-rules/inheritance-manifest.json > "$candidate/core-rules/inheritance-manifest.json"
+  rm -f "$candidate/core-rules/CLAUDE.md"
+  cp "$candidate/core-rules/AGENTS.md" "$candidate/core-rules/CLAUDE.md"
   # Production templates remain legacy until T34. This complete isolated
   # payload has native candidate arrays but retains every old guard worker.
   for path in claude-settings.local.json codex-hooks.local.json claude-user-settings.json; do
@@ -1243,7 +1246,7 @@ PY
     [ "$path" != claude-user-settings.json ] || events='["WorktreeCreate","WorktreeRemove"]'
     jq -n --arg harness "$harness" --argjson events "$events" '{hooks:($events | map(. as $event | {key:$event,value:[{hooks:[({type:"command",command:"__TRELLIS_LAUNCHER__",args:["hook","event",$harness,$event],timeout:30} + (if $harness == "claude" then {onFailure:"block"} else {} end))]}]}) | from_entries)}' > "$candidate/core-rules/templates/$path"
   done
-  git -C "$candidate" add -A
+  git -C "$candidate" add -f -A
   git -C "$candidate" commit -qm 'complete isolated native candidate payload'
   git -C "$candidate" tag -a v1.5.0 -m 'native candidate fixture'
   run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash -c '. "$1/scripts/lib/release-store.sh"; release_store_install 1.4.0 "$1"' _ "$old"

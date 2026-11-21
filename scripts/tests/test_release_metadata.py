@@ -164,6 +164,11 @@ class MetadataTests(FIXTURE.VerdictTests):
         return head
 
     def run_class_case(self, case):
+        machine_home = Path(os.environ["TRELLIS_HOME"])
+        machine_home.mkdir(mode=0o700, exist_ok=True)
+        config = machine_home / "config.json"
+        config.touch(mode=0o600)
+        config.write_text('{"process_gate_slots":1}\n')
         helper = self.root / "scripts/lib/release_metadata.py"
         if case in ("permissive-base", "merge"):
             source = helper.read_text()

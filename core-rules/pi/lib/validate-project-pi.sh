@@ -21,9 +21,10 @@
 #     .pi/subagent-schedules/** (pi-subagents reads only the file named for the
 #     session being resumed, and a launcher starts a fresh session; accepted as
 #     output by the B0-6 ruling);
-#   - an agent file in .pi/agents/ or .agents/agents/ byte-identical to the
-#     release roster beside this script (../agents/<name>.md), the copy
-#     foreman-start.sh materializes;
+#   - an agent file in .pi/agents/ byte-identical to the release roster beside
+#     this script (../agents/<name>.md), the copy foreman-start.sh materializes
+#     (shared .agents/agents/ carries no release-roster exemption so Pi agents
+#     never leak into agy's shared discovery root);
 #   - a Trellis-managed attachment link: listed in the managed block of the
 #     clone's info/exclude (machine-local, not branch content), carrying the
 #     exact ../.trellis/runtime/<source> text attach writes, with an untracked
@@ -284,7 +285,7 @@ check_entry() {
   case "$path" in
     "$root/.pi/subagents.json") check_subagents "$rel"; return ;;
     "$root/.pi/.gitignore"|"$root/.pi/generated-images/"*|"$root/.pi/subagent-schedules/"*) return ;;
-    "$root/.pi/agents/$name"|"$root/.agents/agents/$name")
+    "$root/.pi/agents/$name")
       if [ -n "$ROSTER" ] && [ -f "$ROSTER/$name" ] && cmp -s "$ROSTER/$name" "$path"; then
         return
       fi

@@ -1,6 +1,6 @@
 # model-routing — which model gets which unit
 
-*Whether* to delegate is decided in `core-rules/CLAUDE.md` § Context management.
+*Whether* to delegate is decided in `core-rules/AGENTS.md` § Context management.
 *How* a delegated unit reaches a lane is in `core-rules/references/model-lanes.md`.
 This file explains the properties supplied to task classification or an explicit
 operator selection; it is not a second model selector. Concrete automatic

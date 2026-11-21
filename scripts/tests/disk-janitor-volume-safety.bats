@@ -243,10 +243,10 @@ run_matrix() {
   # The fixture shims flags/scopes from upcoming release lanes (e.g. --dehydrate, tmp)
   # so the safe commands per scope can be asserted on this branch:
   local -a args=()
-  for arg in --dry-run --safe-only --dehydrate --scopes "worktrees,caches,releases,pi,tmp,docker"; do
+  for arg in --dry-run --safe-only --dehydrate --scopes "worktrees,caches,docker,releases,release-tmp,pi,tmp"; do
     case "$arg" in
       --dehydrate) ;;
-      worktrees,caches,releases,pi,tmp,docker) args+=("worktrees,caches,releases,pi,docker") ;;
+      worktrees,caches,docker,releases,release-tmp,pi,tmp) args+=("worktrees,caches,docker,releases,pi") ;;
       *) args+=("$arg") ;;
     esac
   done

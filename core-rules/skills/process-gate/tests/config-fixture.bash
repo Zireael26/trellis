@@ -18,6 +18,9 @@ config_fixture_setup() {
   cp "$REAL_SCRIPTS/run-all.sh"    "$STUB/scripts/run-all.sh"
   cp "$REAL_SCRIPTS/lib/common.sh" "$STUB/scripts/lib/common.sh"
   cp "$REAL_SCRIPTS/lib/diff-base.sh" "$STUB/scripts/lib/diff-base.sh"
+  if [ -f "$REAL_SCRIPTS/lib/docs-policy.py" ]; then
+    cp "$REAL_SCRIPTS/lib/docs-policy.py" "$STUB/scripts/lib/docs-policy.py"
+  fi
   if [ -f "$REAL_SCRIPTS/lib/validator-env.sh" ]; then
     cp "$REAL_SCRIPTS/lib/validator-env.sh" "$STUB/scripts/lib/validator-env.sh"
   fi
@@ -79,6 +82,9 @@ SH
   for var in $(compgen -A variable PROCESS_GATE_); do unset "$var"; done
   unset PG_TRUSTED_ROOT PG_SKILL_ROOT PG_GATE_RANGE PG_MODE BASH_ENV ENV SECURITY_GATE_AUDIT_DIR
   export PROCESS_GATE_HEAVY_LAUNCHER="$BATS_TEST_TMPDIR/no-trellis-launcher"
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
+  mkdir -m 700 "$TRELLIS_HOME"
+  (umask 077; printf '{}\n' > "$TRELLIS_HOME/config.json")
   CFG=.claude/skills/process-gate-local/local.config.sh
 }
 

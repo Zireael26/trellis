@@ -94,10 +94,7 @@ SHOWN=0
 TOTAL=0
 
 scan_target() {
-local FILE_PATH="$1" SLOP_LANG FILE_DIR FILE_BASE SLOP_REL_PATH PAIRS FINDINGS idx id lineno
-
-# Extension outside the pattern set: silence, no work.
-SLOP_LANG=$(slop_lang_for_path "$FILE_PATH") || return 0
+local FILE_PATH="$1" SLOP_LANG="" SCAN_MODE="" FILE_DIR FILE_BASE SLOP_REL_PATH PAIRS FINDINGS idx id lineno
 
 FILE_DIR=$(dirname "$FILE_PATH")
 FILE_BASE=$(basename "$FILE_PATH")
@@ -120,7 +117,21 @@ if __ST_PREFIX=$(git -C "$FILE_DIR" rev-parse --show-prefix 2>/dev/null); then
 else
   SLOP_REL_PATH="$FILE_PATH"
 fi
-slop_path_carved_out "$SLOP_REL_PATH" && return 0
+if slop_is_settings_path "$SLOP_REL_PATH"; then
+  SCAN_MODE="settings"
+elif SLOP_LANG=$(slop_lang_for_path "$FILE_PATH"); then
+  if slop_path_carved_out "$SLOP_REL_PATH"; then
+    if slop_is_test_path "$SLOP_REL_PATH"; then
+      SCAN_MODE="test_flake"
+    else
+      return 0
+    fi
+  else
+    SCAN_MODE="slop"
+  fi
+else
+  return 0
+fi
 
 # __st_added_lines — prints "<new-file line number>\t<content>" for every added
 # line of the touched file, cheapest source first:
@@ -152,8 +163,12 @@ PAIRS=$(mktemp) || return 0
 __st_added_lines > "$PAIRS"
 [ -s "$PAIRS" ] || { rm -f "$PAIRS"; return 0; }
 
-# slop_scan_text is grep-like: status 1 means the added lines are clean.
-FINDINGS=$(slop_scan_text "$SLOP_LANG" --numbered < "$PAIRS") || { rm -f "$PAIRS"; return 0; }
+# Scan dispatch is grep-like: status 1 means the added lines are clean.
+case "$SCAN_MODE" in
+  settings) FINDINGS=$(slop_scan_settings_secrets --numbered < "$PAIRS") || { rm -f "$PAIRS"; return 0; } ;;
+  test_flake) FINDINGS=$(slop_scan_test_flake --numbered < "$PAIRS") || { rm -f "$PAIRS"; return 0; } ;;
+  *) FINDINGS=$(slop_scan_text "$SLOP_LANG" --numbered < "$PAIRS") || { rm -f "$PAIRS"; return 0; } ;;
+esac
 [ -n "$FINDINGS" ] || { rm -f "$PAIRS"; return 0; }
 
 TOTAL=$((TOTAL + $(printf '%s\n' "$FINDINGS" | grep -c '^')))
@@ -187,5 +202,11 @@ if [ "$TOTAL" -gt "$SHOWN" ]; then
   MSG="${MSG} (+$((TOTAL - SHOWN)) more)"
 fi
 
-[ -n "$MSG" ] && _se_emit_hook_context "PostToolUse" "${MSG} — evidence doctrine: ${SLOP_DOCTRINE_REF}"
+if [ -n "$MSG" ]; then
+  if [ "${TRELLIS_HARNESS:-codex}" = "antigravity" ]; then
+    printf '%s — evidence doctrine: %s\n' "$MSG" "$SLOP_DOCTRINE_REF" >&2
+  else
+    _se_emit_hook_context "PostToolUse" "${MSG} — evidence doctrine: ${SLOP_DOCTRINE_REF}"
+  fi
+fi
 exit 0

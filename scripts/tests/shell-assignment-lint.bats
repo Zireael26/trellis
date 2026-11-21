@@ -166,6 +166,191 @@ SH
   [[ "$output" == *"locale:"* ]] || { printf '%s\n' "$output"; false; }
 }
 
+@test "local declare and typeset locale assignments fail without substitutions or redirects" {
+  cat > "$WORK/sample.sh" <<'SH'
+#!/bin/bash
+f() {
+  local LC_ALL=C value
+  local value=ok LC_CTYPE='C'
+  declare -x LC_MESSAGES=C
+  typeset -- "LC_COLLATE=C"
+  builtin local \
+    LC_NUMERIC=C
+  command -p declare -g LC_TIME=C
+  local LANG=C LANGUAGE=en
+  local LC_PAPER
+  LC_PAPER=C
+  readonly LC_ADDRESS=C
+}
+SH
+  run scan --write-baseline
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  run python3 -I -B -c 'import json,sys; assert json.load(open(sys.argv[1]))["entries"] == []' "$WORK/baseline.json"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  local name
+  for name in LC_ALL LC_CTYPE LC_MESSAGES LC_COLLATE LC_NUMERIC LC_TIME LANG LC_PAPER LC_ADDRESS; do
+    [[ "$output" == *"$name"* ]] || { printf 'missed %s: %s\n' "$name" "$output"; false; }
+  done
+}
+
+@test "locale save restore env and quoted declaration data are not local assignments" {
+  cat > "$WORK/sample.sh" <<'SH'
+#!/bin/bash
+# local LC_ALL=C
+text='declare LC_CTYPE=C'
+printf '%s' 'typeset LC_TIME=C'
+f() {
+  local original_lc_all="${LC_ALL-}" lc_all_set="${LC_ALL+x}" value=ok
+  LC_ALL=C
+  env LC_ALL=C command
+  declare -p LC_ALL
+  local -p LC_TIME
+  typeset -f LANG
+  declare -F LC_CTYPE
+  readonly -p LC_ALL
+  if [ "$lc_all_set" = x ]; then LC_ALL="$original_lc_all"; else unset LC_ALL; fi
+}
+SH
+  run scan --write-baseline
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *"0 fingerprint(s), 0 occurrence(s)"* ]] || { printf '%s\n' "$output"; false; }
+  run scan
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "migrated helpers reject plain export and prefix locale changes but allow env" {
+  cat > "$WORK/sample.sh" <<'SH'
+#!/bin/bash
+shared_infra_safe_line() {
+  LC_ALL=C
+  export LANG=C
+  LC_CTYPE=C printf ok
+  LC_TIME=C helper
+  local LC_MESSAGES=C
+  declare LC_COLLATE=C
+  typeset LC_NUMERIC=C
+  builtin readonly LC_MONETARY=C
+}
+SH
+  run scan --write-baseline
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  local name
+  for name in LC_ALL LANG LC_CTYPE LC_TIME LC_MESSAGES LC_COLLATE LC_NUMERIC LC_MONETARY; do
+    [[ "$output" == *"$name="* ]] || { printf 'missed %s: %s\n' "$name" "$output"; false; }
+  done
+  cat > "$WORK/sample.sh" <<'SH'
+#!/bin/bash
+shared_infra_safe_line() {
+  local value='LC_ALL=C'
+  printf '%s' 'export LANG=C'
+  /usr/bin/env LC_ALL=C command
+  command env LANG=C command
+}
+# Existing non-local entry points and unredirected prefixes stay out of scope.
+export LC_ALL=C
+LANG=C
+LC_CTYPE=C helper
+SH
+  run scan --write-baseline
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *"0 fingerprint(s), 0 occurrence(s)"* ]] || { printf '%s\n' "$output"; false; }
+}
+
+@test "non-locale prefixes cannot overwrite declaration or protected export findings" {
+  cat > "$WORK/sample.sh" <<'SH'
+#!/bin/bash
+x="$(FOO=1 local LC_ALL=C 2>/dev/null)"
+shared_infra_safe_line() {
+  x="$(FOO=1 export LANG=C 2>/dev/null)"
+}
+SH
+  run scan --write-baseline
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  run python3 -I -B -c 'import json,sys; assert json.load(open(sys.argv[1]))["entries"] == []' "$WORK/baseline.json"
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *"LC_ALL=C"* && "$output" == *"LANG=C"* ]] || { printf '%s\n' "$output"; false; }
+}
+
+@test "protected helper regions survive comments spacing and subshell bodies" {
+  cat > "$WORK/sample.sh" <<'SH'
+#!/bin/bash
+shared_infra_safe_line () { # header comment
+  LC_ALL=C
+}
+_gr_json_str() ( # subshell header comment
+  export LANG=C
+)
+SH
+  run scan --write-baseline
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *"LC_ALL=C"* && "$output" == *"LANG=C"* ]] || { printf '%s\n' "$output"; false; }
+  run python3 -I -B - "$SCANNER" "$REPO_ROOT" <<'PY'
+import importlib.util
+from pathlib import Path
+import sys
+spec = importlib.util.spec_from_file_location('guard', sys.argv[1])
+guard = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(guard)
+root = Path(sys.argv[2])
+found = set()
+for path in ('scripts/lib/trellis-home.sh', 'scripts/lib/attachment.sh', 'scripts/doctor.sh',
+             'scripts/lib/guard-rules-runtime.bash', 'core-rules/skills/process-gate/scripts/run-all.sh',
+             'core-rules/skills/process-gate/scripts/check-analyze.sh',
+             'core-rules/skills/security-gate/scripts/lib/engine.sh',
+             'core-rules/skills/security-gate/scripts/run-diff.sh'):
+    found.update(guard.Scanner((root / path).read_text(encoding='utf-8')).locale_helper_names)
+assert found == guard.MIGRATED_LOCALE_HELPERS, (found, guard.MIGRATED_LOCALE_HELPERS)
+PY
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "only the exact native-pinned semver bytes retain declaration exceptions" {
+  mkdir -p "$WORK/scripts/lib"
+  cp "$REPO_ROOT/scripts/lib/semver.sh" "$WORK/scripts/lib/semver.sh"
+  printf 'scripts/lib/semver.sh\0' > "$WORK/paths"
+  run scan --write-baseline
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *"0 fingerprint(s), 0 occurrence(s)"* ]] || { printf '%s\n' "$output"; false; }
+  printf '\n# changed bytes do not inherit the exception\n' >> "$WORK/scripts/lib/semver.sh"
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  [[ "$output" == *"locale:"* ]] || { printf '%s\n' "$output"; false; }
+  cp "$REPO_ROOT/scripts/lib/semver.sh" "$WORK/sample.sh"
+  printf 'sample.sh\0' > "$WORK/paths"
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+}
+
+@test "guard matcher exceptions bind the function bytes path and occurrence" {
+  mkdir -p "$WORK/scripts/lib"
+  cp "$REPO_ROOT/scripts/lib/guard-rules-runtime.bash" "$WORK/scripts/lib/guard-rules-runtime.bash"
+  printf 'scripts/lib/guard-rules-runtime.bash\0' > "$WORK/paths"
+  run scan --write-baseline
+  [ "$status" -eq 0 ] || { printf '%s\n' "$output"; false; }
+  printf '%s\n' 'other() { local LC_ALL=C _gr_text='\'''\'' nocase=0 rc; }' >> "$WORK/scripts/lib/guard-rules-runtime.bash"
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  cp "$REPO_ROOT/scripts/lib/guard-rules-runtime.bash" "$WORK/scripts/lib/guard-rules-runtime.bash"
+  python3 -I -B - "$WORK/scripts/lib/guard-rules-runtime.bash" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+p.write_text(p.read_text().replace('  local -a _gr_lines', '  local -a _gr_lines # changed'))
+PY
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+  cp "$REPO_ROOT/scripts/lib/guard-rules-runtime.bash" "$WORK/sample.sh"
+  printf 'sample.sh\0' > "$WORK/paths"
+  run scan
+  [ "$status" -eq 1 ] || { printf '%s\n' "$output"; false; }
+}
+
 @test "doctor usage and owner prepass avoid redirected temporary assignment hits" {
   # These two functions contain both an external CLI and shell-function calls;
   # check the actual production code, not only a synthetic scanner example.

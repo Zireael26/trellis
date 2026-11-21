@@ -23,7 +23,8 @@ setup() {
   export HOME="$SANDBOX/home" TRELLIS_HOME="$SANDBOX/trellis-home" GIT_CONFIG_GLOBAL="$SANDBOX/home/.gitconfig" GIT_CONFIG_NOSYSTEM=1
   mkdir -p "$HOME" "$TRELLIS_HOME"
   chmod 700 "$TRELLIS_HOME"
-  : > "$GIT_CONFIG_GLOBAL"
+  # Snapshot copies must have no detached Git writer racing their traversal.
+  printf '[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n' > "$GIT_CONFIG_GLOBAL"
   git init -q "$SANDBOX/repo"
   git -C "$SANDBOX/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
   mkdir -p "$SANDBOX/template"
@@ -56,6 +57,13 @@ call_one() {
     fn=$3; shift 3
     "$fn" "$@"' x "$deps" "$preload" "$fn" "$@" </dev/null >"$out.stdout" 2>"$out.stderr") || rc=$?
   echo "$rc" >"$out.status"
+}
+
+@test "fixture snapshots disable automatic maintenance and garbage collection" {
+  # Commits must not leave a detached writer removing maintenance.lock while
+  # setup or call_one recursively copies the repository snapshot.
+  [ "$(git -C "$SANDBOX/repo" config --get maintenance.auto)" = false ]
+  [ "$(git -C "$SANDBOX/repo" config --get gc.auto)" = 0 ]
 }
 
 @test "every moved function behaves identically loaded lazily and preloaded, in both twins" {

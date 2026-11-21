@@ -17,6 +17,7 @@ setup() {
   mkdir -p "$HOME" "$TRELLIS_HOME"
   PROJECT="$BATS_TEST_TMPDIR/project"
   mkdir -p "$PROJECT/src"
+  PROJECT="$(cd -P "$PROJECT" && pwd -P)"
   git -C "$PROJECT" -c core.hooksPath=/dev/null -c init.templateDir= init -q
   printf 'export default [];\n' >"$PROJECT/eslint.config.js"
   printf 'export const a = 1;\n' >"$PROJECT/src/a.ts"
@@ -214,5 +215,50 @@ EOF
     [[ "$output" == 'post-edit-verify: eslint not found (no local install and no npx eslint on PATH); JS/TS lint skipped for '*src/a.ts ]] ||
       { echo "$runner: $output"; return 1; }
     [ "$(cat "$CALLS")" = "npx --no-install eslint --version" ] || { cat "$CALLS"; return 1; }
+  done
+}
+
+@test "P45 oxlint config takes precedence over eslint and biome in post-edit-verify" {
+  local runner
+  printf '{}\n' >"$PROJECT/.oxlintrc.json"
+  printf '{}\n' >"$PROJECT/biome.json"
+  local_eslint 1
+  mkdir -p "$PROJECT/node_modules/.bin"
+  cat >"$PROJECT/node_modules/.bin/oxlint" <<EOF
+#!/bin/sh
+printf 'oxlint %s\n' "\$*" >>"$CALLS"
+echo oxlint-error
+exit 1
+EOF
+  chmod +x "$PROJECT/node_modules/.bin/oxlint"
+  for runner in run_claude run_codex; do
+    : >"$CALLS"
+    "$runner"
+    [ "$status" -eq 2 ] || { echo "$runner: $output"; return 1; }
+    [[ "$output" == *oxlint-error* ]] || { echo "$runner: $output"; return 1; }
+    grep -q '^oxlint --quiet ' "$CALLS"
+    ! grep -q '^local ' "$CALLS"
+  done
+}
+
+@test "P45 biome config takes precedence over eslint when oxlint is absent" {
+  local runner
+  printf '{}\n' >"$PROJECT/biome.json"
+  local_eslint 1
+  mkdir -p "$PROJECT/node_modules/.bin"
+  cat >"$PROJECT/node_modules/.bin/biome" <<EOF
+#!/bin/sh
+printf 'biome %s\n' "\$*" >>"$CALLS"
+echo biome-error
+exit 1
+EOF
+  chmod +x "$PROJECT/node_modules/.bin/biome"
+  for runner in run_claude run_codex; do
+    : >"$CALLS"
+    "$runner"
+    [ "$status" -eq 2 ] || { echo "$runner: $output"; return 1; }
+    [[ "$output" == *biome-error* ]] || { echo "$runner: $output"; return 1; }
+    grep -q '^biome check ' "$CALLS"
+    ! grep -q '^local ' "$CALLS"
   done
 }

@@ -218,21 +218,16 @@ sg_vet_helpers() {
 # accepted literal/default grammar matches the diff gate's pinned parser; the
 # allowlist includes the documented shared keys even when only diff uses one.
 sg_parse_local_config() {
-  local LC_ALL=C line key val n=0
-  local re_assign='^([A-Z][A-Z0-9_]*)=(.*)$'
-  local re_tail='([[:space:]]+(#.*)?)?$'
-  local re_dq='^"([^"$`\\]*)"'"$re_tail"
-  local re_sq="^'([^']*)'$re_tail"
-  local re_bare='^([A-Za-z0-9_./:,@+%=-]*)'"$re_tail"
-  local re_def='^"[$][{]([A-Z0-9_]+):-([^"$`\\}]*)[}]"'"$re_tail"
+  local line key val raw tail default n=0 whitespace=$' \t\r\n\v\f'
+  # Literal shell patterns preserve C grammar without changing Bash's locale.
   SG_CONFIG_BAD_LINE=0
   while IFS= builtin read -r line || [ -n "$line" ]; do
     n=$((n + 1))
-    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line#"${line%%[!$whitespace]*}"}"
     case "$line" in ''|'#'*) continue ;; esac
     SG_CONFIG_BAD_LINE="$n"
-    [[ "$line" =~ $re_assign ]] || return 1
-    key="${BASH_REMATCH[1]}"; val="${BASH_REMATCH[2]}"
+    case "$line" in *=*) ;; *) return 1 ;; esac
+    key=${line%%=*} val=${line#*=}
     case "$key" in
       SECURITY_GATE_STACK_PROFILE|SECURITY_GATE_PROJECT_NAME|SECURITY_GATE_AUDIT_DIR|\
       SECURITY_GATE_SEMGREP_TIMEOUT|SECURITY_GATE_SHELLCHECK|SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS|\
@@ -240,13 +235,34 @@ sg_parse_local_config() {
       SECURITY_GATE_LLM_TIMEOUT_S|SECURITY_GATE_STACK_VALIDATORS|LLM_PROVIDER|LLM_MODEL) ;;
       *) return 1 ;;
     esac
-    if [[ "$val" =~ $re_def ]]; then
-      [ "${BASH_REMATCH[1]}" = "$key" ] || return 1
-      [ -n "${!key:-}" ] || builtin printf -v "$key" '%s' "${BASH_REMATCH[2]}"
-    elif [[ "$val" =~ $re_dq ]] || [[ "$val" =~ $re_sq ]] || [[ "$val" =~ $re_bare ]]; then
-      builtin printf -v "$key" '%s' "${BASH_REMATCH[1]}"
-    else
-      return 1
+    default=false
+    case "$val" in
+      '"'*)
+        val=${val#'"'}
+        case "$val" in *'"'*) tail=${val#*'"'}; val=${val%%'"'*} ;; *) return 1 ;; esac
+        case "$val" in
+          '${'*':-'*'}')
+            raw=${val#'${'}; raw=${raw%%':-'*}
+            [ "$raw" = "$key" ] || return 1
+            val=${val#*':-'}; val=${val%'}'}
+            case "$val" in *'}'*) return 1 ;; esac
+            default=true ;;
+        esac
+        case "$val" in *'$'*|*'`'*|*'\'*|*'"'*) return 1 ;; esac ;;
+      "'"*)
+        val=${val#"'"}
+        case "$val" in *"'"*) tail=${val#*"'"}; val=${val%%"'"*} ;; *) return 1 ;; esac ;;
+      *)
+        raw=$val; val=${val%%[$whitespace]*}; tail=${raw#"$val"}
+        case "$val" in *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_./:,@+%=-]*) return 1 ;; esac ;;
+    esac
+    case "$tail" in
+      '') ;;
+      [$whitespace]*) tail=${tail#"${tail%%[!$whitespace]*}"}; case "$tail" in ''|'#'*) ;; *) return 1 ;; esac ;;
+      *) return 1 ;;
+    esac
+    if [ "$default" = false ] || [ -z "${!key:-}" ]; then
+      builtin printf -v "$key" '%s' "$val"
     fi
     builtin export "${key?}"
   done < "$1"

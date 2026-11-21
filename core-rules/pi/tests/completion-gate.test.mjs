@@ -295,6 +295,90 @@ test('T65: an operator abort, a shutdown request or an initialization error is n
   assert.equal((await broken.fire('tool_call', broken.call('bash', { command: 'ls' }))).block, true);
 });
 
+function providerFailure(f) {
+  return f.fire('agent_before_settle', { entries: [], continue: false, outcome: 'error',
+    context: { canContinue: false, contextMessages: [{ role: 'user', content: 'hello' },
+      { role: 'assistant', content: [], stopReason: 'error', errorMessage: 'quota exhausted' }] } });
+}
+
+test('provider failure before tools leaves dirty work pending without success gates or settled diagnostics', async t => {
+  const f = await gateFixture(t); if (!f) return;
+  writeFileSync(resolve(f.cwd, 'dirty.ts'), 'pre-existing work\n');
+  f.respond({ 'decision-receipt': deny('no readable assistant message or transcript') });
+  assert.equal(await providerFailure(f), undefined);
+  assert.equal(f.state().status, 'needs_check');
+  assert.equal(f.calls().length, 0, 'no success check or stamp for an unanswered request');
+  const before = f.allCalls().length;
+  await f.fire('agent_settled', { type: 'agent_settled', aborted: false });
+  assert.equal(f.allCalls().length, before, 'settled diagnostics must not re-run the same receipt check');
+  assert.equal(f.notifications.length, 0);
+  assert.equal(f.messages.length, 0, 'no misleading completion block queued into the next turn');
+  // A subsequent aborted non-user turn does not inherit the skipped-settled latch.
+  await f.fire('agent_settled', { type: 'agent_settled', aborted: true });
+  assert.equal(f.allCalls().length, before + 1, 'later aborted run still runs settled lifecycle');
+  const next = await f.settle(false);
+  assert.equal(f.entryState(next).status, 'blocked', 'a successful response still runs the full gate');
+  assert.equal(f.calls().length, 1);
+});
+
+for (const unknown of [false, true]) {
+  test(`provider failure preserves a standing ${unknown ? 'unknown' : 'known'} completion block`, async t => {
+    const f = await gateFixture(t); if (!f) return;
+    f.respond({ 'stop-verify': unknown ? 'missing' : deny('missing receipt') });
+    const saved = f.entryState(await f.settle(false));
+    const calls = f.calls().length;
+    assert.equal(await providerFailure(f), undefined);
+    assert.deepEqual(f.state(), saved, 'failure cannot clear or relabel an existing block');
+    assert.equal(f.calls().length, calls);
+    const action = await f.fire('tool_call', f.call('bash', { command: 'ls' }));
+    assert.equal(action?.block === true, unknown, 'unknown enforcement still fences covered actions');
+  });
+}
+
+test('provider failure after tool activity still enforces receipts and mandatory checks', async t => {
+  const f = await gateFixture(t); if (!f) return;
+  const call = f.call('bash', { command: 'ls' });
+  await f.fire('tool_call', call);
+  await f.result(call);
+  f.respond({ 'stop-verify': deny('missing receipt after tool work') });
+  const result = await providerFailure(f);
+  assert.equal(f.entryState(result).status, 'blocked');
+  assert.match(result.entries.at(-1).content, /missing receipt after tool work/);
+  assert.equal(f.calls().length, 1);
+});
+
+test('provider failure after user bash still runs the full completion gate', async t => {
+  const f = await gateFixture(t); if (!f) return;
+  await f.fire('user_bash', { command: 'ls', cwd: f.cwd, excludeFromContext: true });
+  f.respond({ 'stop-verify': deny('user bash work needs checking') });
+  assert.equal(f.entryState(await providerFailure(f)).status, 'blocked');
+  assert.equal(f.calls().length, 1);
+});
+
+test('a fresh user prompt resets earlier tool activity but not pending verification', async t => {
+  const f = await gateFixture(t); if (!f) return;
+  await f.fire('tool_call', f.call('bash', { command: 'ls' }));
+  await f.settle();
+  await f.fire('before_agent_start', { systemPrompt: '' });
+  const calls = f.calls().length;
+  assert.equal(await providerFailure(f), undefined);
+  assert.equal(f.state().status, 'needs_check');
+  assert.equal(f.calls().length, calls);
+});
+
+test('a provider failure after an earlier acceptance never inherits accepted status', async t => {
+  const f = await gateFixture(t); if (!f) return;
+  await f.settle();
+  assert.equal(f.state().status, 'accepted');
+  const calls = f.calls().length;
+  assert.equal(await providerFailure(f), undefined);
+  assert.equal(f.state().status, 'needs_check');
+  assert.equal(f.calls().length, calls);
+  await f.settle();
+  assert.equal(f.state().status, 'accepted');
+  assert.equal(f.calls().length, calls + 1);
+});
+
 // --- QP review fixes (H2, H3) -----------------------------------------------
 test('QP H2: a gate-requested retry runs a fresh check, never a reentrant Stop', async t => {
   const f = await gateFixture(t); if (!f) return;

@@ -108,15 +108,39 @@ teardown() {
   [ "$(grep -c '^  Husky coverage:' <<< "$output")" -eq 1 ]
 }
 
+@test "render: Semgrep bundle parse notice stays visible on pass and failure" {
+  local notice='semgrep: PartialParsing skipped (minified/generated bundle): 2 target(s)'
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" %q\nexit "${STUB_RC_6:-0}"\n' "$notice" \
+    > "$STUB/scripts/check-security-diff.sh"
+  run_all merge
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(grep -Fxc "$notice" <<< "$output")" -eq 1 ]
+
+  export STUB_RC_6=1
+  run_all merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [ "$(grep -Fxc "$notice" <<< "$output")" -eq 1 ]
+}
+
 @test "render: metadata selection and exact-input reuse receipts stay visible" {
   local receipt
   for receipt in 'Tests: narrowed (release-metadata: 3 files)' \
     'tests: reused verdict aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (tree bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb, ran 2026-10-31T00:00:00+00:00)'; do
     printf '#!/usr/bin/env bash\nprintf "  %%s\\n" %q\n' "$receipt" > "$STUB/scripts/check-tests.sh"
+    if [[ "$receipt" == *release-metadata* ]]; then
+      docs_policy_fixture_record 3 targeted >> "$STUB/scripts/check-tests.sh"
+    fi
     run_all merge
     [ "$status" -eq 0 ] || { echo "$output"; false; }
     [[ "$output" == *"Overall: MERGEABLE"*"$receipt"* ]] || { echo "$output"; false; }
   done
+}
+
+docs_policy_fixture_record() {
+  local base head
+  base="$(git -C "$PROJECT_DIR" rev-parse main)"
+  head="$(git -C "$PROJECT_DIR" rev-parse HEAD)"
+  printf 'echo %q\n' "  tests: docs-policy v1 base=$base head=$head policy=$base paths=$1 battery=$2"
 }
 
 # run_all <mode> — invoke the staged aggregator from inside the fixture so the
@@ -183,6 +207,7 @@ run_all() {
 echo "pass Tests & coverage"
 echo "  Tests: narrowed (docs-only: 3 files)"
 EOF
+  docs_policy_fixture_record 3 targeted >> "$STUB/scripts/check-tests.sh"
   run_all merge
   [ "$status" -eq 0 ]
   [[ "$output" == *"Overall: MERGEABLE"*"Tests: narrowed (docs-only: 3 files)"* ]] || { echo "$output"; false; }

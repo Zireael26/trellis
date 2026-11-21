@@ -12,14 +12,6 @@ setup() {
   before="$(shasum -a 256 "$TRELLIS_HOME/registry.json")"
 }
 
-@test "rollout rejects empty --project values before selecting a fleet" {
-  run "$REPO_ROOT/scripts/rollout-hooks.sh" --yes --project ''
-  [ "$status" -eq 2 ] || { echo "empty selector widened rollout: $output"; false; }
-  run "$REPO_ROOT/scripts/rollout-hooks.sh" --yes --project=
-  [ "$status" -eq 2 ] || { echo "empty equals selector widened rollout: $output"; false; }
-  [ "$(shasum -a 256 "$TRELLIS_HOME/registry.json")" = "$before" ]
-}
-
 @test "Claude and Codex sync reject empty positional selectors" {
   local script
   for script in sync-hooks.sh sync-codex-hooks.sh; do
@@ -33,8 +25,6 @@ setup() {
 
 @test "valid project selectors and unscoped dry-runs keep their existing meaning" {
   local script
-  run "$REPO_ROOT/scripts/rollout-hooks.sh" --check --project absent
-  [ "$status" -eq 1 ] || { echo "$output"; false; }
   for script in sync-hooks.sh sync-codex-hooks.sh; do
     run "$REPO_ROOT/scripts/$script" --dry-run absent
     [ "$status" -eq 1 ] || { echo "$output"; false; }

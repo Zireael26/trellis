@@ -117,8 +117,8 @@ API_TOKEN_SET=
 POLICY=$policy" ]
 }
 
-@test "gate.verdict_reuse beside env_passthrough keeps passthrough; a non-boolean drops it" {
-  seed_protected_manifest '{"schema_version":1,"project_id":"fixture","gate":{"verdict_reuse":false,"env_passthrough":["APP_MODE"]}}'
+@test "boolean gate opt-outs preserve passthrough; a non-boolean drops it" {
+  seed_protected_manifest '{"schema_version":1,"project_id":"fixture","gate":{"verdict_reuse":false,"docs_only_tests":false,"env_passthrough":["APP_MODE"]}}'
   load_gate_env_functions
   export APP_MODE='reuse opt-out'
   trellis_collect_gate_env "$PROJECT"

@@ -89,14 +89,16 @@ const SAFETY_BUDGET_CEILING_USD = 60
 // inheriting the calling main loop; Refresh/Rank remain inherited bounded reads.
 // Per-stage author/reviewer family contract — mirroring core-rules/skills/herdr-foreman/roles.json
 const AGENT_FAMILIES = {
-  sol: 'openai', 'sol-xhigh': 'openai', 'sol-max': 'openai',
+  sol: 'openai', 'sol-low': 'openai', 'sol-medium': 'openai', 'sol-xhigh': 'openai',
   'terra-medium': 'openai', 'terra-low': 'openai',
-  astra: 'openai', 'code-reviewer': 'openai',
+  astra: 'openai', 'astra-medium': 'openai', 'code-reviewer': 'openai',
   opus: 'anthropic', haiku: 'anthropic', 'haiku-xhigh': 'anthropic', sonnet: 'anthropic',
+  'fable-medium': 'anthropic', 'fable-high': 'anthropic',
   'security-reviewer': 'openai',
   'ox-alpha': 'stealth', 'ox-alpha-go': 'stealth', 'ox-alpha-zen': 'stealth',
-  gemini: 'google', flash: 'google', argon: 'google',
-  carbon: 'google', 'carbon-high': 'google',
+  gemini: 'google', flash: 'google', 'hydrogen-low': 'google',
+  neon: 'google', 'neon-low': 'google', 'neon-medium': 'google', 'neon-xhigh': 'google',
+  carbon: 'google',
   muse: 'meta', 'muse-2': 'meta', 'muse-3': 'meta',
   deepseek: 'deepseek', 'deepseek-2': 'deepseek', 'deepseek-3': 'deepseek',
 }

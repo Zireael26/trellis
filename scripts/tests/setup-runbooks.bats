@@ -258,13 +258,37 @@ make_project() {
 # launcher runs under env -i, so the runner's TRELLIS_ATTACH_POSTJOB=off never
 # reaches it. The job holds the checkout lock while it verifies, and detach,
 # relink and recover refuse (exit 3) rather than wait for that lock. Each
-# runbook step below starts only once the previous one's job has ended, however
-# slowly it runs: its detached Perl parent already carries the path in its argv.
+# runbook step below waits for pending/running receipts even before exec makes
+# the process visible, or when pgrep cannot inspect it. Failed/blocked verdicts
+# do not hold the receipt wait open, but their process must still drain cleanup
+# and any in-process retries before the existing assertions report the failure.
+# Probe exit 1 means absent; every other nonzero is unknown.
 wait_for_postjob() {
-  local tries=0
-  while pgrep -f "$TRELLIS_HOME/releases/.*/attach-postjob.sh" >/dev/null 2>&1; do
-    tries=$((tries + 1))
-    [ "$tries" -lt 9000 ] || { echo 'attach postjob did not finish within 900 s'; return 1; }
+  local deadline waiting status_file state probe_status
+  deadline=$((SECONDS + 900))
+  while :; do
+    waiting=0
+    while IFS= read -r status_file; do
+      state="$(jq -er '.state | select(. == "pending" or . == "running" or . == "ok"
+        or . == "failed" or . == "blocked-by-journal")' "$status_file")" || {
+        printf 'cannot read attach postjob state: %s\n' "$status_file" >&2
+        return 1
+      }
+      case "$state" in pending|running) waiting=1 ;; esac
+    done < <(if [ -d "$TRELLIS_HOME/state/attachment-status" ]; then
+      find "$TRELLIS_HOME/state/attachment-status" -mindepth 2 -maxdepth 2 -type f -name '[!.]*.json'
+    fi)
+    probe_status=0
+    pgrep -f "$TRELLIS_HOME/releases/.*/attach-postjob.sh" >/dev/null 2>&1 || probe_status=$?
+    case "$probe_status" in
+      1) ;; # No match is not completion while a receipt is pending/running.
+      *) waiting=1 ;; # 0: still running; other exits: unknown, never finished.
+    esac
+    [ "$waiting" -eq 1 ] || return 0
+    [ "$SECONDS" -lt "$deadline" ] || {
+      printf 'attach postjob did not finish within 900 s (last pgrep exit %s)\n' "$probe_status" >&2
+      return 1
+    }
     sleep 0.1
   done
 }
@@ -1027,4 +1051,134 @@ EOF
   run "$TRELLIS" show-config --home "$TRELLIS_HOME" --fleet "$FLEET"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   assert_line_matches "configured fleets:     personal, work"
+}
+
+@test "postjob status wait covers pending before a process is visible" {
+  local record="$TRELLIS_HOME/state/attachment-status/fixture/worktree.json" writer rc=0 observed
+  mkdir -p "${record%/*}"
+  printf '{"state":"pending"}\n' > "$record"
+  pgrep() { return 1; }
+  (
+    sleep 0.2
+    printf '{"state":"running"}\n' > "$record.next"
+    mv "$record.next" "$record"
+    sleep 0.2
+    printf '{"state":"ok"}\n' > "$record.next"
+    mv "$record.next" "$record"
+  ) >/dev/null 2>&1 &
+  writer=$!
+  wait_for_postjob || rc=$?
+  observed="$(jq -r .state "$record")"
+  wait "$writer"
+  [ "$rc" -eq 0 ] && [ "$observed" = ok ]
+}
+
+@test "postjob status wait covers running despite no process match" {
+  local record="$TRELLIS_HOME/state/attachment-status/fixture/worktree.json" writer rc=0 observed
+  mkdir -p "${record%/*}"
+  printf '{"state":"running"}\n' > "$record"
+  pgrep() { return 1; }
+  (
+    sleep 0.2
+    printf '{"state":"ok"}\n' > "$record.next"
+    mv "$record.next" "$record"
+  ) >/dev/null 2>&1 &
+  writer=$!
+  wait_for_postjob || rc=$?
+  observed="$(jq -r .state "$record")"
+  wait "$writer"
+  [ "$rc" -eq 0 ] && [ "$observed" = ok ]
+}
+
+@test "postjob status wait treats pgrep internal failure as unknown" {
+  local record="$TRELLIS_HOME/state/attachment-status/fixture/worktree.json" writer rc=0 observed
+  mkdir -p "${record%/*}"
+  printf '{"state":"running"}\n' > "$record"
+  pgrep() { [ "$(jq -r .state "$record")" = ok ] && return 1; return 3; }
+  (
+    sleep 0.2
+    printf '{"state":"ok"}\n' > "$record.next"
+    mv "$record.next" "$record"
+  ) >/dev/null 2>&1 &
+  writer=$!
+  wait_for_postjob || rc=$?
+  observed="$(jq -r .state "$record")"
+  wait "$writer"
+  [ "$rc" -eq 0 ] && [ "$observed" = ok ]
+}
+
+@test "postjob status wait promptly exposes a failed receipt after draining its cleanup" {
+  local owner="$TRELLIS_HOME/state/attachments/fixture/worktree.json"
+  local record="$TRELLIS_HOME/state/attachment-status/fixture/worktree.json" digest rc=0 terminal_probes=0 writer
+  mkdir -p "${owner%/*}" "${record%/*}"
+  printf '{"attachment_id":"wait-fixture","worktree_root":"/fixture"}\n' > "$owner"
+  digest="$(shasum -a 256 "$owner" | awk '{print $1}')"
+  jq -cn --arg digest "$digest" '{state:"running",release:"9.9.10",owner_sha256:$digest,
+    attachment_id:"wait-fixture",worktree_root:"/fixture",checks:[],failure:{check:"fixture"}}' > "$record"
+  pgrep() {
+    [ "$(jq -r .state "$record")" = failed ] || return 1
+    terminal_probes=$((terminal_probes + 1))
+    [ "$terminal_probes" -eq 1 ]
+  }
+  (
+    sleep 0.2
+    jq '.state = "failed"' "$record" > "$record.next"
+    mv "$record.next" "$record"
+  ) >/dev/null 2>&1 &
+  writer=$!
+  assert_adoption_checks 9.9.10 > "$SANDBOX/assertion.out" 2>&1 || rc=$?
+  wait "$writer"
+  [ "$rc" -eq 1 ] && [ "$terminal_probes" -eq 2 ]
+  grep -Fq 'attachment checks did not pass for release 9.9.10' "$SANDBOX/assertion.out"
+  grep -Fq '"state": "failed"' "$SANDBOX/assertion.out"
+}
+
+@test "postjob status wait keeps the 900 second elapsed deadline" {
+  local probes=0 rc=0
+  SECONDS=0
+  pgrep() { probes=$((probes + 1)); SECONDS=$((SECONDS + 901)); return 0; }
+  sleep() { return 0; }
+  wait_for_postjob > "$SANDBOX/wait.out" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ] && [ "$probes" -eq 1 ]
+  grep -Fq 'attach postjob did not finish within 900 s' "$SANDBOX/wait.out"
+}
+
+@test "postjob status wait does not let a failed sibling bypass a running receipt" {
+  local dir="$TRELLIS_HOME/state/attachment-status/fixture" writer rc=0 observed
+  mkdir -p "$dir"
+  printf '{"state":"failed"}\n' > "$dir/failed.json"
+  printf '{"state":"running"}\n' > "$dir/running.json"
+  pgrep() { return 1; }
+  (
+    sleep 0.2
+    printf '{"state":"ok"}\n' > "$dir/running.next"
+    mv "$dir/running.next" "$dir/running.json"
+  ) >/dev/null 2>&1 &
+  writer=$!
+  wait_for_postjob || rc=$?
+  observed="$(jq -r .state "$dir/running.json")"
+  wait "$writer"
+  [ "$rc" -eq 0 ] && [ "$observed" = ok ]
+  [ "$(jq -r .state "$dir/failed.json")" = failed ]
+}
+
+@test "postjob status wait ignores hidden and nested scratch JSON" {
+  local dir="$TRELLIS_HOME/state/attachment-status/fixture"
+  mkdir -p "$dir/.tmp.worktree.fixture/render"
+  printf '{"state":"ok"}\n' > "$dir/worktree.json"
+  printf '{"scratch":true}\n' > "$dir/.partial.json"
+  printf '{"scratch":true}\n' > "$dir/.tmp.worktree.fixture/render/transient.json"
+  pgrep() { return 1; }
+  wait_for_postjob
+  [ "$(jq -r .state "$dir/worktree.json")" = ok ]
+}
+
+@test "postjob status wait drains blocked retry activity in the same process" {
+  local dir="$TRELLIS_HOME/state/attachment-status/fixture" probes=0 rc=0
+  mkdir -p "$dir"
+  printf '{"state":"blocked-by-journal"}\n' > "$dir/worktree.json"
+  pgrep() { probes=$((probes + 1)); [ "$probes" -le 3 ]; }
+  wait_for_postjob || rc=$?
+  [ "$rc" -eq 0 ] && [ "$probes" -eq 4 ]
+  [ "$(jq -r .state "$dir/worktree.json")" = blocked-by-journal ]
 }

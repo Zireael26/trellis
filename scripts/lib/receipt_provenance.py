@@ -19,13 +19,13 @@ from typing import Any, Sequence
 TOOLS = ("bash", "bats", "jq", "git", "node", "pnpm")
 
 
-def probe(command: Sequence[str], env: dict[str, str], cwd: Path) -> str:
+def probe(command: Sequence[str], env: dict[str, str], cwd: Path, *, timeout: float = 2) -> str:
     try:
         # Stay in the caller's group so gate teardown/interrupts kill probes too.
         child = subprocess.Popen(command, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                  stderr=subprocess.DEVNULL)
         try:
-            output, _ = child.communicate(timeout=2)
+            output, _ = child.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
             try:
                 child.kill()

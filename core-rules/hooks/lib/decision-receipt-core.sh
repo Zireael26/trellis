@@ -19,7 +19,10 @@ _dr_turn_text() {
   jq -Rrs '
     def role:
       (.message.role // .role // .payload.message.role // .payload.role
-       // (if .type == "assistant" or .type == "user" then .type else "" end));
+       // (if .type == "assistant" or .type == "user" then .type
+           elif .type == "USER_INPUT" then "user"
+           elif .type == "PLANNER_RESPONSE" then "assistant"
+           else "" end));
     def text:
       (.message.content // .content // .payload.message.content // .payload.content // "") as $content
       | if ($content | type) == "string" then $content
@@ -95,7 +98,7 @@ decision_receipt_run() {
     _dr_infrastructure_block "jq required but not found — install jq (brew install jq | apt-get install -y jq)"
   fi
   _se_require_jq "decision-receipt"
-  case "$harness" in claude|codex|pi) ;; *) _dr_infrastructure_block "unknown harness '$harness' — re-run sync-hooks" ;; esac
+  case "$harness" in claude|codex|pi|antigravity) ;; *) _dr_infrastructure_block "unknown harness '$harness' — re-run sync-hooks" ;; esac
 
   input=$(cat 2>/dev/null || true)
   stop_active=$(printf '%s' "$input" | jq -ers '
@@ -103,6 +106,9 @@ decision_receipt_run() {
     else .[0] | if has("stop_hook_active") then
       if (.stop_hook_active | type) == "boolean" then .stop_hook_active | tostring
       else error("stop_hook_active must be a JSON Boolean") end
+    elif has("continuationActive") then
+      if (.continuationActive | type) == "boolean" then .continuationActive | tostring
+      else error("continuationActive must be a JSON Boolean") end
     else "false" end end' 2>/dev/null) \
     || _dr_block "invalid Stop envelope: stop_hook_active must be a JSON Boolean"
   [ "$stop_active" = "true" ] && exit 0
@@ -152,7 +158,7 @@ decision_receipt_run() {
       end;
     (.last_assistant_message // "") | text
   ' 2>/dev/null || true)
-  transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+  transcript=$(printf '%s' "$input" | jq -r '.transcript_path // .transcriptPath // empty' 2>/dev/null || true)
   if [ -z "$transcript" ] || [ ! -f "$transcript" ]; then transcript="${CLAUDE_TRANSCRIPT_PATH:-}"; fi
   transcript_text=""
   if [ -n "$transcript" ] && [ -f "$transcript" ]; then
@@ -162,15 +168,15 @@ decision_receipt_run() {
   [ -n "$turn_text" ] || turn_text="$transcript_text"
   receipt_text=$(printf '%s\n%s\n' "$last_message" "$transcript_text")
 
-  session_id=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null || true)
-  transcript_path_raw=$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null || true)
+  session_id=$(printf '%s' "$input" | jq -r '.session_id // .conversationId // empty' 2>/dev/null || true)
+  transcript_path_raw=$(printf '%s' "$input" | jq -r '.transcript_path // .transcriptPath // empty' 2>/dev/null || true)
   _dr_baseline_ok=0
   _dr_head_moved=1
   # Armed only by the running harness's own turn-baseline registration. Pi
   # runs no turn-baseline, so it keeps the unarmed trigger.
   _dr_armed=0
   case "$harness" in
-    claude|codex) _se_turn_baseline_armed "$project_dir" "$harness" 2>/dev/null && _dr_armed=1 ;;
+    claude|codex|antigravity) _se_turn_baseline_armed "$project_dir" "$harness" 2>/dev/null && _dr_armed=1 ;;
   esac
   if [ "$_dr_armed" -eq 0 ]; then
     _dr_baseline_ok=1
@@ -207,20 +213,25 @@ decision_receipt_run() {
     exit 0
   fi
 
-  [ -n "$turn_text" ] || _dr_block "substantive L${AUTONOMY_LEVEL} turn has no readable assistant message or transcript"
+  # Voluntary decision logging (v1.5.3): L4/L5 turns do not force a performative
+  # decision block when no consequential decision was taken. When the agent does
+  # emit a `## Decisions made (L<n>)` block, validate its level, format, and
+  # presence in canonical-root decisions-log.md.
+  [ -n "$turn_text" ] || exit 0
   heading="## Decisions made (L${AUTONOMY_LEVEL})"
-  all_headings=$(printf '%s\n' "$turn_text" | grep -Ec '^## Decisions made \(L[1-5]\)$' || true)
-  exact_headings=$(printf '%s\n' "$turn_text" | grep -Fxc "$heading" || true)
+  all_headings=$(printf '%s\n' "$turn_text" | grep -Ec '^## Decisions made \(L[1-5]\)[[:blank:]]*$' || true)
+  [ "$all_headings" -eq 0 ] && exit 0
+  exact_headings=$(printf '%s\n' "$turn_text" | sed -E 's/[[:blank:]]+$//' | grep -Fxc "$heading" || true)
   if [ "$exact_headings" -ne 1 ]; then
     if [ "$all_headings" -gt 0 ]; then
       _dr_block "decision block level does not match resolved L${AUTONOMY_LEVEL}"
     fi
-    _dr_block "substantive L${AUTONOMY_LEVEL} turn requires exactly one '${heading}' block"
   fi
   [ "$all_headings" -eq 1 ] \
     || _dr_block "turn contains multiple or cross-level decision blocks"
 
   block=$(printf '%s\n' "$turn_text" | awk -v heading="$heading" '
+    { sub(/[[:blank:]]+$/, "", $0) }
     $0 == heading { in_block = 1; next }
     in_block && /^## / { exit }
     in_block { print }

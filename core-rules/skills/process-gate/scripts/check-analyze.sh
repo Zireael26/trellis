@@ -55,7 +55,6 @@ resolve_analyze_report() {
   local selected=""
   local highest_round="0"
   local candidate name suffix round
-  local LC_ALL=C
 
   if [ -f "$spec_dir/analyze.md" ]; then
     selected="$spec_dir/analyze.md"
@@ -68,7 +67,7 @@ resolve_analyze_report() {
     suffix="${name#analyze-}"
     suffix="${suffix%.md}"
     case "$suffix" in
-      ''|*[!0-9]*) continue ;;
+      ''|*[!0123456789]*) continue ;;
     esac
 
     round="$suffix"
@@ -80,7 +79,7 @@ resolve_analyze_report() {
     # Equal-length normalized digit strings compare lexically without integer overflow.
     # shellcheck disable=SC2071
     if [ "${#round}" -gt "${#highest_round}" ] \
-      || { [ "${#round}" -eq "${#highest_round}" ] && [[ "$round" > "$highest_round" ]]; }; then
+      || { [ "${#round}" -eq "${#highest_round}" ] && [ "$round" \> "$highest_round" ]; }; then
       selected="$candidate"
       highest_round="$round"
     fi

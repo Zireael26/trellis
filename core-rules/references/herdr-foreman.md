@@ -23,8 +23,9 @@ otherwise.
 `SubagentWorkflow` is off in the user's global `~/.pi/agent/subagents.json`.
 `foreman-start.sh` turns it on for the foreman's worktree only, by rewriting
 `<worktree>/.pi/subagents.json` to exactly `workflowsEnabled: true` and
-`toolDescriptionMode: "compact"` before pi starts; branch-supplied keys are
-dropped, and a write failure aborts the start. Before that, `core-rules/pi/lib/validate-project-pi.sh` refuses any
+`toolDescriptionMode: "compact"` before pi starts, and materializes the release
+worker roster into `<worktree>/.pi/agents` (isolating `.agents/agents` for other
+harnesses); branch-supplied keys are dropped, and a write failure aborts the start. Before that, `core-rules/pi/lib/validate-project-pi.sh` refuses any
 `.pi` content the protected base has not approved (B0-6); every Trellis pi
 launcher runs it. A pi apex that needs workflows writes the same file in its
 own cwd before it starts. A running agent keeps the tools it started with.

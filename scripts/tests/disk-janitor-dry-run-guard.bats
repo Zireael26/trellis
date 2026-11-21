@@ -47,7 +47,7 @@ run_fixture_installer() {
 write_fake_janitor() {
   cat > "$FIXTURE_SCRIPTS/disk-janitor.sh" <<'SH'
 #!/bin/sh
-[ "$*" = '--apply --yes --safe-only --dehydrate --scopes worktrees,caches,releases,pi,tmp,docker --dry-run' ]
+[ "$*" = '--apply --yes --safe-only --dehydrate --scopes worktrees,caches,docker,releases,release-tmp,pi,tmp --dry-run' ]
 SH
 }
 

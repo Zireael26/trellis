@@ -48,7 +48,7 @@ def module():
     return mod
 PY
   cat >> "$prelude"
-  run python3 -I "$prelude"
+  run python3 -I -B "$prelude"
   [ "$status" -eq 0 ] || { printf '%s\n' "$output"; return 1; }
 }
 

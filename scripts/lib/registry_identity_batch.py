@@ -25,6 +25,7 @@ GIT = None
 
 
 def load_fs(path):
+    sys.dont_write_bytecode = True
     if path == ":bundle:":
         # The caller admits this only inside the verified command bundle; the
         # manifest-checked source is data, never read from a snapshot path.

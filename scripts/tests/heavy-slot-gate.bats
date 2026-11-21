@@ -26,6 +26,7 @@ setup() {
   unset TRELLIS_HEAVY_FD TRELLIS_HEAVY_SLOT TRELLIS_HEAVY_DIR_ID TRELLIS_HEAVY_POOL TRELLIS_HEAVY_CALLER_ENV
   unset TRELLIS_HEAVY_LIGHT_WARN TRELLIS_HEAVY_KILL_AFTER TRELLIS_HEAVY_TEST_PAUSE TRELLIS_HEAVY_TEST_TRACE
   unset TRELLIS_HEAVY_TEST_HEARTBEAT TRELLIS_HEAVY_TEST_FAIL TRELLIS_VERIFIED_PAYLOAD
+  unset TRELLIS_HEAVY_TEST_PRESSURE TRELLIS_HEAVY_TEST_STAGGER TRELLIS_HEAVY_GATE_SCRATCH_DIRS
   mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR" "$SANDBOX/bin"
   chmod 700 "$TRELLIS_HOME"
   # `trellis` on the workload's PATH, for nested calls.
@@ -47,11 +48,10 @@ teardown() {
   rm -rf "$SANDBOX"
 }
 
-# write_config N [L]  — heavy_slots and heavy_light_slots as raw JSON; an
-# empty (or, for L, absent) value omits the key.
+# write_config N [L] [G] — raw JSON; empty values omit the key.
 write_config() {
-  local slots="$1" light="${2:-}"
-  jq -n --arg source "$SANDBOX/source" --arg projects "$SANDBOX/projects" --arg slots "$slots" --arg light "$light" '
+  local slots="$1" light="${2:-}" gates="${3:-}"
+  jq -n --arg source "$SANDBOX/source" --arg projects "$SANDBOX/projects" --arg slots "$slots" --arg light "$light" --arg gates "$gates" '
     {
       schema_version: 1,
       source_root: $source,
@@ -61,8 +61,10 @@ write_config() {
       fleets: {personal: {discovery_roots: [$projects]}}
     } + (if $slots == "" then {} else {heavy_slots: ($slots | fromjson)} end)
       + (if $light == "" then {} else {heavy_light_slots: ($light | fromjson)} end)
-  ' > "$TRELLIS_HOME/config.json"
-  chmod 600 "$TRELLIS_HOME/config.json"
+      + (if $gates == "" then {} else {process_gate_slots: ($gates | fromjson)} end)
+  ' > "$TRELLIS_HOME/config.tmp"
+  chmod 600 "$TRELLIS_HOME/config.tmp"
+  mv "$TRELLIS_HOME/config.tmp" "$TRELLIS_HOME/config.json"
 }
 
 now() { perl -MTime::HiRes=time -e 'printf "%.3f\n", time'; }
@@ -295,8 +297,161 @@ EOF
   probe="$(report_marker)"
   run "${HEAVY[@]}" --lane process-gate --timeout 3 -- trellis heavy --lane process-gate -- sh -c "$probe"
   [ "$status" -eq 0 ] || { echo "status=$status $output"; false; }
-  [ "$output" = "$(printf '%s\n' caller-group 'pool=heavy slot=0')" ] || { echo "$output"; false; }
+  [[ "$output" == *"$(printf '\n%s\n%s' caller-group 'pool=heavy slot=0')" ]] || { echo "$output"; false; }
   assert_no_holder_files nested-gate
+}
+
+gate_fixture() {
+  local repo
+  for repo in first second third; do
+    git init -q "$SANDBOX/$repo"
+    git -C "$SANDBOX/$repo" -c user.name=Fixture -c user.email=fixture@example.invalid \
+      commit -qm initial --allow-empty
+  done
+  write_config 1 '' 2
+  export TRELLIS_HEAVY_TEST_PRESSURE="$SANDBOX/pressure"
+  export TRELLIS_HEAVY_TEST_STAGGER=0
+  export TRELLIS_HEAVY_TEST_HEARTBEAT=0.1
+  printf 'healthy 0\n' > "$TRELLIS_HEAVY_TEST_PRESSURE"
+}
+
+gate_bg() {
+  local here="$PWD" repo="$1" name="$2"
+  shift 2
+  cd "$SANDBOX/$repo"
+  heavy_bg "$name" --require-gate-protocol=2 --lane process-gate "$@"
+  cd "$here"
+}
+
+@test "gate overflow borrows an ordinary slot and remains counted when primary exits" {
+  gate_fixture
+  gate_bg first primary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/a"
+  local primary="$BG_PID"
+  wait_for_file "$SANDBOX/a"
+  gate_bg second overflow -- sh -c '
+    trellis heavy --lane process-gate -- touch "$1" || exit $?
+    (cd "$2" && trellis heavy --lane process-gate -- exit 0) && exit 99
+    touch "$3"; exec sleep 60
+  ' _ "$SANDBOX/nested" "$SANDBOX/third" "$SANDBOX/b"
+  local overflow="$BG_PID"
+  wait_for_file "$SANDBOX/b"
+  [ -e "$SANDBOX/nested" ]
+  wait_for_grep 'nested process-gate requires' "$SANDBOX/overflow.out"
+  run "${HEAVY[@]}" --status
+  [[ "$output" == *'effective_process_gate_slots=2'* ]] || false
+  [[ "$output" == *'process-gate overflow: held borrowed=slot-1'* ]] || false
+  heavy_bg ordinary -- touch "$SANDBOX/ordinary"
+  local ordinary="$BG_PID"
+  wait_for_grep 'waiting .* heavy slot' "$SANDBOX/ordinary.out"
+  gate_bg third third -- touch "$SANDBOX/c"
+  local third="$BG_PID"
+  wait_for_grep 'reason=gate-full' "$SANDBOX/third.out"
+  [ ! -e "$SANDBOX/ordinary" ] && [ ! -e "$SANDBOX/c" ]
+  printf 'memory\n' > "$TRELLIS_HEAVY_TEST_PRESSURE"
+  kill -TERM "$primary"
+  wait "$primary" || [ "$?" -eq 143 ]
+  wait_for_grep 'reason=memory' "$SANDBOX/third.out"
+  write_config 1 '' 1
+  wait_for_grep 'reason=config' "$SANDBOX/third.out"
+  run "${HEAVY[@]}" --status
+  [[ "$output" == *'effective_process_gate_slots=1'* && "$output" == *'overflow: held (draining) borrowed=slot-1'* ]] || false
+  [ ! -e "$SANDBOX/c" ]
+  kill -TERM "$overflow"
+  wait "$overflow" || [ "$?" -eq 143 ]
+  wait "$third"
+  wait "$ordinary"
+  [ -e "$SANDBOX/c" ] && [ -e "$SANDBOX/ordinary" ]
+}
+
+@test "cap 2 serializes linked/aliased checkouts and cannot borrow a full pool" {
+  gate_fixture
+  git -C "$SANDBOX/first" worktree add -q -b sibling "$SANDBOX/linked"
+  ln -s "$SANDBOX/linked" "$SANDBOX/alias"
+  gate_bg first primary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/a"
+  local primary="$BG_PID"
+  wait_for_file "$SANDBOX/a"
+  GIT_DIR="$SANDBOX/second/.git" gate_bg alias sibling -- touch "$SANDBOX/sibling"
+  local sibling="$BG_PID"
+  wait_for_grep 'reason=same-repo' "$SANDBOX/sibling.out"
+  heavy_bg ordinary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/ordinary"
+  local ordinary="$BG_PID"
+  wait_for_file "$SANDBOX/ordinary"
+  gate_bg second overflow -- touch "$SANDBOX/second-ran"
+  local overflow="$BG_PID"
+  wait_for_grep 'reason=ordinary-full' "$SANDBOX/overflow.out"
+  [ ! -e "$SANDBOX/sibling" ] && [ ! -e "$SANDBOX/second-ran" ]
+  kill -TERM "$ordinary"
+  wait "$ordinary" || [ "$?" -eq 143 ]
+  wait "$overflow"
+  [ -e "$SANDBOX/second-ran" ] && [ ! -e "$SANDBOX/sibling" ]
+  kill -TERM "$primary"
+  wait "$primary" || [ "$?" -eq 143 ]
+  wait "$sibling"
+}
+
+@test "second gate denies every low or unknown resource, then needs two healthy polls" {
+  gate_fixture
+  export TRELLIS_HEAVY_TEST_STAGGER=1
+  gate_bg first primary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/a"
+  local primary="$BG_PID"
+  wait_for_file "$SANDBOX/a"
+  printf 'load\n' > "$TRELLIS_HEAVY_TEST_PRESSURE"
+  gate_bg second overflow -- touch "$SANDBOX/second-ran"
+  local overflow="$BG_PID" reason
+  for reason in load memory swap disk probe-unknown; do
+    printf '%s\n' "$reason" > "$TRELLIS_HEAVY_TEST_PRESSURE"
+    wait_for_grep "reason=$reason" "$SANDBOX/overflow.out"
+    [ ! -e "$SANDBOX/second-ran" ]
+  done
+  printf 'healthy 0\n' > "$TRELLIS_HEAVY_TEST_PRESSURE"
+  wait "$overflow"
+  [ -e "$SANDBOX/second-ran" ]
+  kill -TERM "$primary"
+  wait "$primary" || [ "$?" -eq 143 ]
+}
+
+@test "overflow permit and repo ownership survive a killed supervisor" {
+  gate_fixture
+  write_config 2 '' 2
+  gate_bg first primary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/a"
+  local primary="$BG_PID"
+  wait_for_file "$SANDBOX/a"
+  heavy_bg ordinary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/ordinary"
+  local ordinary="$BG_PID"
+  wait_for_file "$SANDBOX/ordinary"
+  gate_bg second overflow -- sh -c 'echo "$$" > "$1"; exec sleep 60' _ "$SANDBOX/overflow-pid"
+  local overflow="$BG_PID" child
+  wait_for_file "$SANDBOX/overflow-pid"
+  child="$(<"$SANDBOX/overflow-pid")"
+  PIDS+=("$child")
+  kill -KILL "$overflow"
+  wait "$overflow" || [ "$?" -eq 137 ]
+  write_config 1 '' 2
+  kill -TERM "$primary" "$ordinary"
+  wait "$primary" || [ "$?" -eq 143 ]
+  wait "$ordinary" || [ "$?" -eq 143 ]
+  gate_bg third third -- touch "$SANDBOX/c"
+  local third="$BG_PID"
+  wait_for_grep 'reason=config' "$SANDBOX/third.out"
+  run "${HEAVY[@]}" --status
+  [[ "$output" == *'slot 2: held (retired)'* && "$output" == *'overflow: held (draining) borrowed=slot-2'* ]] || false
+  [ ! -e "$SANDBOX/c" ]
+  kill -TERM "$child"
+  wait "$third"
+  [ -e "$SANDBOX/c" ]
+  run "${HEAVY[@]}" --status
+  [[ "$output" == *'overflow: free'* ]] || false
+}
+
+@test "malformed cap reports the diagnostic and keeps the primary usable" {
+  write_config 2 '' '"2"'
+  run "${HEAVY[@]}" --check
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'process_gate_slots must be an integer 1 or 2; using 1'* ]] || false
+  [[ "$output" == *'process_gate_slots=1, process_gate_protocol=2'* ]] || false
+  run "${HEAVY[@]}" --lane process-gate -- sh -c 'echo "slot=$TRELLIS_HEAVY_SLOT"'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'slot=0'* ]] || false
 }
 
 @test "T18: a gate inside an ordinary heavy or light wrapper is refused before admission" {
@@ -1088,7 +1243,7 @@ assert_native_nested_parity() {
   # T18: gate inside gate keeps the reserved slot 0.
   run native_bounded "$LAUNCHER" heavy --lane process-gate --timeout 8 -- trellis heavy --lane process-gate -- sh -c "$probe"
   [ "$status" -eq 0 ] || { echo "$1 gate-in-gate: $status $output"; false; }
-  [ "$output" = "$(printf '%s\n' caller-group 'pool=heavy slot=0')" ] || { echo "$1 gate-in-gate: $output"; false; }
+  [[ "$output" == *"$(printf '\n%s\n%s' caller-group 'pool=heavy slot=0')" ]] || { echo "$1 gate-in-gate: $output"; false; }
   # T18: gate inside an ordinary lane is refused, never admitted to slot 0.
   run native_bounded "$LAUNCHER" heavy --timeout 8 -- trellis heavy --lane process-gate -- touch "$SANDBOX/gate-launched"
   [ "$status" -eq 2 ] || { echo "$1 gate-in-lane: $status $output"; false; }
@@ -1270,9 +1425,9 @@ EOF
   for sig in INT HUP; do
     case "$sig" in INT) want=130 ;; HUP) want=129 ;; esac
     : > "$SANDBOX/launcher-$sig.out"
-    # perl restores INT's default disposition: bats starts background jobs with
-    # INT ignored, and a shell cannot trap a signal ignored on entry.
-    TRELLIS_HEAVY_TEST_PAUSE=launcher-startup perl -e '$SIG{INT} = "DEFAULT"; exec { $ARGV[0] } @ARGV' \
+    # Bats background jobs ignore INT; a detached test runner may ignore HUP.
+    # Restore both defaults before Bash, which cannot trap ignored-on-entry signals.
+    TRELLIS_HEAVY_TEST_PAUSE=launcher-startup perl -e '$SIG{INT} = $SIG{HUP} = "DEFAULT"; exec { $ARGV[0] } @ARGV' \
       "$LAUNCHER" heavy -- sleep 5 > "$SANDBOX/launcher-$sig.out" 2>&1 3>&- &
     local launcher=$!
     PIDS+=("$launcher")

@@ -121,12 +121,12 @@ make_deciding_reviewer_state() {
   local workspace="${3:-fixture-scope}"
   local pane="${4:-fixture-terminal}"
   local state="$home/.trellis/state/roles-resolved.json"
-  local implementer="${5:-haiku-xhigh}"  # the default roster's implementer head (unit H)
+  local implementer="${5:-neon-medium}"  # the default roster's subscription-first implementer head
   local resolver
   resolver="$(make_active_release_resolver "$home")"
 
   mkdir -p "$(dirname "$state")"
-  python3 - "$resolver" "$home" "$nonce" "$workspace" "$pane" "$implementer" <<'PY'
+  python3 -B - "$resolver" "$home" "$nonce" "$workspace" "$pane" "$implementer" <<'PY'
 import contextlib
 import importlib.util
 import io
@@ -160,6 +160,7 @@ rr = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(rr)
 rr.load_usage = lambda ttl, fresh, usage_source="openusage": (usage, "fixture")
 rr.auth_probe_passes = lambda candidate, cache: True
+rr.live_probe_passes = lambda candidate, cache: True
 sys.argv = [resolver_path, "--implementer", implementer]
 with contextlib.redirect_stdout(io.StringIO()):
     rr.main()

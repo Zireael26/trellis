@@ -320,7 +320,8 @@
                     "path": {
                       "enum": [
                         ".claude/settings.local.json",
-                        ".codex/hooks.json"
+                        ".codex/hooks.json",
+                        ".agents/hooks.json"
                       ]
                     }
                   }
@@ -443,6 +444,42 @@
         "managed_by_attachment": { "type": "boolean" }
       }
     },
+    "projectHarness": {
+      "type": "string",
+      "enum": ["antigravity", "claude", "codex", "opencode", "pi"]
+    },
+    "projectHarnesses": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/projectHarness" }
+    },
+    "excludeRewrite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path",
+        "before_sha256",
+        "before_base64",
+        "before_mode",
+        "after_sha256",
+        "after_base64",
+        "after_mode",
+        "managed_block_sha256",
+        "managed_block_base64"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/absoluteCanonicalPath" },
+        "before_sha256": { "$ref": "#/$defs/sha256" },
+        "before_base64": { "$ref": "#/$defs/base64" },
+        "before_mode": { "$ref": "#/$defs/mode" },
+        "after_sha256": { "$ref": "#/$defs/sha256" },
+        "after_base64": { "$ref": "#/$defs/base64" },
+        "after_mode": { "const": "0600" },
+        "managed_block_sha256": { "$ref": "#/$defs/sha256" },
+        "managed_block_base64": { "$ref": "#/$defs/base64" }
+      }
+    },
     "plan": {
       "type": "object",
       "additionalProperties": false,
@@ -461,9 +498,10 @@
       ],
       "properties": {
         "$schema": { "type": "string", "minLength": 1 },
-        "schema_version": { "const": 1 },
+        "schema_version": { "enum": [1, 2] },
         "status": { "const": "prepared" },
         "surface": { "const": "project" },
+        "harnesses": { "$ref": "#/$defs/projectHarnesses" },
         "fleet": { "$ref": "#/$defs/fleet" },
         "project_id": { "$ref": "#/$defs/projectId" },
         "checkout_id": { "$ref": "#/$defs/sha256" },
@@ -497,7 +535,12 @@
         "exclude": { "$ref": "#/$defs/excludeState" }
       },
       "allOf": [
-        { "$ref": "#/$defs/contextualRenderContextState" }
+        { "$ref": "#/$defs/contextualRenderContextState" },
+        {
+          "if": { "properties": { "schema_version": { "const": 2 } }, "required": ["schema_version"] },
+          "then": { "required": ["harnesses"] },
+          "else": { "not": { "required": ["harnesses"] } }
+        }
       ]
     },
     "pending": {
@@ -672,7 +715,19 @@
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/explicitJsonRender" }
         },
-        "exclude_action": { "enum": ["none", "transfer", "restore"] },
+        "exclude_action": { "enum": ["none", "transfer", "restore", "rewrite"] },
+        "exclude_rewrite": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/excludeRewrite" }
+          ]
+        },
+        "registry_update": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "object" }
+          ]
+        },
         "restore_hooks": { "type": "boolean" },
         "clear_registry": { "type": "boolean" },
         "render_phase": { "type": "integer", "minimum": 0 },
@@ -684,6 +739,19 @@
         }
       },
       "allOf": [
+        {
+          "if": {
+            "properties": { "exclude_action": { "const": "rewrite" } },
+            "required": ["exclude_action"]
+          },
+          "then": {
+            "required": ["exclude_rewrite"],
+            "properties": { "exclude_rewrite": { "$ref": "#/$defs/excludeRewrite" } }
+          },
+          "else": {
+            "properties": { "exclude_rewrite": { "type": "null" } }
+          }
+        },
         {
           "if": {
             "properties": { "render_pending": { "not": { "type": "null" } } },
@@ -718,7 +786,7 @@
         "external"
       ],
       "properties": {
-        "schema_version": { "const": 1 },
+        "schema_version": { "enum": [1, 2] },
         "status": { "const": "detaching" },
         "surface": { "const": "project" },
         "attachment_id": { "$ref": "#/$defs/uuid" },
@@ -782,9 +850,10 @@
       ],
       "properties": {
         "$schema": { "type": "string", "minLength": 1 },
-        "schema_version": { "const": 1 },
+        "schema_version": { "enum": [1, 2] },
         "status": { "const": "prepared" },
         "surface": { "const": "project" },
+        "harnesses": { "$ref": "#/$defs/projectHarnesses" },
         "fleet": { "$ref": "#/$defs/fleet" },
         "project_id": { "$ref": "#/$defs/projectId" },
         "checkout_id": { "$ref": "#/$defs/sha256" },
@@ -831,7 +900,12 @@
         }
       },
       "allOf": [
-        { "$ref": "#/$defs/contextualRenderContextState" }
+        { "$ref": "#/$defs/contextualRenderContextState" },
+        {
+          "if": { "properties": { "schema_version": { "const": 2 } }, "required": ["schema_version"] },
+          "then": { "required": ["harnesses"] },
+          "else": { "not": { "required": ["harnesses"] } }
+        }
       ]
     },
     "ownership": {
@@ -852,9 +926,10 @@
       ],
       "properties": {
         "$schema": { "type": "string", "minLength": 1 },
-        "schema_version": { "const": 1 },
+        "schema_version": { "enum": [1, 2] },
         "status": { "const": "committed" },
         "surface": { "const": "project" },
+        "harnesses": { "$ref": "#/$defs/projectHarnesses" },
         "fleet": { "$ref": "#/$defs/fleet" },
         "project_id": { "$ref": "#/$defs/projectId" },
         "checkout_id": { "$ref": "#/$defs/sha256" },
@@ -888,7 +963,12 @@
         "exclude": { "$ref": "#/$defs/excludeState" }
       },
       "allOf": [
-        { "$ref": "#/$defs/contextualRenderContextState" }
+        { "$ref": "#/$defs/contextualRenderContextState" },
+        {
+          "if": { "properties": { "schema_version": { "const": 2 } }, "required": ["schema_version"] },
+          "then": { "required": ["harnesses"] },
+          "else": { "not": { "required": ["harnesses"] } }
+        }
       ]
     },
     "homePaths": {

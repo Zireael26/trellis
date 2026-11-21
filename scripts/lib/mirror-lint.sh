@@ -415,6 +415,7 @@ lint_mirror() {
   done < <(find -P "$mirror_dir" \
     \( -path "$mirror_pat/.trellis" -o -path "$mirror_pat/.trellis/*" \
        -o -path "$mirror_pat/config.json" \
+       -o -path "$mirror_pat/roster.json" \
        -o -path "$mirror_pat/registry.json" \
        -o -path "$mirror_pat/releases" -o -path "$mirror_pat/releases/*" \
        -o -path "$mirror_pat/state" -o -path "$mirror_pat/state/*" \
@@ -589,6 +590,11 @@ Antigravity ANTIGRAVITY $mirror_allowed_tokens"
             mirror_allowed_tokens="docs/adr/2026-05-20-antigravity-third-harness.md \
 $mirror_allowed_tokens"
             ;;
+          # Disk-janitor transcripts histogram reads the real ~/.gemini/antigravity-cli
+          # runtime directory; allow the exact lowercase dir token in those two files.
+          scripts/lib/disk-janitor-host.sh|scripts/tests/disk-janitor-lane-d.bats)
+            mirror_allowed_tokens="antigravity-cli $mirror_allowed_tokens"
+            ;;
         esac
         scan_file="$f"
         case "$rel" in
@@ -640,6 +646,15 @@ $mirror_allowed_tokens"
       *) printf "%s: instance-private proxy token must not publish\n" "$rel"; rc=1 ;;
     esac
   done < <(mirror_lint_grep "$mirror_dir" "$scan_dir" -aliE 'claudex|cli-proxy-api|cliproxy')
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    rel="${f#"$mirror_dir"/}"
+    case "$rel" in
+      docs/adr/*|docs/specs/*|CHANGELOG.md|scripts/lib/mirror-lint.sh|scripts/tests/mirror-lint.bats) ;;
+      *) printf "%s: operator account or workspace token must not publish\n" "$rel"; rc=1 ;;
+    esac
+  done < <(export LC_ALL=C && mirror_lint_grep "$mirror_dir" "$scan_dir" -alE 'wrk_[0-9A-Za-z]{20,}')
 
   # Fleet project identifiers must never reach a public mirror. Deliberately NO
   # historical-record exemption: unlike the retired-integration tokens above,

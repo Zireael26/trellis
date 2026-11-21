@@ -93,7 +93,7 @@ class ReceiptProvenanceTests(unittest.TestCase):
         # Keep the synthetic interpreter selected after the runner pins Python.
         self.env["TRELLIS_PYTHON"] = str(self.bin / "python3")
         # Only this fixture's AEO unittest stage is skipped, never the subject helper.
-        self.script("python3", 'if [ "${1:-}" = -m ]; then exit 0; fi\nexec '
+        self.script("python3", 'if [ "${1:-}" = -m ] || { [ "${1:-}" = -B ] && [ "${2:-}" = -m ]; }; then exit 0; fi\nexec '
                     + self.quote(sys.executable) + ' "$@"\n')
         return self.root / "scripts/run-tests.sh"
 
@@ -180,7 +180,7 @@ class ReceiptProvenanceTests(unittest.TestCase):
     def test_failed_helper_is_nonfatal_at_start_and_fenced(self):
         runner = self.runner_fixture()
         self.script("python3", 'case "${1:-}" in *receipt_provenance.py) exit 29 ;; esac\n'
-                    'if [ "${1:-}" = -m ]; then exit 0; fi\nexec '
+                    'if [ "${1:-}" = -m ] || { [ "${1:-}" = -B ] && [ "${2:-}" = -m ]; }; then exit 0; fi\nexec '
                     + self.quote(sys.executable) + ' "$@"\n')
         result = self.launch(runner, "--quick")
         self.assertEqual(result.returncode, 0, result.stderr)

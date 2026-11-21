@@ -261,7 +261,7 @@ run_hook() {
 }
 
 @test "the bench spawns exec-form hooks directly and honours a Bash if filter" {
-  run python3 -I - "$REPO/scripts/bench/trellis-latency.py" "$TEMPLATE" <<'PY'
+  run python3 -I -B - "$REPO/scripts/bench/trellis-latency.py" "$TEMPLATE" <<'PY'
 import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location("bench", sys.argv[1])
 bench = importlib.util.module_from_spec(spec)

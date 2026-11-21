@@ -11,6 +11,9 @@
 setup() {
   unset PG_PUSH_TEST_SCOPE
   export TRELLIS_GATE_STATE_DIR="$BATS_TEST_TMPDIR/trellis-gate-state"
+  export TRELLIS_HOME="$BATS_TEST_TMPDIR/trellis-home"
+  mkdir -m 700 "$TRELLIS_HOME"
+  (umask 077; printf '{}\n' > "$TRELLIS_HOME/config.json")
   SCRIPT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)/scripts/check-tests.sh"
   PROJECT_DIR="$(mktemp -d "$BATS_TEST_TMPDIR/proj.XXXXXX")"
   export CLAUDE_PROJECT_DIR="$PROJECT_DIR"
@@ -459,6 +462,242 @@ tests exit 3"
   assert_narrowed 1
   [ ! -f "$cov" ]
   [[ "$output" != *"mutation spot-check"* ]] || false
+}
+
+# --- Push policy and object-level refusal cases ----------------------------
+
+push_policy() {
+  printf '%s\n' 'scope push' 'allow ^docs/records/[A-Za-z0-9_./-]+\.md$' \
+    'allow ^docs/implementation/approved-record\.md$'
+}
+
+prepare_push() {
+  set_main_policy "$(push_policy)"
+  branch docs
+  put docs/implementation/approved-record.md
+  commit 'passive record'
+  export PG_PUSH_TEST_SCOPE=branch
+}
+
+run_context() {
+  rm -f "$MARK"
+  run bash -c 'cd "$CLAUDE_PROJECT_DIR" && bash -p "$@"' _ "$SCRIPT" "$@"
+}
+
+assert_no_policy_record() {
+  [[ "$output" != *'tests: docs-policy v1'* ]] || { echo "$output"; return 1; }
+}
+
+@test "scope push classifies one exact passive Markdown addition from its base" {
+  # Same shape with no approved policy match still runs the battery.
+  branch no-policy
+  put docs/implementation/approved-record.md
+  commit 'passive record'
+  export PG_PUSH_TEST_SCOPE=branch
+  run_context --mode=push --range=main..HEAD
+  assert_full
+  assert_no_policy_record
+
+  prepare_push
+  run_context --mode=push --range=main..HEAD
+  [ "$status" -eq 0 ]
+  [ ! -e "$MARK" ]
+  local policy="$(gfx rev-parse main:.claude/skills/process-gate-local/docs-only-tests.policy)"
+  [[ "$output" == *'Tests: no-tests: docs-only'* ]] || false
+  [ "$(grep -Fxc "  tests: docs-policy v1 base=$(gfx rev-parse main) head=$(gfx rev-parse HEAD) policy=$policy paths=1 battery=not-required" <<<"$output")" -eq 1 ]
+}
+
+@test "scope push refuses manual, merge, default, protected, and tag or mixed contexts" {
+  prepare_push
+  run_context --range=main..HEAD
+  assert_full
+  run_context --mode=merge --range=main..HEAD
+  assert_full
+  run_context --mode=push --range=main..HEAD --target=main
+  assert_full
+  run_context --mode=push --range=main..HEAD --tag-push
+  assert_full
+  run_context --mode=push --range=main..HEAD --release-tag=refs/tags/v1:dummy
+  assert_full
+  run_context --mode=push
+  assert_full
+  unset PG_PUSH_TEST_SCOPE
+  run_context --mode=push --range=main..HEAD
+  assert_full
+  assert_no_policy_record
+}
+
+@test "scope push refuses hidden or dirty index, dirty tree, untracked files and other HEAD" {
+  prepare_push
+  local head="$(gfx rev-parse HEAD)" p=docs/implementation/approved-record.md flag
+  put "$p"
+  run_context --mode=push --range="main..$head"
+  assert_full
+  gfx add "$p"
+  run_context --mode=push --range="main..$head"
+  assert_full
+  gfx reset -q --hard HEAD
+  for flag in assume-unchanged skip-worktree; do
+    gfx update-index --"$flag" "$p"
+    run_context --mode=push --range="main..$head"
+    assert_full
+    [[ "$output" == *'index has hidden'* ]] || false
+    gfx update-index --no-"$flag" "$p"
+  done
+  put untracked.tmp
+  run_context --mode=push --range="main..$head"
+  assert_full
+  rm "$PROJECT_DIR/untracked.tmp"
+  gfx checkout -q main
+  run_context --mode=push --range="main..$head"
+  assert_full
+  assert_no_policy_record
+}
+
+@test "push policies cannot use global or implementation tree patterns to exempt consumer docs" {
+  set_main_policy 'scope push
+allow ^.*\.md$
+allow ^docs/.*$
+allow ^docs/implementation/.*\.md$
+allow ^docs/records/.*\.md$'
+  export PG_PUSH_TEST_SCOPE=branch
+  local p i=0
+  for p in docs/other.md docs/implementation/reminder-contract.md \
+    docs/implementation/restore-fixture.md docs/records/Content/example.md \
+    docs/records/Specs/plan.md docs/records/SCHEMAS/example.md docs/records/Workflows/example.md \
+    docs/records/site/x.md docs/records/content-collections/x.md docs/records/page.mdx docs/records/page.MD; do
+    i=$((i + 1)); branch "unsafe-$i"
+    put "$p"; commit changed
+    run_context --mode=push --range=main..HEAD
+    assert_full
+    assert_no_policy_record
+  done
+}
+
+@test "push subtree regex alternation cannot escape the approved prefix" {
+  set_main_policy 'scope push
+allow ^docs/records/.*\.md$|^docs/other\.md$'
+  branch docs
+  put docs/other.md; commit changed
+  export PG_PUSH_TEST_SCOPE=branch
+  run_context --mode=push --range=main..HEAD
+  assert_full
+}
+
+@test "base docs_only_tests false, invalid shapes, malformed and duplicate JSON all refuse" {
+  local json i=0
+  for json in '{"gate":{"docs_only_tests":false}}' '{"gate":{"docs_only_tests":"false"}}' \
+    '{"gate":{"docs_only_tests":null}}' '{"gate":[]}' '[]' '{' \
+    '{"gate":{},"gate":{"docs_only_tests":true}}' '{"gate":{"docs_only_tests":false,"docs_only_tests":true}}' \
+    '{"gate":{},"nested":{"a":1,"a":2}}' '{"gate":{},"number":NaN}'; do
+    gfx checkout -q main
+    put .trellis.json "$json"; commit settings
+    i=$((i + 1)); branch "manifest-$i"
+    put docs/adr/0002-second.md; commit changed
+    run_gate
+    assert_full
+    [[ "$output" == *'base .trellis.json'* ]] || false
+    assert_no_policy_record
+  done
+}
+
+@test "base true is only permission to apply policy, not a path allowance" {
+  gfx checkout -q main
+  put .trellis.json '{"gate":{"docs_only_tests":true}}'; commit settings
+  branch docs
+  put docs/adr/0002-second.md; commit changed
+  put .trellis.json '{}'
+  run_gate
+  assert_narrowed 1
+  gfx reset -q --hard main
+  put docs/other.md; commit changed
+  run_gate
+  assert_full
+}
+
+@test "base manifest symlink or tree is not absence and a twin's trailing newline counts" {
+  gfx checkout -q main
+  ln -s CHANGELOG.md "$PROJECT_DIR/.trellis.json"; commit manifest
+  branch docs
+  put docs/adr/0002-second.md; commit changed
+  run_gate
+  assert_full
+  [[ "$output" == *'.trellis.json is not a regular file'* ]] || false
+  gfx checkout -q main
+  rm "$PROJECT_DIR/.trellis.json"
+  put .trellis.json/manifest
+  commit 'manifest directory'
+  branch tree
+  put docs/adr/0002-second.md; commit changed
+  run_gate
+  assert_full
+  [[ "$output" == *'.trellis.json is not a regular file'* ]] || false
+  gfx checkout -q main
+  gfx rm -qr .trellis.json
+  local p=skills/process-gate-local/docs-only-tests.policy
+  write_policy .agents "$(trellis_policy)"
+  printf '\n' >> "$PROJECT_DIR/.agents/$p"
+  commit twins
+  branch again
+  put docs/adr/0002-second.md; commit changed
+  run_gate
+  assert_full
+  [[ "$output" == *'policies differ at the base'* ]] || false
+}
+
+@test "binary or LFS old blobs refuse deletion, replacement, and rename" {
+  gfx checkout -q main
+  printf 'a\000b\n' > "$PROJECT_DIR/docs/adr/0002-binary.md"
+  put docs/adr/0003-lfs.md 'version https://git-lfs.github.com/spec/v1'
+  commit 'old blobs'
+  branch delete
+  gfx rm -q docs/adr/0002-binary.md; commit delete
+  run_gate
+  assert_full
+  branch replace
+  put docs/adr/0003-lfs.md 'ordinary text'; commit changed
+  run_gate
+  assert_full
+  branch rename
+  gfx mv docs/adr/0002-binary.md docs/adr/0004-new.md
+  put docs/adr/0004-new.md 'ordinary text'; commit changed
+  run_gate
+  assert_full
+}
+
+@test "case-fold denies and case-only rename refuse even on case-insensitive filesystems" {
+  branch deny
+  put docs/adr/0009-PINNED.md; commit changed
+  run_gate
+  assert_full
+  branch rename
+  gfx mv docs/adr/0001-first.md docs/adr/temporary.md
+  gfx mv docs/adr/temporary.md docs/adr/0001-FIRST.md
+  commit changed
+  run_gate
+  assert_full
+  [[ "$output" == *'case-fold collision'* ]] || false
+}
+
+@test "replace refs and an insufficient shallow chain cannot authorize scope push" {
+  prepare_push
+  local head="$(gfx rev-parse HEAD)" shallow="$(gfx rev-parse --absolute-git-dir)/shallow"
+  gfx replace "$head" main
+  run_context --mode=push --range="main..$head"
+  assert_full
+  [[ "$output" == *'replace refs'* ]] || false
+  gfx replace -d "$head"
+  # Leave the endpoint objects readable, but remove the middle commit from a
+  # depth-1 clone to exercise a genuinely insufficient shallow chain.
+  put docs/records/later.md; commit later
+  local clone="$BATS_TEST_TMPDIR/shallow" base="$(gfx rev-parse main)"
+  git clone -q --depth=1 --branch docs "file://$PROJECT_DIR" "$clone"
+  git -C "$clone" fetch -q --depth=1 origin main:refs/heads/main
+  [ -f "$clone/.git/shallow" ]; [ ! -f "$shallow" ]
+  export CLAUDE_PROJECT_DIR="$clone"
+  run_context --mode=push --range="$base..HEAD"
+  assert_full
+  assert_no_policy_record
 }
 
 # --- Trellis's own policy ----------------------------------------------------

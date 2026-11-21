@@ -1,5 +1,5 @@
 #!/usr/bin/env bats
-# The recommended pi setup supports pi 1.1.0 and above. Doctor warns below it,
+# The recommended pi setup supports pi 1.5.2 and above. Doctor warns below it,
 # stays silent at or above it, warns when pi is missing but a registered
 # checkout selects the pi harness, and reports INFO when pi is neither
 # installed nor selected, or its version cannot be read. A stub CLI only:
@@ -27,29 +27,29 @@ registry_with() {
   printf '{"version":1,"projects":{"f/p":{"fleet":"f","project_id":"p","status":"active","metadata":{},"checkouts":{"c":{"root":"/x","git_common_dir":"/x/.git","harnesses":%s,"worktrees":{}}}}}}\n' "$1" > "$REG"
 }
 
-@test "below 1.1.0 -> WARN naming the installed version and the floor" {
+@test "below 1.5.2 -> WARN naming the installed version and the floor" {
   local version
   registry_with '["claude","pi"]'
-  for version in 1.0.9 1.0.0 0.99.2 0.87.1; do
+  for version in 1.5.1 1.5.0 1.1.0 1.0.9 0.99.2 0.87.1; do
     stub_pi "echo '$version'"
     run hc_pi_version "$REG"
     [ "$status" -eq "$HC_WARN" ] || { echo "$version: status=$status $output"; return 1; }
     [[ "$output" == *"$version"* ]] || { echo "$output"; return 1; }
-    [[ "$output" == *"1.1.0"* ]] || { echo "$output"; return 1; }
+    [[ "$output" == *"1.5.2"* ]] || { echo "$output"; return 1; }
   done
 }
 
-@test "below 1.1.0 warns even when no checkout selects pi" {
-  stub_pi "echo 1.0.0"
+@test "below 1.5.2 warns even when no checkout selects pi" {
+  stub_pi "echo 1.1.0"
   run hc_pi_version "$SANDBOX/no-registry.json"
   [ "$status" -eq "$HC_WARN" ]
-  [[ "$output" == *"1.0.0"* ]] || false
+  [[ "$output" == *"1.1.0"* ]] || false
 }
 
-@test "at or above 1.1.0 -> silent OK" {
+@test "at or above 1.5.2 -> silent OK" {
   local version
   registry_with '["pi"]'
-  for version in 1.1.0 1.1.1 1.2.0 1.10.0 2.0.0; do
+  for version in 1.5.2 1.5.3 1.6.0 1.10.0 2.0.0; do
     stub_pi "echo '$version'"
     run hc_pi_version "$REG"
     [ "$status" -eq "$HC_OK" ] || { echo "$version: status=$status $output"; return 1; }
@@ -71,7 +71,7 @@ registry_with() {
 @test "pi --version runs with stdin closed" {
   # Prints a passing version only when stdin is at EOF; an inherited stdin
   # would make it print a failing one.
-  stub_pi 'if read -r _; then echo 0.1.0; else echo 1.1.0; fi'
+  stub_pi 'if read -r _; then echo 0.1.0; else echo 1.5.2; fi'
   registry_with '["pi"]'
   printf 'not-eof\n' | {
     run hc_pi_version "$REG"
@@ -95,7 +95,7 @@ registry_with() {
   run hc_pi_version "$REG"
   [ "$status" -eq "$HC_WARN" ]
   [[ "$output" == *"not found"* ]] || false
-  [[ "$output" == *"1.1.0"* ]] || false
+  [[ "$output" == *"1.5.2"* ]] || false
 }
 
 @test "pi absent and not selected by any checkout -> INFO" {
@@ -119,7 +119,7 @@ registry_with() {
   eval "$report_fn"
   GLYPH_OK='✓'; GLYPH_WARN='⚠'; GLYPH_ERR='✗'; GLYPH_INFO='i'; N_WARN=0; N_ERROR=0; N_INFO=0
   REGISTRY_PATH="$REG"
-  stub_pi "echo '1.1.0'"
+  stub_pi "echo '1.5.2'"
   registry_with '["pi"]'
   output="$(eval "$pi_block")"
   [ -z "$output" ] || { echo "healthy pi reported: $output"; false; }
@@ -127,7 +127,7 @@ registry_with() {
   registry_with '["claude","pi"]'
   output="$(eval "$pi_block")"
   [[ "$output" == *"not found"* ]] || { echo "$output"; false; }
-  [[ "$output" == *"1.1.0"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"1.5.2"* ]] || { echo "$output"; false; }
   [[ "$output" == *"⚠"* ]] || { echo "$output"; false; }
   registry_with '["claude","codex"]'
   output="$(eval "$pi_block")"

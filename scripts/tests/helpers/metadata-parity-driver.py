@@ -75,15 +75,27 @@ for case in sorted(Path(cases_dir).glob("*.json")):
     row = {"case": case.name, "jq": oracle, "strict": strict, "routes": {}}
     for name, args in routes.items():
         expected = 0 if admitted else 4
+        gate_case = case.name.startswith(("val-process_gate_slots-", "gate-escaped-key"))
+        direct = None
         if admitted and name in ("check", "status"):
-            expected, _, _ = run(["/usr/bin/perl", supervisor, name], case.name, "supervisor-" + name)
+            expected, direct_out, direct_err = run(["/usr/bin/perl", supervisor, name], case.name, "supervisor-" + name)
+            if gate_case:
+                direct = (direct_out, direct_err)
         actual, out, err = run([launcher, *args], case.name, name)
         row["routes"][name] = {"expected": expected, "actual": actual}
-        if actual != expected:
+        if actual != expected or (direct is not None and (out, err) != direct):
             row["failure"] = {"route": name, "stdout": out[-1000:].decode("utf-8", "replace"), "stderr": err[-1000:].decode("utf-8", "replace")}
             rows.append(row)
             Path(output).write_text(json.dumps(rows, indent=2)+"\n")
-            raise AssertionError(f"{case.name}/{name}: jq={oracle} strict={strict} expected={expected} actual={actual}: {out[-200:]!r} {err[-200:]!r}")
+            raise AssertionError(f"{case.name}/{name}: jq={oracle} strict={strict} expected={expected} actual={actual}: {out[-200:]!r} {err[-200:]!r}; supervisor={direct!r}")
+        if gate_case and admitted and name in ("check", "status"):
+            requested = json.loads(raw)["process_gate_slots"]
+            valid = type(requested) is int and requested in (1, 2)
+            cap = requested if valid else 1
+            assert actual == 0 and re.search(rb"\bprocess_gate_slots=" + str(cap).encode() + rb"\b", out), (case.name, name, out, err)
+            assert (b"process_gate_slots must be" in err) == (not valid), (case.name, name, out, err)
+            if name == "status" and not valid:
+                assert b"effective_process_gate_slots=1" in out, (case.name, name, out, err)
     rows.append(row)
 Path(output).write_text(json.dumps(rows, indent=2)+"\n")
 print(f"{len(rows)} configs x {len(routes)} metadata routes agree with canonical or named stricter safety ruling")

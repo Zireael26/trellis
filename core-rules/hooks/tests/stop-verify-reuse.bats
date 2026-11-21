@@ -1168,13 +1168,21 @@ EOF
 
 @test "npm and pnpm config is read only in a strict simple grammar: any other shape refuses reuse" {
   local lib f body
+  # This unit tests grammar, not the host's npm settings or node installation.
+  # HOME is private from setup; bind both inferred and explicit global prefixes.
+  make_fake_tool node
+  : > "$HOME/.npmrc"
   for lib in "$HOOKS_DIR/lib/deps.sh" "$CODEX_HOOKS_DIR/lib/deps.sh"; do
     # The shapes real projects write: read and bound.
     printf '%s\n' 'registry=https://r.example/' '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' '# c' '@s:registry=https://x/' \
       > "$PROJECT_DIR/.npmrc"
     printf '%s\n' 'packages:' "  - 'packages/*'" '  - "apps/*"' 'nodeLinker: hoisted' > "$PROJECT_DIR/pnpm-workspace.yaml"
-    run bash -c '. "$1"; _se_pm_config "$2"' _ "$lib" "$PROJECT_DIR"
-    [ "$status" -eq 0 ] || { echo "${lib#"$BATS_TEST_DIRNAME"/}: plain config refused"; false; }
+    run env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} PATH="$FAKE_BIN:$PATH" PREFIX="$PROJECT_DIR" \
+      bash -c '. "$1"; _se_pm_config "$2"' _ "$lib" "$PROJECT_DIR"
+    [ "$status" -eq 0 ] || {
+      printf '%s: plain config refused (exit=%s)\n%s\n' "${lib#"$BATS_TEST_DIRNAME"/}" "$status" "$output"
+      false
+    }
     for body in '.npmrc registry=a\b' '.npmrc "registry"=x' '.npmrc [sec]' '.npmrc   registry=x' '.npmrc ${X}=1' \
                 'pnpm-workspace.yaml "nodeLinker": hoisted' 'pnpm-workspace.yaml ? nodeLinker' \
                 'pnpm-workspace.yaml catalog: {a: 1}' 'pnpm-workspace.yaml packages: [a]' 'pnpm-workspace.yaml x: &a 1' \
@@ -1185,8 +1193,12 @@ EOF
       printf '' > "$PROJECT_DIR/.npmrc"
       printf '' > "$PROJECT_DIR/pnpm-workspace.yaml"
       printf '%s\n' "${body#* }" > "$PROJECT_DIR/$f"
-      run bash -c '. "$1"; _se_pm_config "$2"' _ "$lib" "$PROJECT_DIR"
-      [ "$status" -ne 0 ] || { echo "${lib#"$BATS_TEST_DIRNAME"/}: admitted $body"; false; }
+      run env ${HOOK_ENV_UNSET[@]+"${HOOK_ENV_UNSET[@]}"} PATH="$FAKE_BIN:$PATH" PREFIX="$PROJECT_DIR" \
+        bash -c '. "$1"; _se_pm_config "$2"' _ "$lib" "$PROJECT_DIR"
+      [ "$status" -ne 0 ] || {
+        printf '%s: admitted %s (exit=%s)\n%s\n' "${lib#"$BATS_TEST_DIRNAME"/}" "$body" "$status" "$output"
+        false
+      }
     done
   done
 }

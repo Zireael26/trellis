@@ -368,6 +368,11 @@ vals = {
     ],
     "$schema": ["5", '""', '"x"', '"\\t"', "null", '"\\u0001"'],
     "heavy_slots": ["0", '"x"', "{}", "1e999"],
+    "process_gate_slots": [
+        "1", "2", "0", "-1", "3", '"2"', "true", "null", "[]", "{}",
+        "2.0", "2e0", "2.0000000000000000001", "1e400",
+    ],
+    "process_gate_slot": ["2"],  # The machine object stays closed.
     "projects": ['{"x":[1,2]}', "null"],
     "surprise": ["1"],
 }
@@ -414,6 +419,8 @@ put("big-heavy-bigexp", sub("heavy_slots", b"1e400"))
 put("big-heavy-long1", sub("heavy_slots", b"1." + b"0" * 30))
 put("big-heavy-neg0", sub("heavy_slots", b"-0"))
 put("big-light-21digit", sub("heavy_light_slots", b"200000000000000000000"))
+put("gate-escaped-key", sub("process_gate_slots", b"2").replace(b"process_gate_", b"process_gate\\u005f"))
+put("gate-malformed-json", sub("process_gate_slots", b"tru"))
 for name, data in cases.items():
     safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in name)
     (out / (safe + ".json")).write_bytes(data)

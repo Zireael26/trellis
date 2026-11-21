@@ -81,6 +81,17 @@ _real_triad() {
   return 0
 }
 
+# Create a sibling worktree with an over-floor feature commit.
+_linked_feature() (
+  local worktree="$1" branch="$2" triad="${3:-}"
+  git -C "$REPO_DIR" worktree add -q -b "$branch" "$worktree" main || return 1
+  cd "$worktree" || return 1
+  local REPO_DIR="$PWD"
+  _write_lines src/f.js 200
+  [ -z "$triad" ] || _real_triad "$triad"
+  git add -A && git commit -qm "feature in $branch"
+)
+
 # run the pre-push gate CLI from inside the fixture repo.
 _gate() {
   ( cd "$REPO_DIR" && bash "$GATE" --gate )
@@ -525,6 +536,60 @@ JSON
   [ "$status" -eq 1 ]
 }
 
+@test "sibling worktrees keep independent surgical and emergency declarations" {
+  _config true 80 400
+  local one="$SANDBOX/worktree one" two="$SANDBOX/worktree two"
+  _linked_feature "$one" feat/one
+  _linked_feature "$two" feat/two
+
+  cd "$one/src"
+  run bash "$GATE" --mark 'first declaration'
+  [ "$status" -eq 0 ]
+  cd "$two/src"
+  run bash "$GATE" --mark-emergency 'second declaration'
+  [ "$status" -eq 0 ]
+
+  [ "$(sed -n '6,7p' "$one/.claude/session-surgical")" = $'surgical\nfirst declaration' ]
+  [ "$(sed -n '6,7p' "$two/.claude/session-surgical")" = $'emergency\nsecond declaration' ]
+  [ ! -e "$REPO_DIR/.claude" ]
+  run bash "$GATE" --gate --ref refs/heads/feat/two --head "$(git rev-parse HEAD)"
+  [ "$status" -eq 0 ]
+  grep -q emergency-override "$REPO_DIR/.claude/spec-gate-audit.log"
+
+  cd "$one/src"
+  run bash "$GATE" --gate --ref refs/heads/feat/one --head "$(git rev-parse HEAD)"
+  [ "$status" -eq 0 ]
+  # A legacy marker in the main checkout cannot substitute for a local one.
+  mv "$one/.claude/session-surgical" "$REPO_DIR/.claude/session-surgical"
+  run bash "$GATE" --gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'no valid surgical declaration'* ]] || false
+}
+
+@test "linked worktree marker writes cannot clobber another checkout through links" {
+  _config true 80 400
+  local one="$SANDBOX/worktree one" two="$SANDBOX/worktree two"
+  _linked_feature "$one" feat/one
+  _linked_feature "$two" feat/two
+  cd "$one"
+  run bash "$GATE" --mark 'keep this declaration'
+  [ "$status" -eq 0 ]
+
+  ln -s "$one/.claude" "$two/.claude"
+  cd "$two"
+  run bash "$GATE" --mark 'must not overwrite'
+  [ "$status" -eq 1 ]
+  [ "$(sed -n '7p' "$one/.claude/session-surgical")" = 'keep this declaration' ]
+
+  rm .claude
+  mkdir .claude
+  ln "$one/.claude/session-surgical" .claude/session-surgical
+  run bash "$GATE" --mark 'replace only this marker'
+  [ "$status" -eq 0 ]
+  [ "$(sed -n '7p' .claude/session-surgical)" = 'replace only this marker' ]
+  [ "$(sed -n '7p' "$one/.claude/session-surgical")" = 'keep this declaration' ]
+}
+
 # --- L4/L5 interview path ----------------------------------------------------
 
 @test "autonomy resolver preserves every fleet default from L1 through L5" {
@@ -605,6 +670,24 @@ EOF
 }
 
 
+@test "sibling worktrees pass at L4 with an in-range triad without requiring decisions-log.md" {
+  _config true 80 400
+  _write_fleet_autonomy 4
+  local one="$SANDBOX/worktree one" two="$SANDBOX/worktree two" wt branch head
+  _linked_feature "$one" feat/one 001-first
+  _linked_feature "$two" feat/two 002-second
+
+  for wt in "$one" "$two"; do
+    cd "$wt/src"
+    branch=$(git symbolic-ref --short HEAD)
+    head=$(git rev-parse HEAD)
+    run bash "$GATE" --gate
+    [ "$status" -eq 0 ]
+    run bash "$GATE" --gate --ref "refs/heads/$branch" --head "$head"
+    [ "$status" -eq 0 ]
+  done
+}
+
 @test "canonical autonomy selects the decisions-log interview path over legacy and runtime" {
   export TRELLIS_ROOT="$TRELLIS_FIXTURE"
   cat > "$TRELLIS_FIXTURE/trellis.config.json" <<'JSON'
@@ -657,15 +740,15 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-@test "L5 + in-range triad but NO decisions-log entry -> BLOCK" {
+@test "L5 + in-range triad without decisions-log entry -> pass (decisions-log is voluntary)" {
   _config true 80 400
   mkdir -p "$REPO_DIR/.claude"; printf '5\n' > "$REPO_DIR/.claude/session-autonomy"
   _write_lines src/f.js 200
-  _real_triad 001-feature with_clarify   # clarify.md present, but at L5 that is not the artifact
-  git checkout -q -b feat/l5-missing
+  _real_triad 001-feature
+  git checkout -q -b feat/l5-voluntary
   git add -A && git commit -qm "feat: big + spec, no decisions log" >/dev/null
   run _gate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 0 ]
 }
 
 

@@ -65,38 +65,68 @@ lint_target() {
     *) return 0 ;;
   esac
   [ -f "$FILE_PATH" ] || return 0
+  _se_prepare_toolchain_shims "$ACTION_CWD"
   FILE_DIR=$(dirname "$FILE_PATH")
 
 # --- JS / TS ---
 case "$FILE_PATH" in
   *.ts|*.tsx|*.js|*.jsx)
+    SE_LINTER_KIND="" SE_LINTER_DIR="" SE_LINTER_BIN="" SE_LINTER_FILE=""
     SE_ESLINT_DIR="" SE_ESLINT_BIN="" SE_ESLINT_FILE=""
-    if _se_find_eslint_config "$FILE_PATH"; then
-      # Resolve a local or hoisted install independently of npx. Run from the
-      # config's workspace so ESLint can find nested flat configs.
-      ESLINT=()
-      if [ -n "$SE_ESLINT_BIN" ]; then
-        ESLINT=("$SE_ESLINT_BIN")
-      elif command -v npx >/dev/null 2>&1 && (cd "$SE_ESLINT_DIR" && npx --no-install eslint --version >/dev/null 2>&1); then
-        ESLINT=(npx --no-install eslint)
-      fi
-      if [ "${#ESLINT[@]}" -gt 0 ]; then
-        OUT=$(cd "$SE_ESLINT_DIR" && "${ESLINT[@]}" --quiet "$SE_ESLINT_FILE" 2>&1)
-        RC=$?
-        # Preserve the existing opportunistic treatment of a broken install.
-        if [ "$RC" -ne 0 ] && [ -n "$SE_ESLINT_BIN" ] &&
-           ! (cd "$SE_ESLINT_DIR" && "$SE_ESLINT_BIN" --version >/dev/null 2>&1); then
-          RC=0
-        fi
-        if [ "$RC" -ne 0 ]; then
-          ERRORS="${ERRORS}eslint: ${FILE_PATH}
+    if _se_find_js_linter "$FILE_PATH"; then
+      case "$SE_LINTER_KIND" in
+        oxlint)
+          if [ -n "$SE_LINTER_BIN" ]; then
+            OUT=$(cd "$SE_LINTER_DIR" && "$SE_LINTER_BIN" --quiet "$SE_LINTER_FILE" 2>&1)
+            if [ $? -ne 0 ]; then
+              ERRORS="${ERRORS}oxlint: ${FILE_PATH}
 ${OUT}
 
 "
-        fi
-      else
-        echo "post-edit-verify: eslint not found (no local install and no npx eslint on PATH); JS/TS lint skipped for ${FILE_PATH}" >&2
-      fi
+            fi
+          else
+            echo "post-edit-verify: oxlint not found on PATH; JS/TS lint skipped for ${FILE_PATH}" >&2
+          fi
+          ;;
+        biome)
+          if [ -n "$SE_LINTER_BIN" ]; then
+            OUT=$(cd "$SE_LINTER_DIR" && "$SE_LINTER_BIN" check "$SE_LINTER_FILE" 2>&1)
+            if [ $? -ne 0 ]; then
+              ERRORS="${ERRORS}biome: ${FILE_PATH}
+${OUT}
+
+"
+            fi
+          else
+            echo "post-edit-verify: biome not found on PATH; JS/TS lint skipped for ${FILE_PATH}" >&2
+          fi
+          ;;
+        eslint)
+          ESLINT=()
+          if [ -n "$SE_ESLINT_BIN" ]; then
+            ESLINT=("$SE_ESLINT_BIN")
+          elif command -v npx >/dev/null 2>&1 && (cd "$SE_ESLINT_DIR" && npx --no-install eslint --version >/dev/null 2>&1); then
+            ESLINT=(npx --no-install eslint)
+          fi
+          if [ "${#ESLINT[@]}" -gt 0 ]; then
+            OUT=$(cd "$SE_ESLINT_DIR" && "${ESLINT[@]}" --quiet "$SE_ESLINT_FILE" 2>&1)
+            RC=$?
+            # Preserve the existing opportunistic treatment of a broken install.
+            if [ "$RC" -ne 0 ] && [ -n "$SE_ESLINT_BIN" ] &&
+               ! (cd "$SE_ESLINT_DIR" && "$SE_ESLINT_BIN" --version >/dev/null 2>&1); then
+              RC=0
+            fi
+            if [ "$RC" -ne 0 ]; then
+              ERRORS="${ERRORS}eslint: ${FILE_PATH}
+${OUT}
+
+"
+            fi
+          else
+            echo "post-edit-verify: eslint not found (no local install and no npx eslint on PATH); JS/TS lint skipped for ${FILE_PATH}" >&2
+          fi
+          ;;
+      esac
     fi
     ;;
 esac

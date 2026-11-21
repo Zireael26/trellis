@@ -39,13 +39,16 @@ Existing commands:
   doctor        Diagnose (and --fix) inheritance health
   conformance  Verify live documentation path citations
   disk-janitor  Reclaim build caches, dead worktrees, package stores
+  gc            Reclaim unreachable releases, native binaries, and stale staging
   onboard       Onboard a project into Trellis
   upgrade       Install, verify, and explicitly adopt a named immutable release
                 (launcher-only route; not runnable from this dispatcher)
   mirror        Publish the verified immutable policy payload to a mirror
   sync          Sync Claude hooks into managed projects
   skills        Manage Trellis-owned user skills (list, import, link, unlink)
-  worktree      Create/repair a worktree with Trellis inheritance seeded
+  roster        Manage local machine model roster (discover, show, gaps, probe, latch, unlatch, classify, migrate)
+  lean-audit    Audit mature-repo bloat, oversized files, and redundant test suites
+  worktree      Create/repair/launch a worktree with Trellis inheritance seeded
   usage         Query repository-local usage federation (query, refresh, backfill, doctor, strip, watch, report)
   reread        Write a short-lived, logged reread-guard override (reread override --session ID --reason WHY)
   heavy         Run a test command in one of the machine's heavy (or --light) slots (--check, --status)
@@ -198,6 +201,7 @@ case "$cmd" in
   doctor)       shift; exec "$SCRIPT_DIR/doctor.sh" "$@" ;;
   conformance)  shift; exec "$SCRIPT_DIR/conformance-check.sh" "$@" ;;
   disk-janitor) shift; exec "$SCRIPT_DIR/disk-janitor.sh" "$@" ;;
+  gc)           shift; exec "$SCRIPT_DIR/gc.sh" "$@" ;;
   launchd)      shift; exec "$SCRIPT_DIR/install-disk-janitor-launchd.sh" "$@" ;;
   onboard)      shift; exec "$SCRIPT_DIR/onboard-project.sh" "$@" ;;
   migrate)      shift; exec "$SCRIPT_DIR/migrate-project.sh" "$@" ;;
@@ -217,6 +221,8 @@ case "$cmd" in
   mirror)       shift; exec "$SCRIPT_DIR/sync-to-template.sh" "$@" ;;
   sync)         shift; exec "$SCRIPT_DIR/sync-hooks.sh" "$@" ;;
   skills)       shift; exec "$SCRIPT_DIR/skills.sh" "$@" ;;
+  roster)       shift; exec "$SCRIPT_DIR/roster.sh" "$@" ;;
+  lean-audit)   shift; exec "$SCRIPT_DIR/lean-audit.sh" "$@" ;;
   hook)
                 shift
                 run_session_hook "$@"

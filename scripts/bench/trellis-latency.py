@@ -1631,16 +1631,18 @@ def join_postjob(sb: Sandbox, root: str, checkout_id: str, worktree_id: str, own
         except (OSError, ValueError):
             return True
     # T14 amended: attach returns once the job is spawned, so the detached job
-    # may not hold its lock yet. Join while a job holds the lock; while the
-    # verdict is unsettled and no job has been seen yet, allow it
+    # may not hold its lock yet. Join while the lock exists, even when a
+    # process-identity probe fails; that alone cannot prove the job has ended.
+    # While the verdict is unsettled and no job has been seen yet, allow it
     # JOB_START_GRACE_S to start. A job that ended, or never started, with
     # the verdict still pending falls through to the "ended pending" refusal.
     deadline = time.monotonic() + COMMAND_TIMEOUT
     start_by = time.monotonic() + JOB_START_GRACE_S
     seen = False
     while True:
-        if os.path.lexists(lock) and _job_lock_pid(lock) is not None:
-            seen = True
+        if os.path.lexists(lock):
+            if _job_lock_pid(lock) is not None:
+                seen = True
         elif not unsettled() or seen or time.monotonic() > start_by:
             break
         if time.monotonic() > deadline:

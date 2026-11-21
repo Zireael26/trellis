@@ -272,10 +272,11 @@ autonomy_ceiling: 2
 Fixture preset
 EOF
   fi
+  printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/AGENTS.md"
   printf '# fixture rules\n' > "$PORTABLE_RELEASE_PAYLOAD/core-rules/CLAUDE.md"
   printf -- '---\nname: fixture\ndescription: fixture\n---\n' \
     > "$PORTABLE_RELEASE_PAYLOAD/core-rules/skills/fixture/SKILL.md"
-  for command_name in fixture primer primer-refresh primer-check explore surgical; do
+  for command_name in fixture primer primer-refresh primer-check explore surgical lean-sweep red-team test-cleanup de-slop; do
     printf '# fixture command %s\n' "$command_name" \
       > "$PORTABLE_RELEASE_PAYLOAD/core-rules/commands/$command_name.md"
   done

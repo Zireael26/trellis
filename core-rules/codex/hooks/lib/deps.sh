@@ -50,11 +50,11 @@ _se_project_dir() {
 #   - callers cannot supply an arbitrary filesystem destination through env.
 _se_harness_home() {
   local root="$1"
-  if [ "${TRELLIS_HARNESS:-codex}" = "pi" ]; then
-    printf '%s/.pi' "$root"
-  else
-    printf '%s/.codex' "$root"
-  fi
+  case "${TRELLIS_HARNESS:-codex}" in
+    pi) printf '%s/.pi' "$root" ;;
+    antigravity) printf '%s/.agents' "$root" ;;
+    *) printf '%s/.codex' "$root" ;;
+  esac
 }
 
 # _se_emit_hook_context <HookEventName> <message>
@@ -269,7 +269,7 @@ _se_turn_state_dir() {
   fi
   top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null) && [ -n "$top" ] || return 1
   top=$(CDPATH='' cd -P "$top" 2>/dev/null && pwd -P) || return 1
-  sum=$(printf '%s' "$top" | _se_turn_sha256 2>/dev/null) || return 1
+  sum=$({ printf '%s' "$top" | _se_turn_sha256; } 2>/dev/null) || return 1
   sum=${sum%% *}
   [ "${#sum}" -eq 64 ] || return 1
   printf '%s/state/turn-baseline/%s' "$home" "${sum:0:16}"
@@ -384,3 +384,30 @@ _se_pkg_digest() { _se_load_heavy || exit 70; _se_pkg_digest "$@"; }
 _se_pm_progs() { _se_load_heavy || exit 70; _se_pm_progs "$@"; }
 _se_pm_config() { _se_load_heavy || exit 70; _se_pm_config "$@"; }
 _se_env_moves_code() { _se_load_heavy || exit 70; _se_env_moves_code "$@"; }
+_se_prepare_toolchain_shims() { _se_load_heavy || exit 70; _se_prepare_toolchain_shims "$@"; }
+_se_find_js_linter() { _se_load_heavy || exit 70; _se_find_js_linter "$@"; }
+_se_last_verified_file() { _se_load_heavy || exit 70; _se_last_verified_file "$@"; }
+_se_last_verified_match() { _se_load_heavy || exit 70; _se_last_verified_match "$@"; }
+_se_last_verified_write() { _se_load_heavy || exit 70; _se_last_verified_write "$@"; }
+
+_se_review_merge_base() {
+  local root="${1:-$PWD}" deps_dir candidate resolver="" sha=""
+  deps_dir="$(unset CDPATH; cd -- "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P)" || deps_dir=""
+  for candidate in \
+    "$root/.claude/skills/process-gate/scripts/lib/diff-base.sh" \
+    "$root/.agents/skills/process-gate/scripts/lib/diff-base.sh" \
+    "${TRELLIS_ROOT:+$TRELLIS_ROOT/core-rules/skills/process-gate/scripts/lib/diff-base.sh}" \
+    "${deps_dir:+$deps_dir/../../skills/process-gate/scripts/lib/diff-base.sh}" \
+    "${deps_dir:+$deps_dir/../../../skills/process-gate/scripts/lib/diff-base.sh}"; do
+    [ -n "$candidate" ] && [ -f "$candidate" ] && { resolver="$candidate"; break; }
+  done
+  if [ -n "$resolver" ]; then
+    sha=$(
+      cd "$root" 2>/dev/null || exit 1
+      # shellcheck source=/dev/null
+      . "$resolver" && db_resolve --mode push >/dev/null 2>&1 && printf '%s' "$DB_BASE_SHA"
+    ) || sha=""
+  fi
+  [ -n "$sha" ] || sha=$(git -C "$root" rev-parse -q --verify 'HEAD^{commit}' 2>/dev/null || true)
+  printf '%s' "$sha"
+}

@@ -43,11 +43,9 @@ More presets land here over time as different projects' needs surface. Two-proje
    }
    ```
 
-3. Run `scripts/rollout-presets.sh <project-name>` (or re-run `onboard-project.sh` on a freshly-onboarded project).
+3. Link `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` to `<trellis-runtime>/core-rules/presets/<name>.md` (or re-run `onboard-project.sh` on a freshly-onboarded project). Claude Code and Codex load those links natively; pi shares the Codex `.agents` surface and reads the same managed `preset-*.md` links.
 
-The script seeds `<project>/.claude/rules/preset-<name>.md` and `<project>/.agents/rules/preset-<name>.md` as symlinks pointing at `core-rules/presets/<name>.md`. Claude Code and Codex load those links natively; pi shares the Codex `.agents` surface and reads the same managed `preset-*.md` links.
-
-Remove a preset by deleting its entry from the array and re-running `rollout-presets.sh`. The script removes any preset symlinks no longer declared in the config (idempotent).
+Remove a preset by deleting its entry from the array and removing any preset symlinks no longer declared in the config.
 
 ---
 
@@ -116,7 +114,7 @@ Both fields are optional. A preset without frontmatter has no autonomy effect. S
 An optional operator preset-drift check can compare each registered project's `presets` array against the symlinks actually present under `.claude/rules/` and `.agents/rules/`. Mismatches are reported:
 
 - **critical** — config declares a preset but the symlink is missing (or points somewhere unexpected). The preset's discipline isn't loading.
-- **warning** — symlink exists but the config doesn't list the preset (stale; should be removed by `rollout-presets.sh`).
+- **warning** — symlink exists but the config doesn't list the preset (stale; remove the unused preset symlink).
 - **info** — project has no `presets` array. Acceptable; most projects don't need a preset.
 
-The drift audit is read-only; remediation goes through `rollout-presets.sh`.
+The drift audit is read-only.

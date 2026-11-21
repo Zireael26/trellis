@@ -72,7 +72,17 @@ run_fixture() {
 
 assert_row_order() {
   local expected="$1"
-  [ "$(tr '\n' ' ' < "$ROW_LOG")" = "$expected" ]
+  if [ "$expected" = '0 1 2 4 5 6 7 8 3 ' ]; then
+    [ "$(wc -l < "$ROW_LOG" | tr -d ' ')" -eq 9 ]
+    [ "$(tail -n 1 "$ROW_LOG")" = "3" ]
+    [ "$(head -n 8 "$ROW_LOG" | LC_ALL=C sort | tr '\n' ' ')" = '0 1 2 4 5 6 7 8 ' ]
+  elif [ "$expected" = '0 1 2 4 5 6 7 8 ' ]; then
+    [ "$(wc -l < "$ROW_LOG" | tr -d ' ')" -eq 8 ]
+    [ "$(grep -c '^3$' "$ROW_LOG" || true)" -eq 0 ]
+    [ "$(LC_ALL=C sort "$ROW_LOG" | tr '\n' ' ')" = '0 1 2 4 5 6 7 8 ' ]
+  else
+    [ "$(tr '\n' ' ' < "$ROW_LOG")" = "$expected" ]
+  fi
 }
 
 @test "all cheap rows precede Tests on clean, warning and failed merge runs" {
@@ -133,4 +143,30 @@ print(f"refusal median seconds: {statistics.median(elapsed):.3f}")
   printf '# %s\n' "$output" >&3
   [ "$(grep -c '^3$' "$ROW_LOG" || true)" -eq 0 ]
   [ "$(wc -l < "$ROW_LOG" | tr -d ' ')" -eq 40 ]
+}
+
+@test "static cheap rows execute concurrently in wall-clock time while Tests waits for them" {
+  local name idx=0
+  for name in pr secrets bypass docs security-diff analyze; do
+    case "$name" in
+      pr) idx=0 ;; secrets) idx=1 ;; bypass) idx=2 ;;
+      docs) idx=4 ;; security-diff) idx=6 ;; analyze) idx=7 ;;
+    esac
+    printf '#!/usr/bin/env bash\nsleep 0.6\nprintf "%%s\\n" %s >> "$ROW_LOG"\nprintf "fixture row %s\\n"\nexit 0\n' "$idx" "$idx" > "$SKILL/scripts/check-$name.sh"
+  done
+  : > "$ROW_LOG"
+  run python3 -I -B -c '
+import subprocess
+import sys
+import time
+
+start = time.perf_counter()
+res = subprocess.run(["bash", "-p", sys.argv[1], "--mode=push", "--range=main..HEAD"], capture_output=True, text=True)
+elapsed = time.perf_counter() - start
+assert res.returncode == 0, res.stdout + res.stderr
+# 6 static rows each sleep 0.6s (3.6s serial); concurrent execution completes well under 2.6s even under 12-shard load.
+assert elapsed < 2.6, f"expected concurrent static rows < 2.6s, got {elapsed:.3f}s"
+' "$SKILL/scripts/run-all.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  assert_row_order '0 1 2 4 5 6 7 8 3 '
 }
