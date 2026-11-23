@@ -22,7 +22,7 @@
       "size": 4396064
     }
   },
-  "generation": "d61c38c2b2c40d8aba8448dfcf52dbe948c14a3b6bb1c9863b408af40576856e",
+  "generation": "1b2aece7846dc295c08efb29f790ec01cfeb2eb802b12d1caf8684f1dfe313ae",
   "inputs": {
     "core-rules/codex/hooks/code-review-subagent.sh": "eb5be8cda768bafc56387aff39252e63b664e463118201f657a960e2fa680eea",
     "core-rules/codex/hooks/decision-receipt.sh": "13c3d4ae599dd44d5e42c642614adbb8da18a7141044f4521d6f896b2ddf8f80",
@@ -142,5 +142,5 @@
     "rust_toolchain_sha256": "3003a09987459e5921dcddde94f8ea929b2d5e66efbbc30160e9d78de7ff010a",
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
   },
-  "version": "1.5.6"
+  "version": "1.5.7"
 }

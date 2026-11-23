@@ -816,4 +816,22 @@ EOF
   [[ "$extra_output" == *"has an extended ACL: $HOME/Library"* ]] || { echo "$extra_output"; false; }
 }
 
+@test "accepts stock macOS deny-delete ACL on HOME/Library/Logs while rejecting other ACLs" {
+  [ "$(uname -s)" = Darwin ] || skip 'macOS-only: ls -e ACL listing and chmod +a fixture'
+  mkdir -p "$HOME/Library/Logs"
+  chmod +a "group:everyone deny delete" "$HOME/Library/Logs"
+  run_installer
+  local stock_status="$status" stock_output="$output"
+
+  chmod +a "user:$(id -un) allow read" "$HOME/Library/Logs"
+  run_installer
+  local extra_status="$status" extra_output="$output"
+
+  chmod -N "$HOME/Library/Logs"
+
+  [ "$stock_status" -eq 0 ] || { echo "stock deny-delete failed ($stock_status): $stock_output"; false; }
+  [ "$extra_status" -eq 4 ] || { echo "extra ACL not rejected ($extra_status): $extra_output"; false; }
+  [[ "$extra_output" == *"Logs directory has an extended ACL: $HOME/Library/Logs"* ]] || { echo "$extra_output"; false; }
+}
+
 

@@ -213,17 +213,21 @@ path_has_extended_acl() {
   esac
   [ -n "$listing" ] || return 2
   # Darwin's ls prints an xattr's "@" in place of an ACL's "+"; with -e each
-  # ACL entry is a line of its own after the first. Stock macOS user homes and
-  # $HOME/Library carry a single system-default deletion guard
-  # (` 0: group:everyone deny delete`), which grants zero permissions; accept
-  # that exact single ACE on operator home and $user_home/Library only while
+  # ACL entry is a line of its own after the first. Stock macOS user homes,
+  # $HOME/Library, and $HOME/Library/Logs carry a single system-default deletion
+  # guard (` 0: group:everyone deny delete`), which grants zero permissions;
+  # accept that exact single ACE on those three system paths only while
   # rejecting every other ACL entry and every other child-path ACL.
   case "$listing" in *"
 "*)
     acl_tail="${listing#*
 }"
     if [ "$acl_tail" = " 0: group:everyone deny delete" ]; then
-      if [ "$label" = "operator home" ] || { [ -n "${user_home:-}" ] && [ "$path" = "$user_home/Library" ]; }; then
+      if [ "$label" = "operator home" ] || {
+        [ -n "${user_home:-}" ] && {
+          [ "$path" = "$user_home/Library" ] || [ "$path" = "$user_home/Library/Logs" ]
+        }
+      }; then
         return 1
       fi
     fi

@@ -185,3 +185,58 @@ EOF
   [ ! -e "$TRELLIS_HOME/tasks/personal/.test-health.tmp.ownedld4.owner.json" ] || { echo "task-named owner sidecar survived"; false; }
   [ ! -e "$TRELLIS_HOME/pi-worktrees.test.strayld4" ] || { echo "test stray survived"; false; }
 }
+
+@test "LD.5 tmp reaps fastembed_cache, mypy-*, and aged claude-<uid> sessions while keeping fresh ones" {
+  local system="$SANDBOX/sys-tmp" my_uid
+  my_uid="$(id -u)"
+  mkdir -p "$system/fastembed_cache" "$system/mypy-review" \
+    "$system/claude-$my_uid/proj-a/old-sess/snap" \
+    "$system/claude-$my_uid/proj-a/fresh-sess"
+  printf 'x\n' >"$system/fastembed_cache/model.bin"
+  printf 'x\n' >"$system/mypy-review/cache.json"
+  printf 'ro\n' >"$system/claude-$my_uid/proj-a/old-sess/snap/f"
+  chmod -R a-w "$system/claude-$my_uid/proj-a/old-sess/snap"
+  printf 'live\n' >"$system/claude-$my_uid/proj-a/fresh-sess/f"
+  age_tree "$system/fastembed_cache"
+  age_tree "$system/mypy-review"
+  age_tree "$system/claude-$my_uid/proj-a/old-sess"
+  export DJ_DARWIN_TMPDIR_OVERRIDE="" DJ_SYSTEM_TMPDIR_OVERRIDE="$system"
+
+  run bash "$DJ" --report --scopes tmp
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"[delete] $system/fastembed_cache "* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[delete] $system/mypy-review "* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[delete] $system/claude-$my_uid/proj-a/old-sess "* ]] || { echo "$output"; false; }
+  [[ "$output" != *"[delete] $system/claude-$my_uid/proj-a/fresh-sess "* ]] || { echo "fresh claude session deleted"; false; }
+
+  run bash "$DJ" --apply --yes --scopes tmp </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$system/fastembed_cache" ] || { echo "fastembed_cache survived"; false; }
+  [ ! -e "$system/mypy-review" ] || { echo "mypy-review survived"; false; }
+  [ ! -e "$system/claude-$my_uid/proj-a/old-sess" ] || { echo "old claude session survived"; false; }
+  [ -f "$system/claude-$my_uid/proj-a/fresh-sess/f" ] || { echo "fresh claude session removed"; false; }
+}
+
+@test "LD.6 stores report surfaces gradle, pnpm-http, codex-plugin-staging, claude-cli-versions, and chrome-headless" {
+  local stub="$SANDBOX/stub-bin"
+  write_stub_tools "$stub"
+  mkdir -p "$HOME/.gradle/caches" "$HOME/Library/Caches/pnpm" \
+    "$HOME/.codex/plugins/.marketplace-plugin-source-staging" \
+    "$HOME/.local/share/claude/versions" \
+    "$HOME/Library/Application Support/Google/Chrome-headless"
+  for d in "$HOME/.gradle/caches" "$HOME/Library/Caches/pnpm" \
+    "$HOME/.codex/plugins/.marketplace-plugin-source-staging" \
+    "$HOME/.local/share/claude/versions" \
+    "$HOME/Library/Application Support/Google/Chrome-headless"; do
+    printf 'x\n' >"$d/f"
+  done
+  mkdir -p "$TRELLIS_HOME/state/disk-janitor"
+  printf '%s\n' "$stub" >"$TRELLIS_HOME/state/disk-janitor/tool-path"
+  chmod 600 "$TRELLIS_HOME/state/disk-janitor/tool-path"
+
+  run env PATH="/usr/bin:/bin:/usr/sbin:/sbin" bash "$DJ" --report --scopes stores
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  for kind in gradle-cache pnpm-http-cache codex-plugin-staging claude-cli-versions chrome-headless; do
+    [[ "$output" == *"$kind"* ]] || { echo "missing $kind row: $output"; false; }
+  done
+}

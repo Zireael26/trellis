@@ -313,7 +313,16 @@ dj_host_store_list() {
     fi
   fi
   # Report-only visibility rows: never pruned by apply.
-  for dir in "$HOME/.cache/codex-runtimes" "$HOME/Library/Caches/claude-cli-nodejs" "$HOME/Library/Caches/dotslash" "$HOME/Library/Caches/node-gyp"; do
+  for dir in \
+    "$HOME/.cache/codex-runtimes" \
+    "$HOME/Library/Caches/claude-cli-nodejs" \
+    "$HOME/Library/Caches/dotslash" \
+    "$HOME/Library/Caches/node-gyp" \
+    "$HOME/.gradle/caches" \
+    "$HOME/Library/Caches/pnpm" \
+    "$HOME/.codex/plugins/.marketplace-plugin-source-staging" \
+    "$HOME/.local/share/claude/versions" \
+    "$HOME/Library/Application Support/Google/Chrome-headless"; do
     [ -d "$dir" ] || continue
     [ ! -L "$dir" ] || continue
     if dj_host_has_ctrl "$dir"; then continue; fi
@@ -326,6 +335,11 @@ dj_host_store_list() {
       *claude-cli-nodejs) printf 'claude-cli-nodejs\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
       *dotslash) printf 'dotslash\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
       *node-gyp) printf 'node-gyp\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *.gradle/caches) printf 'gradle-cache\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *Caches/pnpm) printf 'pnpm-http-cache\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *.marketplace-plugin-source-staging) printf 'codex-plugin-staging\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *share/claude/versions) printf 'claude-cli-versions\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
+      *Chrome-headless) printf 'chrome-headless\t%s\t%s\t%s\n' "$dir" "$bytes" "$mtime" ;;
     esac
   done
   return 0
@@ -418,7 +432,7 @@ dj_host_store_apply() {
     fi
   fi
   if command -v bun >/dev/null 2>&1; then
-    if bun pm cache rm >/dev/null 2>&1; then
+    if bun pm cache rm -g >/dev/null 2>&1 || bun pm cache rm >/dev/null 2>&1; then
       echo "  pruned: bun pm cache rm"
     else
       echo "  bun pm cache rm failed" >&2
@@ -604,7 +618,7 @@ dj_host_tmp_roots() {
 # _dj_tmp_name_ok BASENAME — 0 iff BASENAME matches a tmp scratch pattern.
 _dj_tmp_name_ok() {
   case "$1" in
-    bats-run-*|rv-*|tg-*|trellis-test-git.*|pytest-of-*|node-compile-cache|tsx-*|jiti|pi-subagents-*) return 0 ;;
+    bats-run-*|rv-*|tg-*|trellis-test-git.*|pytest-of-*|node-compile-cache|tsx-*|jiti|pi-subagents-*|fastembed_cache|mypy-*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -642,7 +656,7 @@ dj_host_tmp_root() {
 # delete rows (apply) and skip rows (young/in-use). Never follows symlinks.
 # Refuses with a skip reason when no root is safe.
 dj_host_tmp_scan() {
-  local tmpdir roots ttl entry bytes reason fresh_rc base
+  local tmpdir roots ttl entry bytes reason fresh_rc base claude_root proj_dir sess_dir my_uid
   scope_enabled tmp || return 0
   if ! roots="$(dj_host_tmp_roots 2>/dev/null)"; then
     plan_row tmp skip tmp "-" 0 "-" "tmp scope refused: temp dirs unresolvable or unsafe (HOME, /, or under HOME); nothing scanned"
@@ -650,9 +664,10 @@ dj_host_tmp_scan() {
   fi
   ttl="$(cfg_num '.disk_janitor.tmp_ttl_days' 2)"
   case "$ttl" in ''|*[!0-9]*) ttl=2 ;; esac
+  my_uid="$(id -u 2>/dev/null || echo '')"
   while IFS= read -r tmpdir; do
     [ -n "$tmpdir" ] || continue
-  for entry in "$tmpdir"/bats-run-* "$tmpdir"/rv-* "$tmpdir"/tg-* "$tmpdir"/trellis-test-git.* "$tmpdir"/pytest-of-* "$tmpdir"/node-compile-cache "$tmpdir"/tsx-* "$tmpdir"/jiti "$tmpdir"/pi-subagents-*; do
+  for entry in "$tmpdir"/bats-run-* "$tmpdir"/rv-* "$tmpdir"/tg-* "$tmpdir"/trellis-test-git.* "$tmpdir"/pytest-of-* "$tmpdir"/node-compile-cache "$tmpdir"/tsx-* "$tmpdir"/jiti "$tmpdir"/pi-subagents-* "$tmpdir"/fastembed_cache "$tmpdir"/mypy-*; do
     [ -e "$entry" ] || [ -L "$entry" ] || continue
     if dj_host_has_ctrl "$entry"; then
       plan_row tmp candidate tmp "$entry" 0 "$tmpdir" "held: control characters in path; manual review"
@@ -680,6 +695,39 @@ dj_host_tmp_scan() {
     if ! dj_host_is_uint "$bytes"; then bytes=0; fi
     plan_row tmp delete tmp "$entry" "$bytes" "$tmpdir" "older than ${ttl}d with no open handle"
   done
+  # Per-session Claude Code temp scratch: <tmpdir>/claude-<uid>/<project>/<session>
+  # The top-level claude-<uid> directory almost always holds a live session, so
+  # descend strictly two levels to reap only dead, aged session directories.
+  claude_root="$tmpdir/claude-$my_uid"
+  if [ -n "$my_uid" ] && [ -d "$claude_root" ] && [ ! -L "$claude_root" ]; then
+    for proj_dir in "$claude_root"/*; do
+      [ -d "$proj_dir" ] && [ ! -L "$proj_dir" ] || continue
+      for sess_dir in "$proj_dir"/*; do
+        [ -d "$sess_dir" ] || [ -L "$sess_dir" ] || continue
+        if dj_host_has_ctrl "$sess_dir"; then
+          plan_row tmp candidate claude-tmp-session "$sess_dir" 0 "$tmpdir" "held: control characters in path; manual review"
+          continue
+        fi
+        if [ -L "$sess_dir" ]; then
+          plan_row tmp skip claude-tmp-session "$sess_dir" 0 "$tmpdir" "symlink; never listed for deletion"
+          continue
+        fi
+        fresh_rc=0
+        dj_pi_entry_fresh "$sess_dir" "$ttl" || fresh_rc=$?
+        case "$fresh_rc" in
+          0) plan_row tmp skip claude-tmp-session "$sess_dir" "$(dj_dir_bytes "$sess_dir")" "$tmpdir" "younger than ${ttl}d; left intact"; continue ;;
+          2) plan_row tmp skip claude-tmp-session "$sess_dir" "$(dj_dir_bytes "$sess_dir")" "$tmpdir" "age unknown (unreadable content); left intact"; continue ;;
+        esac
+        if reason="$(dj_worktree_in_use "$sess_dir" "$LSOF_SNAPSHOT_TMP")"; then
+          plan_row tmp candidate claude-tmp-session "$sess_dir" "$(dj_dir_bytes "$sess_dir")" "$tmpdir" "candidate (in use: $reason)"
+          continue
+        fi
+        bytes="$(dj_dir_bytes "$sess_dir")"
+        if ! dj_host_is_uint "$bytes"; then bytes=0; fi
+        plan_row tmp delete claude-tmp-session "$sess_dir" "$bytes" "$tmpdir" "older than ${ttl}d with no open handle"
+      done
+    done
+  fi
   done <<EOF
 $roots
 EOF
@@ -687,19 +735,21 @@ EOF
 
 # dj_host_tmp_apply — D5 tmp apply: remove delete rows after revalidation.
 # The tmp root is re-resolved (never the launcher TMPDIR); each plan path must
-# be a direct child of it (canonical parent equality + basename pattern).
-# Removal is descriptor-relative: cd into the root, re-check the basename
-# (exists, non-symlink, pattern, age, liveness) and rm the relative name —
-# never rm -rf on a re-derived absolute string without re-validation.
+# be a direct child of it (canonical parent equality + basename pattern) or a
+# strict 2-level child under <tmpdir>/claude-<uid>/<project>/<session>.
+# Removal is descriptor-relative: cd into the verified parent, re-check the
+# basename (exists, non-symlink, pattern, age, liveness) and rm the relative
+# name — never rm -rf on a re-derived absolute string without re-validation.
 # shellcheck disable=SC2034  # EXIT_STATUS assignments below accumulate into the orchestrator's exit class.
 dj_host_tmp_apply() {
-  local scope verdict kind path bytes repo detail reason tmpdir roots dir dir_real base ttl fresh_rc root_ok r
+  local scope verdict kind path bytes repo detail reason tmpdir roots dir dir_real base ttl fresh_rc root_ok r my_uid proj_dir claude_dir claude_real
   scope_enabled tmp || return 0
   [ "$(awk -F'\t' '$1=="tmp" && $2=="delete" {n++} END {print n+0}' "$PLAN_TMP")" -gt 0 ] || return 0
-  if ! confirm_category "tmp scratch (bats-run-*, rv-*, tg-*, trellis-test-git.*, pytest-of-*, node-compile-cache, tsx-*, jiti, pi-subagents-* older than TTL with no open handle)"; then return 0; fi
+  if ! confirm_category "tmp scratch (bats-run-*, rv-*, tg-*, trellis-test-git.*, pytest-of-*, node-compile-cache, tsx-*, jiti, pi-subagents-*, fastembed_cache, mypy-*, stale claude-<uid> sessions older than TTL with no open handle)"; then return 0; fi
   if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
   ttl="$(cfg_num '.disk_janitor.tmp_ttl_days' 2)"
   case "$ttl" in ''|*[!0-9]*) ttl=2 ;; esac
+  my_uid="$(id -u 2>/dev/null || echo '')"
   if ! roots="$(dj_host_tmp_roots 2>/dev/null)"; then
     echo "  tmp scope refused: temp dirs unresolvable or unsafe; nothing removed"
     return 0
@@ -708,8 +758,48 @@ dj_host_tmp_apply() {
     [ "$scope" = "tmp" ] && [ "$verdict" = "delete" ] || continue
     case "$path" in *"$(printf '\t')"*|*$'\n'*) echo "  skipped (plan changed): control characters"; continue ;; esac
     base="$(basename "$path")"
-    if ! _dj_tmp_name_ok "$base"; then echo "  skipped (plan changed): $path is not tmp scratch"; continue; fi
     if [ -L "$path" ]; then echo "  skipped (plan changed): $path is a symlink"; continue; fi
+    if [ "$kind" = "claude-tmp-session" ]; then
+      if [ -z "$my_uid" ]; then echo "  skipped (plan changed): uid unresolvable"; continue; fi
+      proj_dir="$(dirname "$path")"
+      claude_dir="$(dirname "$proj_dir")"
+      [ ! -L "$proj_dir" ] && [ ! -L "$claude_dir" ] || { echo "  skipped (plan changed): $path has symlinked ancestor"; continue; }
+      [ "$(basename "$claude_dir")" = "claude-$my_uid" ] || { echo "  skipped (plan changed): $path outside claude-$my_uid"; continue; }
+      dir="$(dirname "$claude_dir")"
+      dir_real="$(unset CDPATH; cd -P -- "$dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path parent unresolvable"; continue; }
+      root_ok=0; tmpdir=""
+      while IFS= read -r r; do
+        [ -n "$r" ] || continue
+        if [ "$dir_real" = "$r" ]; then root_ok=1; tmpdir="$r"; break; fi
+      done <<EOF
+$roots
+EOF
+      [ "$root_ok" -eq 1 ] || { echo "  skipped (plan changed): $path outside tmp roots"; continue; }
+      claude_real="$(unset CDPATH; cd -P -- "$proj_dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path project dir unresolvable"; continue; }
+      case "$claude_real" in "$tmpdir/claude-$my_uid/"*) ;; *) echo "  skipped (plan changed): $path escaped claude-$my_uid"; continue ;; esac
+      if ! dj_host_is_uint "$bytes"; then echo "  skipped: malformed plan bytes for $path"; continue; fi
+      fresh_rc=0
+      dj_pi_entry_fresh "$claude_real/$base" "$ttl" || fresh_rc=$?
+      case "$fresh_rc" in
+        0) echo "  skipped (plan changed): $path is fresh"; continue ;;
+        2) echo "  skipped (plan changed): $path age unknown (unreadable content)"; continue ;;
+      esac
+      if reason="$(dj_worktree_in_use "$claude_real/$base" "$LSOF_SNAPSHOT_TMP")"; then echo "  skipped (plan changed): $path in use ($reason)"; continue; fi
+      if (
+        cd -P -- "$claude_real" 2>/dev/null || exit 1
+        [ -d "$base" ] && [ ! -L "$base" ] || exit 1
+        chmod -RP u+w -- "$base" 2>/dev/null || chmod -R u+w -- "$base" 2>/dev/null || true
+        rm -rf -- "$base" 2>/dev/null
+      ); then
+        echo "  removed: $path"
+        rmdir "$claude_real" 2>/dev/null || true
+      else
+        echo "  REFUSED/failed: $path" >&2
+        EXIT_STATUS=1
+      fi
+      continue
+    fi
+    if ! _dj_tmp_name_ok "$base"; then echo "  skipped (plan changed): $path is not tmp scratch"; continue; fi
     dir="$(dirname "$path")"
     dir_real="$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path parent unresolvable"; continue; }
     root_ok=0; tmpdir=""
@@ -732,7 +822,7 @@ EOF
       cd -P -- "$tmpdir" 2>/dev/null || exit 1
       [ -e "$base" ] || [ -L "$base" ] || exit 1
       [ ! -L "$base" ] || exit 1
-      case "$base" in bats-run-*|rv-*|tg-*|trellis-test-git.*|pytest-of-*|node-compile-cache|tsx-*|jiti|pi-subagents-*) ;; *) exit 1 ;; esac
+      _dj_tmp_name_ok "$base" || exit 1
       # Read-only contents (e.g. Go module caches) defeat rm; grant owner
       # write first without following symlinks.
       chmod -RP u+w -- "$base" 2>/dev/null || chmod -R u+w -- "$base" 2>/dev/null || true

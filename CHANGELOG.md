@@ -6,6 +6,19 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.5.7] - 2026-11-23
+
+### Fixed
+
+- **`trellis launchd` macOS `~/Library/Logs` stock ACL:** `scripts/install-disk-janitor-launchd.sh` accepts macOS's stock single-ACE `0: group:everyone deny delete` extended ACL on `$HOME/Library/Logs` (matching `$HOME` and `$HOME/Library`) while continuing to reject any other ACL entry.
+- **`trellis disk-janitor` `bun pm cache rm` outside package roots:** `scripts/lib/disk-janitor-host.sh` invokes `bun pm cache rm -g` (falling back to `bun pm cache rm`) so `--apply --scopes stores` succeeds when run from LaunchAgents or directories without a `package.json`.
+
+### Added
+
+- **`trellis disk-janitor` sweep & visibility expansion (`scripts/lib/disk-janitor-host.sh`):**
+  - Expanded `tmp` scope to reap aged `fastembed_cache`, `mypy-*`, and dead per-session `<tmpdir>/claude-<uid>/<project>/<session>` directories (descriptor-relative, chmod-tolerant, skipping fresh and in-use sessions).
+  - Added report-only `stores` visibility rows for `~/.gradle/caches`, `~/Library/Caches/pnpm`, `~/.codex/plugins/.marketplace-plugin-source-staging`, `~/.local/share/claude/versions`, and `~/Library/Application Support/Google/Chrome-headless`.
+
 ## [1.5.6] - 2026-11-19
 
 ### Added
