@@ -2544,3 +2544,16 @@ warm_native_session() {
   after="$(state_listing)"
   [ "$after" = "$before" ] || { diff <(printf '%s\n' "$before") <(printf '%s\n' "$after"); false; }
 }
+
+@test "release install pre-seals the execution snapshot and exec-stamp before active_cli_release switches" {
+  local remote="$SANDBOX/preseal-release-remote" digest
+  make_release 1.2.3 command-bundle
+  make_bootstrap_release_remote 1.2.4 "$remote"
+
+  run_launcher release install 1.2.4 --remote "$remote"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -f "$TRELLIS_HOME/releases/1.2.4/release.json" ]
+  digest="$(shasum -a 256 "$TRELLIS_HOME/releases/1.2.4/release.json" | awk '{print $1}')"
+  [ -d "$TRELLIS_HOME/releases/.exec/1.2.4-$digest" ] || { ls -la "$TRELLIS_HOME/releases/.exec"; false; }
+  [ -f "$TRELLIS_HOME/state/exec-stamps/1.2.4-$digest.json" ] || { ls -la "$TRELLIS_HOME/state/exec-stamps"; false; }
+}

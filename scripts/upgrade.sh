@@ -360,6 +360,18 @@ fi
 # library publishes the target pair without executing a target helper/binary.
 # Preserve the historical scope: upgrade adopts project policy; it does not
 # silently switch active_cli_release or the user-global attachment.
+upgrade_sha256_file() {
+  local path="$1" out=''
+  if command -v shasum >/dev/null 2>&1; then
+    out="$(shasum -a 256 "$path" 2>/dev/null)" || return 1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    out="$(sha256sum "$path" 2>/dev/null)" || return 1
+  else
+    return 1
+  fi
+  printf '%s\n' "${out%%[[:space:]]*}"
+}
+
 upgrade_adopt_with_pair() (
   # Plain assignments, not local: the subshell already isolates them, and the
   # launcher's /bin/bash 3.2 runs this EXIT trap after exit has dropped a
@@ -379,7 +391,7 @@ upgrade_adopt_with_pair() (
     rc=$?
     if [ "$rc" -ne 0 ] && [ -n "$expected" ]; then
       if [ -L "$launcher" ] || [ ! -f "$launcher" ] ||
-         [ "$(shasum -a 256 "$launcher" | awk '{print $1}')" != "$expected" ]; then
+         [ "$(upgrade_sha256_file "$launcher" || true)" != "$expected" ]; then
         printf '%s\n' 'trellis upgrade: launcher changed; refusing rollback' >&2
         rc=3
       elif [ "$before" -eq 1 ]; then
@@ -403,7 +415,7 @@ upgrade_adopt_with_pair() (
     before=1
   fi
   trellis_home_install_launcher "$target" "$launcher" "$home" "$version" || exit "$?"
-  expected="$(shasum -a 256 "$launcher" | awk '{print $1}')" || exit 5
+  expected="$(upgrade_sha256_file "$launcher")" || exit 5
   upgrade_release_command "${adopt_args[@]}"
   exit "$?"
 )

@@ -365,3 +365,33 @@ run_matrix() {
     echo "unexpected docker invocation in host library:"; grep -E "^[[:space:]]*docker[[:space:]]" "$REPO_ROOT/scripts/lib/disk-janitor-host.sh"; false
   fi
 }
+
+@test "report surfaces stopped/exited containers read-only without any container removal call" {
+  cat > "$FAKE_BIN/docker" <<'EOF'
+#!/bin/sh
+{
+  for arg in "$@"; do printf '%s\037' "$arg"; done
+  printf '\n'
+} >> "$DJ_DOCKER_ARGV_LOG"
+case "${1:-}:${2:-}" in
+  info:) exit 0 ;;
+  version:--format) printf '27.4.0\n' ;;
+  system:df)
+    if [ "${3:-}" = "-v" ]; then
+      printf '{"Containers":[{"ID":"a1","State":"exited","Size":"12MB (virtual 200MB)"},{"ID":"a2","State":"running","Size":"50MB"}],"Volumes":[{"Name":"%s","Links":"0","Size":"1MB"}]}\n' \
+        "$DJ_UNATTACHED_ONE"
+    else
+      printf '%s\n' '{"Type":"Images","TotalCount":"2"}'
+    fi
+    ;;
+  buildx:du) printf '%s\n' '{"Reclaimable":true,"Size":"3MB"}' ;;
+esac
+exit 0
+EOF
+  chmod +x "$FAKE_BIN/docker"
+  run env PATH="$FAKE_BIN:$PATH" DJ_DOCKER_ARGV_LOG="$DOCKER_ARGV_LOG" \
+    DJ_UNATTACHED_ONE="$UNATTACHED_ONE" \
+    bash "$DJ" --report --scopes docker
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"stopped/exited containers (report-only — never deleted by janitor): 1, "* ]] || { echo "$output"; false; }
+}

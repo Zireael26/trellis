@@ -63,10 +63,11 @@ fi
 PROJECT_DIR="$(builtin cd "$PROJECT_DIR" && builtin pwd)"
 # Capture the first selected scanners before dropping project PATH entries, so
 # an unsafe candidate is recorded failed rather than silently substituted.
-SG_SEMGREP_RC=0; SG_OSV_RC=0; SG_GITLEAKS_RC=0
+SG_SEMGREP_RC=0; SG_OSV_RC=0; SG_GITLEAKS_RC=0; SG_SHELLCHECK_RC=0
 SG_SEMGREP_BIN="$(sg_resolve_engine semgrep "$PROJECT_DIR")" || SG_SEMGREP_RC=$?
 SG_OSV_BIN="$(sg_resolve_engine osv-scanner "$PROJECT_DIR")" || SG_OSV_RC=$?
 SG_GITLEAKS_BIN="$(sg_resolve_engine gitleaks "$PROJECT_DIR")" || SG_GITLEAKS_RC=$?
+SG_SHELLCHECK_BIN="$(sg_resolve_engine shellcheck "$PROJECT_DIR")" || SG_SHELLCHECK_RC=$?
 if ! sg_path_sanitize "$PROJECT_DIR" || ! sg_vet_helpers "$PROJECT_DIR" \
     bash git basename date mkdir mktemp rm ls sort tail cp cat wc tr head awk; then
   echo "fail: unsafe baseline helper or project path" >&2
@@ -120,6 +121,58 @@ else
 fi
 
 PROFILE="${PROFILE_OVERRIDE:-${SECURITY_GATE_STACK_PROFILE:-web-next}}"
+SEMGREP_RULE_TIMEOUT=30
+case "${SECURITY_GATE_SEMGREP_TIMEOUT:-}" in
+  '') ;;
+  *[!0-9]*|0*) echo "warn: SECURITY_GATE_SEMGREP_TIMEOUT must be 1-600 seconds; using $SEMGREP_RULE_TIMEOUT" >&2 ;;
+  *) if [ "$SECURITY_GATE_SEMGREP_TIMEOUT" -le 600 ]; then
+       SEMGREP_RULE_TIMEOUT="$SECURITY_GATE_SEMGREP_TIMEOUT"
+     else
+       echo "warn: SECURITY_GATE_SEMGREP_TIMEOUT must be 1-600 seconds; using $SEMGREP_RULE_TIMEOUT" >&2
+     fi ;;
+esac
+if [ -f "$PROJECT_DIR/.trellis.json" ] && [ ! -L "$PROJECT_DIR/.trellis.json" ]; then
+  _sg_manifest_timeout="$("$PYTHON3_BIN" -I - "$PROJECT_DIR/.trellis.json" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        doc = json.load(fh)
+except Exception:
+    sys.exit(2)
+if not isinstance(doc, dict):
+    sys.exit(2)
+if "security_gate" not in doc:
+    sys.exit(0)
+sg = doc["security_gate"]
+if not isinstance(sg, dict) or set(sg.keys()) - {"semgrep_timeout"}:
+    sys.exit(2)
+if "semgrep_timeout" not in sg:
+    sys.exit(0)
+val = sg["semgrep_timeout"]
+if isinstance(val, bool) or not isinstance(val, int) or val < 1 or val > 600:
+    sys.exit(2)
+print(val)
+PY
+  )" || {
+    echo "fail: .trellis.json security_gate.semgrep_timeout must be an integer from 1-600" >&2
+    exit 1
+  }
+  [ -z "$_sg_manifest_timeout" ] || SEMGREP_RULE_TIMEOUT="$_sg_manifest_timeout"
+  builtin unset _sg_manifest_timeout
+fi
+case "${SECURITY_GATE_SHELLCHECK:-}" in
+  1|true|on|yes)  SHELLCHECK_ENABLED=true ;;
+  0|false|off|no|"") SHELLCHECK_ENABLED=false ;;
+  *) echo "warn: unrecognized SECURITY_GATE_SHELLCHECK value — treating as unset" >&2
+     SHELLCHECK_ENABLED=false ;;
+esac
+SHELLCHECK_EXCLUDE_GLOBS=()
+if [ -n "${SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS:-}" ]; then
+  set -f
+  # shellcheck disable=SC2206  # word splitting is the point; globbing is off
+  SHELLCHECK_EXCLUDE_GLOBS=(${SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS})
+  set +f
+fi
 AUDIT_DIR_REL="${SECURITY_GATE_AUDIT_DIR:-audits}"
 case "$AUDIT_DIR_REL" in
   /*) echo "fail: SECURITY_GATE_AUDIT_DIR must be relative: $AUDIT_DIR_REL" >&2; exit 1 ;;
@@ -160,6 +213,7 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 SEMGREP_OUT="$WORK/semgrep.jsonl"
+SHELLCHECK_OUT="$WORK/shellcheck.jsonl"
 OSV_OUT="$WORK/osv.jsonl"
 GITLEAKS_RAW_OUT="$WORK/gitleaks-all.jsonl"
 GITLEAKS_OUT="$WORK/gitleaks-current.jsonl"
@@ -189,19 +243,194 @@ echo "   config:    $([ "$CFG_LOADED" = 1 ] && echo loaded || echo defaults)"
 echo
 
 # --- scanners -------------------------------------------------------------
-SEMGREP_RC=0; OSV_RC=0; GITLEAKS_RC=0; GARAK_RC=0; GARAK_USED=0
+SEMGREP_RC=0; SHELLCHECK_RC=0; OSV_RC=0; GITLEAKS_RC=0; GARAK_RC=0; GARAK_USED=0
 TOTAL_STAGES=3
-[ "$PROFILE" = "web-rag-llm" ] && TOTAL_STAGES=4
+[ "$SHELLCHECK_ENABLED" = true ] && TOTAL_STAGES=$((TOTAL_STAGES + 1))
+[ "$PROFILE" = "web-rag-llm" ] && TOTAL_STAGES=$((TOTAL_STAGES + 1))
+STAGE_NUM=0
+# Run opt-in ShellCheck before Semgrep so Semgrep only receives a shell-scope
+# parse-coverage transfer when ShellCheck actually ran to completion.
+: > "$SHELLCHECK_OUT"
+: > "$WORK/shellcheck.err"
+SHELL_SCOPE_PATH=""
+if [ "$SHELLCHECK_ENABLED" = true ]; then
+  STAGE_NUM=$((STAGE_NUM + 1))
+  echo "[$STAGE_NUM/$TOTAL_STAGES] ShellCheck…"
+  SHELL_CANDIDATES="$WORK/shellcheck.candidates"
+  SHELL_LIST="$WORK/shellcheck.files"
+  : > "$SHELL_CANDIDATES"
+  : > "$SHELL_LIST"
+  : > "$WORK/semgrep.shell-scope"
+  if git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    git -C "$PROJECT_DIR" -c core.quotePath=false ls-files -z > "$SHELL_CANDIDATES" 2>/dev/null || : > "$SHELL_CANDIDATES"
+  fi
+  "$PYTHON3_BIN" -I - "$PROJECT_DIR" "$SHELL_CANDIDATES" "$SHELL_LIST" <<'PY'
+import os, re, sys
+root = os.path.abspath(sys.argv[1])
+cand_path, out_path = sys.argv[2], sys.argv[3]
+excluded_dirs = {"node_modules", ".next", "dist", "build", ".turbo", "test-results", "coverage", "audits", "playwright-report", ".git"}
+shebang_re = re.compile(rb"^#![ \t]*([^\r\n]+)")
+
+def is_shell_shebang(full):
+    try:
+        with open(full, "rb") as fh:
+            head = fh.read(256)
+    except OSError:
+        return False
+    m = shebang_re.match(head)
+    if not m:
+        return False
+    parts = m.group(1).split()
+    if not parts:
+        return False
+    interp = os.path.basename(parts[0])
+    if interp == b"env":
+        interp = b""
+        for tok in parts[1:]:
+            if not tok.startswith(b"-"):
+                interp = os.path.basename(tok)
+                break
+    return interp in (b"sh", b"bash", b"dash", b"ksh")
+
+rels = []
+if os.path.getsize(cand_path) > 0:
+    with open(cand_path, "rb") as fh:
+        for raw in fh.read().split(b"\0"):
+            if raw:
+                rels.append(os.fsdecode(raw))
+else:
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in excluded_dirs)
+        for fn in sorted(filenames):
+            rels.append(os.path.relpath(os.path.join(dirpath, fn), root))
+
+kept = []
+for rel in sorted(set(rels)):
+    parts = rel.split(os.sep)
+    if any(p in excluded_dirs for p in parts[:-1]):
+        continue
+    full = os.path.join(root, rel)
+    if not os.path.isfile(full) or os.path.islink(full):
+        continue
+    base = os.path.basename(rel)
+    if base.endswith((".sh", ".bash")):
+        kept.append(rel)
+    elif "." not in base and is_shell_shebang(full):
+        kept.append(rel)
+
+with open(out_path, "wb") as fh:
+    for rel in kept:
+        fh.write(os.fsencode(rel) + b"\0")
+PY
+  SHELL_SCOPE_FILES=()
+  while IFS= read -r -d '' _sg_sf; do
+    [ -z "$_sg_sf" ] && continue
+    _sg_excl=false
+    for _sg_glob in ${SHELLCHECK_EXCLUDE_GLOBS[@]+"${SHELLCHECK_EXCLUDE_GLOBS[@]}"}; do
+      # shellcheck disable=SC2254  # the config value is a glob pattern by design
+      case "$_sg_sf" in $_sg_glob) _sg_excl=true; break ;; esac
+    done
+    if [ "$_sg_excl" = false ]; then
+      SHELL_SCOPE_FILES+=("$PROJECT_DIR/$_sg_sf")
+      printf '%s\0' "$PROJECT_DIR/$_sg_sf" >> "$WORK/semgrep.shell-scope"
+    fi
+  done < "$SHELL_LIST"
+  if [ "$SG_SHELLCHECK_RC" -eq 3 ]; then
+    echo "shellcheck did not complete: unsafe selected engine" > "$WORK/shellcheck.err"
+    SHELLCHECK_RC=2
+  elif [ -z "$SG_SHELLCHECK_BIN" ]; then
+    echo "shellcheck did not complete: binary not installed" > "$WORK/shellcheck.err"
+    SHELLCHECK_RC=2
+  elif [ "${#SHELL_SCOPE_FILES[@]}" -gt 0 ]; then
+    sc_index=0
+    sc_pids=()
+    for _sg_sf in "${SHELL_SCOPE_FILES[@]}"; do
+      if [ "${#sc_pids[@]}" -ge 4 ]; then
+        wait "${sc_pids[0]}" || true
+        sc_pids=(${sc_pids[@]+"${sc_pids[@]:1}"})
+      fi
+      (
+        "$SG_SHELLCHECK_BIN" --severity=warning --format=json "$_sg_sf" >"$WORK/shellcheck.raw.$sc_index.json" 2>/dev/null
+        printf '%s\n' "$?" >"$WORK/shellcheck.rc.$sc_index"
+      ) &
+      sc_pids+=("$!")
+      sc_index=$((sc_index + 1))
+    done
+    wait || true
+    SC_RAWS=()
+    SC_SCAN_RC=0
+    sc_index=0
+    while [ "$sc_index" -lt "${#SHELL_SCOPE_FILES[@]}" ]; do
+      SC_RAWS+=("$WORK/shellcheck.raw.$sc_index.json")
+      _sc_rc=missing
+      [ ! -f "$WORK/shellcheck.rc.$sc_index" ] || IFS= read -r _sc_rc < "$WORK/shellcheck.rc.$sc_index" || _sc_rc=missing
+      case "$_sc_rc" in
+        0) ;;
+        1) [ "$SC_SCAN_RC" != 0 ] || SC_SCAN_RC=1 ;;
+        *) case "$SC_SCAN_RC" in 0|1) SC_SCAN_RC="$_sc_rc" ;; esac ;;
+      esac
+      sc_index=$((sc_index + 1))
+    done
+    case "$SC_SCAN_RC" in
+      0|1)
+        if ! "$PYTHON3_BIN" -I - "$PROJECT_DIR" "${SC_RAWS[@]}" > "$SHELLCHECK_OUT" 2>/dev/null <<'SCPY'
+import json, os, sys
+root = os.path.abspath(sys.argv[1])
+sev_map = {"error": "high", "warning": "medium", "info": "low", "style": "low"}
+data = []
+for raw in sys.argv[2:]:
+    try:
+        with open(raw) as fh: part = json.load(fh)
+    except (OSError, ValueError):
+        sys.exit(2)
+    if not isinstance(part, list) or not all(isinstance(r, dict) for r in part):
+        sys.exit(2)
+    data.extend(part)
+for i, r in enumerate(data, 1):
+    path = r.get("file") or ""
+    if path.startswith(root + os.sep): path = path[len(root) + 1:]
+    print(json.dumps({
+        "id": f"shellcheck-{i:04d}",
+        "tool": "shellcheck",
+        "rule": f"SC{r.get('code', 0)}",
+        "severity": sev_map.get((r.get("level") or "").lower(), "low"),
+        "file": path,
+        "line": r.get("line", 0),
+        "message": (r.get("message") or "")[:280],
+    }, ensure_ascii=False))
+SCPY
+        then
+          echo "shellcheck did not complete: missing or malformed JSON" > "$WORK/shellcheck.err"
+          : > "$SHELLCHECK_OUT"
+          SHELLCHECK_RC=2
+        fi
+        ;;
+      *)
+        echo "shellcheck did not complete: scanner exit $SC_SCAN_RC" > "$WORK/shellcheck.err"
+        : > "$SHELLCHECK_OUT"
+        SHELLCHECK_RC=2
+        ;;
+    esac
+  fi
+  cat "$WORK/shellcheck.err" >&2
+  if [ "$SHELLCHECK_RC" -eq 0 ] && [ -s "$WORK/semgrep.shell-scope" ]; then
+    SHELL_SCOPE_PATH="$WORK/semgrep.shell-scope"
+  fi
+fi
 # Each wrapper's stderr is kept so the narrative can say why a stage did not
 # complete; it is still shown as the stage ends.
-echo "[1/$TOTAL_STAGES] Semgrep…"
+STAGE_NUM=$((STAGE_NUM + 1))
+echo "[$STAGE_NUM/$TOTAL_STAGES] Semgrep…"
 if [ "$SG_SEMGREP_RC" -eq 3 ]; then
   echo "semgrep did not complete: unsafe selected engine" > "$WORK/semgrep.err"; : > "$SEMGREP_OUT"; SEMGREP_RC=2
 else
-  "$SG_BASH" -p "$SKILL_DIR/scripts/lib/semgrep.sh" "$PROJECT_DIR" "$PROFILE" "$SEMGREP_OUT" 2>"$WORK/semgrep.err" || SEMGREP_RC=$?
+  SEMGREP_ARGS=("$PROJECT_DIR" "$PROFILE" "$SEMGREP_OUT" --timeout "$SEMGREP_RULE_TIMEOUT")
+  [ -z "$SHELL_SCOPE_PATH" ] || SEMGREP_ARGS+=(--shell-scope "$SHELL_SCOPE_PATH")
+  "$SG_BASH" -p "$SKILL_DIR/scripts/lib/semgrep.sh" "${SEMGREP_ARGS[@]}" 2>"$WORK/semgrep.err" || SEMGREP_RC=$?
 fi
 cat "$WORK/semgrep.err" >&2
-echo "[2/$TOTAL_STAGES] OSV…"
+STAGE_NUM=$((STAGE_NUM + 1))
+echo "[$STAGE_NUM/$TOTAL_STAGES] OSV…"
 if [ "$SG_OSV_RC" -eq 3 ]; then
   echo "osv-scanner did not complete: unsafe selected engine" > "$WORK/osv.err"; : > "$OSV_OUT"; OSV_RC=2
 else
@@ -214,7 +443,8 @@ if [ "$OSV_RC" -eq 3 ] && [ "$(cat "$WORK/osv.status" 2>/dev/null)" = "osv-scann
 osv-scanner: not-applicable: scanner found no package sources and scanned nothing" ]; then
   OSV_RC=not-applicable
 fi
-echo "[3/$TOTAL_STAGES] Gitleaks…"
+STAGE_NUM=$((STAGE_NUM + 1))
+echo "[$STAGE_NUM/$TOTAL_STAGES] Gitleaks…"
 if [ "$SG_GITLEAKS_RC" -eq 3 ]; then
   echo "gitleaks did not complete: unsafe selected engine" > "$WORK/gitleaks.err"; : > "$GITLEAKS_RAW_OUT"; GITLEAKS_RC=2
 else
@@ -224,7 +454,8 @@ cat "$WORK/gitleaks.err" >&2
 :> "$GARAK_OUT"
 if [ "$PROFILE" = "web-rag-llm" ]; then
   GARAK_USED=1
-  echo "[4/4] Garak (LLM probes)…"
+  STAGE_NUM=$((STAGE_NUM + 1))
+  echo "[$STAGE_NUM/$TOTAL_STAGES] Garak (LLM probes)…"
   "$SG_BASH" -p "$SKILL_DIR/scripts/lib/garak.sh" "$PROJECT_DIR" "$GARAK_OUT" 2>"$WORK/garak.err" || GARAK_RC=$?
   cat "$WORK/garak.err" >&2
 fi
@@ -248,15 +479,16 @@ with open(current_path, "w") as current, open(history_path, "w") as history:
         target.write(json.dumps(finding, ensure_ascii=False) + "\n")
 PY
 
-cat "$SEMGREP_OUT" "$OSV_OUT" "$GITLEAKS_OUT" "$GARAK_OUT" 2>/dev/null > "$MERGED" || true
+cat "$SEMGREP_OUT" "$SHELLCHECK_OUT" "$OSV_OUT" "$GITLEAKS_OUT" "$GARAK_OUT" 2>/dev/null > "$MERGED" || true
 RAW_COUNT="$(wc -l < "$MERGED" | tr -d ' ')"
 HISTORICAL_COUNT="$(wc -l < "$HISTORICAL_OUT" | tr -d ' ')"
 echo
-if [ "$GARAK_USED" = "1" ]; then
-  echo "raw findings: $RAW_COUNT (semgrep rc=$SEMGREP_RC, osv rc=$OSV_RC, gitleaks rc=$GITLEAKS_RC, garak rc=$GARAK_RC)"
-else
-  echo "raw findings: $RAW_COUNT (semgrep rc=$SEMGREP_RC, osv rc=$OSV_RC, gitleaks rc=$GITLEAKS_RC)"
-fi
+_sg_rc_summary="semgrep rc=$SEMGREP_RC"
+[ "$SHELLCHECK_ENABLED" != true ] || _sg_rc_summary="$_sg_rc_summary, shellcheck rc=$SHELLCHECK_RC"
+_sg_rc_summary="$_sg_rc_summary, osv rc=$OSV_RC, gitleaks rc=$GITLEAKS_RC"
+[ "$GARAK_USED" != "1" ] || _sg_rc_summary="$_sg_rc_summary, garak rc=$GARAK_RC"
+echo "raw findings: $RAW_COUNT ($_sg_rc_summary)"
+builtin unset _sg_rc_summary
 echo "historical findings: $HISTORICAL_COUNT (separate, non-gating; severity retained)"
 
 # --- triage ---------------------------------------------------------------
@@ -324,6 +556,7 @@ SEMGREP_VER=""; OSV_VER=""; GITLEAKS_VER=""
 ENGINES=(semgrep "$SEMGREP_RC" "$SEMGREP_OUT" "$WORK/semgrep.err"
          osv-scanner "$OSV_RC" "$OSV_OUT" "$WORK/osv.err"
          gitleaks "$GITLEAKS_RC" "$GITLEAKS_RAW_OUT" "$WORK/gitleaks.err")
+[ "$SHELLCHECK_ENABLED" = true ] && ENGINES+=(shellcheck "$SHELLCHECK_RC" "$SHELLCHECK_OUT" "$WORK/shellcheck.err")
 [ "$GARAK_USED" = "1" ] && ENGINES+=(garak "$GARAK_RC" "$GARAK_OUT" "$WORK/garak.err")
 
 AGG_RC=0

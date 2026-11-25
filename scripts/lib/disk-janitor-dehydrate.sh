@@ -76,9 +76,35 @@ _dw_under_root() {
 # _dw_regenerable_kind DIR — hy_regenerable_kind (spec 069 D1): L-0 already
 # restricts `target` to Cargo/Maven/Gradle markers and `dist`/`build` to JS or
 # Python markers. Tracked content is ruled out separately, by the caller's
-# git ls-files check.
+# git ls-files check. Also recognizes ignored `t15b-*` Vite/web build fixture
+# directories living directly under a `build` parent.
 _dw_regenerable_kind() {
-  hy_regenerable_kind "$1"
+  local base parent
+  if hy_regenerable_kind "$1"; then
+    return 0
+  fi
+  base="$(basename "$1")"
+  case "$base" in
+    t15b-*)
+      parent="$(basename "$(dirname "$1")")"
+      if [ "$parent" = "build" ] && [ -d "$1" ] && [ ! -L "$1" ]; then
+        printf 'build-fixture\n'
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+# _dw_has_non_ignored_under TREE PREFIX — 0 iff TREE/PREFIX holds zero tracked
+# modifications and zero non-ignored untracked files; 1 if any exist; 2 on git
+# failure. Used when DEHYDRATE_DIRTY=1 allows dehydrating strictly gitignored
+# regenerable directories inside an idle dirty worktree without touching any
+# modified tracked or untracked user file.
+_dw_has_non_ignored_under() {
+  local tree="$1" prefix="$2" out
+  out="$(_hy_git -C "$tree" --literal-pathspecs status --porcelain -z --untracked-files=all -- "$prefix" 2>/dev/null)" || return 2
+  [ -z "$out" ]
 }
 
 # _dw_has_nested_git DIR — 0 when DIR holds a `.git` file or directory at any
@@ -179,8 +205,8 @@ _dw_tracks_lockfile() {
 # the index and reset the idle clock it is about to read.
 dj_dehydrate_classify() {
   local tree="$1" idle_days="$2" now="$3" snapshot="$4"
-  local status_file entry rel row kind rows="" reason="" in_use activity rc
-  local verdict tab nl
+  local status_file entry rel row kind rows="" reason="" in_use activity rc tree_dirty=0
+  local verdict tab nl path_reason
   tab="$(printf '\t')"
   nl="$(printf '\nx')"; nl="${nl%x}"
 
@@ -203,7 +229,13 @@ dj_dehydrate_classify() {
   while IFS= read -r -d '' entry; do
     case "$entry" in
       '!! '*) ;;
-      *) reason="tracked or untracked changes"; continue ;;
+      *)
+        tree_dirty=1
+        if [ "${DEHYDRATE_DIRTY:-0}" -ne 1 ]; then
+          reason="tracked or untracked changes"
+        fi
+        continue
+        ;;
     esac
     rel="${entry#!! }"
     rel="${rel%/}"
@@ -269,10 +301,22 @@ dj_dehydrate_classify() {
         esac
         ;;
     esac
+    path_reason="$reason"
+    if [ -z "$path_reason" ] && [ "$tree_dirty" -eq 1 ]; then
+      if _dw_has_non_ignored_under "$tree" "$rel"; then rc=0; else rc=$?; fi
+      case "$rc" in
+        0) ;;
+        1) path_reason="contains tracked or untracked changes" ;;
+        *) path_reason="git error" ;;
+      esac
+    fi
     verdict=delete
-    [ -z "$reason" ] || verdict=hold
+    [ -z "$path_reason" ] || verdict=hold
+    if [ -z "$path_reason" ] && [ "$tree_dirty" -eq 1 ]; then
+      path_reason="idle, dirty tree (gitignored regenerable only), lockfile tracked"
+    fi
     printf '%s\t%s\t%s/%s\t%s\n' "$verdict" "$kind" "$tree" "$rel" \
-      "${reason:-idle, clean, lockfile tracked}"
+      "${path_reason:-idle, clean, lockfile tracked}"
   done <<EOF
 $rows
 EOF

@@ -9,7 +9,7 @@
       "format": "mach-o",
       "minimum_os": "13.0",
       "path": "aarch64-apple-darwin/trellis-hooks",
-      "sha256": "d677f90b5214033c8d8c3fa59c6d9b494ce22fc4218d67fdfdaf2a35e998433c",
+      "sha256": "c2e02b0e2a65edf5d35c417a3d91f7fd518066124609d7f0e69c5dea46aec8c9",
       "signature": "adhoc",
       "size": 3609440
     },
@@ -17,12 +17,12 @@
       "format": "elf-static",
       "minimum_os": null,
       "path": "x86_64-unknown-linux-musl/trellis-hooks",
-      "sha256": "bd4bc20e883a08bca7cd206085a31e21b746562f3e1b6bfe8dfc874a42fff26f",
+      "sha256": "c43500b5faf13e00f1722cc83d2875d52e9190982b73ea648237d0bfe25c06c6",
       "signature": "none",
       "size": 4396064
     }
   },
-  "generation": "1b2aece7846dc295c08efb29f790ec01cfeb2eb802b12d1caf8684f1dfe313ae",
+  "generation": "19d0e97b6440420c39b255561afe8b50183e4c54bd3a31dd663c7d1610827d99",
   "inputs": {
     "core-rules/codex/hooks/code-review-subagent.sh": "eb5be8cda768bafc56387aff39252e63b664e463118201f657a960e2fa680eea",
     "core-rules/codex/hooks/decision-receipt.sh": "13c3d4ae599dd44d5e42c642614adbb8da18a7141044f4521d6f896b2ddf8f80",
@@ -122,7 +122,7 @@
     "native/trellis-hooks/tests/supervision.rs": "468a696c74d7c539f7f6999aadfd8e8be08070dba81b4283c8b14b5d7a7038cf",
     "scripts/build-native-hooks.sh": "d3b28c550481e71b0670d14784de5aa61190129b97408d733e03c1fc9972f6b3",
     "scripts/heavy.sh": "f184af92296ad1095bbb9a37bd3b3257cd64a19f7f865e66452a26fe6fad52dd",
-    "scripts/lib/heavy-supervisor.pl": "82748bbfd55890a573d6a68a09fdf9f893308ce554b42ea05be4f86c2b54a994",
+    "scripts/lib/heavy-supervisor.pl": "c42598974975e0970c25f7bb62bfee15dfbe6da95ba12c9afeceada6ab56a26d",
     "scripts/lib/release-stamp.sh": "aadd4892b3a6b1fbb29bcfa4b48dddbca6937e38119e678e4440bc92a461ffc4",
     "scripts/lib/release-store.sh": "d3a9e85f961049002229c40f65c3252b13964b0d86d383f13740eb6055607c73",
     "scripts/lib/release_stamp.py": "eeb74633514b41254d0fd6584314e2ef99b1b30a165abc1447e859eb37f5942e",
@@ -131,16 +131,16 @@
     "scripts/lib/trellis-python.sh": "97c41959b4731310b64e432cc9e61ab02894b80581f534516204c5e6e9985aac",
     "scripts/tests/pr-gate-shiftleft-base.bats": "58813aec9148116fa275213805a0a1bb48ef41b2a2433a561346cb466da871a3",
     "scripts/trellis": "cf754454d8e5d5f3e0ca372281f7c3e5acc83f5371d76d4b2999c2131d2f1ad9",
-    "scripts/trellis-launcher.sh": "3151e9005e303a42a99bef501a3302a191f1f04df4450b6a4fa49afcb13b42ac"
+    "scripts/trellis-launcher.sh": "48a59e12907f1cec00f994c8b655377302efc35b425c65db1f7f62e2a346f676"
   },
   "install_path": "bin/native/{version}/{target}/{sha256}/trellis-hooks",
   "schema_version": 1,
-  "source_commit": "63474b08c420fdc926a1d23bd682935d11744388",
+  "source_commit": "d71b4403a32a0637dc7dfd9372961e1a8846f46d",
   "toolchain": {
     "cargo_lock_sha256": "40aeb42dac2b544541050f6181bc7b49ebe8488534d09c7e5680537c74303f05",
     "channel": "1.97.1",
     "rust_toolchain_sha256": "3003a09987459e5921dcddde94f8ea929b2d5e66efbbc30160e9d78de7ff010a",
     "rustc": "rustc 1.97.1 (8bab26f4f 2026-07-14)"
   },
-  "version": "1.5.7"
+  "version": "1.5.8"
 }

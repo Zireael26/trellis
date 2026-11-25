@@ -1059,6 +1059,29 @@ parse_types = {"Syntax error", "PartialParsing", "Lexical error"}
 shell_parse_errors = 0
 bundle_parse_paths = set()
 types = set()
+def error_in_shell_scope(err_path, raw_kind):
+    spans = None
+    if (isinstance(raw_kind, list) and len(raw_kind) == 2
+            and raw_kind[0] == "PartialParsing" and isinstance(raw_kind[1], list)):
+        spans = raw_kind[1]
+    if isinstance(err_path, str) and err_path:
+        if os.path.abspath(os.path.join(root, err_path)) not in shell_scope:
+            return False
+        if spans:
+            return all(
+                isinstance(span, dict) and isinstance(span.get("path"), str) and span["path"]
+                and os.path.abspath(os.path.join(root, span["path"])) in shell_scope
+                for span in spans
+            )
+        return True
+    if spans:
+        return all(
+            isinstance(span, dict) and isinstance(span.get("path"), str) and span["path"]
+            and os.path.abspath(os.path.join(root, span["path"])) in shell_scope
+            for span in spans
+        )
+    return False
+
 for error in data.get("errors", []):
     raw_kind = error.get("type") if isinstance(error, dict) else None
     path = error.get("path") if isinstance(error, dict) else None
@@ -1075,8 +1098,7 @@ for error in data.get("errors", []):
         continue
     kind = raw_kind[0] if isinstance(raw_kind, list) and raw_kind else raw_kind
     kind = " ".join(kind.split()) if isinstance(kind, str) else "unknown"
-    if (kind in parse_types and isinstance(path, str) and path
-            and os.path.abspath(os.path.join(root, path)) in shell_scope):
+    if kind in parse_types and error_in_shell_scope(path, raw_kind):
         shell_parse_errors += 1
     else:
         types.add(kind[:64] or "unknown")

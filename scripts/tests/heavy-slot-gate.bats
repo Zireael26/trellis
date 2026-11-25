@@ -26,7 +26,7 @@ setup() {
   unset TRELLIS_HEAVY_FD TRELLIS_HEAVY_SLOT TRELLIS_HEAVY_DIR_ID TRELLIS_HEAVY_POOL TRELLIS_HEAVY_CALLER_ENV
   unset TRELLIS_HEAVY_LIGHT_WARN TRELLIS_HEAVY_KILL_AFTER TRELLIS_HEAVY_TEST_PAUSE TRELLIS_HEAVY_TEST_TRACE
   unset TRELLIS_HEAVY_TEST_HEARTBEAT TRELLIS_HEAVY_TEST_FAIL TRELLIS_VERIFIED_PAYLOAD
-  unset TRELLIS_HEAVY_TEST_PRESSURE TRELLIS_HEAVY_TEST_STAGGER TRELLIS_HEAVY_GATE_SCRATCH_DIRS
+  unset TRELLIS_HEAVY_TEST_PRESSURE TRELLIS_HEAVY_TEST_STAGGER TRELLIS_HEAVY_GATE_SCRATCH_DIRS DOCKER_HOST
   mkdir -p "$HOME" "$TRELLIS_HOME" "$TMPDIR" "$SANDBOX/bin"
   chmod 700 "$TRELLIS_HOME"
   # `trellis` on the workload's PATH, for nested calls.
@@ -1880,4 +1880,51 @@ assert_no_holder_files() {
   [[ "$output" == *"could not acknowledge heavy child readiness"* ]] || { echo "$output"; false; }
   [ ! -e "$SANDBOX/launched" ]
   perl -e 'exit(($ARGV[1] - $ARGV[0]) < 5 ? 0 : 1)' "$start" "$end"
+}
+
+@test "local unix DOCKER_HOST resolves backing directory and admits process-gate overflow" {
+  gate_fixture
+  mkdir -p "$SANDBOX/colima"
+  local sock="$SANDBOX/colima/docker.sock"
+  DOCKER_HOST="unix://$sock" gate_bg first primary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/a"
+  local primary="$BG_PID"
+  wait_for_file "$SANDBOX/a"
+  # Primary recorded the resolved local socket parent dir in gate-primary.json.
+  jq -e --arg p "$SANDBOX/colima" '.paths | type == "array" and index($p) != null' \
+    "$TRELLIS_HEAVY_DIR/gate-primary.json" || { cat "$TRELLIS_HEAVY_DIR/gate-primary.json"; false; }
+  # A second distinct repo (both with local unix DOCKER_HOST and without) borrows slot 1.
+  DOCKER_HOST="unix://$sock" gate_bg second overflow -- touch "$SANDBOX/b"
+  local overflow="$BG_PID"
+  wait "$overflow"
+  [ -e "$SANDBOX/b" ]
+  kill -TERM "$primary"
+  wait "$primary" || [ "$?" -eq 143 ]
+}
+
+@test "remote DOCKER_HOST fails closed with probe-unknown unless TRELLIS_HEAVY_GATE_SCRATCH_DIRS is set" {
+  gate_fixture
+  DOCKER_HOST="tcp://127.0.0.1:2375" gate_bg first primary -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/a"
+  local primary="$BG_PID"
+  wait_for_file "$SANDBOX/a"
+  jq -e '.paths == null' "$TRELLIS_HEAVY_DIR/gate-primary.json" || { cat "$TRELLIS_HEAVY_DIR/gate-primary.json"; false; }
+  gate_bg second overflow -- touch "$SANDBOX/b"
+  local overflow="$BG_PID"
+  wait_for_grep 'reason=probe-unknown' "$SANDBOX/overflow.out"
+  [ ! -e "$SANDBOX/b" ]
+  kill -TERM "$overflow" "$primary"
+  wait "$overflow" || [ "$?" -eq 143 ]
+  wait "$primary" || [ "$?" -eq 143 ]
+
+  # Inversion: declaring scratch storage admits overflow even with remote DOCKER_HOST.
+  mkdir -p "$SANDBOX/scratch"
+  DOCKER_HOST="tcp://127.0.0.1:2375" TRELLIS_HEAVY_GATE_SCRATCH_DIRS="[\"$SANDBOX/scratch\"]" \
+    gate_bg first primary2 -- sh -c 'touch "$1"; exec sleep 60' _ "$SANDBOX/a2"
+  primary="$BG_PID"
+  wait_for_file "$SANDBOX/a2"
+  gate_bg second overflow2 -- touch "$SANDBOX/b2"
+  overflow="$BG_PID"
+  wait "$overflow"
+  [ -e "$SANDBOX/b2" ]
+  kill -TERM "$primary"
+  wait "$primary" || [ "$?" -eq 143 ]
 }

@@ -949,3 +949,35 @@ sweep() {
   [[ "$output" == *"could not scan for nested git"* ]] || { echo "$output"; false; }
   ! has_row delete "$WT/node_modules"
 }
+
+@test "--dehydrate-dirty removes strictly gitignored regenerable dirs in idle dirty trees while keeping edits and untracked files" {
+  MAIN="$PROJECTS/app"
+  make_repo "$MAIN"
+  WT="$HOME/projects/worktrees/app/dirty-idle"
+  add_wt "$MAIN" "$WT" feat-dirty
+  register "$WT" app
+  # Tracked modification, untracked user file, non-regenerable ignored .env,
+  # plus regenerable gitignored node_modules and apps/web/build/t15b-* fixture.
+  printf '// dirty edit\n' >> "$WT/package.json"
+  printf 'my notes\n' > "$WT/notes.txt"
+  printf 'SECRET=1\n' > "$WT/.env"
+  fill "$WT/node_modules/pkg"
+  mkdir -p "$WT/apps/web/build/t15b-stale1"
+  printf '{"name":"web"}\n' > "$WT/apps/web/package.json"
+  dd if=/dev/zero of="$WT/apps/web/build/t15b-stale1/bundle.js" bs=1024 count=8 >/dev/null 2>&1
+  backdate "$WT"
+
+  # Inversion: plain --dehydrate holds the dirty tree.
+  run_dj --apply --yes --dehydrate --scopes worktrees
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$WT/node_modules" ] || { echo "plain --dehydrate removed dirty tree node_modules"; false; }
+
+  # Opt-in --dehydrate-dirty removes only strictly gitignored regenerable dirs.
+  run_dj --apply --yes --dehydrate-dirty --scopes worktrees
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$WT/node_modules" ] || { echo "node_modules survived --dehydrate-dirty: $output"; false; }
+  [ ! -e "$WT/apps/web/build/t15b-stale1" ] || { echo "t15b fixture survived --dehydrate-dirty: $output"; false; }
+  grep -q 'dirty edit' "$WT/package.json" || { echo "tracked edit lost"; false; }
+  [ -f "$WT/notes.txt" ] || { echo "untracked file lost"; false; }
+  [ -f "$WT/.env" ] || { echo "non-regenerable ignored .env lost"; false; }
+}

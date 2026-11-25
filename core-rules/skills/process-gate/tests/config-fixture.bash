@@ -57,8 +57,12 @@ case "$1 $2" in
   "pr list") json="$(jq --argjson n "$limit" '.[:$n]' "$GH_STUB_DIR/prs.json")" || exit 1 ;;
   "pr view") json="$(cat "$GH_STUB_DIR/pr-$3.json" 2>/dev/null)" || exit 1 ;;
   "api"*)
-    login="$(printf '%s' "$2" | sed -E 's#^repos/[^/]+/[^/]+/collaborators/([^/]+)/permission$#\1#')"
-    [ -n "$login" ] && [ "$login" != "$2" ] && json="$(cat "$GH_STUB_DIR/perm-$login.json" 2>/dev/null)" || exit 1 ;;
+    if printf '%s' "$2" | grep -Eq '^repos/[^/]+/[^/]+$'; then
+      json="$(cat "$GH_STUB_DIR/api-repo.json" 2>/dev/null)" || exit 1
+    else
+      login="$(printf '%s' "$2" | sed -E 's#^repos/[^/]+/[^/]+/collaborators/([^/]+)/permission$#\1#')"
+      [ -n "$login" ] && [ "$login" != "$2" ] && json="$(cat "$GH_STUB_DIR/perm-$login.json" 2>/dev/null)" || exit 1
+    fi ;;
   *) exit 1 ;;
 esac
 if [ -n "$filter" ]; then
@@ -158,9 +162,20 @@ gh_view() {
     '{state:$s,headRefOid:$h,comments:$c,reviews:$r}' > "$GH_STUB_DIR/pr-$1.json"
 }
 # gh_org <org> <repo>: the repo is organization-owned (admin approvals apply).
+# Mirrors real GitHub CLI output: `gh repo view --json owner,nameWithOwner`
+# omits `.owner.type`, so run-all resolves it via `gh api repos/<nwo>`.
 gh_org() {
-  printf '{"owner":{"login":"%s","type":"Organization"},"nameWithOwner":"%s/%s"}\n' \
+  printf '{"owner":{"id":"O_fixture","login":"%s"},"nameWithOwner":"%s/%s"}\n' \
     "$1" "$1" "$2" > "$GH_STUB_DIR/repo.json"
+  printf '{"owner":{"login":"%s","type":"Organization"},"full_name":"%s/%s"}\n' \
+    "$1" "$1" "$2" > "$GH_STUB_DIR/api-repo.json"
+}
+# gh_user <user> <repo>: realistic user-owned repo (gh repo view omits type).
+gh_user() {
+  printf '{"owner":{"id":"U_fixture","login":"%s"},"nameWithOwner":"%s/%s"}\n' \
+    "$1" "$1" "$2" > "$GH_STUB_DIR/repo.json"
+  printf '{"owner":{"login":"%s","type":"User"},"full_name":"%s/%s"}\n' \
+    "$1" "$1" "$2" > "$GH_STUB_DIR/api-repo.json"
 }
 # gh_perm <login> <permission>: serve this permission for the collaborators probe.
 # No stub file means the lookup fails (fail closed).

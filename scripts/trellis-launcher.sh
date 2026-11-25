@@ -3475,6 +3475,40 @@ launcher_snapshot_verified_release() (
   printf '%s\t%s\n' "$snapshot" "$digest"
 )
 
+# Pre-seal the persistent execution snapshot and exec-stamp for a newly
+# installed or upgraded release so live native hooks can bind it immediately
+# when active_cli_release switches, without waiting for a follow-up launcher
+# command. Only persistent-snapshot payloads (1.4.0+) are pre-sealed; legacy
+# per-run snapshot payloads are left untouched.
+launcher_preseal_installed_release() {
+  local releases="${1:-}" active_version="${2:-}" target=""
+  shift 2
+  case "${1:-}" in
+    upgrade)
+      target="${2:-}"
+      ;;
+    release)
+      case "${2:-}" in
+        install|verify|adopt) target="${3:-}" ;;
+        *) return 0 ;;
+      esac
+      ;;
+    *) return 0 ;;
+  esac
+  target="${target#v}"
+  case "$target" in
+    ''|-*|*/*|.*|*[[:cntrl:]]*|*[[:space:]]*) return 0 ;;
+  esac
+  [ "$target" != "$active_version" ] || return 0
+  [ ! -L "$releases/$target" ] && [ -d "$releases/$target" ] || return 0
+  [ "$(launcher_real_directory "$releases/$target")" = "$releases/$target" ] || return 0
+  [ ! -L "$releases/$target/payload/scripts/trellis" ] &&
+    [ -f "$releases/$target/payload/scripts/trellis" ] &&
+    [ -x "$releases/$target/payload/scripts/trellis" ] || return 0
+  launcher_payload_runs_from_exec_store "$releases/$target/payload" || return 0
+  launcher_snapshot_verified_release "$releases" "$target" >/dev/null || return "$?"
+}
+
 # Buffer the command carrier, every sourced helper, and the command bodies from
 # a sealed snapshot before emitting any script bytes. The resulting stdin program
 # is the only thing the child Bash executes; no snapshot pathname is executed.
@@ -5175,6 +5209,11 @@ launcher_main() {
         /bin/bash --noprofile --norc -s -- "$@"
     child_status=$?
     set +o pipefail
+    if [ "$child_status" -eq 0 ]; then
+      launcher_preseal_installed_release "$releases" "$version" "$@" || child_status=$?
+    else
+      launcher_preseal_installed_release "$releases" "$version" "$@" || true
+    fi
   elif [ "${1:-}" = heavy ]; then
     # A heavy run can last an hour, and a trapped signal is deferred while Bash
     # waits on a foreground child. Run it in the background (keeping stdin) and

@@ -921,3 +921,27 @@ PY
 @test "every python stdin helper in disk-janitor-lib is isolated" {
   ! grep -n 'python3 - ' "$LIB" || { echo "unisolated python3 - invocation"; false; }
 }
+
+@test "dj_branch_merged caches gh pr list once per repo across multiple branches" {
+  local repo="$BATS_TEST_TMPDIR/gh-cache-repo"
+  local cache="$BATS_TEST_TMPDIR/gh-cache"
+  local bin="$BATS_TEST_TMPDIR/gh-bin"
+  local calls="$BATS_TEST_TMPDIR/gh-calls.log"
+  mkdir -p "$repo" "$cache" "$bin"
+  git -C "$repo" init -q -b main
+  cat > "$bin/gh" <<'SH'
+#!/bin/sh
+printf '%s\n' "$*" >> "$GH_CALLS_LOG"
+printf '[{"number":10,"headRefName":"feat/merged-a"},{"number":11,"headRefName":"feat/merged-b"}]\n'
+SH
+  chmod +x "$bin/gh"
+  run env PATH="$bin:$PATH" GH_CALLS_LOG="$calls" DJ_GH_PR_CACHE_DIR="$cache" bash -c '
+    . "$1"
+    dj_branch_merged "$2" "feat/merged-a" || exit 11
+    dj_branch_merged "$2" "feat/merged-b" || exit 12
+    if dj_branch_merged "$2" "feat/unmerged-c"; then exit 13; fi
+    exit 0
+  ' _ "$LIB" "$repo"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(wc -l < "$calls" | tr -d '[:space:]')" -eq 1 ] || { cat "$calls"; false; }
+}

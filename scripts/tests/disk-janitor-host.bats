@@ -714,3 +714,53 @@ SH
   [[ "$output" == *"age unknown"* ]] || { echo "$output"; false; }
   [ -d "$wt" ]
 }
+
+@test "pi scope: apply removes stale known scratch dirs in pi-worktrees while keeping registered non-pi-agent worktrees and arbitrary files" {
+  local parent wt_other scratch_dir sentinel
+  parent="$SANDBOX/pi-other-parent"
+  git init -q -b main "$parent"
+  git -C "$parent" -c user.name=t -c user.email=t@e.invalid -c commit.gpgsign=false commit -q --allow-empty -m seed
+  mkdir -p "$HOME/.pi-worktrees"
+  git -C "$parent" worktree add -q --detach "$HOME/.pi-worktrees/worker-registered-wt" HEAD
+  wt_other="$HOME/.pi-worktrees/worker-registered-wt"
+  scratch_dir="$HOME/.pi-worktrees/pi-subagents-old99"
+  mkdir -p "$scratch_dir"
+  printf 'tmp\n' > "$scratch_dir/file.txt"
+  sentinel="$HOME/.pi-worktrees/sentinel-old.txt"
+  printf 'keep\n' > "$sentinel"
+  find "$wt_other" "$scratch_dir" "$sentinel" -exec touch -h -t "$STALE_TOUCH" {} + 2>/dev/null || true
+  export DJ_DARWIN_TMPDIR_OVERRIDE=""
+
+  run_dj --apply --yes --scopes pi </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$wt_other" ] || { echo "registered non-pi-agent worktree should stay held"; false; }
+  [ ! -e "$scratch_dir" ] || { echo "stale pi-subagents scratch survived: $output"; false; }
+  [ -f "$sentinel" ] || { echo "arbitrary non-scratch file deleted"; false; }
+}
+
+@test "tmp scope: apply reaps aged leaked caches and superseded claude versions, keeping active and newest" {
+  local codex_stage chrome_hl claude_vers old_ver active_ver newest_ver
+  export DJ_DARWIN_TMPDIR_OVERRIDE="$TMPDIR"
+  codex_stage="$HOME/.codex/plugins/.marketplace-plugin-source-staging"
+  chrome_hl="$HOME/Library/Application Support/Google/Chrome-headless"
+  claude_vers="$HOME/.local/share/claude/versions"
+  mkdir -p "$codex_stage" "$chrome_hl" "$claude_vers" "$HOME/.local/bin"
+  printf 'stage\n' > "$codex_stage/pkg.tgz"
+  printf 'cache\n' > "$chrome_hl/cache.dat"
+  old_ver="$claude_vers/2.1.320"
+  active_ver="$claude_vers/2.1.325"
+  newest_ver="$claude_vers/2.1.330"
+  printf 'old\n' > "$old_ver"
+  printf 'active\n' > "$active_ver"
+  printf 'newest\n' > "$newest_ver"
+  ln -s "$active_ver" "$HOME/.local/bin/claude"
+  find "$codex_stage" "$chrome_hl" "$old_ver" "$active_ver" "$newest_ver" -exec touch -h -t "$STALE_TOUCH" {} +
+
+  run_dj --apply --yes --scopes tmp </dev/null
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$codex_stage" ] || { echo "codex staging survived: $output"; false; }
+  [ ! -e "$chrome_hl" ] || { echo "Chrome-headless survived: $output"; false; }
+  [ ! -e "$old_ver" ] || { echo "superseded claude binary survived: $output"; false; }
+  [ -f "$active_ver" ] || { echo "active symlinked claude binary was removed"; false; }
+  [ -f "$newest_ver" ] || { echo "newest claude binary was removed"; false; }
+}

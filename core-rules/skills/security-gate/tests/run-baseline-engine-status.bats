@@ -19,6 +19,7 @@ setup() {
   cat > "$BIN/semgrep" <<'SH'
 #!/usr/bin/env bash
 [ "${1:-}" = "--version" ] && { echo "1.157.0"; exit 0; }
+[ -z "${SEMGREP_ARGS_FILE:-}" ] || printf '%s\n' "$@" > "$SEMGREP_ARGS_FILE"
 case " ${STUB_FAIL:-} " in *" semgrep "*) exit 42 ;; esac
 [ -n "${SEMGREP_STDOUT:-}" ] && { printf '%s\n' "$SEMGREP_STDOUT"; exit 0; }
 echo '{"results":[]}'
@@ -724,4 +725,96 @@ SH
   [ ! -e "$HOSTILE_MARK" ] || { echo "the baseline ran the project-chosen interpreter"; false; }
   run engines "$BASELINE"
   [ "$output" = $'gitleaks=ok:0\nosv-scanner=ok:0\nsemgrep=ok:0\ncomplete=true' ] || { echo "$output"; false; }
+}
+
+semgrep_baseline_timeout_arg() {
+  awk 'prev == "--timeout" { print; exit } { prev = $0 }' "$1"
+}
+
+@test "baseline semgrep defaults --timeout to 30 and honors SECURITY_GATE_SEMGREP_TIMEOUT and .trellis.json" {
+  local args_file="$TEST_ROOT/semgrep.args"
+  run env PATH="$BIN:$PATH" SEMGREP_ARGS_FILE="$args_file" \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(semgrep_baseline_timeout_arg "$args_file")" = "30" ] || { cat "$args_file"; false; }
+
+  run env PATH="$BIN:$PATH" SEMGREP_ARGS_FILE="$args_file" SECURITY_GATE_SEMGREP_TIMEOUT=95 \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(semgrep_baseline_timeout_arg "$args_file")" = "95" ] || { cat "$args_file"; false; }
+
+  printf '%s\n' '{"schema_version":1,"project_id":"fixture","security_gate":{"semgrep_timeout":120}}' \
+    > "$PROJECT/.trellis.json"
+  run env PATH="$BIN:$PATH" SEMGREP_ARGS_FILE="$args_file" SECURITY_GATE_SEMGREP_TIMEOUT=95 \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(semgrep_baseline_timeout_arg "$args_file")" = "120" ] || { cat "$args_file"; false; }
+
+  printf '%s\n' '{"schema_version":1,"project_id":"fixture","security_gate":{"semgrep_timeout":601}}' \
+    > "$PROJECT/.trellis.json"
+  rm -f "$args_file"
+  run env PATH="$BIN:$PATH" SEMGREP_ARGS_FILE="$args_file" \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"security_gate.semgrep_timeout"* ]] || { echo "$output"; false; }
+  [ ! -e "$args_file" ]
+}
+
+@test "baseline opt-in ShellCheck baselines findings and transfers shell PartialParsing without waiving Timeout or non-shell" {
+  mkdir -p "$PROJECT/tools"
+  printf '#!/usr/bin/env bash\necho hi\n' > "$PROJECT/tools/local-gate.sh"
+  git -C "$PROJECT" add tools/local-gate.sh
+  cat > "$BIN/shellcheck" <<'SH'
+#!/usr/bin/env bash
+target=""
+for a in "$@"; do case "$a" in --*) ;; *) target="$a" ;; esac; done
+printf '[{"file":"%s","line":2,"column":1,"level":"warning","code":2086,"message":"quote to prevent globbing"}]' "$target"
+exit 1
+SH
+  chmod +x "$BIN/shellcheck"
+
+  # Real Semgrep PartialParsing omits top-level "path" and puts path only in spans.
+  run env PATH="$BIN:$PATH" SECURITY_GATE_SHELLCHECK=1 \
+    SEMGREP_STDOUT="{\"results\":[],\"errors\":[{\"code\":3,\"level\":\"warn\",\"type\":[\"PartialParsing\",[{\"path\":\"$PROJECT/tools/local-gate.sh\",\"start\":{\"line\":1,\"col\":1},\"end\":{\"line\":2,\"col\":1}}]],\"message\":\"Syntax error\"}]}" \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"semgrep: 1 shell parse errors not counted (shellcheck is the shell SAST)"* ]] || { echo "$output"; false; }
+  run engines "$BASELINE"
+  [ "$output" = $'gitleaks=ok:0\nosv-scanner=ok:0\nsemgrep=ok:0\nshellcheck=ok:0\ncomplete=true' ] || { echo "$output"; false; }
+  run findings "$BASELINE"
+  [ "$output" = "shellcheck/SC2086@tools/local-gate.sh" ] || { echo "$output"; false; }
+
+  # Timeout on the same .sh file still fails closed.
+  run env PATH="$BIN:$PATH" SECURITY_GATE_SHELLCHECK=1 \
+    SEMGREP_STDOUT='{"results":[],"errors":[{"type":"Timeout","path":"tools/local-gate.sh"}]}' \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  run engines "$BASELINE"
+  [[ "$output" == *"semgrep=failed:2"*"complete=false"* ]] || { echo "$output"; false; }
+
+  # Mixed shell + non-shell PartialParsing spans still fail closed.
+  run env PATH="$BIN:$PATH" SECURITY_GATE_SHELLCHECK=1 \
+    SEMGREP_STDOUT="{\"results\":[],\"errors\":[{\"type\":[\"PartialParsing\",[{\"path\":\"$PROJECT/tools/local-gate.sh\"},{\"path\":\"$PROJECT/app.py\"}]]}]}" \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  run engines "$BASELINE"
+  [[ "$output" == *"semgrep=failed:2"*"complete=false"* ]] || { echo "$output"; false; }
+
+  # Excluded shell paths do not get a Semgrep parse waiver.
+  run env PATH="$BIN:$PATH" SECURITY_GATE_SHELLCHECK=1 SECURITY_GATE_SHELLCHECK_EXCLUDE_GLOBS='tools/*' \
+    SEMGREP_STDOUT="{\"results\":[],\"errors\":[{\"type\":[\"PartialParsing\",[{\"path\":\"$PROJECT/tools/local-gate.sh\"}]]}]}" \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  run engines "$BASELINE"
+  [[ "$output" == *"semgrep=failed:2"*"complete=false"* ]] || { echo "$output"; false; }
+
+  # Missing shellcheck binary fails closed on both shellcheck and semgrep transfer.
+  rm -f "$BIN/shellcheck"
+  run env PATH="$BIN:/usr/bin:/bin" SECURITY_GATE_SHELLCHECK=1 \
+    SEMGREP_STDOUT="{\"results\":[],\"errors\":[{\"type\":[\"PartialParsing\",[{\"path\":\"$PROJECT/tools/local-gate.sh\"}]]}]}" \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" != *"shell parse errors not counted"* ]] || { echo "$output"; false; }
+  run engines "$BASELINE"
+  [[ "$output" == *"semgrep=failed:2"*"shellcheck=failed:2"*"complete=false"* ]] || { echo "$output"; false; }
 }

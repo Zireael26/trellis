@@ -679,16 +679,31 @@ gate_config_approval() {
   # owner match a deleted (null) comment author: missing fields default to
   # "" (never the literal string "null"), and an empty owner refuses
   # below; the author read keeps a sentinel no login can spell.
-  owner=""; otype="User"; nwo=""
+  owner=""; otype=""; nwo=""
   if oinfo="$(cd "$PROJECT_DIR" && gh repo view --json owner,nameWithOwner \
     --jq '"\(.owner.login // "")\t\(.owner.type // "")\t\(.nameWithOwner // "")"' 2>/dev/null)"; then
     owner="${oinfo%%$'\t'*}"; rest="${oinfo#*$'\t'}"
-    [ -n "${rest%%$'\t'*}" ] && otype="${rest%%$'\t'*}"
+    otype="${rest%%$'\t'*}"
     nwo="${rest#*$'\t'}"
   fi
   if [ -z "$owner" ]; then
     APPROVAL_REASON="$need; gh could not read the repo owner"
     return 1
+  fi
+  # gh repo view queries GraphQL RepositoryOwner, which only exposes {id, login}
+  # and omits .owner.type. Resolve the owner type from the REST repo endpoint
+  # whenever gh repo view did not supply one; fail closed on lookup failure
+  # when nameWithOwner is known so Organization repos are never misclassified
+  # as User-owned.
+  if [ -z "$otype" ]; then
+    if [ -n "$nwo" ]; then
+      if ! otype="$(cd "$PROJECT_DIR" && gh api "repos/$nwo" --jq '.owner.type // empty' 2>/dev/null)" || [ -z "$otype" ]; then
+        APPROVAL_REASON="$need; gh could not read the repo owner type"
+        return 1
+      fi
+    else
+      otype="User"
+    fi
   fi
   case "$otype" in
     User) ;;

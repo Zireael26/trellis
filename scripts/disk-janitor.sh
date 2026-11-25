@@ -95,6 +95,7 @@ SCOPES="caches,worktrees,stores,docker,releases"
 ASSUME_YES=0
 SAFE_ONLY=0              # --safe-only: unattended-safe worktree reap (merged-only)
 DEHYDRATE=0              # --dehydrate: delete regenerable dirs in idle clean trees (spec 069 D1)
+DEHYDRATE_DIRTY=0        # --dehydrate-dirty: also dehydrate strictly gitignored regenerable dirs in idle dirty trees
 
 print_help() {
   cat <<'EOF'
@@ -135,6 +136,10 @@ Usage:
                                            lockfile and no open handle, and in
                                            orphans (spec 069 D1). Other ignored
                                            content is kept.
+  disk-janitor.sh --dehydrate-dirty        Implies --dehydrate; also removes
+                                           strictly gitignored regenerable dirs
+                                           (zero tracked or untracked files
+                                           inside) in idle dirty worktrees.
   disk-janitor.sh --help                   Show this help.
 
 Modes (escalating):
@@ -251,6 +256,11 @@ while [ "$i" -le "$#" ]; do
     --dehydrate)
       # shellcheck disable=SC2034  # read by lib/disk-janitor-dehydrate.sh
       DEHYDRATE=1
+      ;;
+    --dehydrate-dirty)
+      # shellcheck disable=SC2034  # read by lib/disk-janitor-dehydrate.sh
+      DEHYDRATE=1
+      DEHYDRATE_DIRTY=1
       ;;
     --project)
       i=$((i + 1))
@@ -396,6 +406,10 @@ PI_TMP_TTL_DAYS=3
 PI_SPILL_TTL_DAYS=1
 PI_SPILL_MAX_BYTES=1073741824
 PI_APPLY="$(cfg_bool '.disk_janitor.pi_apply' true)"
+if [ "$DEHYDRATE_DIRTY" -eq 0 ] && [ "$(cfg_bool '.disk_janitor.dehydrate_dirty' false)" = "true" ]; then
+  # shellcheck disable=SC2034  # read by lib/disk-janitor-dehydrate.sh
+  DEHYDRATE_DIRTY=1
+fi
 PI_WORKTREE_TTL_DAYS="$(cfg_num '.disk_janitor.pi_worktree_ttl_days' 7)"
 case "$PI_WORKTREE_TTL_DAYS" in ''|*[!0-9]*) PI_WORKTREE_TTL_DAYS=7 ;; esac
 WORKTREE_COUNT_CEILING="$(cfg_num '.disk_janitor.worktree_count_ceiling' 25)"
@@ -446,7 +460,9 @@ TARGETS_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-targets.XXXXXX")"
 VOLUMES_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-volumes.XXXXXX")"
 DOCKER_VOLUME_IDS_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-docker-volumes.XXXXXX")"
 PI_OWNER_PATHS_TMP="$(mktemp "${TMPDIR:-/tmp}/disk-janitor-pi-owners.XXXXXX")"
-trap 'rm -f "$PLAN_TMP" "$LSOF_SNAPSHOT_TMP" "$REGISTRY_SNAPSHOT_TMP" "$TARGETS_TMP" "$VOLUMES_TMP" "$DOCKER_VOLUME_IDS_TMP" "$PI_OWNER_PATHS_TMP"' EXIT
+DJ_GH_PR_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/disk-janitor-ghcache.XXXXXX")"
+export DJ_GH_PR_CACHE_DIR
+trap 'rm -f "$PLAN_TMP" "$LSOF_SNAPSHOT_TMP" "$REGISTRY_SNAPSHOT_TMP" "$TARGETS_TMP" "$VOLUMES_TMP" "$DOCKER_VOLUME_IDS_TMP" "$PI_OWNER_PATHS_TMP"; rm -rf "$DJ_GH_PR_CACHE_DIR"' EXIT
 
 EXIT_STATUS=0
 REGISTRY_STATE_ERRORS=0
@@ -1254,11 +1270,13 @@ EOF
       if [ "$PI_APPLY" != "true" ] && [ "$verdict" = "delete" ]; then
         verdict="reclaimable"
       fi
-      # A9: pi-agent-* worktrees need the 7-day TTL plus clean-tree and
-      # no-unique-commits gates before delete; otherwise hold. Covers both
-      # reclaimable orphans and registered-but-unowned worktrees (which `git
-      # worktree remove` can still remove). Non-pi-agent names stay as classified.
-      case "$(basename "$entry")" in pi-agent-*) _wt_pi_agent=1 ;; *) _wt_pi_agent=0 ;; esac
+      # A9: pi-agent-* worktrees (both orphan and registered-but-unowned) need
+      # the 7-day TTL plus clean-tree and no-unique-commits gates before delete.
+      # Non-pi-agent linked worktrees that are registered with their parent stay
+      # held (DH.4); only already-unregistered orphans or known scratch dirs
+      # under the pi worktree roots are eligible.
+      _wt_pi_agent=0
+      case "$(basename "$entry")" in pi-agent-*) _wt_pi_agent=1 ;; esac
       if [ "$kind" = "pi-worktree" ] && [ "$_wt_pi_agent" -eq 1 ]; then
         _wt_eligible=0
         if [ "$verdict" = "reclaimable" ]; then _wt_eligible=1; fi
@@ -1291,6 +1309,15 @@ EOF
             verdict="reclaimable"
             detail="orphan pi-agent worktree older than ${PI_WORKTREE_TTL_DAYS}d, clean, no unique commits; manual removal"
           fi
+        fi
+      elif [ "$kind" = "pi-temp" ] && [ "$verdict" = "reclaimable" ] &&
+           { [ "$root" = "$PI_WORKTREE_ROOT" ] || [ "$root" = "$PI_LEGACY_ROOT" ]; } &&
+           [ ! -L "$entry" ] && [ ! -e "$entry/.git" ] &&
+           _dj_tmp_name_ok "$(basename "$entry")"; then
+        kind="pi-scratch"
+        if { [ "$MODE" = "apply" ] || [ "$MODE" = "dry-run" ]; } && [ "$PI_APPLY" = "true" ]; then
+          verdict="delete"
+          detail="stale pi-worktrees scratch older than ${PI_TMP_TTL_DAYS}d with no open handle"
         fi
       fi
       bytes="$(dj_dir_bytes "$entry")"
@@ -1339,12 +1366,14 @@ DOCKER_SERVER_VERSION="unknown"
 DOCKER_ANON_VOLUME_COUNT=0
 DOCKER_ANON_DANGLING_COUNT=0
 DOCKER_ANON_RECLAIMABLE_BYTES=0
+DOCKER_STOPPED_CONTAINER_COUNT=0
+DOCKER_STOPPED_CONTAINER_BYTES=0
 DOCKER_BUILD_CACHE_RECLAIMABLE_BYTES=0
 DOCKER_IMAGE_COUNT=0
 DOCKER_BUILDX_PRUNE_APPLIED=0
 
 scan_docker() {
-  local summary verbose buildx_du volume_parsed buildx_parsed listed_volume_count
+  local summary verbose buildx_du volume_parsed container_parsed buildx_parsed listed_volume_count
 
   if ! command -v docker >/dev/null 2>&1; then
     DOCKER_SKIP_REASON="Docker CLI unavailable"
@@ -1429,6 +1458,34 @@ EOF
     return 0
   fi
 
+  # Report-only visibility for stopped/exited containers from the same
+  # `docker system df -v` snapshot (never deleted by the janitor; spec 059).
+  DOCKER_STOPPED_CONTAINER_COUNT=0
+  DOCKER_STOPPED_CONTAINER_BYTES=0
+  if container_parsed="$(printf '%s\n' "$verbose" | jq -r '
+    def docker_bytes:
+      if type != "string" then 0
+      else
+        (split(" ")[0]) as $first |
+        if ($first | test("kB$")) then ($first | sub("kB$"; "") | tonumber * 1000)
+        elif ($first | test("MB$")) then ($first | sub("MB$"; "") | tonumber * 1000000)
+        elif ($first | test("GB$")) then ($first | sub("GB$"; "") | tonumber * 1000000000)
+        elif ($first | test("TB$")) then ($first | sub("TB$"; "") | tonumber * 1000000000000)
+        elif ($first | test("B$")) then ($first | sub("B$"; "") | tonumber)
+        else 0
+        end
+      end;
+    [.Containers[]? | select((.State? // "") != "running")] as $stopped |
+    "\($stopped | length)\t\([$stopped[].Size | docker_bytes] | add // 0 | floor)"
+  ' 2>/dev/null)"; then
+    IFS="$(printf '\t')" read -r DOCKER_STOPPED_CONTAINER_COUNT DOCKER_STOPPED_CONTAINER_BYTES <<EOF
+$container_parsed
+EOF
+    case "$DOCKER_STOPPED_CONTAINER_COUNT:$DOCKER_STOPPED_CONTAINER_BYTES" in
+      *[!0-9:]*) DOCKER_STOPPED_CONTAINER_COUNT=0; DOCKER_STOPPED_CONTAINER_BYTES=0 ;;
+    esac
+  fi
+
   if ! buildx_parsed="$(printf '%s\n' "$buildx_du" | jq -rs -r '
     def docker_bytes:
       if test("kB$") then (sub("kB$"; "") | tonumber * 1000)
@@ -1462,6 +1519,8 @@ EOF
 # this script deletes a Docker volume (spec 059).
 print_docker_volumes_report_only() {
   local volume_id listed=0
+  printf '  stopped/exited containers (report-only — never deleted by janitor): %s, %s\n' \
+    "$DOCKER_STOPPED_CONTAINER_COUNT" "$(dj_human_bytes "$DOCKER_STOPPED_CONTAINER_BYTES")"
   printf '  anonymous volumes: %s total; %s unattached (Links == 0), %s\n' \
     "$DOCKER_ANON_VOLUME_COUNT" "$DOCKER_ANON_DANGLING_COUNT" \
     "$(dj_human_bytes "$DOCKER_ANON_RECLAIMABLE_BYTES")"

@@ -890,6 +890,57 @@ dj_branch_merged() {
   # gh absent → we cannot authoritatively verify → UNVERIFIED (never reaped).
   command -v gh >/dev/null 2>&1 || return 2
 
+  # Per-repo merged-PR cache: populate once per git-common-dir per janitor run
+  # so multi-worktree reports avoid N separate GitHub API round-trips.
+  local common_dir key cache_state cache_branches raw parsed state
+  if [ -n "${DJ_GH_PR_CACHE_DIR:-}" ] && [ -d "$DJ_GH_PR_CACHE_DIR" ] && [ ! -L "$DJ_GH_PR_CACHE_DIR" ]; then
+    common_dir="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo '')"
+    if [ -z "$common_dir" ]; then
+      common_dir="$(unset CDPATH; cd -P -- "$repo" 2>/dev/null && pwd -P)" || common_dir="$repo"
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+      key="$(printf '%s' "$common_dir" | shasum -a 256 | awk '{print $1}')"
+    elif command -v sha256sum >/dev/null 2>&1; then
+      key="$(printf '%s' "$common_dir" | sha256sum | awk '{print $1}')"
+    else
+      key="$(printf '%s' "$common_dir" | cksum | awk '{print $1 "-" $2}')"
+    fi
+    cache_state="$DJ_GH_PR_CACHE_DIR/$key.state"
+    cache_branches="$DJ_GH_PR_CACHE_DIR/$key.branches"
+    if [ ! -f "$cache_state" ]; then
+      raw="$( (unset CDPATH; cd -P -- "$repo" 2>/dev/null && gh pr list --state merged --limit 1000 --json headRefName,number 2>/dev/null) || echo '' )"
+      if [ -n "$raw" ] && parsed="$(printf '%s\n' "$raw" | jq -er '
+        if type != "array" then error("not array")
+        elif length > 0 and (all(.[]; has("headRefName")) | not) then error("no headRefName")
+        else
+          (if length >= 1000 then "truncated" else "complete" end),
+          ([.[].headRefName | select(type == "string" and length > 0)] | unique[])
+        end
+      ' 2>/dev/null)"; then
+        state="${parsed%%$'\n'*}"
+        printf '%s\n' "$state" > "$cache_state"
+        if [ "$parsed" != "$state" ]; then
+          printf '%s\n' "${parsed#*$'\n'}" > "$cache_branches"
+        else
+          : > "$cache_branches"
+        fi
+      else
+        printf 'fallback\n' > "$cache_state"
+      fi
+    fi
+    state="$(cat "$cache_state" 2>/dev/null || echo fallback)"
+    case "$state" in
+      complete|truncated)
+        if [ -f "$cache_branches" ] && grep -Fqx -- "$branch" "$cache_branches"; then
+          return 0
+        fi
+        if [ "$state" = "complete" ]; then
+          return 1
+        fi
+        ;;
+    esac
+  fi
+
   # Scope gh to <repo> via a subshell cd; `|| echo ''` keeps the whole
   # substitution exit-0 under the caller's `set -e`.
   local merged_prs

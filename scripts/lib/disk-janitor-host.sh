@@ -731,6 +731,91 @@ dj_host_tmp_scan() {
   done <<EOF
 $roots
 EOF
+  # Leaked non-tmp agent/updater caches (aged > ttl, no open handle, non-symlink):
+  # codex marketplace plugin staging and Chrome-headless profile cache.
+  local leak_dir leak_parent claude_ver_root active_claude newest_ver ver_entry ver_base
+  for leak_dir in \
+    "$HOME/.codex/plugins/.marketplace-plugin-source-staging" \
+    "$HOME/Library/Application Support/Google/Chrome-headless"; do
+    [ -d "$leak_dir" ] || [ -L "$leak_dir" ] || continue
+    if dj_host_has_ctrl "$leak_dir"; then
+      plan_row tmp candidate leaked-cache "$leak_dir" 0 "$HOME" "held: control characters in path; manual review"
+      continue
+    fi
+    if [ -L "$leak_dir" ]; then
+      plan_row tmp skip leaked-cache "$leak_dir" 0 "$HOME" "symlink; never listed for deletion"
+      continue
+    fi
+    fresh_rc=0
+    dj_pi_entry_fresh "$leak_dir" "$ttl" || fresh_rc=$?
+    case "$fresh_rc" in
+      0) plan_row tmp skip leaked-cache "$leak_dir" "$(dj_dir_bytes "$leak_dir")" "$HOME" "younger than ${ttl}d; left intact"; continue ;;
+      2) plan_row tmp skip leaked-cache "$leak_dir" "$(dj_dir_bytes "$leak_dir")" "$HOME" "age unknown (unreadable content); left intact"; continue ;;
+    esac
+    if reason="$(dj_worktree_in_use "$leak_dir" "$LSOF_SNAPSHOT_TMP")"; then
+      plan_row tmp candidate leaked-cache "$leak_dir" "$(dj_dir_bytes "$leak_dir")" "$HOME" "candidate (in use: $reason)"
+      continue
+    fi
+    bytes="$(dj_dir_bytes "$leak_dir")"
+    if ! dj_host_is_uint "$bytes"; then bytes=0; fi
+    plan_row tmp delete leaked-cache "$leak_dir" "$bytes" "$HOME" "leaked agent/browser cache older than ${ttl}d with no open handle"
+  done
+  # Superseded Claude CLI version binaries under ~/.local/share/claude/versions:
+  # always retain the active symlinked binary (~/.local/bin/claude) AND the
+  # newest installed version; reap older non-in-use entries past TTL.
+  claude_ver_root="$HOME/.local/share/claude/versions"
+  if [ -d "$claude_ver_root" ] && [ ! -L "$claude_ver_root" ]; then
+    active_claude=""
+    if [ -L "$HOME/.local/bin/claude" ]; then
+      active_claude="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$HOME/.local/bin/claude" 2>/dev/null || echo '')"
+    fi
+    newest_ver="$(python3 -I -c '
+import os, re, sys
+root = sys.argv[1]
+names = [n for n in os.listdir(root) if not n.startswith(".") and not os.path.islink(os.path.join(root, n))]
+def key(s):
+    return [int(p) if p.isdigit() else p for p in re.split(r"([0-9]+)", s)]
+if names:
+    names.sort(key=key)
+    print(names[-1])
+' "$claude_ver_root" 2>/dev/null || echo '')"
+    for ver_entry in "$claude_ver_root"/*; do
+      [ -e "$ver_entry" ] || [ -L "$ver_entry" ] || continue
+      if dj_host_has_ctrl "$ver_entry"; then
+        plan_row tmp candidate claude-old-version "$ver_entry" 0 "$claude_ver_root" "held: control characters in path; manual review"
+        continue
+      fi
+      if [ -L "$ver_entry" ]; then
+        plan_row tmp skip claude-old-version "$ver_entry" 0 "$claude_ver_root" "symlink; never listed for deletion"
+        continue
+      fi
+      ver_base="$(basename "$ver_entry")"
+      if [ -n "$newest_ver" ] && [ "$ver_base" = "$newest_ver" ]; then
+        plan_row tmp skip claude-old-version "$ver_entry" "$(dj_dir_bytes "$ver_entry")" "$claude_ver_root" "newest installed version; kept"
+        continue
+      fi
+      if [ -n "$active_claude" ]; then
+        leak_parent="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$ver_entry" 2>/dev/null || echo '')"
+        if [ "$leak_parent" = "$active_claude" ]; then
+          plan_row tmp skip claude-old-version "$ver_entry" "$(dj_dir_bytes "$ver_entry")" "$claude_ver_root" "active symlinked version; kept"
+          continue
+        fi
+      fi
+      fresh_rc=0
+      dj_pi_entry_fresh "$ver_entry" "$ttl" || fresh_rc=$?
+      case "$fresh_rc" in
+        0) plan_row tmp skip claude-old-version "$ver_entry" "$(dj_dir_bytes "$ver_entry")" "$claude_ver_root" "younger than ${ttl}d; left intact"; continue ;;
+        2) plan_row tmp skip claude-old-version "$ver_entry" "$(dj_dir_bytes "$ver_entry")" "$claude_ver_root" "age unknown (unreadable content); left intact"; continue ;;
+      esac
+      if reason="$(dj_worktree_in_use "$ver_entry" "$LSOF_SNAPSHOT_TMP")"; then
+        plan_row tmp candidate claude-old-version "$ver_entry" "$(dj_dir_bytes "$ver_entry")" "$claude_ver_root" "candidate (in use: $reason)"
+        continue
+      fi
+      bytes="$(dj_dir_bytes "$ver_entry")"
+      if ! dj_host_is_uint "$bytes"; then bytes=0; fi
+      plan_row tmp delete claude-old-version "$ver_entry" "$bytes" "$claude_ver_root" "superseded claude CLI binary older than ${ttl}d with no open handle"
+    done
+  fi
 }
 
 # dj_host_tmp_apply — D5 tmp apply: remove delete rows after revalidation.
@@ -793,6 +878,88 @@ EOF
       ); then
         echo "  removed: $path"
         rmdir "$claude_real" 2>/dev/null || true
+      else
+        echo "  REFUSED/failed: $path" >&2
+        EXIT_STATUS=1
+      fi
+      continue
+    fi
+    if [ "$kind" = "leaked-cache" ]; then
+      local expected_codex expected_chrome
+      expected_codex="$HOME/.codex/plugins/.marketplace-plugin-source-staging"
+      expected_chrome="$HOME/Library/Application Support/Google/Chrome-headless"
+      if [ "$path" != "$expected_codex" ] && [ "$path" != "$expected_chrome" ]; then
+        echo "  skipped (plan changed): $path is not an allowed leaked-cache path"
+        continue
+      fi
+      dir="$(dirname "$path")"
+      [ ! -L "$dir" ] && [ -d "$dir" ] || { echo "  skipped (plan changed): $path parent invalid"; continue; }
+      dir_real="$(unset CDPATH; cd -P -- "$dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path parent unresolvable"; continue; }
+      if ! dj_host_is_uint "$bytes"; then echo "  skipped: malformed plan bytes for $path"; continue; fi
+      fresh_rc=0
+      dj_pi_entry_fresh "$dir_real/$base" "$ttl" || fresh_rc=$?
+      case "$fresh_rc" in
+        0) echo "  skipped (plan changed): $path is fresh"; continue ;;
+        2) echo "  skipped (plan changed): $path age unknown (unreadable content)"; continue ;;
+      esac
+      if reason="$(dj_worktree_in_use "$dir_real/$base" "$LSOF_SNAPSHOT_TMP")"; then echo "  skipped (plan changed): $path in use ($reason)"; continue; fi
+      if (
+        cd -P -- "$dir_real" 2>/dev/null || exit 1
+        [ -d "$base" ] && [ ! -L "$base" ] || exit 1
+        chmod -RP u+w -- "$base" 2>/dev/null || chmod -R u+w -- "$base" 2>/dev/null || true
+        rm -rf -- "$base" 2>/dev/null
+      ); then
+        echo "  removed: $path"
+      else
+        echo "  REFUSED/failed: $path" >&2
+        EXIT_STATUS=1
+      fi
+      continue
+    fi
+    if [ "$kind" = "claude-old-version" ]; then
+      local ver_root_real active_now newest_now entry_real
+      ver_root_real="$(unset CDPATH; cd -P -- "$HOME/.local/share/claude/versions" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): claude versions dir unavailable"; continue; }
+      dir="$(dirname "$path")"
+      dir_real="$(unset CDPATH; cd -P -- "$dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path parent unresolvable"; continue; }
+      [ "$dir_real" = "$ver_root_real" ] || { echo "  skipped (plan changed): $path outside claude versions dir"; continue; }
+      if ! dj_host_is_uint "$bytes"; then echo "  skipped: malformed plan bytes for $path"; continue; fi
+      newest_now="$(python3 -I -c '
+import os, re, sys
+root = sys.argv[1]
+names = [n for n in os.listdir(root) if not n.startswith(".") and not os.path.islink(os.path.join(root, n))]
+def key(s):
+    return [int(p) if p.isdigit() else p for p in re.split(r"([0-9]+)", s)]
+if names:
+    names.sort(key=key)
+    print(names[-1])
+' "$ver_root_real" 2>/dev/null || echo '')"
+      if [ -z "$newest_now" ] || [ "$base" = "$newest_now" ]; then
+        echo "  skipped (plan changed): $path is newest claude version"
+        continue
+      fi
+      active_now=""
+      if [ -L "$HOME/.local/bin/claude" ]; then
+        active_now="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$HOME/.local/bin/claude" 2>/dev/null || echo '')"
+      fi
+      entry_real="$(python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$ver_root_real/$base" 2>/dev/null || echo '')"
+      if [ -n "$active_now" ] && [ "$entry_real" = "$active_now" ]; then
+        echo "  skipped (plan changed): $path is active claude version"
+        continue
+      fi
+      fresh_rc=0
+      dj_pi_entry_fresh "$ver_root_real/$base" "$ttl" || fresh_rc=$?
+      case "$fresh_rc" in
+        0) echo "  skipped (plan changed): $path is fresh"; continue ;;
+        2) echo "  skipped (plan changed): $path age unknown (unreadable content)"; continue ;;
+      esac
+      if reason="$(dj_worktree_in_use "$ver_root_real/$base" "$LSOF_SNAPSHOT_TMP")"; then echo "  skipped (plan changed): $path in use ($reason)"; continue; fi
+      if (
+        cd -P -- "$ver_root_real" 2>/dev/null || exit 1
+        [ -e "$base" ] && [ ! -L "$base" ] || exit 1
+        chmod -RP u+w -- "$base" 2>/dev/null || chmod -R u+w -- "$base" 2>/dev/null || true
+        rm -rf -- "$base" 2>/dev/null
+      ); then
+        echo "  removed: $path"
       else
         echo "  REFUSED/failed: $path" >&2
         EXIT_STATUS=1
@@ -972,7 +1139,8 @@ dj_host_pi_spill_apply() {
   done <"$PLAN_TMP"
 }
 
-# dj_host_pi_worktree_apply — A9: remove orphan pi-agent-* worktrees verdict=delete
+# dj_host_pi_worktree_apply — A9: remove stale linked worktrees under the pi
+# worktree roots (pi-agent-* and other subagent/worker worktrees) verdict=delete
 # via `git worktree remove` (no --force), revalidating age (TTL), cleanliness
 # (no dirty/untracked/ignored content), uniqueness (no unique commits) and liveness just
 # before acting. Respects pi_apply:false.
@@ -982,7 +1150,7 @@ dj_host_pi_worktree_apply() {
   scope_enabled pi || return 0
   [ "${PI_APPLY:-true}" = "true" ] || return 0
   [ "$(awk -F'\t' '$1=="pi" && $2=="delete" && $3=="pi-worktree" {n++} END {print n+0}' "$PLAN_TMP")" -gt 0 ] || return 0
-  if ! confirm_category "orphan pi-agent worktrees older than ${PI_WORKTREE_TTL_DAYS:-7}d with no unique commits and no dirty files"; then
+  if ! confirm_category "orphan pi worktrees older than ${PI_WORKTREE_TTL_DAYS:-7}d with no unique commits and no dirty files"; then
     return 0
   fi
   if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
@@ -1016,12 +1184,63 @@ dj_host_pi_worktree_apply() {
   done <"$PLAN_TMP"
 }
 
+# dj_host_pi_scratch_apply — remove aged known-scratch directories (matching
+# _dj_tmp_name_ok) under PI_WORKTREE_ROOT / PI_LEGACY_ROOT with no .git marker,
+# no open handle, and descriptor-relative revalidation. Never removes arbitrary
+# files or non-scratch entries. Respects pi_apply:false.
+# shellcheck disable=SC2034  # EXIT_STATUS assignments below accumulate into the orchestrator's exit class.
+dj_host_pi_scratch_apply() {
+  local scope verdict kind path bytes repo detail dir dir_real base fresh_rc reason
+  scope_enabled pi || return 0
+  [ "${PI_APPLY:-true}" = "true" ] || return 0
+  [ "$(awk -F'\t' '$1=="pi" && $2=="delete" && $3=="pi-scratch" {n++} END {print n+0}' "$PLAN_TMP")" -gt 0 ] || return 0
+  if ! confirm_category "stale pi-worktrees scratch directories older than ${PI_TMP_TTL_DAYS:-3}d with no open handle"; then
+    return 0
+  fi
+  if dj_capture_lsof_snapshot "$LSOF_SNAPSHOT_TMP" 5; then :; else :; fi
+  while IFS="$(printf '\t')" read -r scope verdict kind path bytes repo detail _a _b _c _d _e; do
+    [ "$scope" = "pi" ] && [ "$verdict" = "delete" ] && [ "$kind" = "pi-scratch" ] || continue
+    case "$path" in *"$(printf '\t')"*|*$'\n'*) echo "  skipped (plan changed): control characters in path"; continue ;; esac
+    if [ -L "$path" ] || [ ! -e "$path" ]; then echo "  skipped (plan changed): $path gone or symlinked"; continue; fi
+    base="$(basename "$path")"
+    if ! _dj_tmp_name_ok "$base"; then echo "  skipped (plan changed): $path is not pi scratch"; continue; fi
+    if [ -e "$path/.git" ] || [ -L "$path/.git" ]; then echo "  skipped (plan changed): $path contains .git"; continue; fi
+    dir="$(dirname "$path")"
+    dir_real="$(unset CDPATH; cd -P -- "$dir" 2>/dev/null && pwd -P)" || { echo "  skipped (plan changed): $path parent unresolvable"; continue; }
+    if [ "$dir_real" != "${PI_WORKTREE_ROOT:-}" ] && [ "$dir_real" != "${PI_LEGACY_ROOT:-}" ]; then
+      echo "  skipped (plan changed): $path outside pi worktree roots"
+      continue
+    fi
+    if ! dj_host_is_uint "$bytes"; then echo "  skipped (plan changed): malformed plan bytes for $path"; continue; fi
+    fresh_rc=0
+    dj_pi_entry_fresh "$dir_real/$base" "${PI_TMP_TTL_DAYS:-3}" || fresh_rc=$?
+    case "$fresh_rc" in
+      0) echo "  skipped (plan changed): $path is fresh"; continue ;;
+      2) echo "  skipped (plan changed): $path age unknown (unreadable content)"; continue ;;
+    esac
+    if reason="$(dj_worktree_in_use "$dir_real/$base" "$LSOF_SNAPSHOT_TMP")"; then echo "  skipped (plan changed): $path in use ($reason)"; continue; fi
+    if (
+      cd -P -- "$dir_real" 2>/dev/null || exit 1
+      [ -e "$base" ] && [ ! -L "$base" ] && [ ! -e "$base/.git" ] || exit 1
+      _dj_tmp_name_ok "$base" || exit 1
+      chmod -RP u+w -- "$base" 2>/dev/null || chmod -R u+w -- "$base" 2>/dev/null || true
+      rm -rf -- "$base" 2>/dev/null
+    ); then
+      echo "  removed: $path"
+    else
+      echo "  REFUSED/failed: $path" >&2
+      EXIT_STATUS=1
+    fi
+  done <"$PLAN_TMP"
+}
+
 dj_host_apply() {
   if scope_enabled stores; then
     dj_host_store_apply
   fi
   dj_host_pi_spill_apply
   dj_host_pi_worktree_apply
+  dj_host_pi_scratch_apply
   dj_host_tmp_apply
   dj_host_docker_fstrim_apply
   dj_host_render

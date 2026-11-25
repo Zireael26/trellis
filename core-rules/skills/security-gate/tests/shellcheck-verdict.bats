@@ -282,3 +282,29 @@ commit_shell_files() {
   [[ "$output" == *"shellcheck: ran=1 exit=2 parsed=0 scanned=0"* ]] && [[ "$output" == *"shellcheck did not complete: scanner exit 2"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
 }
+
+@test "diff mode transfers span-only Semgrep PartialParsing on shell files when ShellCheck runs" {
+  cat > "$BIN/shellcheck" <<'SH'
+#!/usr/bin/env bash
+printf '[]'
+exit 0
+SH
+  cat > "$BIN/semgrep" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo "1.157.0"; exit 0; fi
+printf '{"results":[],"errors":[{"code":3,"level":"warn","type":["PartialParsing",[{"path":"%s/changed.sh","start":{"line":1,"col":1},"end":{"line":2,"col":1}}]],"message":"Syntax error"}],"paths":{"scanned":["%s/changed.sh"]}}\n' "$PROJECT" "$PROJECT"
+SH
+  chmod +x "$BIN/shellcheck" "$BIN/semgrep"
+  commit_shell_change
+
+  run_diff SECURITY_GATE_STACK_PROFILE=web-next SECURITY_GATE_SHELLCHECK=1
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"semgrep: 1 shell parse errors not counted (shellcheck is the shell SAST)"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
+
+  # Without ShellCheck opted in, the same span-only PartialParsing still blocks.
+  run_diff SECURITY_GATE_STACK_PROFILE=web-next SECURITY_GATE_SHELLCHECK=0
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"JSON errors non-empty (PartialParsing)"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
+}

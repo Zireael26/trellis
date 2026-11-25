@@ -6,6 +6,27 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.5.8] - 2026-11-24
+
+### Fixed
+
+- **Organization-owned repository gate-config approval (`core-rules/skills/process-gate/scripts/run-all.sh`):** `gh repo view --json owner,nameWithOwner` queries GitHub GraphQL where `RepositoryOwner` omits `.owner.type`, leaving `otype` defaulted to `User` and blocking org-admin `gate-config-approved:` comments on every Organization-owned repository. `gate_config_approval` now resolves `.owner.type` via `gh api repos/<nwo> --jq '.owner.type // empty'` when `gh repo view` omits it (failing closed if lookup fails), and the `config-approval.bats` fixture mirrors real `gh repo view` output.
+- **Pre-seal execution snapshot & exec-stamp on release install/upgrade (`scripts/trellis-launcher.sh`):** After `trellis release install|verify|adopt VERSION` or `trellis upgrade VERSION` installs a persistent-snapshot release (`1.4.0+`), the launcher pre-seals `releases/.exec/VERSION-<sha256>` and `state/exec-stamps/VERSION-<sha256>.json` immediately (including when a multi-row adopt partially fails) so live native hooks do not fail with `no execution stamp names this release.json` when `active_cli_release` switches.
+- **Linux `trellis upgrade` SHA-256 portability (`scripts/upgrade.sh`):** `upgrade_adopt_with_pair` now falls back from `shasum -a 256` to `sha256sum` when `shasum` is not installed (e.g. minimal Linux hosts).
+- **Process-gate overflow admission on local-socket Docker/Colima hosts (`scripts/lib/heavy-supervisor.pl`):** `gate_disk_paths` now resolves local `unix:///` `DOCKER_HOST` sockets to their backing directory instead of returning `probe-unknown` when `TRELLIS_HEAVY_GATE_SCRATCH_DIRS` is unset (preserving fail-closed behavior for remote `tcp://`/`ssh://` daemons), unblocking `process_gate_slots=2` concurrent push gates on Colima hosts.
+- **Security-gate Semgrep span-only `PartialParsing` and baseline parity (`core-rules/skills/security-gate/scripts/{run-diff.sh,run-baseline.sh,lib/semgrep.sh}`):**
+  - `run-diff.sh` now recognizes Semgrep's real `["PartialParsing", [{"path": ...}]]` span-only error payload (where top-level `"path"` is omitted) when transferring shell parse coverage to ShellCheck, while still failing closed on empty or mixed shell/non-shell spans.
+  - `run-baseline.sh` and `lib/semgrep.sh` now match `run-diff.sh` with `--timeout` defaulting to `30s` (honoring `SECURITY_GATE_SEMGREP_TIMEOUT` and `.trellis.json` `security_gate.semgrep_timeout` `1–600s`) and add an opt-in ShellCheck stage (`SECURITY_GATE_SHELLCHECK=1`) that baselines ShellCheck findings, records `shellcheck` in `engines`, and transfers shell parse errors from Semgrep to ShellCheck (fail-closed default preserved when off or incomplete).
+
+### Added
+
+- **`trellis disk-janitor` sweep, speed, and visibility improvements (`scripts/disk-janitor.sh`, `scripts/lib/disk-janitor-*.sh`):**
+  - **Per-repo `gh pr list` cache (`dj_branch_merged`):** Caches `gh pr list --state merged --limit 1000 --json headRefName,number` once per `git-common-dir` per janitor run (falling back to single-branch lookup only on `>=1000` truncation or stub fallback), eliminating N-way GitHub API round-trips across multi-worktree fleets.
+  - **Opt-in idle dirty-tree dehydration (`--dehydrate-dirty` / `disk_janitor.dehydrate_dirty`):** Removes strictly gitignored regenerable directories (including `apps/web/build/t15b-*` fixtures) inside idle dirty worktrees after verifying zero tracked modifications and zero non-ignored untracked files reside inside each target directory; default `--dehydrate` preserves clean-only behavior.
+  - **Pi worktree-root scratch cleanup (`pi-scratch`):** `--apply --scopes pi` now reaps aged known-scratch directories (`_dj_tmp_name_ok` patterns without `.git`, no open handle) inside `~/.pi-worktrees` and `~/.trellis/pi-worktrees` while keeping registered non-`pi-agent-*` worktrees and arbitrary files intact.
+  - **Leaked agent/browser cache auto-reap (`tmp` scope):** `--apply --scopes tmp` now reaps aged non-in-use `~/.codex/plugins/.marketplace-plugin-source-staging`, `~/Library/Application Support/Google/Chrome-headless`, and superseded `~/.local/share/claude/versions/*` binaries (always retaining both the active `~/.local/bin/claude` symlink target and the newest installed version).
+  - **Docker stopped/exited container visibility (`docker` scope):** Surfaces stopped/exited container counts and bytes from the existing `docker system df -v` snapshot as report-only (preserving Spec 059's strict no-volume/no-container-deletion invariant).
+
 ## [1.5.7] - 2026-11-23
 
 ### Fixed

@@ -713,6 +713,7 @@ audit_dir_case() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"Overall: MERGEABLE"* ]] || { echo "$output"; false; }
   [[ "$output" == *"gate config approved on PR #42 by team-lead (admin permission): \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
+  grep -q -- "api repos/example-org/example-repo " "$GH_LOG" || { cat "$GH_LOG"; false; }
   grep -q -- "api repos/example-org/example-repo/collaborators/team-lead/permission" "$GH_LOG" || { cat "$GH_LOG"; false; }
 }
 
@@ -763,4 +764,32 @@ audit_dir_case() {
   run_gate merge
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"PR #42 has an approval by team-lead for another SHA: \"gate-config-approved: $base\""* ]] || { echo "$output"; false; }
+}
+
+@test "user repo with nameWithOwner: resolves User via REST without collaborator lookup" {
+  approval_fixture || return 1
+  gh_user repo-owner example-repo
+  gh_perm some-agent admin
+  gh_prs "[$(pr_row 42 "$HEAD_SHA")]"
+  approve 42 OPEN "$HEAD_SHA" some-agent "$HEAD_SHA"
+
+  run_gate merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"PR #42 has an approval by some-agent (not the repo owner repo-owner): \"gate-config-approved: $HEAD_SHA\""* ]] || { echo "$output"; false; }
+  grep -q -- "api repos/repo-owner/example-repo " "$GH_LOG" || { cat "$GH_LOG"; false; }
+  grep -q -- "collaborators/" "$GH_LOG" && { cat "$GH_LOG"; false; } || true
+}
+
+@test "repo with nameWithOwner: failed owner-type REST lookup fails closed" {
+  approval_fixture || return 1
+  printf '{"owner":{"id":"O_fixture","login":"example-org"},"nameWithOwner":"example-org/example-repo"}\n' \
+    > "$GH_STUB_DIR/repo.json"
+  rm -f "$GH_STUB_DIR/api-repo.json"
+  gh_perm team-lead admin
+  gh_prs "[$(pr_row 42 "$HEAD_SHA")]"
+  approve 42 OPEN "$HEAD_SHA" team-lead "$HEAD_SHA"
+
+  run_gate merge
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"gh could not read the repo owner type"* ]] || { echo "$output"; false; }
 }

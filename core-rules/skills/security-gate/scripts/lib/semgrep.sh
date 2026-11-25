@@ -20,6 +20,48 @@ set -euo pipefail
 PROJECT_DIR="${1:?project-dir required}"
 PROFILE="${2:?profile required}"
 OUT="${3:?out-jsonl required}"
+shift 3
+
+SEMGREP_RULE_TIMEOUT=30
+TIMEOUT_ARG=""
+SHELL_SCOPE_FILE=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --timeout)
+      TIMEOUT_ARG="${2:?--timeout requires seconds}"
+      shift 2
+      ;;
+    --timeout=*)
+      TIMEOUT_ARG="${1#--timeout=}"
+      shift
+      ;;
+    --shell-scope)
+      SHELL_SCOPE_FILE="${2:?--shell-scope requires path}"
+      shift 2
+      ;;
+    --shell-scope=*)
+      SHELL_SCOPE_FILE="${1#--shell-scope=}"
+      shift
+      ;;
+    *)
+      echo "semgrep did not complete: unknown option: $1" >&2
+      : > "$OUT"
+      exit 2
+      ;;
+  esac
+done
+
+_sg_timeout_raw="${TIMEOUT_ARG:-${SECURITY_GATE_SEMGREP_TIMEOUT:-}}"
+case "$_sg_timeout_raw" in
+  '') ;;
+  *[!0-9]*|0*) echo "warn: SECURITY_GATE_SEMGREP_TIMEOUT must be 1-600 seconds; using $SEMGREP_RULE_TIMEOUT" >&2 ;;
+  *) if [ "$_sg_timeout_raw" -le 600 ]; then
+       SEMGREP_RULE_TIMEOUT="$_sg_timeout_raw"
+     else
+       echo "warn: SECURITY_GATE_SEMGREP_TIMEOUT must be 1-600 seconds; using $SEMGREP_RULE_TIMEOUT" >&2
+     fi ;;
+esac
+builtin unset _sg_timeout_raw
 
 case "$0" in */*) _sg_lib_dir="${0%/*}" ;; *) _sg_lib_dir=. ;; esac
 builtin source "$_sg_lib_dir/engine.sh"
@@ -83,7 +125,7 @@ trap 'rm -f "$RAW"' EXIT
 # error. Its partial output is still normalized; the stage is incomplete.
 # --metrics off: no telemetry.
 SCAN_RC=0
-"$SEMGREP_BIN" scan --json --metrics=off --quiet "${CONFIGS[@]}" "${EXCLUDES[@]}" "$PROJECT_DIR" >"$RAW" 2>/dev/null || SCAN_RC=$?
+"$SEMGREP_BIN" scan --json --metrics=off --quiet --timeout "$SEMGREP_RULE_TIMEOUT" "${CONFIGS[@]}" "${EXCLUDES[@]}" "$PROJECT_DIR" >"$RAW" 2>/dev/null || SCAN_RC=$?
 
 # Normalize → JSONL of {tool, rule, severity, file, line, message}
 # A report that parses can still be partial: semgrep exits 0 with a Timeout or a
@@ -92,7 +134,7 @@ SCAN_RC=0
 # this wrapper ignored errors[], the rc-0 discard recorded in decisions-log.md
 # on 2026-10-10.
 PARSE_RC=0
-"$PYTHON3_BIN" -I - "$RAW" "$PROJECT_DIR" >"$OUT" <<'PY' || PARSE_RC=$?
+SG_SHELL_SCOPE="$SHELL_SCOPE_FILE" "$PYTHON3_BIN" -I - "$RAW" "$PROJECT_DIR" >"$OUT" <<'PY' || PARSE_RC=$?
 import json, sys, os
 raw, root = sys.argv[1], os.path.abspath(sys.argv[2])
 sev_map = {"ERROR": "high", "WARNING": "medium", "INFO": "low"}
@@ -119,16 +161,58 @@ for i, r in enumerate(data["results"], 1):
     }
     print(json.dumps(out, ensure_ascii=False))
 
+shell_scope = set()
+scope_path = os.environ.get("SG_SHELL_SCOPE", "")
+if scope_path:
+    try:
+        with open(scope_path, "rb") as fh:
+            shell_scope = {os.path.abspath(os.fsdecode(p))
+                           for p in fh.read().split(b'\0') if p}
+    except OSError:
+        sys.exit(3)
 
-# Baseline does not run ShellCheck, so it cannot transfer shell parse coverage
-# to another scanner. Every Semgrep error makes this stage incomplete.
+parse_types = {"Syntax error", "PartialParsing", "Lexical error"}
+
+def error_in_shell_scope(err_path, raw_kind):
+    if not shell_scope:
+        return False
+    spans = None
+    if (isinstance(raw_kind, list) and len(raw_kind) == 2
+            and raw_kind[0] == "PartialParsing" and isinstance(raw_kind[1], list)):
+        spans = raw_kind[1]
+    if isinstance(err_path, str) and err_path:
+        if os.path.abspath(os.path.join(root, err_path)) not in shell_scope:
+            return False
+        if spans:
+            return all(
+                isinstance(span, dict) and isinstance(span.get("path"), str) and span["path"]
+                and os.path.abspath(os.path.join(root, span["path"])) in shell_scope
+                for span in spans
+            )
+        return True
+    if spans:
+        return all(
+            isinstance(span, dict) and isinstance(span.get("path"), str) and span["path"]
+            and os.path.abspath(os.path.join(root, span["path"])) in shell_scope
+            for span in spans
+        )
+    return False
+
+# Only waive shell parse errors when the caller ran ShellCheck to completion
+# and passed its covered shell scope. Every other Semgrep error fails closed.
+shell_parse_errors = 0
 types = set()
 for error in data.get("errors", []):
-    kind = error.get("type") if isinstance(error, dict) else None
-    if isinstance(kind, list) and kind:
-        kind = kind[0]
+    raw_kind = error.get("type") if isinstance(error, dict) else None
+    path = error.get("path") if isinstance(error, dict) else None
+    kind = raw_kind[0] if isinstance(raw_kind, list) and raw_kind else raw_kind
     kind = " ".join(kind.split()) if isinstance(kind, str) else "unknown"
-    types.add(kind[:64] or "unknown")
+    if kind in parse_types and error_in_shell_scope(path, raw_kind):
+        shell_parse_errors += 1
+    else:
+        types.add(kind[:64] or "unknown")
+if shell_parse_errors:
+    print(f"semgrep: {shell_parse_errors} shell parse errors not counted (shellcheck is the shell SAST)", file=sys.stderr)
 if types:
     print("semgrep did not complete: partial scan: JSON errors non-empty (" + ", ".join(sorted(types)) + ")", file=sys.stderr)
     sys.exit(4)

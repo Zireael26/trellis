@@ -854,12 +854,38 @@ sub gate_disk_paths {
     $scratch = eval { JSON::PP->new->utf8->decode($caller{TRELLIS_HEAVY_GATE_SCRATCH_DIRS}) };
     return undef unless ref($scratch) eq 'ARRAY' && @$scratch <= 16;
   }
-  # An explicit container endpoint can store its data outside the checkout
-  # and TMPDIR. Don't infer that storage is healthy from the local df alone.
-  return undef if length($caller{DOCKER_HOST} // '') && !@$scratch;
+  my $docker_host = $caller{DOCKER_HOST} // '';
+  my $local_sock;
+  if (length($docker_host) && !@$scratch) {
+    # An explicit container endpoint can store its data outside the checkout
+    # and TMPDIR. Remote endpoints (tcp://, ssh://, etc.) fail closed unless
+    # TRELLIS_HEAVY_GATE_SCRATCH_DIRS names their backing storage; local
+    # unix:/// sockets (e.g. Colima/Docker Desktop injected by pre-push) resolve
+    # to their local storage directory so pressure_probe checks its host volume.
+    return undef unless $docker_host =~ m{\Aunix://(/[\x20-\x7e]+)\z};
+    $local_sock = $1;
+    return undef if $local_sock =~ m{/\z};
+  }
   my $out = _pp_bounded(24000, sub {
+    my @extra = @$scratch;
+    if (defined $local_sock) {
+      my $target = $local_sock;
+      if (-e $local_sock || -l $local_sock) {
+        return undef unless -S $local_sock;
+        $target = Cwd::abs_path($local_sock);
+        return undef unless defined $target && $target =~ m{\A/[\x20-\x7e]+\z};
+      }
+      my $sock_dir = $target;
+      $sock_dir =~ s{/[^/]+\z}{};
+      $sock_dir = '/' unless length($sock_dir);
+      if ($^O eq 'linux' && $sock_dir =~ m{\A/run(?:/|\z)}) {
+        return undef unless -d '/var/lib/docker';
+        $sock_dir = '/var/lib/docker';
+      }
+      push @extra, $sock_dir;
+    }
     my @paths;
-    for my $path ($worktree, $dir, $tmpdir, @$scratch) {
+    for my $path ($worktree, $dir, $tmpdir, @extra) {
       return undef unless defined $path && !ref($path) && $path =~ m{\A/[\x20-\x7e]*\z} && -d $path;
       my $real = Cwd::abs_path($path);
       return undef unless defined $real && $real =~ m{\A/[\x20-\x7e]*\z};
