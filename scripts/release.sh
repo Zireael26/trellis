@@ -660,13 +660,17 @@ owner_replacement() {
 # dangle untracked. Only exact owned symlinks retire; renders and deferred
 # project files are left alone.
 adoption_retired_leaves() {
-  local owner="$1" payload="$2" selection="$3" surfaces harness
+  local owner="$1" payload="$2" selection="$3" surfaces harness harness_lines
   local -a harnesses=()
   # Without the planner nothing retires: a single-owner adopt then keeps both
   # its leaves and its old exclude block; a group adopt refuses at exclude
   # planning.
   command -v surface_plan_emit >/dev/null 2>&1 || { printf '[]\n'; return 0; }
-  while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$selection" | jq -r '.[]')
+  harness_lines="$(printf '%s\n' "$selection" | jq -r '.[]')" || return "$TRELLIS_EX_STATE"
+  while IFS= read -r harness; do
+    [ -n "$harness" ] || continue
+    harnesses+=("$harness")
+  done <<< "$harness_lines"
   surfaces="$(surface_plan_emit "$payload" "${harnesses[@]}")" || return "$?"
   jq -c --argjson surfaces "$surfaces" '
     [$surfaces.artifacts[].destination] as $planned
@@ -684,13 +688,17 @@ adoption_retired_leaves() {
 # attach owns them), and project-owned destinations recorded exactly as attach
 # would. Anything else standing at a new destination refuses BY NAME.
 adoption_introduced_leaves() {
-  local owner="$1" payload="$2" selection="$3" root surfaces unowned deferred harness introduced path parents='[]'
+  local owner="$1" payload="$2" selection="$3" root surfaces unowned deferred harness harness_lines introduced path path_lines parents='[]'
   local -a harnesses=()
   if ! command -v surface_plan_emit >/dev/null 2>&1 || ! command -v attach_deferred_leaves >/dev/null 2>&1; then
     printf '{"link":[],"parents":[],"deferred":[]}\n'
     return 0
   fi
-  while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$selection" | jq -r '.[]')
+  harness_lines="$(printf '%s\n' "$selection" | jq -r '.[]')" || return "$TRELLIS_EX_STATE"
+  while IFS= read -r harness; do
+    [ -n "$harness" ] || continue
+    harnesses+=("$harness")
+  done <<< "$harness_lines"
   surfaces="$(surface_plan_emit "$payload" "${harnesses[@]}")" || return "$?"
   root="$(jq -r '.worktree_root' "$owner")" || return "$TRELLIS_EX_STATE"
   unowned="$(printf '%s\n' "$surfaces" | jq -c --slurpfile owner "$owner" '
@@ -706,12 +714,14 @@ adoption_introduced_leaves() {
                 else .target end)}],
      deferred: $deferred}')" || return "$TRELLIS_EX_STATE"
   # Every ancestor the checkout lacks, once, shallowest first.
+  path_lines="$(printf '%s\n' "$introduced" | jq -r '
+    [.link[].path | split("/") | .[:-1] as $parts | range(1; ($parts | length) + 1) | $parts[:.] | join("/")]
+    | unique | sort_by(split("/") | length) | .[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r path; do
+    [ -n "$path" ] || continue
     [ -e "$root/$path" ] || [ -L "$root/$path" ] || parents="$(jq -c --arg path "$path" '. + [{kind: "parent", path: $path}]' <<< "$parents")" ||
       return "$TRELLIS_EX_STATE"
-  done < <(printf '%s\n' "$introduced" | jq -r '
-    [.link[].path | split("/") | .[:-1] as $parts | range(1; ($parts | length) + 1) | $parts[:.] | join("/")]
-    | unique | sort_by(split("/") | length) | .[]')
+  done <<< "$path_lines"
   jq -c --argjson parents "$parents" '.parents = $parents' <<< "$introduced" || return "$TRELLIS_EX_STATE"
 }
 
@@ -819,10 +829,14 @@ adoption_retire_leaf() (
 # changed effective target (for example 1.5.3 retargeting .claude/rules/trellis.md
 # and .agents/rules/trellis.md from core-rules/CLAUDE.md to core-rules/AGENTS.md).
 adoption_retargeted_leaves() {
-  local owner="$1" payload="$2" selection="$3" root surfaces harness project_claude
+  local owner="$1" payload="$2" selection="$3" root surfaces harness harness_lines project_claude
   local -a harnesses=()
   command -v surface_plan_emit >/dev/null 2>&1 || { printf '[]\n'; return 0; }
-  while IFS= read -r harness; do harnesses+=("$harness"); done < <(printf '%s\n' "$selection" | jq -r '.[]')
+  harness_lines="$(printf '%s\n' "$selection" | jq -r '.[]')" || return "$TRELLIS_EX_STATE"
+  while IFS= read -r harness; do
+    [ -n "$harness" ] || continue
+    harnesses+=("$harness")
+  done <<< "$harness_lines"
   surfaces="$(surface_plan_emit "$payload" "${harnesses[@]}")" || return "$?"
   root="$(jq -r '.worktree_root' "$owner")" || return "$TRELLIS_EX_STATE"
   project_claude=false
@@ -1218,19 +1232,25 @@ release_adoption_reap_completed_stages() {
   if [ -n "$shared" ] && [ "$shared" = "${__release_adoption_common:-}/info/exclude" ]; then
     release_adoption_reap_stale "$shared" render '' true
   fi
-  while IFS= read -r -d '' kind && IFS= read -r -d '' target && IFS= read -r -d '' render_root; do
-    release_adoption_reap_stale "$target" "$kind" "$render_root"
-  done < <(jq -j --arg home "${__release_adoption_home:-}" --arg checkout "${__release_adoption_checkout:-}" \
-    --arg common "${__release_adoption_common:-}" '
-    select(.binding.checkout_id == $checkout and .binding.git_common_dir == $common)
-    | (.binding.root // "") as $root
-    | ((if .owner == ($home + "/state/attachments/" + $checkout + "/" + .binding.worktree_id + ".json")
-        then ["owner", .owner, ""] else empty end),
-       (.renders[]? | select((.destination | type) == "string") | ["render", .destination, $root]),
-       (if .hooks == "true" and .managed == ($home + "/state/git-hooks/" + $checkout)
-        then ["hooks", .managed, ""] else empty end))
-    | .[] | ., "\u0000"
-  ' "$plans" 2>/dev/null)
+  (
+    __rarcs_tmp="$(mktemp "${TMPDIR:-/tmp}/trellis.release.reap.XXXXXX")" || exit 0
+    trap 'rm -f "${__rarcs_tmp:-}"' EXIT
+    trap 'trap "" HUP INT TERM; rm -f "${__rarcs_tmp:-}"; exit 1' HUP INT TERM
+    jq -j --arg home "${__release_adoption_home:-}" --arg checkout "${__release_adoption_checkout:-}" \
+      --arg common "${__release_adoption_common:-}" '
+      select(.binding.checkout_id == $checkout and .binding.git_common_dir == $common)
+      | (.binding.root // "") as $root
+      | ((if .owner == ($home + "/state/attachments/" + $checkout + "/" + .binding.worktree_id + ".json")
+          then ["owner", .owner, ""] else empty end),
+         (.renders[]? | select((.destination | type) == "string") | ["render", .destination, $root]),
+         (if .hooks == "true" and .managed == ($home + "/state/git-hooks/" + $checkout)
+          then ["hooks", .managed, ""] else empty end))
+      | .[] | ., "\u0000"
+    ' "$plans" > "$__rarcs_tmp" 2>/dev/null || :
+    while IFS= read -r -d '' kind && IFS= read -r -d '' target && IFS= read -r -d '' render_root; do
+      release_adoption_reap_stale "$target" "$kind" "$render_root"
+    done < "$__rarcs_tmp"
+  )
 }
 
 replace_owned_file() (
@@ -1898,7 +1918,7 @@ preflight_target() {
   # trellis-release-capability: native-render-migration
   local home="$1" new_version="$2" new_payload="$3" row="$4" work="$5" number="$6"
   local target binding identity root root_identity trellis_identity checkout owner old_version old_payload old_owner new_owner hooks managed source reconcile carrier hook_authority
-  local renders='[]' render render_plan index=0 retired introduced retargeted='[]' leaf pruned='[]' migrate=false context='null'
+  local renders='[]' render render_lines render_plan index=0 retired introduced retargeted='[]' leaf leaf_lines pruned='[]' migrate=false context='null'
   local pi_hooks_required pi_hooks_owned checkout_root fleet recovery_roots recovery_root recovery_harnesses
 
   target="$(resolve_verified_adoption_target "$home" "$row")" || return "$?"
@@ -1969,9 +1989,11 @@ preflight_target() {
   retired="$(adoption_retired_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
   retargeted="$(adoption_retargeted_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
   introduced="$(adoption_introduced_leaves "$old_owner" "$new_payload" "$(printf '%s\n' "$binding" | jq -c '.harnesses')")" || return "$?"
+  leaf_lines="$(printf '%s\n' "$introduced" | jq -c '.link[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r leaf; do
+    [ -n "$leaf" ] || continue
     adoption_introduced_leaf_ready "$root" "$leaf" || return "$?"
-  done < <(printf '%s\n' "$introduced" | jq -c '.link[]')
+  done <<< "$leaf_lines"
   if printf '%s\n' "$binding" | jq -e '.harnesses | index("pi")' >/dev/null &&
     [ "$pi_hooks_required" = false ]; then
     pruned="$(adoption_pi_hooks_prune_plan "$root" "$retired" "$old_owner")" || return "$?"
@@ -1982,12 +2004,14 @@ preflight_target() {
       context="$(attachment_contextual_render_context "$home")" || return "$?"
     fi
   fi
+  render_lines="$(jq -c '(.renders // [])[]' "$old_owner")" || return "$TRELLIS_EX_STATE"
   while IFS= read -r render; do
+    [ -n "$render" ] || continue
     index=$((index + 1))
     render_plan="$(adoption_snapshot_render "$root" "$render" "$work" "$number" "$index" "$new_payload" "$migrate" "$context")" || return "$?"
     renders="$(trellis_jq -cn --argjson current "$renders" --argjson planned "$render_plan" '$current + [$planned]')" ||
       return "$TRELLIS_EX_STATE"
-  done < <(jq -c '(.renders // [])[]' "$old_owner")
+  done <<< "$render_lines"
   if [ "$migrate" = true ]; then
     owner_replacement "$old_owner" "$new_owner" "$new_version" "$new_payload" "$retired" "$pruned" "$renders" "$context" "$introduced" "$retargeted" || return "$?"
   else
@@ -2029,7 +2053,7 @@ preflight_target() {
 }
 
 plan_matches_old() {
-  local home="$1" plan="$2" row binding planned_identity planned_root_identity planned_trellis_identity planned_hook_authority target current_binding current_identity current_root_identity current_trellis_identity current_hook_authority owner old_owner old_payload old_version new_version new_payload verified_new_payload root planned_render status
+  local home="$1" plan="$2" row binding planned_identity planned_root_identity planned_trellis_identity planned_hook_authority target current_binding current_identity current_root_identity current_trellis_identity current_hook_authority owner old_owner old_payload old_version new_version new_payload verified_new_payload root planned_render render_lines status
   row="$(printf '%s\n' "$plan" | jq -c '.row')" || return "$TRELLIS_EX_STATE"
   binding="$(printf '%s\n' "$plan" | jq -cS '.binding')" || return "$TRELLIS_EX_STATE"
   planned_identity="$(printf '%s\n' "$plan" | jq -cS '.identity')" || return "$TRELLIS_EX_STATE"
@@ -2074,19 +2098,21 @@ plan_matches_old() {
     return "$TRELLIS_EX_CONFLICT"
   fi
   root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
+  render_lines="$(printf '%s\n' "$plan" | jq -c '.renders[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r planned_render; do
+    [ -n "$planned_render" ] || continue
     adoption_render_plan_matches_source "$root" "$planned_render"
     status=$?
     if [ "$status" -ne 0 ]; then
       release_err 'release adoption render source changed after plan validation'
       return "$status"
     fi
-  done < <(printf '%s\n' "$plan" | jq -c '.renders[]')
+  done <<< "$render_lines"
 }
 
 apply_plan() {
   local plan="$1" root root_identity trellis_identity owner old_owner new_owner new_version old_payload new_payload verified_new_payload
-  local planned_render drift_count leaf
+  local planned_render render_lines drift_count leaf leaf_lines
   root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
   root_identity="$(printf '%s\n' "$plan" | jq -r '.root_identity')" || return "$TRELLIS_EX_STATE"
   trellis_identity="$(printf '%s\n' "$plan" | jq -r '.trellis_identity')" || return "$TRELLIS_EX_STATE"
@@ -2099,36 +2125,48 @@ apply_plan() {
   verified_new_payload="$(payload_for "$new_version")" || return "$?"
   [ "$verified_new_payload" = "$new_payload" ] || return "$TRELLIS_EX_CONFLICT"
 
+  render_lines="$(printf '%s\n' "$plan" | jq -c '.renders[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r planned_render; do
+    [ -n "$planned_render" ] || continue
     drift_count="$(printf '%s\n' "$planned_render" | jq '.drift | length')" || return "$TRELLIS_EX_STATE"
     [ "$drift_count" -gt 0 ] || continue
     adoption_publish_render "$planned_render" forward || return "$?"
-  done < <(printf '%s\n' "$plan" | jq -c '.renders[]')
+  done <<< "$render_lines"
 
   runtime_anchor_matches_payload "$root/.trellis/runtime" "$old_payload" || return "$?"
   release_store_adopt_runtime_anchor_pinned \
     "$new_version" "$root" "$root_identity" "$trellis_identity" "$old_payload" >/dev/null || return "$?"
   replace_owned_file "$owner" "$old_owner" "$new_owner" || return "$?"
+  leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.retargeted // [])[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r leaf; do
+    [ -n "$leaf" ] || continue
     adoption_retarget_leaf "$root" "$leaf" forward || return "$?"
-  done < <(printf '%s\n' "$plan" | jq -c '(.retargeted // [])[]')
+  done <<< "$leaf_lines"
+  leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r leaf; do
+    [ -n "$leaf" ] || continue
     adoption_retire_leaf "$root" "$leaf" forward || return "$?"
-  done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
+  done <<< "$leaf_lines"
+  leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.introduced.parents // [])[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r leaf; do
+    [ -n "$leaf" ] || continue
     adoption_introduce_parent "$root" "$leaf" forward || return "$?"
-  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.parents // [])[]')
+  done <<< "$leaf_lines"
+  leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.introduced.link // [])[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r leaf; do
+    [ -n "$leaf" ] || continue
     adoption_introduce_leaf "$root" "$leaf" forward || return "$?"
-  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.link // [])[]')
+  done <<< "$leaf_lines"
+  leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.pruned // [])[]')" || return "$TRELLIS_EX_STATE"
   while IFS= read -r leaf; do
+    [ -n "$leaf" ] || continue
     adoption_prune_dir "$root" "$leaf" forward || return "$?"
-  done < <(printf '%s\n' "$plan" | jq -c '(.pruned // [])[]')
+  done <<< "$leaf_lines"
 }
 
 rollback_plan() {
   local plan="$1" root root_identity trellis_identity owner old_owner new_owner old_version old_payload new_payload
-  local planned_render destination source source_hash source_mode candidate candidate_hash candidate_mode leaf
+  local planned_render destination source source_hash source_mode candidate candidate_hash candidate_mode leaf leaf_lines render_queue_lines
   local rc=0 one index
   local -a render_lines=()
   root="$(printf '%s\n' "$plan" | jq -r '.row.root')" || return "$TRELLIS_EX_STATE"
@@ -2162,35 +2200,64 @@ rollback_plan() {
     rc="$(max_status "$rc" "$TRELLIS_EX_CONFLICT")"
   fi
 
-  while IFS= read -r leaf; do
-    adoption_introduce_leaf "$root" "$leaf" rollback
-    one=$?
-    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
-  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.link // []) | reverse[]')
-  while IFS= read -r leaf; do
-    adoption_introduce_parent "$root" "$leaf" rollback
-    one=$?
-    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
-  done < <(printf '%s\n' "$plan" | jq -c '(.introduced.parents // []) | reverse[]')
-  while IFS= read -r leaf; do
-    adoption_prune_dir "$root" "$leaf" rollback
-    one=$?
-    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
-  done < <(printf '%s\n' "$plan" | jq -c '(.pruned // []) | reverse[]')
-  while IFS= read -r leaf; do
-    adoption_retire_leaf "$root" "$leaf" rollback
-    one=$?
-    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
-  done < <(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')
-  while IFS= read -r leaf; do
-    adoption_retarget_leaf "$root" "$leaf" rollback
-    one=$?
-    [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
-  done < <(printf '%s\n' "$plan" | jq -c '(.retargeted // []) | reverse[]')
+  if leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.introduced.link // []) | reverse[]')"; then
+    while IFS= read -r leaf; do
+      [ -n "$leaf" ] || continue
+      adoption_introduce_leaf "$root" "$leaf" rollback
+      one=$?
+      [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+    done <<< "$leaf_lines"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+  fi
+  if leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.introduced.parents // []) | reverse[]')"; then
+    while IFS= read -r leaf; do
+      [ -n "$leaf" ] || continue
+      adoption_introduce_parent "$root" "$leaf" rollback
+      one=$?
+      [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+    done <<< "$leaf_lines"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+  fi
+  if leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.pruned // []) | reverse[]')"; then
+    while IFS= read -r leaf; do
+      [ -n "$leaf" ] || continue
+      adoption_prune_dir "$root" "$leaf" rollback
+      one=$?
+      [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+    done <<< "$leaf_lines"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+  fi
+  if leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.retired // [])[]')"; then
+    while IFS= read -r leaf; do
+      [ -n "$leaf" ] || continue
+      adoption_retire_leaf "$root" "$leaf" rollback
+      one=$?
+      [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+    done <<< "$leaf_lines"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+  fi
+  if leaf_lines="$(printf '%s\n' "$plan" | jq -c '(.retargeted // []) | reverse[]')"; then
+    while IFS= read -r leaf; do
+      [ -n "$leaf" ] || continue
+      adoption_retarget_leaf "$root" "$leaf" rollback
+      one=$?
+      [ "$one" -eq 0 ] || rc="$(max_status "$rc" "$one")"
+    done <<< "$leaf_lines"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+  fi
 
-  while IFS= read -r planned_render; do
-    [ -n "$planned_render" ] && render_lines+=("$planned_render")
-  done < <(printf '%s\n' "$plan" | jq -c '.renders[] | select((.drift | length) > 0)')
+  if render_queue_lines="$(printf '%s\n' "$plan" | jq -c '.renders[] | select((.drift | length) > 0)')"; then
+    while IFS= read -r planned_render; do
+      [ -n "$planned_render" ] && render_lines+=("$planned_render")
+    done <<< "$render_queue_lines"
+  else
+    rc="$(max_status "$rc" "$TRELLIS_EX_STATE")"
+  fi
   for ((index=${#render_lines[@]} - 1; index >= 0; index--)); do
     planned_render="${render_lines[$index]}"
     destination="$(printf '%s\n' "$planned_render" | jq -r '.destination')" || {
@@ -2614,6 +2681,7 @@ adopt_group() (
   local home="$1" version="$2" payload="$3" rows="$4" work="$5"
   local plans="$work/plans.jsonl" changed="$work/changed.jsonl" changed_hooks="$work/changed-hooks.jsonl"
   local row plan first checkout common rc=0 number=0 label planned_render repair render_path json_path repair_state dropped_key
+  local render_lines drift_lines dropped_lines
   local adopted_roots root
   local owner planned_hook_authority current_hook_authority
   local lock_held=false committed=false cleanup_started=false active_plan='' active_hook_plan=''
@@ -2723,11 +2791,13 @@ adopt_group() (
   # Verify each distinct one once in this shell so the memo answers the rest
   # (see adopt_registry). A failure here is ignored: the per-row call that
   # follows verifies again and reports it exactly as before.
-  local warm_release
+  local warm_release warm_releases
+  warm_releases="$(jq -r '.release // empty' "$rows" 2>/dev/null | sort -u)" || warm_releases=""
   while IFS= read -r warm_release; do
+    [ -n "$warm_release" ] || continue
     warm_release="$(local_registry_normalize_release "$warm_release" 2>/dev/null)" && [ -n "$warm_release" ] || continue
     release_store_locate "$warm_release" >/dev/null 2>&1 || :
-  done < <(jq -r '.release // empty' "$rows" 2>/dev/null | sort -u)
+  done <<< "$warm_releases"
   while IFS= read -r row; do
     [ -n "$row" ] || continue
     number=$((number + 1))
@@ -2807,18 +2877,23 @@ adopt_group() (
   [ "$rc" -eq 0 ] || return "$rc"
   while IFS= read -r plan; do
     [ -n "$plan" ] || continue
+    render_lines="$(printf '%s\n' "$plan" | jq -c '.renders[]')" || return "$TRELLIS_EX_STATE"
     while IFS= read -r planned_render; do
+      [ -n "$planned_render" ] || continue
       render_path="$(printf '%s\n' "$planned_render" | jq -r '.path')" || return "$TRELLIS_EX_STATE"
+      drift_lines="$(printf '%s\n' "$planned_render" | jq -c '.drift[]')" || return "$TRELLIS_EX_STATE"
       while IFS= read -r repair; do
+        [ -n "$repair" ] || continue
         json_path="$(printf '%s\n' "$repair" | jq -r '.path | @json')" || return "$TRELLIS_EX_STATE"
         repair_state="$(printf '%s\n' "$repair" | jq -r '.state')" || return "$TRELLIS_EX_STATE"
         printf 're-rendered owned JSON key: %s %s (%s)\n' "$render_path" "$json_path" "$repair_state"
-      done < <(printf '%s\n' "$planned_render" | jq -c '.drift[]')
+      done <<< "$drift_lines"
+      dropped_lines="$(printf '%s\n' "$planned_render" | jq -c '(.template_dropped // [])[]')" || return "$TRELLIS_EX_STATE"
       while IFS= read -r dropped_key; do
         [ -n "$dropped_key" ] || continue
         printf 'left in place (no longer in template): %s %s\n' "$render_path" "$dropped_key"
-      done < <(printf '%s\n' "$planned_render" | jq -c '(.template_dropped // [])[]')
-    done < <(printf '%s\n' "$plan" | jq -c '.renders[]')
+      done <<< "$dropped_lines"
+    done <<< "$render_lines"
     label="$(target_label "$(printf '%s\n' "$plan" | jq -c '.row')")" || return "$TRELLIS_EX_STATE"
     planned_hook_authority="$(printf '%s\n' "$plan" | jq -r '.hook_authority')" || return "$TRELLIS_EX_STATE"
     if [ "$planned_hook_authority" = operator-owned ]; then

@@ -53,3 +53,14 @@ exercise() {
   exercise owner acl-stage
   exercise hooks acl-child
 }
+
+@test "release.sh avoids process substitutions that corrupt macOS Bash 3.2 subshells" {
+  # macOS /bin/bash 3.2.57 corrupts xzone malloc (SIGTRAP / exit 133) after 254
+  # cumulative process substitutions inside a subshell function such as
+  # adopt_group() or recover_adoptions().
+  run grep -nE '<[[:space:]]*<\(' "$ROOT/scripts/release.sh"
+  [ "$status" -eq 1 ] || {
+    printf 'unexpected process substitution in scripts/release.sh:\n%s\n' "$output"
+    return 1
+  }
+}

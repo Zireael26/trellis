@@ -632,7 +632,7 @@ _dj_tmp_name_ok() {
 # (Kept for backwards compatibility; new code prefers dj_host_tmp_roots.)
 dj_host_tmp_root() {
   local base="" real="" home_real=""
-  if [ -n "${DJ_DARWIN_TMPDIR_OVERRIDE:-}" ]; then
+  if [ -n "${DJ_DARWIN_TMPDIR_OVERRIDE+x}" ]; then
     base="${DJ_DARWIN_TMPDIR_OVERRIDE}"
   else
     base="$(getconf DARWIN_USER_TEMP_DIR 2>/dev/null || echo '')"

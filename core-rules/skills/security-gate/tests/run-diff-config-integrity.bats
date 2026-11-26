@@ -124,6 +124,19 @@ case "$engine" in
         [ "${GH_REPO_MODE:-ok}" = ok ] || exit 1
         printf '{"owner":{"login":"%s"},"nameWithOwner":"%s/project"}\n' "${GH_OWNER-owner}" "${GH_OWNER-owner}"
         exit 0 ;;
+      "api "*)
+        endpoint="$2"
+        case "$endpoint" in
+          repos/*/collaborators/*/permission)
+            [ "${GH_COLLAB_PERM_MODE:-ok}" = ok ] || exit 1
+            printf '%s\n' "${GH_COLLAB_PERM:-none}"
+            exit 0 ;;
+          repos/*)
+            [ "${GH_OWNER_TYPE_MODE:-ok}" = ok ] || exit 1
+            printf '%s\n' "${GH_OWNER_TYPE:-User}"
+            exit 0 ;;
+        esac
+        exit 1 ;;
       "pr list")
         [ "${GH_MODE:-ok}" = ok ] || exit 1
         if [ -f "$SCANNER_FIXTURES/gh-list.json" ]; then cat "$SCANNER_FIXTURES/gh-list.json"; exit 0; fi
@@ -1465,4 +1478,57 @@ PY
   run_diff SEMGREP_MODE=clean
   assert_mergeable
   [[ "$output" != *"security config changed"* ]] || { echo "$output"; false; }
+}
+
+# --- Organization-owned repository gate-config approval ----------------------
+
+@test "org repo: merge mode accepts gate-config-approved from a repo admin" {
+  write_config '# org config tweak'
+  change_ts
+  commit_all
+  add_pr 42 OPEN "$(head_sha)" main orgadmin "gate-config-approved: $(head_sha)"
+  DIFF_ARGS=(--mode=merge)
+  run_diff SEMGREP_MODE=clean GH_OWNER=acme-org GH_OWNER_TYPE=Organization GH_COLLAB_PERM=admin
+  assert_mergeable
+  [[ "$output" == *"org repo admin, on PR #42"* ]] || { echo "$output"; false; }
+}
+
+@test "org repo: merge mode refuses gate-config-approved from a non-admin collaborator" {
+  write_config '# org config tweak'
+  change_ts
+  commit_all
+  add_pr 42 OPEN "$(head_sha)" main writer "gate-config-approved: $(head_sha)"
+  DIFF_ARGS=(--mode=merge)
+  run_diff SEMGREP_MODE=clean GH_OWNER=acme-org GH_OWNER_TYPE=Organization GH_COLLAB_PERM=write
+  assert_blocked_by "permission write, need admin"
+}
+
+@test "org repo: merge mode fails closed when owner.type REST lookup fails" {
+  write_config '# org config tweak'
+  change_ts
+  commit_all
+  add_pr 42 OPEN "$(head_sha)" main orgadmin "gate-config-approved: $(head_sha)"
+  DIFF_ARGS=(--mode=merge)
+  run_diff SEMGREP_MODE=clean GH_OWNER=acme-org GH_OWNER_TYPE_MODE=fail GH_COLLAB_PERM=admin
+  assert_blocked_by "gh could not read the repository owner type"
+}
+
+@test "org repo: merge mode fails closed when collaborator permission lookup fails" {
+  write_config '# org config tweak'
+  change_ts
+  commit_all
+  add_pr 42 OPEN "$(head_sha)" main orgadmin "gate-config-approved: $(head_sha)"
+  DIFF_ARGS=(--mode=merge)
+  run_diff SEMGREP_MODE=clean GH_OWNER=acme-org GH_OWNER_TYPE=Organization GH_COLLAB_PERM_MODE=fail
+  assert_blocked_by "permission lookup failed"
+}
+
+@test "user repo: merge mode still refuses collaborator admin who is not the repo owner" {
+  write_config '# user config tweak'
+  change_ts
+  commit_all
+  add_pr 42 OPEN "$(head_sha)" main collabadmin "gate-config-approved: $(head_sha)"
+  DIFF_ARGS=(--mode=merge)
+  run_diff SEMGREP_MODE=clean GH_OWNER=alice GH_OWNER_TYPE=User GH_COLLAB_PERM=admin
+  assert_blocked_by "has no repo-owner approval"
 }

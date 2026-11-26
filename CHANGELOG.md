@@ -6,6 +6,14 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.5.9] - 2026-11-26
+
+### Fixed
+
+- **Organization-owned repository security-gate config approval (`core-rules/skills/security-gate/scripts/run-diff.sh`):** Mirrors `process-gate/scripts/run-all.sh` by resolving `.owner.type` via REST `gh api repos/<nwo>` when `gh repo view` omits it (failing closed on lookup failure), and for `Organization`-owned repositories accepting `gate-config-approved: <head>` from a collaborator with `admin` permission on `repos/<nwo>/collaborators/<login>/permission` (preserving exact owner login matching for `User`-owned repos).
+- **macOS Bash 3.2 `SIGTRAP: 5` during multi-worktree release adoption (`scripts/release.sh`):** Removed all 24 `< <(...)` process substitutions inside `scripts/release.sh` (replaced with local variable here-strings and a trap-cleaned temp file for NUL-delimited `jq -j`) to prevent Apple `/bin/bash` 3.2.57 xzone-malloc heap corruption after 254 cumulative process substitutions inside subshell functions (`adopt_group`, `recover_adoptions`), with a regression guard in `scripts/tests/release-stale-stage.bats`.
+- **Test hermeticity (`scripts/lib/disk-janitor-host.sh`, `core-rules/skills/process-gate/tests/check-tests.bats`):** `dj_host_tmp_root` now checks `${DJ_DARWIN_TMPDIR_OVERRIDE+x}` so empty test overrides suppress scanning host `DARWIN_USER_TEMP_DIR`, and `check-tests.bats` `setup()` unsets 6 leaked `PROCESS_GATE_*` variables.
+
 ## [1.5.8] - 2026-11-24
 
 ### Fixed

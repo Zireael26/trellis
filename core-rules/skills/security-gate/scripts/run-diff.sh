@@ -575,13 +575,16 @@ def load(path):
 mode, path = sys.argv[1], sys.argv[2]
 data = load(path)
 if mode == "repo":
-    owner = (data.get("owner") or {}).get("login") if isinstance(data, dict) else None
+    owner_obj = data.get("owner") if isinstance(data, dict) else None
+    owner = owner_obj.get("login") if isinstance(owner_obj, dict) else None
+    otype = owner_obj.get("type") if isinstance(owner_obj, dict) else ""
     nwo = data.get("nameWithOwner") if isinstance(data, dict) else None
     if not isinstance(owner, str) or not owner or not isinstance(nwo, str) or not nwo:
         print("gh returned no repository owner")
         sys.exit(2)
-    print(owner)
-    print(nwo)
+    if not isinstance(otype, str):
+        otype = ""
+    print(f"{owner}\t{nwo}\t{otype}")
     sys.exit(0)
 
 head = sys.argv[3].lower()
@@ -604,6 +607,7 @@ if mode == "select":
     sys.exit(0)
 
 owner, number = sys.argv[4], sys.argv[5]
+otype = sys.argv[6] if len(sys.argv) > 6 else "User"
 if not isinstance(data, dict) or str(data.get("number")) != number:
     print(f"gh returned no PR #{number}")
     sys.exit(2)
@@ -614,6 +618,7 @@ if data.get("state") != "OPEN" or str(data.get("headRefOid") or "").lower() != h
 # head's length: 40 for SHA-1, 64 for SHA-256); the owner login is exact. A
 # trailing CR (CRLF bodies) is stripped from each line before matching.
 line_re = re.compile(r"[ \t]*gate-config-approved:[ \t]*([0-9a-f]{%d})[ \t]*" % len(head))
+login_re = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
 comments = data.get("comments") or []
 reviews = data.get("reviews") or []
 # gh returns at most a page of each; a full page may hide the owner's line.
@@ -623,6 +628,8 @@ if len(comments) >= 100 or len(reviews) >= 100:
 items = [("comment", c) for c in comments if isinstance(c, dict)]
 items += [("review", r) for r in reviews if isinstance(r, dict) and r.get("state") != "DISMISSED"]
 others = []
+org_candidates = []
+seen_org = set()
 for kind, item in items:
     login = str((item.get("author") or {}).get("login") or "unknown")
     for line in str(item.get("body") or "").split("\n"):
@@ -634,7 +641,15 @@ for kind, item in items:
         if sha == head and login == owner:
             print(f"\"{line.strip()}\" ({kind} by @{login}, the repo owner, on PR #{number})")
             sys.exit(0)
+        if sha == head and otype == "Organization" and login_re.fullmatch(login):
+            if login not in seen_org:
+                seen_org.add(login)
+                org_candidates.append((kind, login, line.strip()))
         others.append(f"{sha[:12]} by @{login}")
+if org_candidates:
+    for kind, login, stripped in org_candidates:
+        print(f"{kind}\t{login}\t{stripped}")
+    sys.exit(6)
 if others:
     print(f"PR #{number} has no repo-owner approval of head {head} (found {', '.join(others)})")
 else:
@@ -647,7 +662,7 @@ PY
 # none, several, or a closed one BLOCKS.
 CONFIG_BLOCK=""
 check_config_approval() {
-  local out owner nwo number
+  local out owner nwo otype number rc perm kind cand_login cand_line org_errors=""
   if [ -z "$GH_BIN" ]; then
     CONFIG_BLOCK="gh unavailable; the PR approval cannot be read"
     return
@@ -659,7 +674,20 @@ check_config_approval() {
   fi
   out="$("$PYTHON3_BIN" -I "$WORK/approval.py" repo "$WORK/gh-repo.json")" \
     || { CONFIG_BLOCK="$out"; return; }
-  owner="${out%%$'\n'*}"; nwo="${out#*$'\n'}"
+  IFS=$'\t' read -r owner nwo otype <<< "$out"
+  # gh repo view queries GraphQL RepositoryOwner, which omits .owner.type.
+  # Resolve via REST repos/<nwo> whenever omitted; fail closed on lookup error
+  # so Organization-owned repos are never silently downgraded to User.
+  if [ -z "$otype" ]; then
+    if ! otype="$(builtin cd "$PROJECT_DIR" && "$GH_BIN" api "repos/$nwo" --jq '.owner.type // empty' 2>/dev/null)" || [ -z "$otype" ]; then
+      CONFIG_BLOCK="gh could not read the repository owner type for $nwo"
+      return
+    fi
+  fi
+  case "$otype" in
+    User|Organization) ;;
+    *) CONFIG_BLOCK="unknown repository owner type '$otype' for $nwo"; return ;;
+  esac
   if ! (builtin cd "$PROJECT_DIR" && "$GH_BIN" pr list --repo "$nwo" --state open \
       --search "$RANGE_HEAD" --json number,state,headRefOid,baseRefName --limit 1000) \
       >"$WORK/gh-prs.json" 2>/dev/null; then
@@ -673,11 +701,28 @@ check_config_approval() {
     CONFIG_BLOCK="gh could not read PR #$number"
     return
   fi
-  if out="$("$PYTHON3_BIN" -I "$WORK/approval.py" approve "$WORK/gh-pr.json" "$RANGE_HEAD" "$owner" "$number")"; then
+  rc=0
+  out="$("$PYTHON3_BIN" -I "$WORK/approval.py" approve "$WORK/gh-pr.json" "$RANGE_HEAD" "$owner" "$number" "$otype")" || rc=$?
+  if [ "$rc" -eq 0 ]; then
     printf 'security-gate: approval: %s\n' "$out"
-  else
-    CONFIG_BLOCK="${out:-the PR approval could not be parsed}"
+    return
   fi
+  if [ "$rc" -eq 6 ] && [ "$otype" = "Organization" ]; then
+    while IFS=$'\t' read -r kind cand_login cand_line; do
+      [ -n "$cand_login" ] || continue
+      if perm="$(builtin cd "$PROJECT_DIR" && "$GH_BIN" api "repos/$nwo/collaborators/$cand_login/permission" --jq '.permission // empty' 2>/dev/null)" && [ "$perm" = "admin" ]; then
+        printf 'security-gate: approval: "%s" (%s by @%s, org repo admin, on PR #%s)\n' "$cand_line" "$kind" "$cand_login" "$number"
+        return
+      elif [ -n "${perm:-}" ]; then
+        org_errors="${org_errors:+$org_errors, }@$cand_login (permission $perm, need admin)"
+      else
+        org_errors="${org_errors:+$org_errors, }@$cand_login (permission lookup failed)"
+      fi
+    done <<< "$out"
+    CONFIG_BLOCK="PR #$number has no org-admin approval of head $RANGE_HEAD (checked ${org_errors:-none})"
+    return
+  fi
+  CONFIG_BLOCK="${out:-the PR approval could not be parsed}"
 }
 
 if [ -n "$CONFIG_CHANGED" ]; then
