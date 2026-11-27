@@ -239,3 +239,28 @@ SH
   [[ "$output" == *"baseline completeness: incomplete (semgrep failed)"* ]] || { echo "$output"; false; }
   [ ! -e "$HOSTILE_MARK" ] || { echo "red-team ran the project-chosen interpreter"; false; }
 }
+
+@test "an opt-in shellcheck baseline record is complete only when shellcheck succeeded" {
+  local ok='"semgrep":{"status":"ok","exit":0},"osv-scanner":{"status":"ok","exit":0},"gitleaks":{"status":"ok","exit":0}'
+
+  seed '{"profile":"web-next","complete":true,"engines":{'"$ok"',"shellcheck":{"status":"ok","exit":0}},"findings":[],"historical_findings":[]}'
+  docs_change
+  run_diff
+  [ "$status" -eq 0 ] || { echo "rc=$status; $output"; false; }
+  [[ "$output" == *"Baseline:          complete — "* ]] || { echo "$output"; false; }
+
+  # A failed or bogus-exit shellcheck record still blocks diff as incomplete.
+  seed '{"profile":"web-next","complete":true,"engines":{'"$ok"',"shellcheck":{"status":"failed","exit":2}},"findings":[],"historical_findings":[]}'
+  printf '# note 2\n' >> "$PROJECT/README.md"
+  git -C "$PROJECT" add README.md && git -C "$PROJECT" commit -qm "docs 2"
+  run_diff
+  [ "$status" -eq 1 ] || { echo "rc=$status; $output"; false; }
+  [[ "$output" == *"❌ incomplete (shellcheck failed)"* ]] || { echo "$output"; false; }
+
+  seed '{"profile":"web-next","complete":true,"engines":{'"$ok"',"shellcheck":{"status":"not_applicable","exit":3}},"findings":[],"historical_findings":[]}'
+  printf '# note 3\n' >> "$PROJECT/README.md"
+  git -C "$PROJECT" add README.md && git -C "$PROJECT" commit -qm "docs 3"
+  run_diff
+  [ "$status" -eq 1 ] || { echo "rc=$status; $output"; false; }
+  [[ "$output" == *"❌ incomplete (shellcheck not_applicable with exit 3)"* ]] || { echo "$output"; false; }
+}

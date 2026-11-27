@@ -6,6 +6,14 @@ The format follows [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [1.5.10] - 2026-11-26
+
+### Fixed
+
+- **Opt-in ShellCheck baseline completeness validation (`core-rules/skills/security-gate/scripts/lib/baseline_state.py`):** Recognizes `shellcheck` as an optional opt-in baseline engine so baselines produced with `SECURITY_GATE_SHELLCHECK=1` classify as `complete` when `shellcheck` succeeds (`status=ok, exit=0`) while still failing closed on failed, invalid-output, or bogus-exit `shellcheck` records.
+- **Malformed `PartialParsing` span container rejection (`core-rules/skills/security-gate/scripts/{run-diff.sh,lib/semgrep.sh}`):** Structured list `type` diagnostics (`["PartialParsing", ...]`) now fail closed whenever the span container is malformed instead of falling back to a top-level shell `path`.
+- **Detached worktree rows during multi-worktree release adoption (`scripts/release.sh`):** `adopt_registry` now explicitly reports and skips available worktree rows that have no `attachment_id` and whose owner record and `.trellis/runtime` anchor are positively proven absent (`adoption_path_proven_absent`), while continuing to fail closed on orphan owners, lingering runtime anchors, corrupt attached rows, or zero-adoptable selections (`scripts/tests/release-store-part4.bats`).
+
 ## [1.5.9] - 2026-11-26
 
 ### Fixed

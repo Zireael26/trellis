@@ -297,6 +297,57 @@ for (const toolName of ['get_subagent_result', 'steer_subagent']) {
   });
 }
 
+function intercomSource(f, source = 'npm:pi-intercom') {
+  const root = resolve(f.base, 'node_modules/pi-intercom');
+  const path = resolve(root, 'index.ts');
+  mkdirSync(root, { recursive: true });
+  writeFileSync(resolve(root, 'package.json'), '{"name":"pi-intercom"}');
+  writeFileSync(path, 'fixture extension');
+  return { path, source, origin: 'package', scope: 'user' };
+}
+
+test('verified Intercom permits discovery but not messaging or pane launch', async t => {
+  const f = await deliveredFixture(t);
+  for (const source of ['npm:pi-intercom', 'npm:pi-intercom@0.1.0']) {
+    const sourceInfo = intercomSource(f, source);
+    f.pi.getAllTools = () => [{ name: 'intercom', sourceInfo }];
+    for (const action of ['list', 'list-cwd', 'pending', 'status']) {
+      const event = f.call('intercom', { action, ...(action === 'list-cwd' ? { cwd: '.' } : {}) });
+      assert.equal(await f.fire('tool_call', event), undefined, action);
+      await f.result(event);
+    }
+  }
+  for (const action of ['send', 'ask', 'handover', 'reply', 'cancel', 'unknown', undefined, ['list-cwd']]) {
+    const result = await blocked(f, 'intercom', { action, cwd: '.', openProjectPaneIfMissing: true });
+    assert.equal(result?.block, true, String(action));
+    assert.match(result.reason, /unmediated/);
+  }
+  assert.equal(f.calls.length, 0);
+});
+
+test('Intercom discovery denies missing, ambiguous, or foreign provenance', async t => {
+  const f = await deliveredFixture(t), sourceInfo = intercomSource(f);
+  const verified = { name: 'intercom', sourceInfo };
+  const impostor = { name: 'intercom', sourceInfo: { ...sourceInfo, source: 'local', origin: 'top-level' } };
+  for (const tools of [[], [impostor], [verified, impostor], ...[
+    { source: 'npm:pi-intercom-impostor' },
+    { source: 'npm:pi-intercom@npm:other-extension' },
+    { path: `${sourceInfo.path}.missing` },
+  ].map(overrides => [{ ...verified, sourceInfo: { ...sourceInfo, ...overrides } }])]) {
+    f.pi.getAllTools = () => tools;
+    assert.equal((await blocked(f, 'intercom', { action: 'list-cwd' })).block, true);
+  }
+  const foreign = resolve(f.base, 'foreign');
+  mkdirSync(foreign);
+  writeFileSync(resolve(foreign, 'package.json'), '{"name":"other-extension"}');
+  writeFileSync(resolve(foreign, 'index.ts'), 'foreign extension');
+  const alias = resolve(f.base, 'linked-intercom.ts');
+  symlinkSync(resolve(foreign, 'index.ts'), alias);
+  f.pi.getAllTools = () => [{ ...verified, sourceInfo: { ...sourceInfo, path: alias } }];
+  assert.equal((await blocked(f, 'intercom', { action: 'list-cwd' })).block, true);
+  assert.equal(f.calls.length, 0);
+});
+
 for (const toolName of ['shell_mutator', 'delete', 'list_agents']) {
   test(`subagent package provenance does not authorize unclassified ${toolName}`, async t => {
     const f = await deliveredFixture(t), sourceInfo = subagentControlSource(f);

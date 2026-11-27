@@ -308,3 +308,31 @@ SH
   [[ "$output" == *"JSON errors non-empty (PartialParsing)"* ]] || { echo "$output"; false; }
   [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "$output"; false; }
 }
+
+@test "diff mode refuses malformed PartialParsing span containers even with a shell top-level path" {
+  cat > "$BIN/shellcheck" <<'SH'
+#!/usr/bin/env bash
+printf '[]'
+exit 0
+SH
+  chmod +x "$BIN/shellcheck"
+  commit_shell_change
+
+  local payload
+  for payload in \
+    '{"results":[],"errors":[{"type":["PartialParsing",null],"path":"changed.sh"}],"paths":{"scanned":["changed.sh"]}}' \
+    '{"results":[],"errors":[{"type":["PartialParsing","bad"],"path":"changed.sh"}],"paths":{"scanned":["changed.sh"]}}' \
+    '{"results":[],"errors":[{"type":["PartialParsing",[{"path":"changed.sh"}],"extra"],"path":"changed.sh"}],"paths":{"scanned":["changed.sh"]}}' \
+    '{"results":[],"errors":[{"type":["Syntax error",[]],"path":"changed.sh"}],"paths":{"scanned":["changed.sh"]}}'; do
+    cat > "$BIN/semgrep" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "--version" ]; then echo "1.157.0"; exit 0; fi
+printf '%s\n' '$payload'
+SH
+    chmod +x "$BIN/semgrep"
+    run_diff SECURITY_GATE_STACK_PROFILE=web-next SECURITY_GATE_SHELLCHECK=1
+    [ "$status" -eq 1 ] || { echo "payload=$payload rc=$status; $output"; false; }
+    [[ "$output" != *"shell parse errors not counted"* ]] || { echo "payload=$payload; $output"; false; }
+    [[ "$output" == *"Overall: BLOCKED"* ]] || { echo "payload=$payload; $output"; false; }
+  done
+}

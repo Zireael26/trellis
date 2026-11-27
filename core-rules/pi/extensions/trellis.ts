@@ -320,10 +320,13 @@ function nativeSkillReason(pi: ExtensionAPI, path: string): string | undefined {
   return basename(path) === "SKILL.md" || (physical && basename(physical) === "SKILL.md") || declared ? skillManifestReason(path) : undefined;
 }
 
-function isSubagentControl(pi: ExtensionAPI, name: string): boolean {
-  if (!["get_subagent_result", "steer_subagent"].includes(name)) return false;
-  const source = pi.getAllTools().find(tool => tool.name === name)?.sourceInfo;
-  if (source?.origin !== "package" || !/^npm:@tintinweb\/pi-subagents(?:@[^/\s:]+)?$/.test(source.source)) return false;
+function isNpmPackageTool(pi: ExtensionAPI, name: string, packageName: string): boolean {
+  const tools = pi.getAllTools().filter(tool => tool.name === name);
+  if (tools.length !== 1) return false;
+  const source = tools[0].sourceInfo;
+  const specifier = `npm:${packageName}`;
+  if (source?.origin !== "package" || (source.source !== specifier
+    && !(source.source.startsWith(`${specifier}@`) && /^[^/\s:]+$/.test(source.source.slice(specifier.length + 1))))) return false;
   try {
     const entry = realpathSync.native(source.path);
     if (!statSync(entry).isFile()) return false;
@@ -332,7 +335,7 @@ function isSubagentControl(pi: ExtensionAPI, name: string): boolean {
       const manifest = resolve(directory, "package.json");
       // The nearest package owns the entry; never inherit an enclosing identity.
       if (lstatSync(manifest, { throwIfNoEntry: false })) {
-        return JSON.parse(readFileSync(manifest, "utf8")).name === "@tintinweb/pi-subagents";
+        return JSON.parse(readFileSync(manifest, "utf8")).name === packageName;
       }
       const parent = resolve(directory, "..");
       if (parent === directory) return false;
@@ -401,7 +404,15 @@ function localPreAction(pi: ExtensionAPI, action: NormalizedAction["action"], cw
   if (action.family === "mcp" || action.family === "local_tool" || action.family === "unknown") {
     // Child guard loading is a launcher/roster contract, not parent argument parsing.
     if (action.tool_name === "Agent" || action.tool_name === "SubagentWorkflow") return unhandledDecision("pre_action", action.family);
-    if (action.family === "local_tool" && isSubagentControl(pi, action.tool_name)) return unhandledDecision("pre_action", action.family);
+    if (action.family === "local_tool") {
+      const { tool_name, input } = action;
+      if ((tool_name === "get_subagent_result" || tool_name === "steer_subagent")
+        && isNpmPackageTool(pi, tool_name, "@tintinweb/pi-subagents")) return unhandledDecision("pre_action", action.family);
+      // Intercom discovery does not send messages or open Herdr panes. Do not
+      // exempt the entire tool: other actions can delegate work to another Pi.
+      if (tool_name === "intercom" && ["list", "list-cwd", "pending", "status"].some(name => input.action === name)
+        && isNpmPackageTool(pi, tool_name, "pi-intercom")) return unhandledDecision("pre_action", action.family);
+    }
     const builtin = ["grep", "find", "ls"].includes(action.tool_name)
       && pi.getAllTools().some(tool => tool.name === action.tool_name && tool.sourceInfo.source === "builtin");
     if (!builtin) return deny(`Trellis refuses unmediated ${action.family} tool '${action.tool_name}': shell/mutation protection is unavailable`);

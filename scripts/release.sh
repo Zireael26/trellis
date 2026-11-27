@@ -2950,9 +2950,32 @@ select_rows() {
     ".entries[]? | select(($predicate) | not)" "$inventory" > "$rejected" || return "$TRELLIS_EX_STATE"
 }
 
+# Returns 0 only when the final path segment is positively proven absent under
+# BASE (a real, traversable directory), never mistaking a symlinked or
+# unreadable intermediate directory for absence.
+adoption_path_proven_absent() {
+  local base="$1" current="$1" segment
+  shift
+  [ "$#" -ge 1 ] || return 1
+  [ -d "$base" ] && [ ! -L "$base" ] && [ -x "$base" ] || return 1
+  while [ "$#" -gt 1 ]; do
+    segment="$1"
+    shift
+    case "$segment" in ""|.|..|*/*) return 1 ;; esac
+    current="$current/$segment"
+    if [ ! -e "$current" ] && [ ! -L "$current" ]; then
+      return 0
+    fi
+    [ -d "$current" ] && [ ! -L "$current" ] && [ -x "$current" ] || return 1
+  done
+  case "$1" in ""|.|..|*/*) return 1 ;; esac
+  current="$current/$1"
+  [ ! -e "$current" ] && [ ! -L "$current" ]
+}
+
 adopt_registry() (
-  local version="$1" selector="$2" fleet="$3" project="$4" home release payload inventory selected rejected groups group_rows work row label kind availability status excluded rc=0 one
-  local row_root row_checkout
+  local version="$1" selector="$2" fleet="$3" project="$4" home release payload inventory selected rejected eligible groups group_rows work row label kind availability status excluded rc=0 one
+  local row_root row_checkout row_worktree row_attachment_is_null row_owner
   home="$(release_home)" || return "$?"
   export TRELLIS_HOME="$home"
   version="$(release_store_normalize_version "$version")" || return "$?"
@@ -2966,8 +2989,9 @@ adopt_registry() (
   inventory="$(mktemp "${TMPDIR:-/tmp}/trellis.release.inventory.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
   selected="$(mktemp "${TMPDIR:-/tmp}/trellis.release.rows.XXXXXX")" || { rm -f "$inventory"; return "$TRELLIS_EX_UNAVAILABLE"; }
   rejected="$(mktemp "${TMPDIR:-/tmp}/trellis.release.unselected.XXXXXX")" || { rm -f "$inventory" "$selected"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  groups="$(mktemp "${TMPDIR:-/tmp}/trellis.release.groups.XXXXXX")" || { rm -f "$inventory" "$selected" "$rejected"; return "$TRELLIS_EX_UNAVAILABLE"; }
-  trap 'rm -f "$inventory" "$selected" "$rejected" "$groups"' EXIT INT TERM
+  eligible="$(mktemp "${TMPDIR:-/tmp}/trellis.release.eligible.XXXXXX")" || { rm -f "$inventory" "$selected" "$rejected"; return "$TRELLIS_EX_UNAVAILABLE"; }
+  groups="$(mktemp "${TMPDIR:-/tmp}/trellis.release.groups.XXXXXX")" || { rm -f "$inventory" "$selected" "$rejected" "$eligible"; return "$TRELLIS_EX_UNAVAILABLE"; }
+  trap 'rm -f "$inventory" "$selected" "$rejected" "$eligible" "$groups"' EXIT INT TERM
 
   if [ "$selector" = project ] && [ -z "$fleet" ]; then
     local_registry_list_json "$home" > "$inventory" || return "$?"
@@ -3042,13 +3066,37 @@ adopt_registry() (
       row_root="$(printf '%s\n' "$row" | jq -r '.root // "(no recorded root)"')" || return "$TRELLIS_EX_STATE"
       row_checkout="$(printf '%s\n' "$row" | jq -r '.checkout_id // "(no checkout)"')" || return "$TRELLIS_EX_STATE"
       release_err "unavailable adoption target remains explicit: $label (root: $row_root, checkout: $row_checkout)"
+    else
+      # Detaching one worktree of a multi-worktree project clears only that
+      # worktree's `attachment_id` while leaving project `.status == "active"`
+      # for its attached siblings. Skip a worktree row with no `attachment_id`
+      # only when both its owner record and `.trellis/runtime` anchor are
+      # positively proven absent; any orphan owner, lingering runtime anchor,
+      # unreadable/symlinked state directory, or attached row with a missing
+      # owner stays in `$eligible` and fails closed in preflight.
+      row_attachment_is_null="$(printf '%s\n' "$row" | jq -r '.attachment_id == null')" || return "$TRELLIS_EX_STATE"
+      if [ "$row_attachment_is_null" = true ]; then
+        row_root="$(printf '%s\n' "$row" | jq -r '.root // empty')" || return "$TRELLIS_EX_STATE"
+        row_checkout="$(printf '%s\n' "$row" | jq -r '.checkout_id // empty')" || return "$TRELLIS_EX_STATE"
+        row_worktree="$(printf '%s\n' "$row" | jq -r '.worktree_id // empty')" || return "$TRELLIS_EX_STATE"
+        if [ -n "$row_root" ] && [ -n "$row_checkout" ] && [ -n "$row_worktree" ]; then
+          row_owner="$(_attachment_ownership_path "$home" "$row_checkout" "$row_worktree")" || return "$TRELLIS_EX_STATE"
+          if [ "$row_owner" = "$home/state/attachments/$row_checkout/$row_worktree.json" ] &&
+            adoption_path_proven_absent "$home" state attachments "$row_checkout" "$row_worktree.json" &&
+            adoption_path_proven_absent "$row_root" .trellis runtime; then
+            release_err "skipping detached worktree row: $label (root: $row_root, checkout: $row_checkout)"
+            continue
+          fi
+        fi
+      fi
+      printf '%s\n' "$row" >> "$eligible" || return "$TRELLIS_EX_UNAVAILABLE"
     fi
   done < "$selected"
 
   # Every exit path after the row loop preserves `rc`. It carries registry
-  # identity errors; unavailable rows are report-only whenever an eligible
-  # worktree exists. Empty scoped selections still return class 5 below.
-  jq -r 'select(.kind == "worktree" and .availability == "available" and .status == "active" and (.excluded // false | not)) | [.fleet,.project_id,.checkout_id] | @tsv' "$selected" | sort -u > "$groups" ||
+  # identity errors; unavailable and detached rows are report-only whenever an
+  # eligible worktree exists. Empty scoped selections still return class 5 below.
+  jq -r '[.fleet,.project_id,.checkout_id] | @tsv' "$eligible" | sort -u > "$groups" ||
     return "$(max_status "$rc" "$TRELLIS_EX_STATE")"
   if [ ! -s "$groups" ]; then
     # NOTHING ADOPTABLE. This is the same condition as an empty selection — the
@@ -3067,10 +3115,8 @@ adopt_registry() (
     group_rows="$(mktemp "${TMPDIR:-/tmp}/trellis.release.group.XXXXXX")" || return "$TRELLIS_EX_UNAVAILABLE"
     work="$(mktemp -d "${TMPDIR:-/tmp}/trellis.release.adopt.XXXXXX")" || { rm -f "$group_rows"; return "$TRELLIS_EX_UNAVAILABLE"; }
     jq -c --arg fleet "$group_fleet" --arg project "$group_project" --arg checkout "$group_checkout" '
-      select(.fleet == $fleet and .project_id == $project and .checkout_id == $checkout
-             and .kind == "worktree" and .availability == "available" and .status == "active"
-             and (.excluded // false | not))
-    ' "$selected" > "$group_rows" || { rm -f "$group_rows"; rm -rf "$work"; return "$(max_status "$rc" "$TRELLIS_EX_STATE")"; }
+      select(.fleet == $fleet and .project_id == $project and .checkout_id == $checkout)
+    ' "$eligible" > "$group_rows" || { rm -f "$group_rows"; rm -rf "$work"; return "$(max_status "$rc" "$TRELLIS_EX_STATE")"; }
     adopt_group "$home" "$version" "$payload" "$group_rows" "$work"
     one=$?
     rm -f "$group_rows"

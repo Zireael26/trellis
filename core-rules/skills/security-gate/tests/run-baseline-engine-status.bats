@@ -783,6 +783,19 @@ SH
   [ "$output" = $'gitleaks=ok:0\nosv-scanner=ok:0\nsemgrep=ok:0\nshellcheck=ok:0\ncomplete=true' ] || { echo "$output"; false; }
   run findings "$BASELINE"
   [ "$output" = "shellcheck/SC2086@tools/local-gate.sh" ] || { echo "$output"; false; }
+  # Producer/consumer agreement: baseline_state.py must classify this baseline complete.
+  run python3 -I "$SCRIPT_ROOT/scripts/lib/baseline_state.py" "$BASELINE" "$(basename "$BASELINE")"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == $'complete\tcomplete — '* ]] || { echo "$output"; false; }
+
+  # Malformed PartialParsing span containers fail closed even with a shell top-level path.
+  run env PATH="$BIN:$PATH" SECURITY_GATE_SHELLCHECK=1 \
+    SEMGREP_STDOUT='{"results":[],"errors":[{"type":["PartialParsing","bad"],"path":"tools/local-gate.sh"}]}' \
+    bash "$SCRIPT_ROOT/scripts/run-baseline.sh" "$PROJECT" --no-llm
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" != *"shell parse errors not counted"* ]] || { echo "$output"; false; }
+  run engines "$BASELINE"
+  [[ "$output" == *"semgrep=failed:2"*"complete=false"* ]] || { echo "$output"; false; }
 
   # Timeout on the same .sh file still fails closed.
   run env PATH="$BIN:$PATH" SECURITY_GATE_SHELLCHECK=1 \

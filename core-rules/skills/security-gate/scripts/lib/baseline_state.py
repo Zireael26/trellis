@@ -16,7 +16,8 @@ python3 -I: the baseline is repository data.
 
 A baseline written by run-baseline.sh since 1.4.2 records `profile`,
 `complete` and `engines`. It is complete only when every one of these holds:
-the engine set is exactly the one its profile runs; each engine's status and
+the engine set contains every engine required by its profile plus only
+recognized opt-in engines (shellcheck); each recorded engine's status and
 exit agree with how run-baseline.sh writes them; not_applicable appears only
 where a wrapper can prove it (osv-scanner, exit 3); and `complete` is true.
 A baseline with neither `complete` nor `engines` predates 1.4.2: its
@@ -26,6 +27,7 @@ import json
 import sys
 
 ENGINES = ("semgrep", "osv-scanner", "gitleaks")
+OPTIONAL_ENGINES = ("shellcheck",)
 PROFILE_ENGINES = {"web-rag-llm": ("garak",)}
 NOT_APPLICABLE_EXIT = {"osv-scanner": 3}
 ROW_COMPLETE = "complete — "
@@ -45,11 +47,12 @@ def problems(doc):
     if not isinstance(engines, dict) or not engines:
         return found + ["no engine record"]
     required = set(ENGINES) | set(PROFILE_ENGINES.get(profile, ()))
+    allowed = required | set(OPTIONAL_ENGINES)
     for name in sorted(required - set(engines)):
         found.append(f"{name} missing")
-    for name in sorted(set(engines) - required):
+    for name in sorted(set(engines) - allowed):
         found.append(f"{name} not run by profile {profile or '(none)'}")
-    for name in sorted(set(engines) & required):
+    for name in sorted(set(engines) & allowed):
         engine = engines[name]
         status = engine.get("status") if isinstance(engine, dict) else None
         code = engine.get("exit") if isinstance(engine, dict) else None

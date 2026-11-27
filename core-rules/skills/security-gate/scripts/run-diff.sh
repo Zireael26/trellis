@@ -1105,27 +1105,28 @@ shell_parse_errors = 0
 bundle_parse_paths = set()
 types = set()
 def error_in_shell_scope(err_path, raw_kind):
-    spans = None
-    if (isinstance(raw_kind, list) and len(raw_kind) == 2
-            and raw_kind[0] == "PartialParsing" and isinstance(raw_kind[1], list)):
-        spans = raw_kind[1]
-    if isinstance(err_path, str) and err_path:
-        if os.path.abspath(os.path.join(root, err_path)) not in shell_scope:
+    if not shell_scope:
+        return False
+    if isinstance(raw_kind, list):
+        if (len(raw_kind) != 2 or raw_kind[0] != "PartialParsing"
+                or not isinstance(raw_kind[1], list)):
             return False
+        spans = raw_kind[1]
         if spans:
+            if isinstance(err_path, str) and err_path:
+                if os.path.abspath(os.path.join(root, err_path)) not in shell_scope:
+                    return False
+            elif err_path is not None and err_path != "":
+                return False
             return all(
                 isinstance(span, dict) and isinstance(span.get("path"), str) and span["path"]
                 and os.path.abspath(os.path.join(root, span["path"])) in shell_scope
                 for span in spans
             )
-        return True
-    if spans:
-        return all(
-            isinstance(span, dict) and isinstance(span.get("path"), str) and span["path"]
-            and os.path.abspath(os.path.join(root, span["path"])) in shell_scope
-            for span in spans
-        )
-    return False
+        return (isinstance(err_path, str) and bool(err_path)
+                and os.path.abspath(os.path.join(root, err_path)) in shell_scope)
+    return (isinstance(err_path, str) and bool(err_path)
+            and os.path.abspath(os.path.join(root, err_path)) in shell_scope)
 
 for error in data.get("errors", []):
     raw_kind = error.get("type") if isinstance(error, dict) else None

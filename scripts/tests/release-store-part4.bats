@@ -372,6 +372,122 @@ setup() {
   [ ! -e "$empty/.trellis/runtime" ]
 }
 
+@test "multi-worktree adoption skips a detached sibling worktree and adopts attached siblings" {
+  local main linked main_owner
+  install_adoption_releases
+  main="$SANDBOX/multi-detached-main"
+  linked="$SANDBOX/multi-detached-linked"
+  make_portable_project "$main" multi-detached
+  git -C "$main" worktree add -q -b linked "$linked"
+  attach_portable_project "$main" personal "$ADOPTION_VERSION_A"
+  attach_portable_project "$linked" personal "$ADOPTION_VERSION_A"
+
+  # Detaching one worktree clears only that worktree's attachment_id while
+  # keeping the project active for the still-attached sibling; the directory
+  # stays on disk and remains an available registry row.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
+    detach --home "$TRELLIS_HOME_FIX" "$linked"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ -d "$linked" ]
+  [ ! -e "$linked/.trellis/runtime" ] && [ ! -L "$linked/.trellis/runtime" ]
+  jq -e --arg main "$main" --arg linked "$linked" '
+    .projects["personal/multi-detached"] as $p
+    | $p.status == "active"
+    and ([ $p.checkouts[].worktrees[] | select(.root == $main and (.attachment_id | type == "string")) ] | length == 1)
+    and ([ $p.checkouts[].worktrees[] | select(.root == $linked and (has("attachment_id") | not)) ] | length == 1)
+  ' "$TRELLIS_HOME_FIX/registry.json" >/dev/null
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --project multi-detached
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qF "skipping detached worktree row: personal/multi-detached (root: $linked," <<<"$output"
+  grep -qF 'adopted: personal/multi-detached' <<<"$output"
+  main_owner="$(owner_for_root "$main")"
+  [ "$(readlink "$main/.trellis/runtime")" = "$ADOPTION_PAYLOAD_B" ]
+  [ "$(jq -r '.release' "$main_owner")" = "$ADOPTION_VERSION_B" ]
+  [ "$(registry_release_for_root "$main")" = "$ADOPTION_VERSION_B" ]
+  [ ! -e "$linked/.trellis/runtime" ] && [ ! -L "$linked/.trellis/runtime" ]
+  ! owner_for_root "$linked"
+
+  # Bulk `--all` follows the same contract on the active multi-worktree project.
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_A" --all
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qF "skipping detached worktree row: personal/multi-detached (root: $linked," <<<"$output"
+  grep -qF 'adopted: personal/multi-detached' <<<"$output"
+  [ "$(readlink "$main/.trellis/runtime")" = "$ADOPTION_PAYLOAD_A" ]
+  [ "$(registry_release_for_root "$main")" = "$ADOPTION_VERSION_A" ]
+  [ ! -e "$linked/.trellis/runtime" ] && [ ! -L "$linked/.trellis/runtime" ]
+}
+
+@test "adoption still fails closed on corrupt detached-looking rows and zero-adoptable projects" {
+  local main linked registry linked_owner linked_backup
+  install_adoption_releases
+  main="$SANDBOX/corrupt-detached-main"
+  linked="$SANDBOX/corrupt-detached-linked"
+  make_portable_project "$main" corrupt-detached
+  git -C "$main" worktree add -q -b linked "$linked"
+  attach_portable_project "$main" personal "$ADOPTION_VERSION_A"
+  attach_portable_project "$linked" personal "$ADOPTION_VERSION_A"
+  registry="$TRELLIS_HOME_FIX/registry.json"
+  cp "$registry" "$SANDBOX/registry.before.json"
+  linked_owner="$(owner_for_root "$linked")"
+  linked_backup="$SANDBOX/linked.owner.json"
+  cp "$linked_owner" "$linked_backup"
+
+  # 1) Orphan owner: registry attachment_id stripped while owner record remains.
+  jq --arg linked "$linked" '
+    .projects["personal/corrupt-detached"].checkouts |= with_entries(
+      .value.worktrees |= with_entries(
+        if .value.root == $linked then .value |= del(.attachment_id) else . end))
+  ' "$SANDBOX/registry.before.json" > "$registry.next"
+  mv -f "$registry.next" "$registry"
+  chmod 600 "$registry"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --project corrupt-detached
+  [ "$status" -eq 4 ] || { echo "$output"; false; }
+  grep -qF 'attachment ownership/runtime preflight failed for personal/corrupt-detached' <<<"$output"
+  [ "$(grep -cF 'skipping detached worktree row:' <<<"$output")" -eq 0 ]
+  [ "$(grep -cF 'adopted:' <<<"$output")" -eq 0 ]
+  [ "$(readlink "$main/.trellis/runtime")" = "$ADOPTION_PAYLOAD_A" ]
+
+  # 2) Missing owner on an attached row: attachment_id present, owner deleted.
+  cp "$SANDBOX/registry.before.json" "$registry"
+  chmod 600 "$registry"
+  rm -f "$linked_owner"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --project corrupt-detached
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  grep -qF 'attachment ownership/runtime preflight failed for personal/corrupt-detached' <<<"$output"
+  [ "$(grep -cF 'skipping detached worktree row:' <<<"$output")" -eq 0 ]
+  [ "$(grep -cF 'adopted:' <<<"$output")" -eq 0 ]
+  [ "$(readlink "$main/.trellis/runtime")" = "$ADOPTION_PAYLOAD_A" ]
+
+  # 3) Zero adoptable worktrees remaining: both cleanly detached, even if
+  # project status were still recorded active, must exit 5 and adopt nothing.
+  cp "$linked_backup" "$linked_owner"
+  chmod 600 "$linked_owner"
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
+    detach --home "$TRELLIS_HOME_FIX" "$linked"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$ATTACH" \
+    detach --home "$TRELLIS_HOME_FIX" "$main"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  jq '.projects["personal/corrupt-detached"].status = "active"' \
+    "$registry" > "$registry.next"
+  mv -f "$registry.next" "$registry"
+  chmod 600 "$registry"
+
+  run env TRELLIS_HOME="$TRELLIS_HOME_FIX" bash "$RELEASE" \
+    adopt "$ADOPTION_VERSION_B" --project corrupt-detached
+  [ "$status" -eq 5 ] || { echo "$output"; false; }
+  grep -qF 'skipping detached worktree row: personal/corrupt-detached' <<<"$output"
+  grep -qF 'no adoptable registered worktree matched the requested adoption selector' <<<"$output"
+  [ "$(grep -cF 'adopted:' <<<"$output")" -eq 0 ]
+}
+
 # Shared scaffold sections below; existing tests above remain unchanged.
 # BEGIN LANE A0
 # END LANE A0
